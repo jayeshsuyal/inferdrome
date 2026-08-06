@@ -5,7 +5,7 @@ import signal
 import stat
 import subprocess
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -40,6 +40,9 @@ class ProcessCapture:
     termination: ProcessTermination
     stdout: bytes
     stderr: bytes
+
+
+ProcessStartObserver = Callable[[int, datetime], None]
 
 
 class _ProcessGroup:
@@ -175,6 +178,7 @@ def run_captured_process(
     termination_policy: TerminationPolicy | None = None,
     environment: Mapping[str, str] | None = None,
     merge_stderr: bool = False,
+    on_start: ProcessStartObserver | None = None,
 ) -> ProcessCapture:
     """Run one process without a shell and bound time plus captured output."""
 
@@ -206,6 +210,12 @@ def run_captured_process(
     except OSError:
         raise AdapterError("subprocess could not be started") from None
     process_group = _ProcessGroup(process)
+    if on_start is not None:
+        try:
+            on_start(process.pid, started_at)
+        except Exception:
+            terminate_bounded(process_group, selected_policy)
+            raise AdapterError("subprocess start observer failed") from None
     if process.stdout is None or (not merge_stderr and process.stderr is None):
         terminate_bounded(process_group, selected_policy)
         raise AdapterError("subprocess capture pipes are unavailable")

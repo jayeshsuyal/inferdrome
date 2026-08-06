@@ -12,6 +12,7 @@ from inferdrome.domain.environment import (
 )
 from inferdrome.domain.experiment import AttachedVllmTarget, ExperimentSpec
 from inferdrome.domain.states import EnvironmentCompleteness
+from inferdrome.gpu_proof import LocalGpuProof
 from inferdrome.normalization.vllm_0_26 import VLLM_VERSION
 
 _PRODUCER_VERSION_PATH = "native/producer-version.txt"
@@ -226,6 +227,110 @@ def capture_attached_environment(
             ),
         }
     )
+    return _manifest(
+        run_id=run_id,
+        captured_at=captured_at,
+        fields_by_name=fields,
+    )
+
+
+def capture_managed_gpu_environment(
+    spec: ExperimentSpec,
+    preflight: EndpointPreflightCapture,
+    proof: LocalGpuProof,
+    *,
+    run_id: str,
+    captured_at: datetime,
+) -> EnvironmentManifest:
+    """Project a validated local-GPU proof onto the frozen public allowlist."""
+
+    target = spec.target
+    if not isinstance(target, AttachedVllmTarget):
+        raise TypeError("managed environment capture requires a vLLM target")
+    if proof.run_id != run_id:
+        raise ValueError("managed environment proof belongs to a different run")
+    if target.model_revision is None or target.tokenizer_revision is None:
+        raise ValueError("managed environment requires exact target revisions")
+    fields = {
+        EnvironmentFieldName.CLIENT_OS: EnvironmentField(
+            name=EnvironmentFieldName.CLIENT_OS,
+            value=proof.client_os,
+            provenance=ProvenanceKind.CLIENT_OBSERVED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.CLIENT_ARCH: EnvironmentField(
+            name=EnvironmentFieldName.CLIENT_ARCH,
+            value=proof.client_arch,
+            provenance=ProvenanceKind.CLIENT_OBSERVED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.CLIENT_PYTHON_VERSION: EnvironmentField(
+            name=EnvironmentFieldName.CLIENT_PYTHON_VERSION,
+            value=proof.client_python_version,
+            provenance=ProvenanceKind.CLIENT_OBSERVED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.PRODUCER_VERSION: EnvironmentField(
+            name=EnvironmentFieldName.PRODUCER_VERSION,
+            value=VLLM_VERSION,
+            provenance=ProvenanceKind.LOCALLY_VERIFIED,
+            evidence_path=_PRODUCER_VERSION_PATH,
+        ),
+        EnvironmentFieldName.PRODUCER_DISTRIBUTION_SHA256: EnvironmentField(
+            name=EnvironmentFieldName.PRODUCER_DISTRIBUTION_SHA256,
+            value=proof.producer_distribution.sha256,
+            provenance=ProvenanceKind.LOCALLY_VERIFIED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.TARGET_ENGINE_VERSION: EnvironmentField(
+            name=EnvironmentFieldName.TARGET_ENGINE_VERSION,
+            value=VLLM_VERSION,
+            provenance=ProvenanceKind.LOCALLY_VERIFIED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.TARGET_MODEL_REVISION: EnvironmentField(
+            name=EnvironmentFieldName.TARGET_MODEL_REVISION,
+            value=target.model_revision,
+            provenance=ProvenanceKind.CONFIGURED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.TARGET_TOKENIZER_REVISION: EnvironmentField(
+            name=EnvironmentFieldName.TARGET_TOKENIZER_REVISION,
+            value=target.tokenizer_revision,
+            provenance=ProvenanceKind.CONFIGURED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.SERVER_MODEL_ID: EnvironmentField(
+            name=EnvironmentFieldName.SERVER_MODEL_ID,
+            value=preflight.result.target_model,
+            provenance=ProvenanceKind.SERVER_REPORTED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.GPU_MODEL: EnvironmentField(
+            name=EnvironmentFieldName.GPU_MODEL,
+            value=proof.gpu_model,
+            provenance=ProvenanceKind.LOCALLY_VERIFIED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.GPU_COUNT: EnvironmentField(
+            name=EnvironmentFieldName.GPU_COUNT,
+            value=len(proof.gpus),
+            provenance=ProvenanceKind.LOCALLY_VERIFIED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.CUDA_VERSION: EnvironmentField(
+            name=EnvironmentFieldName.CUDA_VERSION,
+            value=proof.cuda_runtime_version,
+            provenance=ProvenanceKind.LOCALLY_VERIFIED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+        EnvironmentFieldName.DRIVER_VERSION: EnvironmentField(
+            name=EnvironmentFieldName.DRIVER_VERSION,
+            value=proof.driver_version,
+            provenance=ProvenanceKind.LOCALLY_VERIFIED,
+            evidence_path=_INVOCATION_PATH,
+        ),
+    }
     return _manifest(
         run_id=run_id,
         captured_at=captured_at,

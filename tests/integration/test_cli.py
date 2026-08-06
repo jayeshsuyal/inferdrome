@@ -131,3 +131,64 @@ def test_cli_inspect_rejects_complete_workspace_without_bundle(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "complete workspace is missing its sealed bundle" in captured.err
+
+
+def test_cli_customer_flow_rejects_synthetic_bundle(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runs_root = tmp_path / "runs"
+    assert (
+        main(
+            [
+                "run",
+                str(REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"),
+                "--runs-root",
+                str(runs_root),
+                "--run-id",
+                RUN_ID,
+            ]
+        )
+        == 0
+    )
+    bundle_path = json.loads(capsys.readouterr().out)["bundle_path"]
+
+    assert (
+        main(
+            [
+                "bundle",
+                "verify",
+                bundle_path,
+                "--require-customer-eligible",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "bundle is not customer-eligible" in captured.err
+
+
+def test_cli_managed_options_fail_before_reserving_fake_workspace(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runs_root = tmp_path / "runs"
+    assert (
+        main(
+            [
+                "run",
+                str(REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"),
+                "--runs-root",
+                str(runs_root),
+                "--managed-local-vllm",
+                "--managed-model-path",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "managed vLLM is only valid for attached execution" in captured.err
+    assert not runs_root.exists()

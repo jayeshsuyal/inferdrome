@@ -13,8 +13,9 @@ from typing import Any, NoReturn, cast
 from inferdrome import __version__
 from inferdrome.bundle import recalculate_bundle, verify_bundle
 from inferdrome.domain.digests import canonical_json_bytes
-from inferdrome.domain.states import RunState
+from inferdrome.domain.states import EvidenceEligibility, RunState
 from inferdrome.errors import (
+    AdapterError,
     CancellationRequested,
     InferdromeError,
     VerificationError,
@@ -24,6 +25,7 @@ from inferdrome.execution.cancellation import (
     CancellationToken,
 )
 from inferdrome.execution.orchestrator import run_experiment
+from inferdrome.gpu_proof import ManagedVllmConfig
 from inferdrome.resolution import resolve_experiment
 from inferdrome.workspace import RunWorkspace
 
@@ -42,6 +44,45 @@ def _optional_path(namespace: argparse.Namespace, name: str) -> Path | None:
 
 def _optional_text(namespace: argparse.Namespace, name: str) -> str | None:
     return cast(str | None, getattr(namespace, name))
+
+
+def _gpu_index(value: str) -> int:
+    if not value or not value.isascii() or not value.isdecimal():
+        raise argparse.ArgumentTypeError("GPU index must be an integer")
+    index = int(value)
+    if index > 255:
+        raise argparse.ArgumentTypeError("GPU index must be between 0 and 255")
+    return index
+
+
+def _managed_vllm_config(
+    namespace: argparse.Namespace,
+) -> ManagedVllmConfig | None:
+    enabled = cast(bool, namespace.managed_local_vllm)
+    model_path = _optional_path(namespace, "managed_model_path")
+    gpu_index = cast(int | None, namespace.managed_gpu_index)
+    startup_timeout = cast(float | None, namespace.managed_startup_timeout_seconds)
+    if not enabled:
+        if (
+            model_path is not None
+            or gpu_index is not None
+            or startup_timeout is not None
+        ):
+            raise AdapterError(
+                "managed vLLM options require --managed-local-vllm"
+            )
+        return None
+    if model_path is None:
+        raise AdapterError(
+            "--managed-local-vllm requires --managed-model-path"
+        )
+    return ManagedVllmConfig(
+        model_path=model_path.absolute(),
+        gpu_indices=(gpu_index if gpu_index is not None else 0,),
+        startup_timeout_seconds=(
+            startup_timeout if startup_timeout is not None else 900.0
+        ),
+    )
 
 
 def _json_output(value: object) -> None:
@@ -135,6 +176,7 @@ def _command_run(namespace: argparse.Namespace) -> int:
             run_id=_optional_text(namespace, "run_id"),
             strict=cast(bool, namespace.strict),
             tokenizer_path=_optional_path(namespace, "tokenizer_path"),
+            managed_vllm=_managed_vllm_config(namespace),
             cancellation=cancellation,
         )
     sealed = result.sealed_bundle
@@ -198,6 +240,12 @@ def _command_bundle_verify(namespace: argparse.Namespace) -> int:
         _path(namespace, "bundle"),
         expected_bundle_digest=_optional_text(namespace, "expected_digest"),
     )
+    if (
+        cast(bool, namespace.require_customer_eligible)
+        and report.descriptor.evidence_eligibility
+        is not EvidenceEligibility.CUSTOMER_ELIGIBLE
+    ):
+        raise VerificationError("bundle is not customer-eligible")
     _json_output(
         {
             "artifact_count": report.artifact_count,
@@ -283,6 +331,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--tokenizer-path",
         help="local tokenizer directory required by attached vLLM execution",
     )
+    run.add_argument(
+        "--managed-local-vllm",
+        action="store_true",
+        help="launch and capture proof for one local pinned-vLLM NVIDIA server",
+    )
+    run.add_argument(
+        "--managed-model-path",
+        help="absolute local model snapshot used by managed vLLM",
+    )
+    run.add_argument(
+        "--managed-gpu-index",
+        type=_gpu_index,
+        help="physical NVIDIA GPU index (default: 0)",
+    )
+    run.add_argument(
+        "--managed-startup-timeout-seconds",
+        type=float,
+        help="bounded model-load and server-readiness timeout (default: 900)",
+    )
     run.set_defaults(handler=_command_run)
 
     inspect = commands.add_parser("inspect", help="inspect one run workspace")
@@ -296,6 +363,11 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="verify structure, hashes, and semantic consistency"
     )
     _add_bundle_input(bundle_verify)
+    bundle_verify.add_argument(
+        "--require-customer-eligible",
+        action="store_true",
+        help="reject valid bundles not eligible for customer-evidence flows",
+    )
     bundle_verify.set_defaults(handler=_command_bundle_verify)
 
     reduce_parser = commands.add_parser(

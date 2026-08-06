@@ -1,0 +1,8 @@
+{
+  "model_directory": "Qwen2.5-0.5B-Instruct-7ae557604adf67be50417f59c2c2f167def9a775",
+  "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+  "pandas_version": "2.3.3",
+  "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+  "schema_version": "inferdrome.real-gpu-host-pin.v1",
+  "vllm_version": "0.26.0"
+}

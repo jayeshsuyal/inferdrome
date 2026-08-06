@@ -50,6 +50,12 @@ An attached endpoint is not trusted to report exact server provenance. Model
 names and server metadata are `SERVER_REPORTED` unless verified through a
 separate local observation.
 
+The managed loopback profile replaces remote launch ambiguity with local file,
+process, and NVIDIA observations. Those observations are still made by the
+operationally trusted host: they show that the supervised vLLM process group
+engaged the selected GPU, but they are not hardware attestation and do not
+prove that any particular request executed on that GPU.
+
 ### Evidence transport and storage
 
 Bundles may be corrupted or modified after execution. Exact-byte hashing and an

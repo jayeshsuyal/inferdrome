@@ -6,8 +6,9 @@ The roadmap is gate-driven. A phase is complete when its invariants are proven,
 not when its planned files merely exist.
 
 Current checkpoint: **PR 0 through PR 5 gates passed on 2026-08-05. The
-Inferdrome-only CLI/orchestrator slice is implemented and the next
-Inferdrome-owned gate is PR 7, the real-GPU proof.**
+Inferdrome-only CLI/orchestrator and managed real-GPU proof harness are
+implemented. PR 7 remains open pending a reviewed compatible-host bundle and
+the separate ExitSpec outcome demonstrations.**
 
 PR 6 is an independent-consumer integration boundary. Its contract remains in
 this roadmap, but work on that consumer is outside the Inferdrome repository
@@ -237,11 +238,17 @@ reproduction guide must therefore preserve the exact launch command and locally
 observed environment. A managed local-server mode may be added if that is the
 smallest honest way to meet this gate.
 
-The Inferdrome CLI and end-to-end orchestrator are now available ahead of this
-gate. Attached-endpoint CLI runs deliberately remain `INELIGIBLE` while GPU,
-driver, CUDA, producer-distribution, and server-launch provenance are unknown.
-PR 7 must replace those unknowns with locally verified evidence before claiming
-customer eligibility.
+Implemented on 2026-08-06: the managed Linux/NVIDIA path hashes pinned model,
+tokenizer, and vLLM inputs; launches an exact loopback server argument vector;
+binds it to live GPU process evidence; emits a complete provenance manifest;
+and permits customer eligibility only after offline cross-verification. The
+checked-in host-preparation and demo scripts also exercise corruption and
+synthetic-flow rejection without modifying the original bundle.
+
+Still required to close PR 7: execute the script on a clean compatible NVIDIA
+host, review and promote one genuine bundle, and run the separately owned
+ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations. Ordinary attached
+endpoint runs deliberately remain `INELIGIBLE`.
 
 ## PR 8 — v0.1 hardening and release
 

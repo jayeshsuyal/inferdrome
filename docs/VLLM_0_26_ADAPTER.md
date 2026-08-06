@@ -1,6 +1,6 @@
 # Pinned vLLM 0.26.0 adapter
 
-Status: **Implemented for PR 5**
+Status: **PR 5 implemented; managed PR 7 proof path implemented**
 
 Implementation date: **2026-08-05**
 
@@ -12,6 +12,36 @@ proven by the committed capability capture.
 
 The source pin, local spike patch, exact captured artifacts, and field-level
 findings remain under [`spikes/vllm-0.26.0`](../spikes/vllm-0.26.0/README.md).
+
+## Managed local NVIDIA profile
+
+The ordinary adapter remains an attached client and cannot prove server
+launch or GPU provenance. The opt-in managed profile closes that specific gap
+without broadening remote trust: it accepts only
+`http://127.0.0.1:<explicit-port>`, exact 40-character model and tokenizer
+revisions, Linux, an available CUDA Torch runtime, and one selected NVIDIA
+device.
+
+Inferdrome requires installation metadata for the exact pinned architecture
+wheel and archive SHA-256, then hashes stable regular files for the local model,
+tokenizer, installed vLLM `0.26.0` distribution, and executable. It launches one
+fixed `vllm serve` argument vector in an isolated process group, waits for
+strict model-list preflight, and requires live `nvidia-smi` compute-process
+evidence from that process group on the selected GPU. The model, tokenizer, and
+producer hashes are repeated after benchmark execution.
+
+The canonical invocation artifact embeds a closed
+`inferdrome.local-gpu-proof.v1` object containing the allowlisted raw queries,
+parsed GPU identities, CUDA and Torch versions, snapshot identities,
+distribution identity, exact server argument vector, process identity, and
+readiness timestamps. Offline verification reparses the raw query text,
+regenerates the server and benchmark vectors, and cross-binds every complete
+environment field to that proof.
+
+Only a valid managed proof may accompany `CUSTOMER_ELIGIBLE` vLLM evidence.
+The profile is execution evidence and integrity checking, not trusted hardware
+attestation or proof against a malicious host. See
+[REAL_GPU_PROOF.md](REAL_GPU_PROOF.md) for the exact reproduction procedure.
 
 ## Attached endpoint preflight
 

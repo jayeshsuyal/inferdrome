@@ -1,6 +1,7 @@
 """Subprocess supervision is bounded and preserves exact producer diagnostics."""
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,20 @@ def test_normal_exit_preserves_exact_separate_streams(tmp_path: Path) -> None:
     assert capture.stderr == b"producer-err\n"
     assert capture.argv[0] == sys.executable
     assert capture.ended_at >= capture.started_at
+
+
+def test_start_observer_receives_isolated_process_identity(tmp_path: Path) -> None:
+    observed: list[tuple[int, datetime]] = []
+    capture = run_captured_process(
+        _python("raise SystemExit(0)"),
+        cwd=tmp_path.resolve(),
+        max_runtime_seconds=2,
+        on_start=lambda pid, started_at: observed.append((pid, started_at)),
+    )
+
+    assert len(observed) == 1
+    assert observed[0][0] >= 2
+    assert observed[0][1] == capture.started_at
 
 
 def test_nonzero_exit_is_captured_without_rewriting_diagnostics(

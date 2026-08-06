@@ -202,3 +202,21 @@ def test_rehashed_version_artifact_cannot_claim_another_producer(
 
     with pytest.raises(VerificationError, match="producer version"):
         verify_bundle(bundle, require_immutable=False)
+
+
+def test_attached_bundle_cannot_claim_customer_eligibility_without_gpu_proof(
+    sealed_vllm_bundle: SealedVllmFixture,
+    tmp_path: Path,
+) -> None:
+    bundle = _mutable_copy(
+        sealed_vllm_bundle.sealed.path,
+        tmp_path / "promoted-without-gpu-proof",
+    )
+    descriptor_path = bundle / "bundle.json"
+    descriptor = json.loads(descriptor_path.read_bytes())
+    descriptor["evidence_eligibility"] = "CUSTOMER_ELIGIBLE"
+    descriptor_path.write_bytes(canonical_json_bytes(descriptor))
+    _rehash_manifest_entries(bundle, {"bundle.json"})
+
+    with pytest.raises(VerificationError, match="lacks local GPU proof"):
+        verify_bundle(bundle, require_immutable=False)

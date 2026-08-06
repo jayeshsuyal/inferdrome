@@ -350,7 +350,8 @@ flag.
 
 ## Extension path
 
-Later versions may add trial sets, comparisons, telemetry, managed local server
-launches, routing decisions, signed manifests, and additional producers. These
-extend the evidence model without weakening v0.1's artifact, provenance, and
-population boundaries.
+Later versions may add trial sets, comparisons, telemetry, broader deployment
+orchestration, routing decisions, signed manifests, and additional producers.
+These extend the evidence model without weakening v0.1's artifact, provenance,
+and population boundaries. The v0.1 managed launch remains one narrow,
+loopback-only NVIDIA proof profile rather than a general deployment system.

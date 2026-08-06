@@ -36,6 +36,7 @@ from inferdrome.execution.subprocess_runner import (
     ProcessTermination,
     run_captured_process,
 )
+from inferdrome.gpu_proof import LocalGpuProof, validate_local_gpu_proof
 from inferdrome.normalization.vllm_0_26 import (
     VLLM_ADAPTER_VERSION,
     VLLM_VERSION,
@@ -104,6 +105,7 @@ class VllmInvocation:
     paths: VllmInvocationPaths
     preflight: EndpointPreflightCapture
     evidence_bytes: bytes
+    local_gpu_proof: LocalGpuProof | None
 
 
 @dataclass(frozen=True)
@@ -446,12 +448,14 @@ def _build_argv(
     plan: RequestPlan,
     paths: VllmInvocationPaths,
     metadata: Mapping[str, str],
+    *,
+    executable: str,
 ) -> tuple[str, ...]:
     if not isinstance(spec.target, AttachedVllmTarget):
         raise AdapterError("vLLM invocation requires an attached target")
     endpoint = str(spec.target.endpoint).rstrip("/")
     argv = [
-        "vllm",
+        executable,
         "bench",
         "serve",
         "--backend",
@@ -532,24 +536,30 @@ def _canonical_invocation_bytes(
     argv: tuple[str, ...],
     metadata: Mapping[str, str],
     preflight: EndpointPreflightCapture,
+    local_gpu_proof: LocalGpuProof | None,
 ) -> bytes:
-    return canonical_json_bytes(
-        {
-            "argv": argv,
-            "endpoint_preflight": {
-                "response_base64": base64.b64encode(
-                    preflight.response_bytes
-                ).decode("ascii"),
-                "result": preflight.result.model_dump(
-                    mode="json",
-                    by_alias=True,
-                    exclude_none=False,
-                ),
-            },
-            "metadata": dict(metadata),
-            "schema_version": "inferdrome.producer-invocation.v1",
-        }
-    )
+    value = {
+        "argv": argv,
+        "endpoint_preflight": {
+            "response_base64": base64.b64encode(preflight.response_bytes).decode(
+                "ascii"
+            ),
+            "result": preflight.result.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude_none=False,
+            ),
+        },
+        "metadata": dict(metadata),
+        "schema_version": "inferdrome.producer-invocation.v1",
+    }
+    if local_gpu_proof is not None:
+        value["local_gpu_proof"] = local_gpu_proof.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_none=False,
+        )
+    return canonical_json_bytes(value)
 
 
 def build_vllm_invocation(
@@ -559,6 +569,7 @@ def build_vllm_invocation(
     *,
     execution_fingerprint: str,
     preflight: EndpointPreflightCapture,
+    local_gpu_proof: LocalGpuProof | None = None,
 ) -> VllmInvocation:
     """Build a secret-free argument vector for exactly vLLM 0.26.0."""
 
@@ -574,14 +585,37 @@ def build_vllm_invocation(
     _require_directory_no_follow(paths.tokenizer_path, label="vLLM tokenizer")
     _require_directory_no_follow(paths.result_directory, label="vLLM result directory")
     metadata = _invocation_metadata(spec, plan, validated_fingerprint)
-    argv = _build_argv(spec, plan, paths, metadata)
-    evidence = _canonical_invocation_bytes(argv, metadata, validated_preflight)
+    validated_gpu_proof: LocalGpuProof | None = None
+    executable = "vllm"
+    if local_gpu_proof is not None:
+        validated_gpu_proof = validate_local_gpu_proof(
+            spec,
+            local_gpu_proof,
+            run_id=plan.run_id,
+        )
+        if str(paths.tokenizer_path) != validated_gpu_proof.tokenizer_snapshot.root:
+            raise AdapterError("local GPU proof tokenizer path disagrees")
+        executable = validated_gpu_proof.producer_distribution.executable_path
+    argv = _build_argv(
+        spec,
+        plan,
+        paths,
+        metadata,
+        executable=executable,
+    )
+    evidence = _canonical_invocation_bytes(
+        argv,
+        metadata,
+        validated_preflight,
+        validated_gpu_proof,
+    )
     return VllmInvocation(
         argv=argv,
         metadata=MappingProxyType(metadata),
         paths=paths,
         preflight=validated_preflight,
         evidence_bytes=evidence,
+        local_gpu_proof=validated_gpu_proof,
     )
 
 
@@ -647,18 +681,24 @@ def validate_vllm_invocation_evidence(
         execution_fingerprint,
     )
     value = _strict_invocation_object(content)
-    if set(value) != {
+    base_fields = {
         "argv",
         "endpoint_preflight",
         "metadata",
         "schema_version",
-    }:
+    }
+    accepted_field_sets = {
+        frozenset(base_fields),
+        frozenset(base_fields | {"local_gpu_proof"}),
+    }
+    if set(value) not in accepted_field_sets:
         raise AdapterError("vLLM invocation evidence has an unknown field set")
     if value["schema_version"] != "inferdrome.producer-invocation.v1":
         raise AdapterError("vLLM invocation evidence has an unsupported version")
     raw_argv = value["argv"]
     raw_preflight = value["endpoint_preflight"]
     raw_metadata = value["metadata"]
+    raw_gpu_proof = value.get("local_gpu_proof")
     if (
         not isinstance(raw_argv, list)
         or not raw_argv
@@ -711,6 +751,22 @@ def validate_vllm_invocation_evidence(
     if raw_preflight["result"] != expected_preflight_result:
         raise AdapterError("vLLM invocation preflight result is inconsistent")
 
+    local_gpu_proof: LocalGpuProof | None = None
+    executable = "vllm"
+    if raw_gpu_proof is not None:
+        try:
+            parsed_gpu_proof = LocalGpuProof.model_validate_json(
+                canonical_json_bytes(raw_gpu_proof)
+            )
+        except (TypeError, ValueError):
+            raise AdapterError("vLLM local GPU proof is invalid") from None
+        local_gpu_proof = validate_local_gpu_proof(
+            spec,
+            parsed_gpu_proof,
+            run_id=plan.run_id,
+        )
+        executable = local_gpu_proof.producer_distribution.executable_path
+
     argv = tuple(raw_argv)
     expected_metadata = _invocation_metadata(spec, plan, validated_fingerprint)
     if raw_metadata != expected_metadata:
@@ -720,13 +776,25 @@ def validate_vllm_invocation_evidence(
         tokenizer_path=_invocation_path(argv, "--tokenizer"),
         result_directory=_invocation_path(argv, "--result-dir"),
     )
-    expected_argv = _build_argv(spec, plan, paths, expected_metadata)
+    if (
+        local_gpu_proof is not None
+        and str(paths.tokenizer_path) != local_gpu_proof.tokenizer_snapshot.root
+    ):
+        raise AdapterError("vLLM local GPU proof tokenizer path disagrees")
+    expected_argv = _build_argv(
+        spec,
+        plan,
+        paths,
+        expected_metadata,
+        executable=executable,
+    )
     if argv != expected_argv:
         raise AdapterError("vLLM invocation arguments differ from frozen inputs")
     expected_bytes = _canonical_invocation_bytes(
         expected_argv,
         expected_metadata,
         preflight,
+        local_gpu_proof,
     )
     if content != expected_bytes:
         raise AdapterError("vLLM invocation evidence is not canonical JSON")
@@ -736,6 +804,7 @@ def validate_vllm_invocation_evidence(
         paths=paths,
         preflight=preflight,
         evidence_bytes=content,
+        local_gpu_proof=local_gpu_proof,
     )
 
 

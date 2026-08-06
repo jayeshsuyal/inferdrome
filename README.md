@@ -18,9 +18,13 @@ bundles, exact-byte manifests, attached-endpoint preflight, bounded no-shell
 vLLM execution, version-specific normalization, offline cross-artifact
 recalculation, and the chartered command-line workflow.
 
-The next Inferdrome-owned release gate is the real-GPU reproduction proof and
-v0.1 hardening. Independent acceptance remains a separate consumer boundary;
-it is not implemented inside this repository.
+The opt-in managed local-vLLM path now launches a pinned server on Linux,
+captures locally verified GPU, CUDA, driver, model-snapshot, producer, and
+launch evidence, and permits customer eligibility only when offline
+cross-verification succeeds. The compatible-NVIDIA-host capture and reviewed
+example bundle are still pending, so the PR 7 gate is not yet complete.
+Independent acceptance remains a separate consumer boundary; it is not
+implemented inside this repository.
 
 ## Quick start
 
@@ -45,6 +49,9 @@ an explicit local tokenizer directory and remains `INELIGIBLE` until the
 real-GPU provenance gate is satisfied; the CLI never upgrades configured or
 server-reported facts into locally verified evidence.
 
+The managed NVIDIA reproduction path and its one-command rejection demo are
+documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
+
 ## v0.1 principles
 
 - Preserve native benchmark output.
@@ -68,6 +75,7 @@ server-reported facts into locally verified evidence.
 - [Deterministic reduction and fake adapter](docs/DETERMINISTIC_REDUCTION.md)
 - [Evidence bundle and offline verification](docs/EVIDENCE_BUNDLE_V1.md)
 - [Pinned vLLM 0.26.0 adapter](docs/VLLM_0_26_ADAPTER.md)
+- [Managed real-GPU proof](docs/REAL_GPU_PROOF.md)
 - [CLI and orchestration](docs/CLI.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Pinned-vLLM capability spike](spikes/vllm-0.26.0/README.md)

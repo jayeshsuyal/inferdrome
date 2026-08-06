@@ -9,6 +9,11 @@ __pycache__/
 build/
 dist/
 
+# Opt-in real-GPU host state and generated proof runs are local evidence until
+# a reviewed bundle is promoted deliberately.
+.inferdrome-gpu/
+gpu-proof-output/
+
 # Capability-spike runs are reviewed before selected artifacts are promoted to
 # committed fixtures.
 spikes/**/output/

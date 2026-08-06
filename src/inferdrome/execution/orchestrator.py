@@ -46,6 +46,7 @@ from inferdrome.domain.states import (
 from inferdrome.environment_capture import (
     capture_attached_environment,
     capture_fake_environment,
+    capture_managed_gpu_environment,
 )
 from inferdrome.errors import (
     AdapterError,
@@ -53,7 +54,9 @@ from inferdrome.errors import (
     InferdromeError,
 )
 from inferdrome.execution.cancellation import CancellationToken
-from inferdrome.execution.subprocess_runner import ProcessTermination
+from inferdrome.execution.managed_vllm import ManagedVllmServer
+from inferdrome.execution.subprocess_runner import ProcessCapture, ProcessTermination
+from inferdrome.gpu_proof import LocalGpuProof, ManagedVllmConfig
 from inferdrome.metrics import ReductionResult, reduce_measurements
 from inferdrome.normalization import (
     build_vllm_execution_record,
@@ -104,6 +107,28 @@ def _write_capture_file(path: Path, content: bytes) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _write_managed_server_capture(
+    capture_directory: Path,
+    capture: ProcessCapture,
+) -> None:
+    _write_capture_file(
+        capture_directory / "server-stdout.log",
+        capture.stdout,
+    )
+    _write_capture_file(
+        capture_directory / "server-stderr.log",
+        capture.stderr,
+    )
+    _write_capture_file(
+        capture_directory / "server-exit-status.txt",
+        f"{capture.exit_status}\n".encode(),
+    )
+    _write_capture_file(
+        capture_directory / "server-termination.txt",
+        f"{capture.termination.value}\n".encode(),
+    )
 
 
 def _sensitivity(resolution: ResolutionResult) -> SensitivityDeclaration:
@@ -220,6 +245,7 @@ def _run_vllm(
     workspace: RunWorkspace,
     tokenizer_path: Path,
     cancellation: CancellationToken,
+    managed_config: ManagedVllmConfig | None,
 ) -> SealedBundle:
     spec = resolution.resolved_spec
     if not isinstance(spec.execution, VllmExecution) or not isinstance(
@@ -234,53 +260,99 @@ def _run_vllm(
 
     cancellation.raise_if_requested()
     workspace.transition(RunState.PREFLIGHT)
-    preflight = preflight_attached_endpoint(spec.target)
-    cancellation.raise_if_requested()
-    version = probe_vllm_version(cwd=workspace.path)
-
     capture_directory = workspace.path / "native-capture"
     try:
         capture_directory.mkdir(mode=0o700)
     except OSError:
         raise AdapterError("vLLM capture directory could not be reserved") from None
-    invocation = build_vllm_invocation(
-        spec,
-        resolution.request_plan,
-        VllmInvocationPaths(
-            dataset_path=(
-                workspace.input_directory / "workload.source.jsonl"
-            ).absolute(),
-            tokenizer_path=tokenizer_path.absolute(),
-            result_directory=capture_directory.absolute(),
-        ),
-        execution_fingerprint=resolution.execution_fingerprint,
-        preflight=preflight,
-    )
-    _write_capture_file(
-        capture_directory / "invocation.json",
-        invocation.evidence_bytes,
-    )
-    _write_capture_file(
-        capture_directory / "producer-version.txt",
-        version.process.stdout,
-    )
 
-    cancellation.raise_if_requested()
-    workspace.transition(RunState.WARMUP)
-    workspace.transition(RunState.MEASURING)
-    capture = execute_vllm_benchmark(
-        invocation,
-        spec,
-        resolution.request_plan,
-        execution_fingerprint=resolution.execution_fingerprint,
-        cancellation=cancellation,
-    )
-    _write_capture_file(capture_directory / "stdout.log", capture.process.stdout)
-    _write_capture_file(capture_directory / "stderr.log", capture.process.stderr)
-    _write_capture_file(
-        capture_directory / "exit-status.txt",
-        f"{capture.process.exit_status}\n".encode(),
-    )
+    managed_server: ManagedVllmServer | None = None
+    local_gpu_proof: LocalGpuProof | None = None
+    try:
+        if managed_config is None:
+            preflight = preflight_attached_endpoint(spec.target)
+            version = probe_vllm_version(cwd=workspace.path)
+        else:
+            managed_server = ManagedVllmServer.start(
+                spec,
+                run_id=resolution.run_id,
+                config=managed_config,
+                tokenizer_path=tokenizer_path,
+                cwd=workspace.path,
+                cancellation=cancellation,
+            )
+            preflight, local_gpu_proof = managed_server.wait_until_ready()
+            version = probe_vllm_version(
+                cwd=workspace.path,
+                executable=(
+                    local_gpu_proof.producer_distribution.executable_path
+                ),
+            )
+        cancellation.raise_if_requested()
+        invocation = build_vllm_invocation(
+            spec,
+            resolution.request_plan,
+            VllmInvocationPaths(
+                dataset_path=(
+                    workspace.input_directory / "workload.source.jsonl"
+                ).absolute(),
+                tokenizer_path=tokenizer_path.absolute(),
+                result_directory=capture_directory.absolute(),
+            ),
+            execution_fingerprint=resolution.execution_fingerprint,
+            preflight=preflight,
+            local_gpu_proof=local_gpu_proof,
+        )
+        _write_capture_file(
+            capture_directory / "invocation.json",
+            invocation.evidence_bytes,
+        )
+        _write_capture_file(
+            capture_directory / "producer-version.txt",
+            version.process.stdout,
+        )
+
+        cancellation.raise_if_requested()
+        workspace.transition(RunState.WARMUP)
+        workspace.transition(RunState.MEASURING)
+        capture = execute_vllm_benchmark(
+            invocation,
+            spec,
+            resolution.request_plan,
+            execution_fingerprint=resolution.execution_fingerprint,
+            cancellation=cancellation,
+        )
+        _write_capture_file(
+            capture_directory / "stdout.log",
+            capture.process.stdout,
+        )
+        _write_capture_file(
+            capture_directory / "stderr.log",
+            capture.process.stderr,
+        )
+        _write_capture_file(
+            capture_directory / "exit-status.txt",
+            f"{capture.process.exit_status}\n".encode(),
+        )
+        if managed_server is not None:
+            managed_server.assert_running()
+            managed_server.assert_inputs_unchanged()
+            managed_server.assert_running()
+    except (Exception, KeyboardInterrupt):
+        if managed_server is not None:
+            try:
+                server_capture = managed_server.stop()
+                _write_managed_server_capture(capture_directory, server_capture)
+            except Exception:
+                pass
+        raise
+    if managed_server is not None:
+        server_capture = managed_server.stop()
+        _write_managed_server_capture(capture_directory, server_capture)
+        if server_capture.termination is not ProcessTermination.CANCELLED:
+            raise AdapterError(
+                "managed vLLM server exited before supervised shutdown"
+            )
     if (
         capture.process.termination is not ProcessTermination.EXITED
         or capture.process.exit_status != 0
@@ -306,12 +378,23 @@ def _run_vllm(
         producer_exit_status=capture.process.exit_status,
     )
     reduction = reduce_measurements(execution, normalization.request_records)
-    environment = capture_attached_environment(
-        spec,
-        preflight,
-        run_id=resolution.run_id,
-        captured_at=capture.process.ended_at,
-    )
+    if local_gpu_proof is None:
+        environment = capture_attached_environment(
+            spec,
+            preflight,
+            run_id=resolution.run_id,
+            captured_at=capture.process.ended_at,
+        )
+        eligibility = EvidenceEligibility.INELIGIBLE
+    else:
+        environment = capture_managed_gpu_environment(
+            spec,
+            preflight,
+            local_gpu_proof,
+            run_id=resolution.run_id,
+            captured_at=capture.process.ended_at,
+        )
+        eligibility = EvidenceEligibility.CUSTOMER_ELIGIBLE
     workspace.transition(RunState.FINALIZING)
 
     payloads = {
@@ -335,7 +418,7 @@ def _run_vllm(
         created_at=capture.process.ended_at,
         execution_mode=EvidenceExecutionMode.ATTACHED_ENDPOINT,
         environment_completeness=environment.completeness,
-        evidence_eligibility=EvidenceEligibility.INELIGIBLE,
+        evidence_eligibility=eligibility,
         replayability=resolution.request_plan.replayability,
         producer=VllmProducerDescriptor(
             name="vllm",
@@ -369,6 +452,7 @@ def run_experiment(
     run_id: str | None = None,
     strict: bool = True,
     tokenizer_path: Path | None = None,
+    managed_vllm: ManagedVllmConfig | None = None,
     cancellation: CancellationToken | None = None,
 ) -> RunResult:
     """Resolve, execute, reduce, seal, and verify one Inferdrome run."""
@@ -379,6 +463,8 @@ def run_experiment(
     is_fake = isinstance(resolution.resolved_spec.execution, FakeExecution)
     if is_fake and tokenizer_path is not None:
         raise AdapterError("tokenizer path is only valid for attached vLLM execution")
+    if is_fake and managed_vllm is not None:
+        raise AdapterError("managed vLLM is only valid for attached execution")
     if not is_fake and tokenizer_path is None:
         raise AdapterError("attached vLLM execution requires a tokenizer directory")
     workspace = RunWorkspace.reserve(runs_root, resolution)
@@ -393,6 +479,7 @@ def run_experiment(
                 workspace,
                 tokenizer_path,
                 selected_cancellation,
+                managed_vllm,
             )
     except KeyboardInterrupt:
         _mark_terminal(workspace, RunState.INTERRUPTED)

@@ -29,6 +29,7 @@ from inferdrome.domain.digests import (
     digest_canonical_json,
 )
 from inferdrome.domain.environment import (
+    EnvironmentField,
     EnvironmentFieldName,
     EnvironmentManifest,
     ProvenanceKind,
@@ -56,6 +57,7 @@ from inferdrome.domain.request_record import (
     FakeProducerSemantics,
     RequestRecord,
 )
+from inferdrome.domain.states import EnvironmentCompleteness, EvidenceEligibility
 from inferdrome.errors import (
     AdapterError,
     NormalizationError,
@@ -236,6 +238,111 @@ def _decode_text(content: bytes, *, label: str) -> str:
         return content.decode("utf-8")
     except UnicodeDecodeError:
         raise VerificationError(f"{label} is not valid UTF-8") from None
+
+
+def _verify_customer_eligible_environment(
+    descriptor: EvidenceBundle,
+    invocation: VllmInvocation,
+    environment: EnvironmentManifest,
+    environment_by_name: dict[EnvironmentFieldName, EnvironmentField],
+    role_paths: dict[ArtifactRole, str],
+) -> None:
+    if descriptor.evidence_eligibility is not EvidenceEligibility.CUSTOMER_ELIGIBLE:
+        return
+    proof = invocation.local_gpu_proof
+    if proof is None:
+        raise VerificationError("customer-eligible vLLM evidence lacks local GPU proof")
+    if descriptor.environment_completeness is not EnvironmentCompleteness.COMPLETE:
+        raise VerificationError("customer-eligible vLLM environment is incomplete")
+    if (
+        proof.captured_at > environment.captured_at
+        or environment.captured_at != descriptor.created_at
+    ):
+        raise VerificationError(
+            "customer-eligible environment capture time disagrees with execution"
+        )
+    invocation_path = role_paths[ArtifactRole.PRODUCER_INVOCATION]
+    version_path = role_paths[ArtifactRole.PRODUCER_VERSION]
+    expected: dict[
+        EnvironmentFieldName,
+        tuple[str | int, ProvenanceKind, str],
+    ] = {
+        EnvironmentFieldName.CLIENT_OS: (
+            proof.client_os,
+            ProvenanceKind.CLIENT_OBSERVED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.CLIENT_ARCH: (
+            proof.client_arch,
+            ProvenanceKind.CLIENT_OBSERVED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.CLIENT_PYTHON_VERSION: (
+            proof.client_python_version,
+            ProvenanceKind.CLIENT_OBSERVED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.PRODUCER_VERSION: (
+            proof.producer_distribution.version,
+            ProvenanceKind.LOCALLY_VERIFIED,
+            version_path,
+        ),
+        EnvironmentFieldName.PRODUCER_DISTRIBUTION_SHA256: (
+            proof.producer_distribution.sha256,
+            ProvenanceKind.LOCALLY_VERIFIED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.TARGET_ENGINE_VERSION: (
+            proof.producer_distribution.version,
+            ProvenanceKind.LOCALLY_VERIFIED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.TARGET_MODEL_REVISION: (
+            proof.model_snapshot.revision,
+            ProvenanceKind.CONFIGURED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.TARGET_TOKENIZER_REVISION: (
+            proof.tokenizer_snapshot.revision,
+            ProvenanceKind.CONFIGURED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.SERVER_MODEL_ID: (
+            invocation.preflight.result.target_model,
+            ProvenanceKind.SERVER_REPORTED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.GPU_MODEL: (
+            proof.gpu_model,
+            ProvenanceKind.LOCALLY_VERIFIED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.GPU_COUNT: (
+            len(proof.gpus),
+            ProvenanceKind.LOCALLY_VERIFIED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.CUDA_VERSION: (
+            proof.cuda_runtime_version,
+            ProvenanceKind.LOCALLY_VERIFIED,
+            invocation_path,
+        ),
+        EnvironmentFieldName.DRIVER_VERSION: (
+            proof.driver_version,
+            ProvenanceKind.LOCALLY_VERIFIED,
+            invocation_path,
+        ),
+    }
+    for name, (value, provenance, evidence_path) in expected.items():
+        field = environment_by_name[name]
+        if (
+            field.value != value
+            or field.provenance is not provenance
+            or field.evidence_path != evidence_path
+        ):
+            raise VerificationError(
+                "customer-eligible environment disagrees with local GPU proof"
+            )
 
 
 def verify_bundle(
@@ -506,6 +613,13 @@ def verify_bundle(
             for name, expected in configured_environment_values.items()
         ):
             raise VerificationError("environment target identity disagrees")
+        _verify_customer_eligible_environment(
+            descriptor,
+            vllm_invocation,
+            environment,
+            environment_by_name,
+            role_paths,
+        )
 
     producer_version_bytes = read_role(ArtifactRole.PRODUCER_VERSION)
     if isinstance(descriptor.producer, FakeProducerDescriptor):

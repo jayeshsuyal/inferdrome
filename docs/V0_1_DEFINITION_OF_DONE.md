@@ -125,6 +125,12 @@ PASS and FAIL contracts are frozen before their corresponding demonstrations.
 The failure case is produced honestly through the workload or threshold, not by
 editing measurements.
 
+Current implementation checkpoint: Inferdrome's managed Linux/NVIDIA harness,
+complete local provenance path, repeatable flagship run, corrupted-copy
+rejection, and synthetic customer-flow rejection are implemented. A genuine
+compatible-host bundle has not yet been promoted, and the separately owned
+ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations remain release-blocking.
+
 ## 10. Security and privacy
 
 - The v0.1 threat model is linked from the README and generated documentation.

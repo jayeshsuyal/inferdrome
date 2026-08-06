@@ -86,10 +86,30 @@ one exact no-shell argument vector, supervises the process within the resolved
 runtime limit, preserves native output, normalizes only the pinned `0.26.0`
 shape, and seals the same public evidence format as the fake path.
 
-Attached-endpoint evidence remains `INELIGIBLE` in this phase. Endpoint model
+Ordinary attached-endpoint evidence remains `INELIGIBLE`. Endpoint model
 identity is server-reported; target revisions are configured; GPU, CUDA,
-driver, producer-distribution, and launch provenance remain unknown. The
-real-GPU gate must establish those facts locally before eligibility can change.
+driver, producer-distribution, and launch provenance remain unknown.
+
+The opt-in managed path is narrower and Linux/NVIDIA-only:
+
+```bash
+inferdrome run examples/real-gpu-smoke.yaml \
+  --runs-root runs \
+  --tokenizer-path /absolute/path/to/exact-model-snapshot \
+  --managed-local-vllm \
+  --managed-model-path /absolute/path/to/exact-model-snapshot \
+  --managed-gpu-index 0 \
+  --managed-startup-timeout-seconds 900
+```
+
+It launches the exact pinned server itself, requires live GPU-process binding,
+hashes the model, tokenizer, installed producer, `nvidia-smi`, and generated
+launch vector, and checks immutable inputs again after measurement. Only this
+managed proof can produce `CUSTOMER_ELIGIBLE` vLLM evidence. It does not turn
+eligibility into an acceptance verdict.
+
+The executable host preparation and end-to-end demonstration are in
+[REAL_GPU_PROOF.md](REAL_GPU_PROOF.md).
 
 ## Inspect, verify, reduce, and summarize
 
@@ -113,6 +133,16 @@ to it explicitly:
 inferdrome bundle verify \
   runs/run-0123456789abcdef0123456789abcdef/bundle \
   --expected-digest "$BUNDLE_DIGEST"
+```
+
+A customer-evidence entry point must also reject synthetic and ordinary
+attached bundles:
+
+```bash
+inferdrome bundle verify \
+  runs/run-0123456789abcdef0123456789abcdef/bundle \
+  --expected-digest "$BUNDLE_DIGEST" \
+  --require-customer-eligible
 ```
 
 `reduce` independently reconstructs the frozen measurements from execution
