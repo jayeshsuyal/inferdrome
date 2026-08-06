@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 from urllib.parse import urlsplit
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
@@ -31,10 +31,21 @@ _VLLM_SOURCE_WHEELS = {
         "sha256:adb1e4c9b46d0dfdb094121ae5aad670a42412dd813ed4e5db069ed6a15006de",
     ),
 }
+MANAGED_PROCESS_ENVIRONMENT_POLICY: Final[
+    Literal["vllm-scrubbed-offline-v1"]
+] = "vllm-scrubbed-offline-v1"
+MANAGED_PROCESS_ENVIRONMENT_OVERRIDES: Final = (
+    "DO_NOT_TRACK=1",
+    "HF_HUB_DISABLE_TELEMETRY=1",
+    "HF_HUB_OFFLINE=1",
+    "TRANSFORMERS_OFFLINE=1",
+    "VLLM_NO_USAGE_STATS=1",
+)
 
 AbsolutePathText = Annotated[str, Field(min_length=1, max_length=4096)]
 CommandArgument = Annotated[str, Field(min_length=1, max_length=8192)]
 CapturedText = Annotated[str, Field(max_length=262_144)]
+EnvironmentOverride = Annotated[str, Field(min_length=3, max_length=256)]
 
 
 def _is_safe_absolute_path(value: str) -> bool:
@@ -153,6 +164,10 @@ class VllmDistributionIdentity(FrozenModel):
 class ManagedServerEvidence(FrozenModel):
     argv: Annotated[tuple[CommandArgument, ...], Field(min_length=1, max_length=256)]
     endpoint: Annotated[str, Field(min_length=1, max_length=2048)]
+    environment_policy: Literal["vllm-scrubbed-offline-v1"]
+    environment_overrides: Annotated[
+        tuple[EnvironmentOverride, ...], Field(min_length=5, max_length=5)
+    ]
     pid: Annotated[int, Field(strict=True, ge=2)]
     process_group_id: Annotated[int, Field(strict=True, ge=2)]
     started_at: AwareDatetime
@@ -167,6 +182,8 @@ class ManagedServerEvidence(FrozenModel):
 
     @model_validator(mode="after")
     def process_evidence_must_be_coherent(self) -> ManagedServerEvidence:
+        if self.environment_overrides != MANAGED_PROCESS_ENVIRONMENT_OVERRIDES:
+            raise ValueError("managed server environment overrides differ from policy")
         if self.process_group_id != self.pid:
             raise ValueError("managed server must own its isolated process group")
         if self.ready_at < self.started_at:
@@ -531,6 +548,12 @@ def validate_local_gpu_proof(
         raise AdapterError("local GPU proof tokenizer revision disagrees")
     if proof.server.endpoint != endpoint:
         raise AdapterError("local GPU proof endpoint disagrees")
+    if (
+        proof.server.environment_policy != MANAGED_PROCESS_ENVIRONMENT_POLICY
+        or proof.server.environment_overrides
+        != MANAGED_PROCESS_ENVIRONMENT_OVERRIDES
+    ):
+        raise AdapterError("local GPU proof server environment policy disagrees")
     expected_server_argv = build_managed_server_argv(
         spec,
         executable_path=proof.producer_distribution.executable_path,

@@ -835,6 +835,7 @@ def probe_vllm_version(
     executable: str = "vllm",
     process_runner: ProcessRunner = run_captured_process,
     termination_policy: TerminationPolicy | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> VllmVersionProbeCapture:
     """Capture and validate the pinned producer identity before benchmarking."""
 
@@ -844,6 +845,7 @@ def probe_vllm_version(
         max_runtime_seconds=30,
         output_limit_bytes=_MAX_VERSION_BYTES,
         termination_policy=termination_policy,
+        environment=environment,
         merge_stderr=True,
     )
     if (
@@ -952,6 +954,7 @@ def execute_vllm_benchmark(
     cancellation: CancellationToken | None = None,
     process_runner: ProcessRunner = run_captured_process,
     termination_policy: TerminationPolicy | None = None,
+    environment: Mapping[str, str] | None = None,
     output_limit_bytes: int = 67_108_864,
     native_result_limit_bytes: int = 268_435_456,
 ) -> VllmBenchmarkCapture:
@@ -999,6 +1002,7 @@ def execute_vllm_benchmark(
         output_limit_bytes=output_limit_bytes,
         cancellation=cancellation,
         termination_policy=termination_policy,
+        environment=environment,
         merge_stderr=False,
     )
     _require_dataset_unchanged(

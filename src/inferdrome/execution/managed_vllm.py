@@ -12,11 +12,12 @@ import shutil
 import stat
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import monotonic
+from types import MappingProxyType
 from typing import Any, Literal, cast
 from urllib.parse import unquote, urlsplit
 
@@ -40,6 +41,8 @@ from inferdrome.execution.subprocess_runner import (
     run_captured_process,
 )
 from inferdrome.gpu_proof import (
+    MANAGED_PROCESS_ENVIRONMENT_OVERRIDES,
+    MANAGED_PROCESS_ENVIRONMENT_POLICY,
     GpuComputeProcessEvidence,
     GpuDeviceEvidence,
     LocalGpuProof,
@@ -70,6 +73,28 @@ PreflightProbe = Callable[..., EndpointPreflightCapture]
 
 class _GpuProcessNotReady(AdapterError):
     """The managed server has not yet engaged every selected GPU."""
+
+
+def managed_process_environment(
+    source: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Scrub ambient vLLM controls and force local, telemetry-free execution."""
+
+    inherited = os.environ if source is None else source
+    override_names = {
+        item.partition("=")[0] for item in MANAGED_PROCESS_ENVIRONMENT_OVERRIDES
+    }
+    environment = {
+        name: value
+        for name, value in inherited.items()
+        if not name.startswith("VLLM_") and name not in override_names
+    }
+    for item in MANAGED_PROCESS_ENVIRONMENT_OVERRIDES:
+        name, separator, value = item.partition("=")
+        if not name or separator != "=" or not value:
+            raise AssertionError("invalid managed process environment policy")
+        environment[name] = value
+    return MappingProxyType(environment)
 
 
 @dataclass(frozen=True)
@@ -626,6 +651,7 @@ class ManagedVllmServer:
         self._process_runner = process_runner
         self._preflight_probe = preflight_probe
         self._server_cancellation = CancellationToken()
+        self._process_environment = managed_process_environment()
         self._started = threading.Event()
         self._finished = threading.Event()
         self._lock = threading.Lock()
@@ -743,6 +769,10 @@ class ManagedVllmServer:
                 raise AdapterError("managed vLLM server process start timed out")
         return server
 
+    @property
+    def process_environment(self) -> Mapping[str, str]:
+        return self._process_environment
+
     def _observe_start(self, pid: int, started_at: datetime) -> None:
         with self._lock:
             self._pid = pid
@@ -765,6 +795,7 @@ class ManagedVllmServer:
                 ),
                 output_limit_bytes=_MAX_CAPTURE_BYTES,
                 cancellation=self._server_cancellation,
+                environment=self._process_environment,
                 merge_stderr=False,
                 on_start=self._observe_start,
             )
@@ -908,6 +939,8 @@ class ManagedVllmServer:
                     server=ManagedServerEvidence(
                         argv=self._argv,
                         endpoint=str(self._target.endpoint).rstrip("/"),
+                        environment_policy=MANAGED_PROCESS_ENVIRONMENT_POLICY,
+                        environment_overrides=MANAGED_PROCESS_ENVIRONMENT_OVERRIDES,
                         pid=pid,
                         process_group_id=pid,
                         started_at=started_at,

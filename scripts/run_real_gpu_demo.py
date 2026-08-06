@@ -31,6 +31,7 @@ HOST_PIN_PATH = REPOSITORY_ROOT / "examples" / "real-gpu" / "host-pin.json"
 PRODUCER_PIN_PATH = REPOSITORY_ROOT / "spikes" / "vllm-0.26.0" / "producer-pin.json"
 FAKE_SOURCE_PATH = REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"
 STATIC_RUN_ID = "run-00000000000000000000000000000000"
+_MAX_PACKAGE_INVENTORY_BYTES = 2_097_152
 
 
 class DemoError(RuntimeError):
@@ -76,6 +77,68 @@ def _read_json(path: Path, *, label: str) -> dict[str, Any]:
     except OSError:
         raise DemoError(f"{label} cannot be read") from None
     return _strict_json_bytes(content, label=label)
+
+
+def _canonical_package_inventory(content: bytes) -> bytes:
+    if not content or len(content) > _MAX_PACKAGE_INVENTORY_BYTES:
+        raise DemoError("Python package inventory is empty or exceeds its limit")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise DemoError("Python package inventory is not UTF-8") from None
+    lines = text.splitlines()
+    if not lines or any(
+        not line
+        or len(line.encode("utf-8")) > 8_192
+        or any(ord(character) < 32 for character in line)
+        for line in lines
+    ):
+        raise DemoError("Python package inventory contains an invalid line")
+    if len(lines) != len(set(lines)):
+        raise DemoError("Python package inventory contains duplicate lines")
+    return ("\n".join(sorted(lines)) + "\n").encode()
+
+
+def _current_package_inventory() -> bytes:
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "pip", "freeze", "--all"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise DemoError("installed Python packages cannot be inspected") from None
+    if completed.returncode != 0:
+        raise DemoError("installed Python package inspection failed")
+    return _canonical_package_inventory(completed.stdout)
+
+
+def _require_package_environment_unchanged(packages_path: Path) -> None:
+    try:
+        retained = packages_path.read_bytes()
+    except OSError:
+        raise DemoError("prepared Python package inventory cannot be read") from None
+    canonical = _canonical_package_inventory(retained)
+    if retained != canonical:
+        raise DemoError("prepared Python package inventory is not canonical")
+    if _current_package_inventory() != retained:
+        raise DemoError("installed Python packages changed after host preparation")
+    try:
+        checked = subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise DemoError(
+            "installed Python package consistency cannot be checked"
+        ) from None
+    if checked.returncode != 0:
+        raise DemoError("installed Python package environment is inconsistent")
 
 
 def _host_pin() -> dict[str, str]:
@@ -289,6 +352,7 @@ def _require_clean_prepared_host(
     expected_python_parent = (state_root / "venv" / "bin").absolute()
     if Path(sys.executable).absolute().parent != expected_python_parent:
         raise DemoError("run the demo with the prepared virtual-environment Python")
+    _require_package_environment_unchanged(packages_path)
     try:
         model_stat = os.lstat(model_path)
     except OSError:

@@ -268,6 +268,7 @@ def _run_vllm(
 
     managed_server: ManagedVllmServer | None = None
     local_gpu_proof: LocalGpuProof | None = None
+    managed_environment = None
     try:
         if managed_config is None:
             preflight = preflight_attached_endpoint(spec.target)
@@ -282,11 +283,13 @@ def _run_vllm(
                 cancellation=cancellation,
             )
             preflight, local_gpu_proof = managed_server.wait_until_ready()
+            managed_environment = managed_server.process_environment
             version = probe_vllm_version(
                 cwd=workspace.path,
                 executable=(
                     local_gpu_proof.producer_distribution.executable_path
                 ),
+                environment=managed_environment,
             )
         cancellation.raise_if_requested()
         invocation = build_vllm_invocation(
@@ -321,6 +324,7 @@ def _run_vllm(
             resolution.request_plan,
             execution_fingerprint=resolution.execution_fingerprint,
             cancellation=cancellation,
+            environment=managed_environment,
         )
         _write_capture_file(
             capture_directory / "stdout.log",

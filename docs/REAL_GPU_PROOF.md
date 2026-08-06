@@ -51,7 +51,9 @@ The script uses no `sudo`, refuses a dirty checkout, refuses to reuse an
 existing destination, verifies the exact vLLM wheel hash before installation,
 downloads the model at the exact revision, rejects snapshot symlinks, checks
 CUDA through the installed Torch runtime, and records the checkout commit and
-resolved Python package inventory.
+resolved Python package inventory. Immediately before measurement, the demo
+regenerates that inventory byte-for-byte and reruns `pip check`; package drift
+or a newly inconsistent environment fails before proof output is reserved.
 
 From the repository root:
 
@@ -126,6 +128,14 @@ executable are hashed again after the benchmark. Any drift fails the run.
 Managed server diagnostics remain in the private run workspace, while the
 launch and allowlisted proof needed for offline verification are sealed in the
 producer invocation artifact.
+
+The managed server, version probe, and benchmark also share one process
+environment policy. Inferdrome removes every inherited `VLLM_*` override and
+forces `VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`,
+`HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_OFFLINE=1`, and
+`TRANSFORMERS_OFFLINE=1`. The policy identifier and exact overrides are sealed
+with the server proof so ambient vLLM configuration cannot silently alter the
+demonstration or enable producer telemetry.
 
 ## Run the proof and rejection demonstrations
 

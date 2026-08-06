@@ -420,6 +420,7 @@ def _process_capture(
 def test_version_probe_preserves_raw_merged_output(tmp_path: Path) -> None:
     raw = (SPIKE_FIXTURE / "producer-version.txt").read_bytes()
     calls: list[dict[str, Any]] = []
+    environment = {"VLLM_NO_USAGE_STATS": "1"}
 
     def runner(argv: tuple[str, ...], **kwargs: Any) -> ProcessCapture:
         calls.append(kwargs)
@@ -428,6 +429,7 @@ def test_version_probe_preserves_raw_merged_output(tmp_path: Path) -> None:
     capture = probe_vllm_version(
         cwd=tmp_path.resolve(),
         process_runner=runner,
+        environment=environment,
     )
 
     assert capture.observed_version == "0.26.0+empty"
@@ -435,6 +437,7 @@ def test_version_probe_preserves_raw_merged_output(tmp_path: Path) -> None:
     assert capture.process.argv == ("vllm", "--version")
     assert calls[0]["merge_stderr"] is True
     assert calls[0]["output_limit_bytes"] == 65_536
+    assert calls[0]["environment"] == environment
 
 
 def test_benchmark_capture_preserves_untouched_native_and_streams(
@@ -452,6 +455,7 @@ def test_benchmark_capture_preserves_untouched_native_and_streams(
         SPIKE_FIXTURE / "native" / "benchmark-result.json"
     ).read_bytes()
     calls: list[dict[str, Any]] = []
+    environment = {"VLLM_NO_USAGE_STATS": "1"}
 
     def runner(argv: tuple[str, ...], **kwargs: Any) -> ProcessCapture:
         calls.append(kwargs)
@@ -469,6 +473,7 @@ def test_benchmark_capture_preserves_untouched_native_and_streams(
         resolution.request_plan,
         execution_fingerprint=resolution.execution_fingerprint,
         process_runner=runner,
+        environment=environment,
     )
 
     assert capture.native_result_bytes == native_bytes
@@ -478,6 +483,7 @@ def test_benchmark_capture_preserves_untouched_native_and_streams(
     assert calls[0]["max_runtime_seconds"] == 60
     assert calls[0]["merge_stderr"] is False
     assert calls[0]["cwd"] == invocation.paths.result_directory
+    assert calls[0]["environment"] == environment
 
 
 def test_failed_benchmark_capture_keeps_diagnostics_without_native_guess(

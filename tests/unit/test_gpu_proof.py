@@ -22,6 +22,8 @@ from inferdrome.environment_capture import capture_managed_gpu_environment
 from inferdrome.errors import AdapterError
 from inferdrome.execution.managed_vllm import snapshot_directory_identity
 from inferdrome.gpu_proof import (
+    MANAGED_PROCESS_ENVIRONMENT_OVERRIDES,
+    MANAGED_PROCESS_ENVIRONMENT_POLICY,
     GpuComputeProcessEvidence,
     GpuDeviceEvidence,
     LocalGpuProof,
@@ -137,6 +139,8 @@ def _proof(
         server=ManagedServerEvidence(
             argv=server_argv,
             endpoint=str(target.endpoint).rstrip("/"),
+            environment_policy=MANAGED_PROCESS_ENVIRONMENT_POLICY,
+            environment_overrides=MANAGED_PROCESS_ENVIRONMENT_OVERRIDES,
             pid=4321,
             process_group_id=4321,
             started_at=started_at,
@@ -266,6 +270,17 @@ def test_managed_server_argv_and_proof_are_cross_bound(tmp_path: Path) -> None:
     )
     with pytest.raises(ValidationError, match="source wheel disagrees"):
         LocalGpuProof.model_validate_json(json.dumps(wrong_wheel))
+
+    changed_environment = proof.server.model_copy(
+        update={"environment_overrides": ("VLLM_NO_USAGE_STATS=0",)}
+    )
+    tampered_environment = proof.model_copy(update={"server": changed_environment})
+    with pytest.raises(AdapterError, match="environment policy"):
+        validate_local_gpu_proof(
+            resolution.resolved_spec,
+            tampered_environment,
+            run_id=RUN_ID,
+        )
 
 
 def test_managed_invocation_round_trips_with_local_gpu_proof(

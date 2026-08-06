@@ -32,6 +32,8 @@ from inferdrome.execution.subprocess_runner import (
     ProcessTermination,
 )
 from inferdrome.gpu_proof import (
+    MANAGED_PROCESS_ENVIRONMENT_OVERRIDES,
+    MANAGED_PROCESS_ENVIRONMENT_POLICY,
     GpuComputeProcessEvidence,
     GpuDeviceEvidence,
     LocalGpuProof,
@@ -285,6 +287,8 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
                 gpu_indices=selected,
             ),
             endpoint=str(target.endpoint).rstrip("/"),
+            environment_policy=MANAGED_PROCESS_ENVIRONMENT_POLICY,
+            environment_overrides=MANAGED_PROCESS_ENVIRONMENT_OVERRIDES,
             pid=5431,
             process_group_id=5431,
             started_at=started_at,
@@ -318,6 +322,13 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
 
         def wait_until_ready(self) -> tuple[object, LocalGpuProof]:
             return preflight, proof
+
+        @property
+        def process_environment(self) -> dict[str, str]:
+            return {
+                item.partition("=")[0]: item.partition("=")[2]
+                for item in MANAGED_PROCESS_ENVIRONMENT_OVERRIDES
+            }
 
         def assert_running(self) -> None:
             return None

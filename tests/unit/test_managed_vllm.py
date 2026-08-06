@@ -34,6 +34,26 @@ WHEEL_SHA256 = (
 )
 
 
+def test_managed_process_environment_scrubs_overrides_and_disables_network() -> None:
+    environment = managed_vllm.managed_process_environment(
+        {
+            "PATH": "/usr/bin",
+            "VLLM_CONFIG_ROOT": "/untrusted/config",
+            "VLLM_NO_USAGE_STATS": "0",
+            "HF_HUB_OFFLINE": "0",
+            "INFERDROME_FIXTURE": "retained",
+        }
+    )
+
+    assert environment["PATH"] == "/usr/bin"
+    assert environment["INFERDROME_FIXTURE"] == "retained"
+    assert environment["VLLM_NO_USAGE_STATS"] == "1"
+    assert environment["HF_HUB_OFFLINE"] == "1"
+    assert environment["TRANSFORMERS_OFFLINE"] == "1"
+    assert environment["DO_NOT_TRACK"] == "1"
+    assert "VLLM_CONFIG_ROOT" not in environment
+
+
 def test_distribution_source_wheel_requires_exact_direct_url_pin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -212,6 +232,9 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
             )
         observer = kwargs["on_start"]
         cancellation = kwargs["cancellation"]
+        environment = kwargs["environment"]
+        assert environment["VLLM_NO_USAGE_STATS"] == "1"
+        assert environment["HF_HUB_OFFLINE"] == "1"
         observer(7001, started_at)
         cancellation.wait(5)
         return ProcessCapture(
