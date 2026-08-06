@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Capability-spike runs are reviewed before selected artifacts are promoted to
+# committed fixtures.
+spikes/**/output/

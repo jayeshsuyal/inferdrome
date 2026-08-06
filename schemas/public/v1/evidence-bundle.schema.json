@@ -1,0 +1,378 @@
+{
+  "$comment": "Cross-field semantic invariants are normative; see docs/PUBLIC_CONTRACTS_V1.md and the conformance vectors.",
+  "$defs": {
+    "ArtifactDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "media_type": {
+          "$ref": "#/$defs/ArtifactMediaType"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+          "title": "Path",
+          "type": "string"
+        },
+        "required": {
+          "const": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "role": {
+          "$ref": "#/$defs/ArtifactRole"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/ArtifactSensitivity"
+        }
+      },
+      "required": [
+        "path",
+        "role",
+        "media_type",
+        "sensitivity",
+        "required"
+      ],
+      "title": "ArtifactDescriptor",
+      "type": "object"
+    },
+    "ArtifactMediaType": {
+      "enum": [
+        "application/json",
+        "application/x-ndjson",
+        "application/yaml",
+        "text/plain"
+      ],
+      "title": "ArtifactMediaType",
+      "type": "string"
+    },
+    "ArtifactRole": {
+      "enum": [
+        "bundle_descriptor",
+        "original_spec",
+        "resolved_spec",
+        "request_plan",
+        "environment",
+        "execution",
+        "producer_invocation",
+        "producer_version",
+        "producer_exit_status",
+        "native_result",
+        "native_stdout",
+        "native_stderr",
+        "request_records",
+        "metric_definitions",
+        "measurements",
+        "integrity_manifest"
+      ],
+      "title": "ArtifactRole",
+      "type": "string"
+    },
+    "ArtifactSensitivity": {
+      "enum": [
+        "PUBLIC",
+        "INTERNAL_DIAGNOSTIC",
+        "PROMPT_CONTENT",
+        "RESPONSE_CONTENT"
+      ],
+      "title": "ArtifactSensitivity",
+      "type": "string"
+    },
+    "DigestDomains": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_fingerprint": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Execution Fingerprint",
+          "type": "string"
+        },
+        "exitspec_contract_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exitspec Contract Digest"
+        },
+        "metric_definitions_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Metric Definitions Digest",
+          "type": "string"
+        },
+        "request_plan_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Request Plan Digest",
+          "type": "string"
+        },
+        "source_spec_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Source Spec Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_spec_digest",
+        "execution_fingerprint",
+        "request_plan_digest",
+        "metric_definitions_digest",
+        "exitspec_contract_digest"
+      ],
+      "title": "DigestDomains",
+      "type": "object"
+    },
+    "EnvironmentCompleteness": {
+      "enum": [
+        "COMPLETE",
+        "PARTIAL",
+        "UNKNOWN"
+      ],
+      "title": "EnvironmentCompleteness",
+      "type": "string"
+    },
+    "EvidenceEligibility": {
+      "enum": [
+        "CUSTOMER_ELIGIBLE",
+        "SYNTHETIC_ONLY",
+        "INELIGIBLE"
+      ],
+      "title": "EvidenceEligibility",
+      "type": "string"
+    },
+    "EvidenceExecutionMode": {
+      "enum": [
+        "attached_endpoint",
+        "synthetic_fixture"
+      ],
+      "title": "EvidenceExecutionMode",
+      "type": "string"
+    },
+    "FakeProducerDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "const": "fake",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "adapter_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "name": {
+          "const": "inferdrome_fake",
+          "title": "Name",
+          "type": "string"
+        },
+        "native_schema_fingerprint": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Native Schema Fingerprint",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "adapter",
+        "adapter_version",
+        "native_schema_fingerprint"
+      ],
+      "title": "FakeProducerDescriptor",
+      "type": "object"
+    },
+    "Replayability": {
+      "enum": [
+        "FULL",
+        "LIMITED",
+        "NONE"
+      ],
+      "title": "Replayability",
+      "type": "string"
+    },
+    "SensitivityDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_response_content_included": {
+          "title": "Canonical Response Content Included",
+          "type": "boolean"
+        },
+        "native_response_content_present": {
+          "title": "Native Response Content Present",
+          "type": "boolean"
+        },
+        "prompt_content_in_request_plan": {
+          "title": "Prompt Content In Request Plan",
+          "type": "boolean"
+        },
+        "secrets_permitted": {
+          "const": false,
+          "title": "Secrets Permitted",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "prompt_content_in_request_plan",
+        "canonical_response_content_included",
+        "native_response_content_present",
+        "secrets_permitted"
+      ],
+      "title": "SensitivityDeclaration",
+      "type": "object"
+    },
+    "VllmProducerDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "const": "vllm_bench_serve",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "adapter_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "name": {
+          "const": "vllm",
+          "title": "Name",
+          "type": "string"
+        },
+        "native_schema_fingerprint": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Native Schema Fingerprint",
+          "type": "string"
+        },
+        "version": {
+          "const": "0.26.0",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "adapter",
+        "adapter_version",
+        "native_schema_fingerprint"
+      ],
+      "title": "VllmProducerDescriptor",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.inferdrome.dev/public/v1/evidence-bundle.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactDescriptor"
+      },
+      "minItems": 1,
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "digests": {
+      "$ref": "#/$defs/DigestDomains"
+    },
+    "environment_completeness": {
+      "$ref": "#/$defs/EnvironmentCompleteness"
+    },
+    "evidence_eligibility": {
+      "$ref": "#/$defs/EvidenceEligibility"
+    },
+    "execution_mode": {
+      "$ref": "#/$defs/EvidenceExecutionMode"
+    },
+    "experiment_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+      "title": "Experiment Id",
+      "type": "string"
+    },
+    "integrity_manifest_path": {
+      "maxLength": 512,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+      "title": "Integrity Manifest Path",
+      "type": "string"
+    },
+    "integrity_status": {
+      "const": "VALID",
+      "title": "Integrity Status",
+      "type": "string"
+    },
+    "producer": {
+      "discriminator": {
+        "mapping": {
+          "inferdrome_fake": "#/$defs/FakeProducerDescriptor",
+          "vllm": "#/$defs/VllmProducerDescriptor"
+        },
+        "propertyName": "name"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/VllmProducerDescriptor"
+        },
+        {
+          "$ref": "#/$defs/FakeProducerDescriptor"
+        }
+      ],
+      "title": "Producer"
+    },
+    "replayability": {
+      "$ref": "#/$defs/Replayability"
+    },
+    "run_id": {
+      "pattern": "^run-[0-9a-f]{32}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "run_state": {
+      "const": "COMPLETE",
+      "title": "Run State",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.evidence.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sensitivity": {
+      "$ref": "#/$defs/SensitivityDeclaration"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "experiment_id",
+    "created_at",
+    "execution_mode",
+    "run_state",
+    "integrity_status",
+    "environment_completeness",
+    "evidence_eligibility",
+    "replayability",
+    "producer",
+    "digests",
+    "sensitivity",
+    "integrity_manifest_path",
+    "artifacts"
+  ],
+  "title": "EvidenceBundle",
+  "type": "object"
+}

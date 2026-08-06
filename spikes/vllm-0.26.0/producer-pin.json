@@ -1,0 +1,75 @@
+{
+  "schema_version": "inferdrome.spike-producer-pin.v1",
+  "selected_at": "2026-08-05",
+  "selection_policy": "current_stable_pypi_release_at_spike_start",
+  "producer": {
+    "name": "vllm",
+    "version": "0.26.0",
+    "git_tag": "v0.26.0",
+    "git_commit": "568afb3a13806beb53bb2e6bd518269357b237c0",
+    "release_published_at": "2026-07-27T01:06:58Z",
+    "release_url": "https://github.com/vllm-project/vllm/releases/tag/v0.26.0",
+    "requires_python": ">=3.10,<3.15"
+  },
+  "distributions": [
+    {
+      "filename": "vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+      "kind": "wheel",
+      "size_bytes": 298269785,
+      "sha256": "52a4c3e55c2c80cc8793e52ccc244457ceade25b0ad7caa1c15e5002a95a1b2c",
+      "url": "https://files.pythonhosted.org/packages/58/27/6ff13689a5931f0c97b7008042f07aacc4a246e7eb06fd9b4d5a72de483c/vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl"
+    },
+    {
+      "filename": "vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+      "kind": "wheel",
+      "size_bytes": 303698761,
+      "sha256": "adb1e4c9b46d0dfdb094121ae5aad670a42412dd813ed4e5db069ed6a15006de",
+      "url": "https://files.pythonhosted.org/packages/20/96/86edd288415aafc2952bbb969b5ef4e8c58e5525185b60320730276921e6/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl"
+    },
+    {
+      "filename": "vllm-0.26.0.tar.gz",
+      "kind": "source_distribution",
+      "size_bytes": 38353572,
+      "sha256": "23e9fa19d7e20ce7dcc1c074d41503e2116d23f19e688f5d5ea91b741f958502",
+      "url": "https://files.pythonhosted.org/packages/cd/72/fa30f8459d11ae206f1a20bd0ac7ed1b9e390b695fa3dfc9ef6056de0cfe/vllm-0.26.0.tar.gz"
+    }
+  ],
+  "analyzed_source_files": [
+    {
+      "path": "setup.py",
+      "sha256": "5a7648923085a9d584de4be08a6fdb6430d65ea9cf5aebf1720c3ef7ed0edc50"
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "c9bb90031f57a1cacbe833e09d6746990dfbbe346b21b931ff9bca1c10acfc98"
+    },
+    {
+      "path": "vllm/benchmarks/serve.py",
+      "sha256": "8938b64b273470a3b3fb3b5d8bbd22e8ab4df7640295f55435ac4384283ec589"
+    },
+    {
+      "path": "vllm/benchmarks/lib/endpoint_request_func.py",
+      "sha256": "e9ab4df19c5d89e1b73f116b4e21f2cc6c7da077266367c4b1b2bd7e015fda59"
+    },
+    {
+      "path": "vllm/benchmarks/datasets/datasets.py",
+      "sha256": "f4fed1d7135231d0941bea47a79b6c9901a8d21c3d21ad668a6b662b1c9c3f42"
+    },
+    {
+      "path": "vllm/entrypoints/cli/benchmark/serve.py",
+      "sha256": "6825a4c145d1a6210f3b104407bfc22feabb5f627912b34f545f4be2ab8d0729"
+    },
+    {
+      "path": "tests/benchmarks/test_serve_cli.py",
+      "sha256": "afa36cf1a82cd82508eee7f762c65283df2755314d631b7a1558bb4c040baadc"
+    }
+  ],
+  "client_fixture_compatibility": {
+    "mode": "macos_empty_device",
+    "installed_distribution_version": "0.26.0+empty",
+    "patch_path": "macos-empty-device.patch",
+    "patch_sha256": "7b12a3c28f533979f2c713689536be64c9192e49190c81694aa4b266b63ddf38",
+    "patch_scope": "setup.py platform selection only",
+    "benchmark_source_files_modified": false
+  }
+}

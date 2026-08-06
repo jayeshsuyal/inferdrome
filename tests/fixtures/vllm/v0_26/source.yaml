@@ -1,0 +1,35 @@
+schema_version: inferdrome.source-experiment.v1
+
+experiment:
+  id: vllm-0-26-fixture
+  title: Pinned vLLM 0.26.0 native fixture
+
+execution:
+  mode: attached_endpoint
+  max_runtime_seconds: 60
+  max_measured_requests: 4
+
+target:
+  engine: vllm
+  endpoint: http://127.0.0.1:18083
+  model: inferdrome/mock-model
+  model_revision: fixture-model-revision
+  tokenizer_revision: fixture-tokenizer-revision
+  engine_version: 0.26.0
+
+workload:
+  path: workload.jsonl
+  sha256: sha256:b3dc03f45d2f296a4abbb5444db81a86e8504d323d4fd6714fbf9723758ac5e1
+  prompt_content_policy: include
+  requested_output_tokens: 2
+  temperature: 0
+  seed: 42
+
+traffic:
+  kind: concurrent
+  concurrency: 2
+  warmup_requests: 2
+  measured_requests: 4
+
+evidence:
+  canonical_response_content: omit

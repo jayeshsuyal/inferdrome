@@ -1,0 +1,22 @@
+{
+  "schema_version": "inferdrome.environment.v1",
+  "run_id": "run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "field_set_version": "inferdrome.environment-fields.v1",
+  "captured_at": "2026-08-05T22:13:00Z",
+  "completeness": "PARTIAL",
+  "fields": [
+    {"name": "client.os", "value": "Darwin", "provenance": "CLIENT_OBSERVED", "evidence_path": "native/execution-environment.json"},
+    {"name": "client.arch", "value": "arm64", "provenance": "CLIENT_OBSERVED", "evidence_path": "native/execution-environment.json"},
+    {"name": "client.python_version", "value": "3.12.13", "provenance": "CLIENT_OBSERVED", "evidence_path": "native/execution-environment.json"},
+    {"name": "producer.version", "value": "0.26.0+empty", "provenance": "LOCALLY_VERIFIED", "evidence_path": "native/producer-version.txt"},
+    {"name": "producer.distribution_sha256", "value": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "provenance": "LOCALLY_VERIFIED", "evidence_path": "native/execution-environment.json"},
+    {"name": "target.engine_version", "value": null, "provenance": "UNKNOWN", "evidence_path": null},
+    {"name": "target.model_revision", "value": null, "provenance": "UNKNOWN", "evidence_path": null},
+    {"name": "target.tokenizer_revision", "value": null, "provenance": "UNKNOWN", "evidence_path": null},
+    {"name": "server.model_id", "value": "inferdrome/mock-model", "provenance": "SERVER_REPORTED", "evidence_path": "native/benchmark-result.json"},
+    {"name": "gpu.model", "value": null, "provenance": "UNKNOWN", "evidence_path": null},
+    {"name": "gpu.count", "value": null, "provenance": "UNKNOWN", "evidence_path": null},
+    {"name": "cuda.version", "value": null, "provenance": "UNKNOWN", "evidence_path": null},
+    {"name": "driver.version", "value": null, "provenance": "UNKNOWN", "evidence_path": null}
+  ]
+}

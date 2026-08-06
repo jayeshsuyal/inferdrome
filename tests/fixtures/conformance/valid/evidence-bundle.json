@@ -1,0 +1,51 @@
+{
+  "schema_version": "inferdrome.evidence.v1",
+  "run_id": "run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "experiment_id": "inferdrome-smoke",
+  "created_at": "2026-08-05T22:14:00Z",
+  "execution_mode": "attached_endpoint",
+  "run_state": "COMPLETE",
+  "integrity_status": "VALID",
+  "environment_completeness": "PARTIAL",
+  "evidence_eligibility": "CUSTOMER_ELIGIBLE",
+  "replayability": "FULL",
+  "producer": {
+    "name": "vllm",
+    "version": "0.26.0",
+    "adapter": "vllm_bench_serve",
+    "adapter_version": "1.0.0",
+    "native_schema_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "digests": {
+    "source_spec_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "execution_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "request_plan_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "metric_definitions_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "exitspec_contract_digest": null
+  },
+  "sensitivity": {
+    "prompt_content_in_request_plan": true,
+    "canonical_response_content_included": false,
+    "native_response_content_present": true,
+    "secrets_permitted": false
+  },
+  "integrity_manifest_path": "integrity/artifact-hashes.json",
+  "artifacts": [
+    {"path": "bundle.json", "role": "bundle_descriptor", "media_type": "application/json", "sensitivity": "PUBLIC", "required": true},
+    {"path": "experiment.original.yaml", "role": "original_spec", "media_type": "application/yaml", "sensitivity": "PROMPT_CONTENT", "required": true},
+    {"path": "experiment.resolved.json", "role": "resolved_spec", "media_type": "application/json", "sensitivity": "PUBLIC", "required": true},
+    {"path": "request-plan.json", "role": "request_plan", "media_type": "application/json", "sensitivity": "PROMPT_CONTENT", "required": true},
+    {"path": "environment.json", "role": "environment", "media_type": "application/json", "sensitivity": "INTERNAL_DIAGNOSTIC", "required": true},
+    {"path": "execution.json", "role": "execution", "media_type": "application/json", "sensitivity": "PUBLIC", "required": true},
+    {"path": "native/invocation.json", "role": "producer_invocation", "media_type": "application/json", "sensitivity": "INTERNAL_DIAGNOSTIC", "required": true},
+    {"path": "native/producer-version.txt", "role": "producer_version", "media_type": "text/plain", "sensitivity": "PUBLIC", "required": true},
+    {"path": "native/exit-status.txt", "role": "producer_exit_status", "media_type": "text/plain", "sensitivity": "PUBLIC", "required": true},
+    {"path": "native/benchmark-result.json", "role": "native_result", "media_type": "application/json", "sensitivity": "RESPONSE_CONTENT", "required": true},
+    {"path": "native/stdout.log", "role": "native_stdout", "media_type": "text/plain", "sensitivity": "INTERNAL_DIAGNOSTIC", "required": true},
+    {"path": "native/stderr.log", "role": "native_stderr", "media_type": "text/plain", "sensitivity": "INTERNAL_DIAGNOSTIC", "required": true},
+    {"path": "records/requests.jsonl", "role": "request_records", "media_type": "application/x-ndjson", "sensitivity": "PUBLIC", "required": true},
+    {"path": "definitions/metrics.json", "role": "metric_definitions", "media_type": "application/json", "sensitivity": "PUBLIC", "required": true},
+    {"path": "derived/measurements.json", "role": "measurements", "media_type": "application/json", "sensitivity": "PUBLIC", "required": true},
+    {"path": "integrity/artifact-hashes.json", "role": "integrity_manifest", "media_type": "application/json", "sensitivity": "PUBLIC", "required": true}
+  ]
+}

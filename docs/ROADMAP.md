@@ -1,0 +1,309 @@
+# Inferdrome build roadmap
+
+Status: **Canonical v0.1 sequence**
+
+The roadmap is gate-driven. A phase is complete when its invariants are proven,
+not when its planned files merely exist.
+
+Current checkpoint: **PR 0 through PR 5 gates passed on 2026-08-05. The
+Inferdrome-only CLI/orchestrator slice is implemented and the next
+Inferdrome-owned gate is PR 7, the real-GPU proof.**
+
+PR 6 is an independent-consumer integration boundary. Its contract remains in
+this roadmap, but work on that consumer is outside the Inferdrome repository
+and is not an active implementation target here.
+
+## PR 0 — Freeze the foundation
+
+Deliver:
+
+- product charter;
+- architecture and ownership boundaries;
+- threat model;
+- v0.1 non-goals and definition of done;
+- architecture decision records; and
+- implementation sequence.
+
+Gate:
+
+```text
+Mission, claims, trust boundaries, and delayed scope are explicit.
+Public wire fields remain provisional.
+```
+
+## PR 0.5 — Pinned-vLLM capability spike
+
+This spike comes before public schemas.
+
+Deliver:
+
+- selection and exact pin of one vLLM benchmark version;
+- a small attached-endpoint run with preflight, warmup, successful requests, and
+  at least one failed request;
+- untouched detailed native output;
+- producer invocation and version evidence;
+- a field-by-field capability matrix;
+- documented request ordering and ID behavior;
+- documented streaming and TTFT behavior;
+- documented warmup visibility;
+- documented native response-content behavior; and
+- a first native golden fixture.
+
+Gate:
+
+```text
+Every proposed v0.1 canonical field is OBSERVED, strictly DERIVABLE,
+CONFIGURED_ONLY, or UNAVAILABLE.
+
+No configured-only or unavailable value is represented as an observation.
+```
+
+If the pinned producer cannot support the minimum useful evidence contract, the
+team revises the provisional architecture before publishing v1 schemas.
+
+## PR 1 — Public schemas and domain model
+
+Deliver:
+
+- experiment schema;
+- request-plan schema;
+- canonical request-record schema;
+- environment and provenance schema;
+- metric-definition and measurement schemas;
+- evidence-bundle schema;
+- typed domain models;
+- run-state machine;
+- identifier and digest types; and
+- cross-validator conformance tests.
+
+Gate:
+
+```text
+Schemas express only capabilities established by PR 0.5.
+Invalid, ambiguous, and unsupported fields fail closed.
+```
+
+Completed on 2026-08-05. Eight Draft 2020-12 schemas, strict Pydantic models,
+the frozen run-state graph, domain-separated digest helpers, and cross-validator
+conformance vectors are committed as the v1 contract.
+
+## PR 2 — Resolver and immutable run workspace
+
+Deliver:
+
+- source YAML validation;
+- explicit default expansion;
+- request-plan construction;
+- path and producer resolution;
+- domain-specific hashing;
+- run-directory reservation;
+- state persistence;
+- secret-bearing URL rejection; and
+- bounded cancellation scaffolding.
+
+Gate:
+
+```text
+Resolved execution inputs and the request plan cannot change after
+measurement begins.
+```
+
+Completed on 2026-08-05. The strict YAML resolver reads bounded no-follow
+inputs once, verifies exact workload bytes, expands defaults, constructs the
+ordered request plan, calculates domain-separated digests, reserves run IDs
+atomically, and persists a lock-protected append-only state history. Frozen
+inputs are read-only and reverified before every transition.
+
+## PR 3 — Fake adapter and deterministic reducer
+
+Deliver:
+
+- synthetic fake adapter;
+- golden request-record fixtures;
+- frozen metric-definition implementation;
+- deterministic reducer;
+- quantile and rounding policy;
+- count, error-rate, choices-event latency, and throughput calculations; and
+- explicit empty-population behavior; and
+- synthetic-eligibility enforcement.
+
+Gate:
+
+```text
+Identical canonical inputs produce byte-identical derived output.
+Synthetic evidence cannot enter the honest customer-evidence path.
+```
+
+Completed on 2026-08-05. The fake producer writes immutable synthetic markers,
+native rows, canonical records, and completed execution evidence. The reducer
+implements the frozen count, error-rate, choices-event latency, and throughput
+formulas with nearest-rank quantiles and decimal-half-even rounding. A committed
+success/failure golden fixture regenerates byte-identically in the engineering
+gate.
+
+## PR 4 — Evidence bundle and offline verification
+
+Deliver:
+
+- staged bundle writer;
+- artifact inventory;
+- exact-byte hash manifest;
+- immutable sealing lifecycle;
+- safe bundle reader;
+- offline verifier; and
+- adversarial mutation tests.
+
+Gate:
+
+```text
+Every material post-seal mutation is detected relative to the retained
+manifest and bundle digest. Verification never mutates or executes content.
+```
+
+Completed on 2026-08-05. The writer stages a closed sixteen-role artifact set,
+hashes exact bytes, emits an out-of-band domain-separated bundle digest, seals
+the tree read-only, publishes it atomically, verifies again, and only then marks
+the workspace complete. The bounded no-follow reader and cross-artifact
+verifier reject unsafe nodes, undeclared content, integrity drift, semantic
+disagreement, and reducer mismatch.
+
+## PR 5 — Attached endpoint and pinned-vLLM path
+
+Deliver:
+
+- endpoint preflight profile;
+- pinned producer invocation;
+- native-output preservation;
+- version-specific normalizer;
+- native source locators;
+- capability enforcement;
+- golden native-output tests; and
+- full non-GPU integration tests over stored fixtures.
+
+Gate:
+
+```text
+The real producer and fake adapter converge on the same public evidence
+format without pretending to expose identical capabilities.
+```
+
+Completed on 2026-08-05. The attached profile performs bounded model-list
+preflight, the adapter generates and revalidates one exact no-shell invocation,
+the subprocess supervisor preserves bounded diagnostics, and the pinned
+normalizer converts the real success/failure capture without guessing missing
+fields. Stored native goldens regenerate byte-identically, and a sealed
+non-GPU vLLM fixture passes full offline renormalization and metric
+recalculation. Coherently rehashed shape, timing, invocation, and version
+mutations fail at their semantic boundaries.
+
+## PR 6 — ExitSpec importer
+
+Deliver in ExitSpec:
+
+- vendored public schemas and conformance vectors;
+- bounded, path-safe bundle reader;
+- hash and eligibility verification;
+- canonical-record metric recalculation;
+- applicability and sufficiency mapping;
+- explicit rejection/verdict decision table; and
+- ingestion receipt.
+
+Gate:
+
+```text
+ExitSpec never trusts an Inferdrome summary used in a verdict.
+```
+
+## PR 7 — Real-GPU proof
+
+Deliver:
+
+- exact GPU-host preparation and server-launch instructions;
+- one real vLLM evidence bundle;
+- environment provenance manifest;
+- `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations;
+- corrupted-artifact and synthetic-fixture rejection demonstrations; and
+- a short repeatable demo script.
+
+Gate:
+
+```text
+A clean compatible GPU host can reproduce the measurement procedure and
+produce a newly sealed bundle without editing evidence by hand.
+```
+
+An attached endpoint cannot by itself prove server launch configuration. The
+reproduction guide must therefore preserve the exact launch command and locally
+observed environment. A managed local-server mode may be added if that is the
+smallest honest way to meet this gate.
+
+The Inferdrome CLI and end-to-end orchestrator are now available ahead of this
+gate. Attached-endpoint CLI runs deliberately remain `INELIGIBLE` while GPU,
+driver, CUDA, producer-distribution, and server-launch provenance are unknown.
+PR 7 must replace those unknowns with locally verified evidence before claiming
+customer eligibility.
+
+## PR 8 — v0.1 hardening and release
+
+Deliver:
+
+- complete adversarial suite;
+- error taxonomy and CLI polish;
+- engineering gate;
+- example bundles and receipts;
+- documentation review;
+- security review against the frozen threat model;
+- release checklist evidence; and
+- `v0.1.0`.
+
+In progress: the chartered `validate`, `resolve`, `run`, `inspect`, `bundle
+verify`, `reduce`, and `summarize` commands now share the same fail-closed
+library boundaries used by tests. Remaining polish is tracked by the release
+gate rather than by adding new product scope.
+
+Gate:
+
+```text
+Every item in the v0.1 definition of done has linked evidence.
+```
+
+See [V0_1_DEFINITION_OF_DONE.md](V0_1_DEFINITION_OF_DONE.md).
+
+## Post-v0.1 roadmap
+
+### v0.2 — Repeated trials and controlled comparisons
+
+- trial sets and comparison objects;
+- execution-fingerprint comparability gate;
+- per-run statistics and run-to-run variation;
+- predeclared experimental variables; and
+- a prefix-caching comparison.
+
+Confidence intervals require a defensible repeat count and estimator; three
+runs are an example grouping, not an automatic statistical guarantee.
+
+### v0.2 — Telemetry
+
+- vLLM metrics collection;
+- queue, prefill, decode, and KV-cache observations;
+- NVIDIA DCGM GPU observations;
+- clock-domain and sampling metadata; and
+- telemetry capability declarations.
+
+Only after telemetry is present may Inferdrome make evidence-backed claims about
+why latency changed.
+
+### v0.3 — Router experiments
+
+- request-linked route-decision artifacts;
+- cost and quality references;
+- premium, economy, and routed baselines; and
+- route-policy provenance.
+
+### v0.4 — Second serving engine
+
+- SGLang producer and normalizer;
+- engine-specific capability declaration; and
+- proof that the evidence model tolerates genuinely different native outputs.
+
+Unsupported observations remain unavailable rather than becoming zero.

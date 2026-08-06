@@ -1,0 +1,413 @@
+"""End-to-end execution orchestration for the frozen Inferdrome v0.1 paths."""
+
+import os
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from pydantic import BaseModel
+
+from inferdrome.adapters.fake import (
+    FAKE_ADAPTER_VERSION,
+    FAKE_PRODUCER_VERSION,
+    FakeAdapter,
+    fake_native_schema_fingerprint,
+)
+from inferdrome.adapters.vllm_bench import (
+    VllmInvocationPaths,
+    build_vllm_invocation,
+    execute_vllm_benchmark,
+    preflight_attached_endpoint,
+    probe_vllm_version,
+)
+from inferdrome.bundle import BundleMetadata, SealedBundle, seal_bundle
+from inferdrome.domain.digests import canonical_json_bytes
+from inferdrome.domain.evidence import (
+    ArtifactRole,
+    DigestDomains,
+    EvidenceExecutionMode,
+    FakeProducerDescriptor,
+    SensitivityDeclaration,
+    VllmProducerDescriptor,
+)
+from inferdrome.domain.experiment import (
+    AttachedVllmTarget,
+    CanonicalResponseContentPolicy,
+    FakeExecution,
+    PromptContentPolicy,
+    SyntheticTarget,
+    VllmExecution,
+)
+from inferdrome.domain.states import (
+    EvidenceEligibility,
+    RunState,
+    is_terminal_run_state,
+)
+from inferdrome.environment_capture import (
+    capture_attached_environment,
+    capture_fake_environment,
+)
+from inferdrome.errors import (
+    AdapterError,
+    CancellationRequested,
+    InferdromeError,
+)
+from inferdrome.execution.cancellation import CancellationToken
+from inferdrome.execution.subprocess_runner import ProcessTermination
+from inferdrome.metrics import ReductionResult, reduce_measurements
+from inferdrome.normalization import (
+    build_vllm_execution_record,
+    normalize_vllm_native,
+)
+from inferdrome.normalization.vllm_0_26 import (
+    VLLM_ADAPTER_VERSION,
+    VLLM_VERSION,
+)
+from inferdrome.resolution import ResolutionResult, resolve_experiment
+from inferdrome.workspace import RunWorkspace
+
+
+@dataclass(frozen=True)
+class RunResult:
+    resolution: ResolutionResult
+    workspace: RunWorkspace
+    sealed_bundle: SealedBundle
+
+
+def _canonical_model_bytes(model: BaseModel) -> bytes:
+    return canonical_json_bytes(
+        model.model_dump(mode="json", by_alias=True, exclude_none=False)
+    )
+
+
+def _write_capture_file(path: Path, content: bytes) -> None:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short diagnostic write")
+            view = view[written:]
+        os.fsync(descriptor)
+    except OSError:
+        raise AdapterError("vLLM diagnostic capture failed closed") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _sensitivity(resolution: ResolutionResult) -> SensitivityDeclaration:
+    spec = resolution.resolved_spec
+    return SensitivityDeclaration(
+        prompt_content_in_request_plan=(
+            spec.workload.prompt_content_policy is PromptContentPolicy.INCLUDE
+        ),
+        canonical_response_content_included=(
+            spec.evidence.canonical_response_content
+            is CanonicalResponseContentPolicy.INCLUDE
+        ),
+        native_response_content_present=True,
+        secrets_permitted=False,
+    )
+
+
+def _digests(
+    resolution: ResolutionResult,
+    reduction: ReductionResult,
+) -> DigestDomains:
+    return DigestDomains(
+        source_spec_digest=resolution.source_spec_digest,
+        execution_fingerprint=resolution.execution_fingerprint,
+        request_plan_digest=resolution.request_plan_digest,
+        metric_definitions_digest=reduction.metric_definitions_digest,
+        exitspec_contract_digest=(
+            resolution.resolved_spec.links.exitspec_contract_digest
+        ),
+    )
+
+
+def _run_fake(
+    resolution: ResolutionResult,
+    workspace: RunWorkspace,
+    cancellation: CancellationToken,
+) -> SealedBundle:
+    spec = resolution.resolved_spec
+    if not isinstance(spec.execution, FakeExecution) or not isinstance(
+        spec.target, SyntheticTarget
+    ):
+        raise AdapterError("fake orchestration requires a synthetic experiment")
+    if (
+        spec.execution.producer_version != FAKE_PRODUCER_VERSION
+        or spec.execution.adapter_version != FAKE_ADAPTER_VERSION
+    ):
+        raise AdapterError("fake execution uses an unsupported producer contract")
+
+    cancellation.raise_if_requested()
+    workspace.transition(RunState.PREFLIGHT)
+    cancellation.raise_if_requested()
+    workspace.transition(RunState.WARMUP)
+    cancellation.raise_if_requested()
+    workspace.transition(RunState.MEASURING)
+    fake = FakeAdapter().execute(
+        spec,
+        resolution.request_plan,
+        started_at=datetime.now(UTC),
+    )
+    cancellation.raise_if_requested()
+    reduction = reduce_measurements(fake.execution, fake.request_records)
+    environment = capture_fake_environment(
+        run_id=resolution.run_id,
+        target_model=spec.target.model,
+        captured_at=fake.execution.ended_at,
+    )
+    workspace.transition(RunState.FINALIZING)
+
+    invocation_bytes = canonical_json_bytes(
+        {
+            "argv": ["inferdrome_fake", "--run-id", resolution.run_id],
+            "schema_version": "inferdrome.producer-invocation.v1",
+        }
+    )
+    payloads = {
+        ArtifactRole.ORIGINAL_SPEC: resolution.source_bytes,
+        ArtifactRole.RESOLVED_SPEC: resolution.resolved_spec_bytes,
+        ArtifactRole.REQUEST_PLAN: resolution.request_plan_bytes,
+        ArtifactRole.ENVIRONMENT: _canonical_model_bytes(environment),
+        ArtifactRole.EXECUTION: fake.execution_bytes,
+        ArtifactRole.PRODUCER_INVOCATION: invocation_bytes,
+        ArtifactRole.PRODUCER_VERSION: f"{FAKE_PRODUCER_VERSION}\n".encode(),
+        ArtifactRole.PRODUCER_EXIT_STATUS: b"0\n",
+        ArtifactRole.NATIVE_RESULT: fake.native_result_bytes,
+        ArtifactRole.NATIVE_STDOUT: b"synthetic producer completed\n",
+        ArtifactRole.NATIVE_STDERR: b"",
+        ArtifactRole.REQUEST_RECORDS: fake.request_records_bytes,
+        ArtifactRole.METRIC_DEFINITIONS: reduction.metric_definitions_bytes,
+        ArtifactRole.MEASUREMENTS: reduction.measurements_bytes,
+    }
+    metadata = BundleMetadata(
+        experiment_id=spec.experiment.id,
+        created_at=fake.execution.ended_at,
+        execution_mode=EvidenceExecutionMode.SYNTHETIC_FIXTURE,
+        environment_completeness=environment.completeness,
+        evidence_eligibility=EvidenceEligibility.SYNTHETIC_ONLY,
+        replayability=resolution.request_plan.replayability,
+        producer=FakeProducerDescriptor(
+            name="inferdrome_fake",
+            version=FAKE_PRODUCER_VERSION,
+            adapter="fake",
+            adapter_version=FAKE_ADAPTER_VERSION,
+            native_schema_fingerprint=fake_native_schema_fingerprint(),
+        ),
+        digests=_digests(resolution, reduction),
+        sensitivity=_sensitivity(resolution),
+    )
+    cancellation.raise_if_requested()
+    return seal_bundle(workspace, metadata, payloads)
+
+
+def _run_vllm(
+    resolution: ResolutionResult,
+    workspace: RunWorkspace,
+    tokenizer_path: Path,
+    cancellation: CancellationToken,
+) -> SealedBundle:
+    spec = resolution.resolved_spec
+    if not isinstance(spec.execution, VllmExecution) or not isinstance(
+        spec.target, AttachedVllmTarget
+    ):
+        raise AdapterError("vLLM orchestration requires an attached experiment")
+    if (
+        spec.execution.producer_version != VLLM_VERSION
+        or spec.execution.adapter_version != VLLM_ADAPTER_VERSION
+    ):
+        raise AdapterError("vLLM execution uses an unsupported producer contract")
+
+    cancellation.raise_if_requested()
+    workspace.transition(RunState.PREFLIGHT)
+    preflight = preflight_attached_endpoint(spec.target)
+    cancellation.raise_if_requested()
+    version = probe_vllm_version(cwd=workspace.path)
+
+    capture_directory = workspace.path / "native-capture"
+    try:
+        capture_directory.mkdir(mode=0o700)
+    except OSError:
+        raise AdapterError("vLLM capture directory could not be reserved") from None
+    invocation = build_vllm_invocation(
+        spec,
+        resolution.request_plan,
+        VllmInvocationPaths(
+            dataset_path=(
+                workspace.input_directory / "workload.source.jsonl"
+            ).absolute(),
+            tokenizer_path=tokenizer_path.absolute(),
+            result_directory=capture_directory.absolute(),
+        ),
+        execution_fingerprint=resolution.execution_fingerprint,
+        preflight=preflight,
+    )
+    _write_capture_file(
+        capture_directory / "invocation.json",
+        invocation.evidence_bytes,
+    )
+    _write_capture_file(
+        capture_directory / "producer-version.txt",
+        version.process.stdout,
+    )
+
+    cancellation.raise_if_requested()
+    workspace.transition(RunState.WARMUP)
+    workspace.transition(RunState.MEASURING)
+    capture = execute_vllm_benchmark(
+        invocation,
+        spec,
+        resolution.request_plan,
+        execution_fingerprint=resolution.execution_fingerprint,
+        cancellation=cancellation,
+    )
+    _write_capture_file(capture_directory / "stdout.log", capture.process.stdout)
+    _write_capture_file(capture_directory / "stderr.log", capture.process.stderr)
+    _write_capture_file(
+        capture_directory / "exit-status.txt",
+        f"{capture.process.exit_status}\n".encode(),
+    )
+    if (
+        capture.process.termination is not ProcessTermination.EXITED
+        or capture.process.exit_status != 0
+    ):
+        raise AdapterError("vLLM benchmark did not complete successfully")
+    native_bytes = capture.native_result_bytes
+    if native_bytes is None:
+        raise AdapterError("vLLM benchmark produced no native result")
+
+    normalization = normalize_vllm_native(
+        native_bytes,
+        spec,
+        resolution.request_plan,
+        expected_metadata=invocation.metadata,
+        expected_tokenizer_id=str(invocation.paths.tokenizer_path),
+    )
+    execution = build_vllm_execution_record(
+        normalization,
+        resolution.request_plan,
+        native_bytes,
+        started_at=capture.process.started_at,
+        ended_at=capture.process.ended_at,
+        producer_exit_status=capture.process.exit_status,
+    )
+    reduction = reduce_measurements(execution, normalization.request_records)
+    environment = capture_attached_environment(
+        spec,
+        preflight,
+        run_id=resolution.run_id,
+        captured_at=capture.process.ended_at,
+    )
+    workspace.transition(RunState.FINALIZING)
+
+    payloads = {
+        ArtifactRole.ORIGINAL_SPEC: resolution.source_bytes,
+        ArtifactRole.RESOLVED_SPEC: resolution.resolved_spec_bytes,
+        ArtifactRole.REQUEST_PLAN: resolution.request_plan_bytes,
+        ArtifactRole.ENVIRONMENT: _canonical_model_bytes(environment),
+        ArtifactRole.EXECUTION: reduction.execution_bytes,
+        ArtifactRole.PRODUCER_INVOCATION: invocation.evidence_bytes,
+        ArtifactRole.PRODUCER_VERSION: version.process.stdout,
+        ArtifactRole.PRODUCER_EXIT_STATUS: b"0\n",
+        ArtifactRole.NATIVE_RESULT: native_bytes,
+        ArtifactRole.NATIVE_STDOUT: capture.process.stdout,
+        ArtifactRole.NATIVE_STDERR: capture.process.stderr,
+        ArtifactRole.REQUEST_RECORDS: normalization.request_records_bytes,
+        ArtifactRole.METRIC_DEFINITIONS: reduction.metric_definitions_bytes,
+        ArtifactRole.MEASUREMENTS: reduction.measurements_bytes,
+    }
+    metadata = BundleMetadata(
+        experiment_id=spec.experiment.id,
+        created_at=capture.process.ended_at,
+        execution_mode=EvidenceExecutionMode.ATTACHED_ENDPOINT,
+        environment_completeness=environment.completeness,
+        evidence_eligibility=EvidenceEligibility.INELIGIBLE,
+        replayability=resolution.request_plan.replayability,
+        producer=VllmProducerDescriptor(
+            name="vllm",
+            version=VLLM_VERSION,
+            adapter="vllm_bench_serve",
+            adapter_version=VLLM_ADAPTER_VERSION,
+            native_schema_fingerprint=normalization.native_schema_fingerprint,
+        ),
+        digests=_digests(resolution, reduction),
+        sensitivity=_sensitivity(resolution),
+    )
+    cancellation.raise_if_requested()
+    return seal_bundle(workspace, metadata, payloads)
+
+
+def _mark_terminal(workspace: RunWorkspace, target: RunState) -> None:
+    try:
+        current = workspace.current_state()
+        if not is_terminal_run_state(current.state):
+            workspace.transition(target)
+    except InferdromeError:
+        # Preserve the original execution failure. The workspace remains
+        # crash-readable and its inability to transition is independently visible.
+        return
+
+
+def run_experiment(
+    source_path: Path,
+    *,
+    runs_root: Path,
+    run_id: str | None = None,
+    strict: bool = True,
+    tokenizer_path: Path | None = None,
+    cancellation: CancellationToken | None = None,
+) -> RunResult:
+    """Resolve, execute, reduce, seal, and verify one Inferdrome run."""
+
+    selected_cancellation = cancellation or CancellationToken()
+    selected_cancellation.raise_if_requested()
+    resolution = resolve_experiment(source_path, run_id=run_id, strict=strict)
+    is_fake = isinstance(resolution.resolved_spec.execution, FakeExecution)
+    if is_fake and tokenizer_path is not None:
+        raise AdapterError("tokenizer path is only valid for attached vLLM execution")
+    if not is_fake and tokenizer_path is None:
+        raise AdapterError("attached vLLM execution requires a tokenizer directory")
+    workspace = RunWorkspace.reserve(runs_root, resolution)
+    try:
+        if is_fake:
+            sealed = _run_fake(resolution, workspace, selected_cancellation)
+        else:
+            if tokenizer_path is None:
+                raise AssertionError
+            sealed = _run_vllm(
+                resolution,
+                workspace,
+                tokenizer_path,
+                selected_cancellation,
+            )
+    except KeyboardInterrupt:
+        _mark_terminal(workspace, RunState.INTERRUPTED)
+        raise
+    except Exception as error:
+        interrupted = selected_cancellation.requested or isinstance(
+            error, CancellationRequested
+        )
+        _mark_terminal(
+            workspace,
+            RunState.INTERRUPTED if interrupted else RunState.FAILED,
+        )
+        raise
+    return RunResult(
+        resolution=resolution,
+        workspace=workspace,
+        sealed_bundle=sealed,
+    )

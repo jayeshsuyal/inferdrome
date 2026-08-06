@@ -1,0 +1,30 @@
+{
+  "installed_vllm_source_sha256": {
+    "vllm/benchmarks/datasets/datasets.py": "f4fed1d7135231d0941bea47a79b6c9901a8d21c3d21ad668a6b662b1c9c3f42",
+    "vllm/benchmarks/lib/endpoint_request_func.py": "e9ab4df19c5d89e1b73f116b4e21f2cc6c7da077266367c4b1b2bd7e015fda59",
+    "vllm/benchmarks/serve.py": "8938b64b273470a3b3fb3b5d8bbd22e8ab4df7640295f55435ac4384283ec589",
+    "vllm/entrypoints/cli/benchmark/serve.py": "6825a4c145d1a6210f3b104407bfc22feabb5f627912b34f545f4be2ab8d0729"
+  },
+  "packages": {
+    "aiohttp": "3.14.3",
+    "pandas": "3.0.5",
+    "tokenizers": "0.22.2",
+    "torch": "2.13.0",
+    "transformers": "5.14.1",
+    "vllm": "0.26.0+empty"
+  },
+  "platform": {
+    "machine": "arm64",
+    "release": "25.5.0",
+    "system": "Darwin"
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": "3.12.13"
+  },
+  "schema_version": "inferdrome.spike-execution-environment.v1",
+  "selected_environment": {
+    "VLLM_TARGET_DEVICE": "empty",
+    "compatibility_patch_id": "macos-empty-device-v1"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Whitespace"
+  },
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "[UNK]": 0,
+      "[PAD]": 1,
+      "[BOS]": 2,
+      "[EOS]": 3,
+      "Inferdrome": 4,
+      "capability": 5,
+      "request": 6,
+      "zero": 7,
+      "one": 8,
+      "two": 9,
+      "the": 10,
+      "mock": 11,
+      "endpoint": 12,
+      "will": 13,
+      "reject": 14,
+      "this": 15,
+      "measured": 16,
+      "three": 17,
+      ".": 18,
+      ";": 19
+    },
+    "unk_token": "[UNK]"
+  }
+}

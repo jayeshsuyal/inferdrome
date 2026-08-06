@@ -1,0 +1,269 @@
+{
+  "$comment": "Cross-field semantic invariants are normative; see docs/PUBLIC_CONTRACTS_V1.md and the conformance vectors.",
+  "$defs": {
+    "ConcurrentTraffic": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "concurrent",
+          "title": "Kind",
+          "type": "string"
+        },
+        "measured_requests": {
+          "exclusiveMinimum": 0,
+          "title": "Measured Requests",
+          "type": "integer"
+        },
+        "warmup_requests": {
+          "minimum": 0,
+          "title": "Warmup Requests",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "concurrency",
+        "warmup_requests",
+        "measured_requests"
+      ],
+      "title": "ConcurrentTraffic",
+      "type": "object"
+    },
+    "PhaseEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "configured_request_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Configured Request Count"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ended At"
+        },
+        "phase": {
+          "$ref": "#/$defs/PhaseName"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Started At"
+        },
+        "timing_status": {
+          "$ref": "#/$defs/PhaseTimingStatus"
+        }
+      },
+      "required": [
+        "phase",
+        "timing_status",
+        "started_at",
+        "ended_at",
+        "configured_request_count"
+      ],
+      "title": "PhaseEvent",
+      "type": "object"
+    },
+    "PhaseName": {
+      "enum": [
+        "PREFLIGHT",
+        "WARMUP",
+        "MEASURING",
+        "FINALIZING"
+      ],
+      "title": "PhaseName",
+      "type": "string"
+    },
+    "PhaseTimingStatus": {
+      "enum": [
+        "OBSERVED",
+        "UNAVAILABLE"
+      ],
+      "title": "PhaseTimingStatus",
+      "type": "string"
+    },
+    "RequestRateTraffic": {
+      "additionalProperties": false,
+      "properties": {
+        "burstiness": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Burstiness",
+          "type": "string"
+        },
+        "kind": {
+          "const": "request_rate",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_concurrency": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Max Concurrency"
+        },
+        "measured_requests": {
+          "exclusiveMinimum": 0,
+          "title": "Measured Requests",
+          "type": "integer"
+        },
+        "requests_per_second": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Requests Per Second",
+          "type": "string"
+        },
+        "warmup_requests": {
+          "minimum": 0,
+          "title": "Warmup Requests",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "requests_per_second",
+        "burstiness",
+        "max_concurrency",
+        "warmup_requests",
+        "measured_requests"
+      ],
+      "title": "RequestRateTraffic",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.inferdrome.dev/public/v1/execution.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "configured_traffic": {
+      "discriminator": {
+        "mapping": {
+          "concurrent": "#/$defs/ConcurrentTraffic",
+          "request_rate": "#/$defs/RequestRateTraffic"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ConcurrentTraffic"
+        },
+        {
+          "$ref": "#/$defs/RequestRateTraffic"
+        }
+      ],
+      "title": "Configured Traffic"
+    },
+    "ended_at": {
+      "format": "date-time",
+      "title": "Ended At",
+      "type": "string"
+    },
+    "measurement_window_definition": {
+      "enum": [
+        "vllm_benchmark_duration_v0_26",
+        "fake_measurement_window_v1"
+      ],
+      "title": "Measurement Window Definition",
+      "type": "string"
+    },
+    "measurement_window_ns": {
+      "exclusiveMinimum": 0,
+      "title": "Measurement Window Ns",
+      "type": "integer"
+    },
+    "monotonic_clock_domain_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$",
+      "title": "Monotonic Clock Domain Id",
+      "type": "string"
+    },
+    "native_result_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Native Result Sha256",
+      "type": "string"
+    },
+    "phases": {
+      "items": {
+        "$ref": "#/$defs/PhaseEvent"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "title": "Phases",
+      "type": "array"
+    },
+    "producer_exit_status": {
+      "maximum": 255,
+      "minimum": 0,
+      "title": "Producer Exit Status",
+      "type": "integer"
+    },
+    "run_id": {
+      "pattern": "^run-[0-9a-f]{32}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.execution.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "terminal_state": {
+      "const": "COMPLETE",
+      "title": "Terminal State",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "terminal_state",
+    "started_at",
+    "ended_at",
+    "monotonic_clock_domain_id",
+    "configured_traffic",
+    "measurement_window_ns",
+    "measurement_window_definition",
+    "producer_exit_status",
+    "native_result_sha256",
+    "phases"
+  ],
+  "title": "ExecutionRecord",
+  "type": "object"
+}

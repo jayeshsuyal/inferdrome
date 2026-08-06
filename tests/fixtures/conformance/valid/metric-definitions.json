@@ -1,0 +1,96 @@
+{
+  "schema_version": "inferdrome.metric-definitions.v1",
+  "definition_set_version": "1.0.0",
+  "definitions": [
+    {
+      "metric": "measured_request_count",
+      "definition_id": "measured_request_count_v1",
+      "unit": "count",
+      "population": "all_measured_requests",
+      "allowed_aggregations": ["count"],
+      "required_observations": ["request.outcome.status"],
+      "quantile_method": null,
+      "rounding_policy": "none"
+    },
+    {
+      "metric": "successful_request_count",
+      "definition_id": "successful_request_count_v1",
+      "unit": "count",
+      "population": "successful_measured_requests",
+      "allowed_aggregations": ["count"],
+      "required_observations": ["request.outcome.status"],
+      "quantile_method": null,
+      "rounding_policy": "none"
+    },
+    {
+      "metric": "failed_request_count",
+      "definition_id": "failed_request_count_v1",
+      "unit": "count",
+      "population": "failed_measured_requests",
+      "allowed_aggregations": ["count"],
+      "required_observations": ["request.outcome.status"],
+      "quantile_method": null,
+      "rounding_policy": "none"
+    },
+    {
+      "metric": "error_rate",
+      "definition_id": "measured_failure_ratio_v1",
+      "unit": "ratio",
+      "population": "all_measured_requests",
+      "allowed_aggregations": ["ratio"],
+      "required_observations": ["request.outcome.status"],
+      "quantile_method": null,
+      "rounding_policy": "decimal_half_even_6_v1"
+    },
+    {
+      "metric": "ttft_ns",
+      "definition_id": "vllm_first_choices_event_v0_26",
+      "unit": "ns",
+      "population": "successful_measured_requests_with_observed_ttft",
+      "allowed_aggregations": ["mean", "p50", "p95", "p99"],
+      "required_observations": ["request.timing.ttft_ns"],
+      "quantile_method": "nearest_rank_v1",
+      "rounding_policy": "decimal_half_even_6_v1"
+    },
+    {
+      "metric": "last_choices_event_span_ns",
+      "definition_id": "last_choices_event_span_v1",
+      "unit": "ns",
+      "population": "successful_measured_requests_with_observed_ttft",
+      "allowed_aggregations": ["mean", "p50", "p95", "p99"],
+      "required_observations": ["request.timing.ttft_ns", "request.timing.itl_ns"],
+      "quantile_method": "nearest_rank_v1",
+      "rounding_policy": "decimal_half_even_6_v1"
+    },
+    {
+      "metric": "attempted_request_throughput_per_s",
+      "definition_id": "attempted_measured_requests_per_window_second_v1",
+      "unit": "requests/s",
+      "population": "all_measured_requests",
+      "allowed_aggregations": ["rate"],
+      "required_observations": ["request.outcome.status", "execution.measurement_window_ns"],
+      "quantile_method": null,
+      "rounding_policy": "decimal_half_even_6_v1"
+    },
+    {
+      "metric": "successful_request_throughput_per_s",
+      "definition_id": "successful_measured_requests_per_window_second_v1",
+      "unit": "requests/s",
+      "population": "successful_measured_requests",
+      "allowed_aggregations": ["rate"],
+      "required_observations": ["request.outcome.status", "execution.measurement_window_ns"],
+      "quantile_method": null,
+      "rounding_policy": "decimal_half_even_6_v1"
+    },
+    {
+      "metric": "output_token_throughput_per_s",
+      "definition_id": "successful_output_tokens_per_window_second_v1",
+      "unit": "tokens/s",
+      "population": "successful_measured_requests",
+      "allowed_aggregations": ["rate"],
+      "required_observations": ["request.tokens.output_tokens", "request.outcome.status", "execution.measurement_window_ns"],
+      "quantile_method": null,
+      "rounding_policy": "decimal_half_even_6_v1"
+    }
+  ]
+}

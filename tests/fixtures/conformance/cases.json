@@ -1,0 +1,23 @@
+[
+  {"name": "valid experiment", "schema": "experiment.schema.json", "fixture": "valid/experiment.json", "valid": true},
+  {"name": "valid request plan", "schema": "request-plan.schema.json", "fixture": "valid/request-plan.json", "valid": true},
+  {"name": "valid request record", "schema": "request-record.schema.json", "fixture": "valid/request-record.json", "valid": true},
+  {"name": "valid synthetic request record", "schema": "request-record.schema.json", "fixture": "valid/request-record.json", "valid": true, "mutation": {"operation": "replace", "path": "/producer", "value": {"producer_name": "inferdrome_fake", "producer_version": "1.0.0", "adapter_name": "fake", "adapter_version": "1.0.0", "native_schema_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "request_id_derivation": "frozen_order_and_prefix_v1"}}},
+  {"name": "valid environment", "schema": "environment.schema.json", "fixture": "valid/environment.json", "valid": true},
+  {"name": "valid execution", "schema": "execution.schema.json", "fixture": "valid/execution.json", "valid": true},
+  {"name": "valid synthetic measurement window", "schema": "execution.schema.json", "fixture": "valid/execution.json", "valid": true, "mutation": {"operation": "replace", "path": "/measurement_window_definition", "value": "fake_measurement_window_v1"}},
+  {"name": "valid metric definitions", "schema": "metric-definitions.schema.json", "fixture": "valid/metric-definitions.json", "valid": true},
+  {"name": "valid measurements", "schema": "measurements.schema.json", "fixture": "valid/measurements.json", "valid": true},
+  {"name": "valid evidence bundle", "schema": "evidence-bundle.schema.json", "fixture": "valid/evidence-bundle.json", "valid": true},
+  {"name": "unknown experiment schema version", "schema": "experiment.schema.json", "fixture": "valid/experiment.json", "valid": false, "mutation": {"operation": "replace", "path": "/schema_version", "value": "inferdrome.experiment.v2"}},
+  {"name": "secret-bearing endpoint query", "schema": "experiment.schema.json", "fixture": "valid/experiment.json", "valid": false, "mutation": {"operation": "replace", "path": "/target/endpoint", "value": "http://127.0.0.1:8000?api_key=secret"}},
+  {"name": "secret-bearing endpoint userinfo", "schema": "experiment.schema.json", "fixture": "valid/experiment.json", "valid": false, "mutation": {"operation": "replace", "path": "/target/endpoint", "value": "http://user:secret@127.0.0.1:8000"}},
+  {"name": "malformed request ID", "schema": "request-plan.schema.json", "fixture": "valid/request-plan.json", "valid": false, "mutation": {"operation": "replace", "path": "/requests/0/request_id", "value": "req-1"}},
+  {"name": "unsupported HTTP status field", "schema": "request-record.schema.json", "fixture": "valid/request-record.json", "valid": false, "mutation": {"operation": "add", "path": "/http_status", "value": 200}},
+  {"name": "unknown provenance enum", "schema": "environment.schema.json", "fixture": "valid/environment.json", "valid": false, "mutation": {"operation": "replace", "path": "/fields/0/provenance", "value": "TRUST_ME"}},
+  {"name": "negative measurement window", "schema": "execution.schema.json", "fixture": "valid/execution.json", "valid": false, "mutation": {"operation": "replace", "path": "/measurement_window_ns", "value": -1}},
+  {"name": "non-complete public execution", "schema": "execution.schema.json", "fixture": "valid/execution.json", "valid": false, "mutation": {"operation": "replace", "path": "/terminal_state", "value": "FAILED"}},
+  {"name": "unknown metric", "schema": "metric-definitions.schema.json", "fixture": "valid/metric-definitions.json", "valid": false, "mutation": {"operation": "replace", "path": "/definitions/0/metric", "value": "magic_score"}},
+  {"name": "floating measurement value", "schema": "measurements.schema.json", "fixture": "valid/measurements.json", "valid": false, "mutation": {"operation": "replace", "path": "/measurements/3/value", "value": 0.5}},
+  {"name": "in-band circular bundle digest", "schema": "evidence-bundle.schema.json", "fixture": "valid/evidence-bundle.json", "valid": false, "mutation": {"operation": "add", "path": "/bundle_digest", "value": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}}
+]

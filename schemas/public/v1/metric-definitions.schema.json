@@ -1,0 +1,183 @@
+{
+  "$comment": "Cross-field semantic invariants are normative; see docs/PUBLIC_CONTRACTS_V1.md and the conformance vectors.",
+  "$defs": {
+    "Aggregation": {
+      "enum": [
+        "count",
+        "ratio",
+        "mean",
+        "p50",
+        "p95",
+        "p99",
+        "rate"
+      ],
+      "title": "Aggregation",
+      "type": "string"
+    },
+    "DefinitionId": {
+      "enum": [
+        "measured_request_count_v1",
+        "successful_request_count_v1",
+        "failed_request_count_v1",
+        "measured_failure_ratio_v1",
+        "vllm_first_choices_event_v0_26",
+        "last_choices_event_span_v1",
+        "attempted_measured_requests_per_window_second_v1",
+        "successful_measured_requests_per_window_second_v1",
+        "successful_output_tokens_per_window_second_v1"
+      ],
+      "title": "DefinitionId",
+      "type": "string"
+    },
+    "MetricDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_aggregations": {
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "minItems": 1,
+          "title": "Allowed Aggregations",
+          "type": "array"
+        },
+        "definition_id": {
+          "$ref": "#/$defs/DefinitionId"
+        },
+        "metric": {
+          "$ref": "#/$defs/MetricId"
+        },
+        "population": {
+          "$ref": "#/$defs/Population"
+        },
+        "quantile_method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuantileMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_observations": {
+          "items": {
+            "$ref": "#/$defs/SourceObservation"
+          },
+          "minItems": 1,
+          "title": "Required Observations",
+          "type": "array"
+        },
+        "rounding_policy": {
+          "$ref": "#/$defs/RoundingPolicy"
+        },
+        "unit": {
+          "$ref": "#/$defs/Unit"
+        }
+      },
+      "required": [
+        "metric",
+        "definition_id",
+        "unit",
+        "population",
+        "allowed_aggregations",
+        "required_observations",
+        "quantile_method",
+        "rounding_policy"
+      ],
+      "title": "MetricDefinition",
+      "type": "object"
+    },
+    "MetricId": {
+      "enum": [
+        "measured_request_count",
+        "successful_request_count",
+        "failed_request_count",
+        "error_rate",
+        "ttft_ns",
+        "last_choices_event_span_ns",
+        "attempted_request_throughput_per_s",
+        "successful_request_throughput_per_s",
+        "output_token_throughput_per_s"
+      ],
+      "title": "MetricId",
+      "type": "string"
+    },
+    "Population": {
+      "enum": [
+        "all_measured_requests",
+        "successful_measured_requests",
+        "failed_measured_requests",
+        "successful_measured_requests_with_observed_ttft"
+      ],
+      "title": "Population",
+      "type": "string"
+    },
+    "QuantileMethod": {
+      "enum": [
+        "nearest_rank_v1"
+      ],
+      "title": "QuantileMethod",
+      "type": "string"
+    },
+    "RoundingPolicy": {
+      "enum": [
+        "none",
+        "decimal_half_even_6_v1"
+      ],
+      "title": "RoundingPolicy",
+      "type": "string"
+    },
+    "SourceObservation": {
+      "enum": [
+        "request.outcome.status",
+        "request.tokens.output_tokens",
+        "request.timing.ttft_ns",
+        "request.timing.itl_ns",
+        "execution.measurement_window_ns"
+      ],
+      "title": "SourceObservation",
+      "type": "string"
+    },
+    "Unit": {
+      "enum": [
+        "count",
+        "ratio",
+        "ns",
+        "requests/s",
+        "tokens/s"
+      ],
+      "title": "Unit",
+      "type": "string"
+    }
+  },
+  "$id": "https://schemas.inferdrome.dev/public/v1/metric-definitions.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "definition_set_version": {
+      "const": "1.0.0",
+      "title": "Definition Set Version",
+      "type": "string"
+    },
+    "definitions": {
+      "items": {
+        "$ref": "#/$defs/MetricDefinition"
+      },
+      "minItems": 1,
+      "title": "Definitions",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "inferdrome.metric-definitions.v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "definition_set_version",
+    "definitions"
+  ],
+  "title": "MetricDefinitions",
+  "type": "object"
+}

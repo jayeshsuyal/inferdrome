@@ -1,0 +1,24 @@
+{
+  "schema_version": "inferdrome.execution.v1",
+  "run_id": "run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "terminal_state": "COMPLETE",
+  "started_at": "2026-08-05T22:12:00Z",
+  "ended_at": "2026-08-05T22:13:00Z",
+  "monotonic_clock_domain_id": "vllm-client-clock-1",
+  "configured_traffic": {
+    "kind": "concurrent",
+    "concurrency": 2,
+    "warmup_requests": 2,
+    "measured_requests": 1
+  },
+  "measurement_window_ns": 139442625,
+  "measurement_window_definition": "vllm_benchmark_duration_v0_26",
+  "producer_exit_status": 0,
+  "native_result_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "phases": [
+    {"phase": "PREFLIGHT", "timing_status": "OBSERVED", "started_at": "2026-08-05T22:12:00Z", "ended_at": "2026-08-05T22:12:10Z", "configured_request_count": 1},
+    {"phase": "WARMUP", "timing_status": "OBSERVED", "started_at": "2026-08-05T22:12:10Z", "ended_at": "2026-08-05T22:12:20Z", "configured_request_count": 2},
+    {"phase": "MEASURING", "timing_status": "OBSERVED", "started_at": "2026-08-05T22:12:20Z", "ended_at": "2026-08-05T22:12:40Z", "configured_request_count": 1},
+    {"phase": "FINALIZING", "timing_status": "OBSERVED", "started_at": "2026-08-05T22:12:40Z", "ended_at": "2026-08-05T22:13:00Z", "configured_request_count": null}
+  ]
+}

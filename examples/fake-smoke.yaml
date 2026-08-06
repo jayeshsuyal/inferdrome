@@ -1,0 +1,30 @@
+schema_version: inferdrome.source-experiment.v1
+
+experiment:
+  id: fake-smoke
+  title: Deterministic fake-adapter smoke run
+
+execution:
+  mode: synthetic_fixture
+  max_runtime_seconds: 60
+
+target:
+  engine: fake
+  model: inferdrome/fake-model
+
+workload:
+  path: workloads/fake-smoke.jsonl
+  sha256: sha256:e7758f5390bbbe43502698a1bce5d3a579c2390944853853d3dcb110930ce57b
+  prompt_content_policy: include
+  requested_output_tokens: 16
+  temperature: 0
+  seed: 42
+
+traffic:
+  kind: concurrent
+  concurrency: 2
+  warmup_requests: 1
+  measured_requests: 2
+
+evidence:
+  canonical_response_content: omit

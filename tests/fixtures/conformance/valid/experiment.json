@@ -1,0 +1,55 @@
+{
+  "schema_version": "inferdrome.experiment.v1",
+  "experiment": {
+    "id": "inferdrome-smoke",
+    "title": "Inferdrome schema smoke test",
+    "hypothesis": null
+  },
+  "execution": {
+    "mode": "attached_endpoint",
+    "adapter": "vllm_bench_serve",
+    "adapter_version": "1.0.0",
+    "producer_name": "vllm",
+    "producer_version": "0.26.0",
+    "max_runtime_seconds": 900,
+    "max_measured_requests": 100
+  },
+  "target": {
+    "engine": "vllm",
+    "endpoint": "http://127.0.0.1:8000",
+    "api": "openai_chat_completions",
+    "model": "inferdrome/mock-model",
+    "model_revision": null,
+    "tokenizer_revision": null,
+    "engine_version": null
+  },
+  "workload": {
+    "path": "examples/workloads/smoke.jsonl",
+    "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "prompt_content_policy": "include",
+    "requested_output_tokens": 2,
+    "temperature": "0",
+    "seed": 42
+  },
+  "traffic": {
+    "kind": "concurrent",
+    "concurrency": 2,
+    "warmup_requests": 2,
+    "measured_requests": 1
+  },
+  "measurement": {
+    "streaming": true,
+    "ttft_definition": "vllm_first_choices_event_v0_26",
+    "choices_span_definition": "last_choices_event_span_v1",
+    "metric_definitions_version": "1.0.0",
+    "reducer_version": "1.0.0"
+  },
+  "evidence": {
+    "native_output_sensitivity": "RESPONSE_CONTENT",
+    "canonical_response_content": "omit",
+    "include_request_plan": true
+  },
+  "links": {
+    "exitspec_contract_digest": null
+  }
+}

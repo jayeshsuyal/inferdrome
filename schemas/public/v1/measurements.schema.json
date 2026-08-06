@@ -1,0 +1,247 @@
+{
+  "$comment": "Cross-field semantic invariants are normative; see docs/PUBLIC_CONTRACTS_V1.md and the conformance vectors.",
+  "$defs": {
+    "Aggregation": {
+      "enum": [
+        "count",
+        "ratio",
+        "mean",
+        "p50",
+        "p95",
+        "p99",
+        "rate"
+      ],
+      "title": "Aggregation",
+      "type": "string"
+    },
+    "DefinitionId": {
+      "enum": [
+        "measured_request_count_v1",
+        "successful_request_count_v1",
+        "failed_request_count_v1",
+        "measured_failure_ratio_v1",
+        "vllm_first_choices_event_v0_26",
+        "last_choices_event_span_v1",
+        "attempted_measured_requests_per_window_second_v1",
+        "successful_measured_requests_per_window_second_v1",
+        "successful_output_tokens_per_window_second_v1"
+      ],
+      "title": "DefinitionId",
+      "type": "string"
+    },
+    "Measurement": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation": {
+          "$ref": "#/$defs/Aggregation"
+        },
+        "definition_id": {
+          "$ref": "#/$defs/DefinitionId"
+        },
+        "metric": {
+          "$ref": "#/$defs/MetricId"
+        },
+        "population": {
+          "$ref": "#/$defs/Population"
+        },
+        "quantile_method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuantileMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rounding_policy": {
+          "$ref": "#/$defs/RoundingPolicy"
+        },
+        "sample_count": {
+          "minimum": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "unit": {
+          "$ref": "#/$defs/Unit"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+              "type": "string"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "metric",
+        "aggregation",
+        "value",
+        "unit",
+        "sample_count",
+        "population",
+        "definition_id",
+        "quantile_method",
+        "rounding_policy"
+      ],
+      "title": "Measurement",
+      "type": "object"
+    },
+    "MetricId": {
+      "enum": [
+        "measured_request_count",
+        "successful_request_count",
+        "failed_request_count",
+        "error_rate",
+        "ttft_ns",
+        "last_choices_event_span_ns",
+        "attempted_request_throughput_per_s",
+        "successful_request_throughput_per_s",
+        "output_token_throughput_per_s"
+      ],
+      "title": "MetricId",
+      "type": "string"
+    },
+    "Population": {
+      "enum": [
+        "all_measured_requests",
+        "successful_measured_requests",
+        "failed_measured_requests",
+        "successful_measured_requests_with_observed_ttft"
+      ],
+      "title": "Population",
+      "type": "string"
+    },
+    "QuantileMethod": {
+      "enum": [
+        "nearest_rank_v1"
+      ],
+      "title": "QuantileMethod",
+      "type": "string"
+    },
+    "RoundingPolicy": {
+      "enum": [
+        "none",
+        "decimal_half_even_6_v1"
+      ],
+      "title": "RoundingPolicy",
+      "type": "string"
+    },
+    "UnavailableMeasurement": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_matrix": {
+          "const": "vllm-0.26.0",
+          "title": "Capability Matrix",
+          "type": "string"
+        },
+        "metric": {
+          "$ref": "#/$defs/UnavailableMetricId"
+        },
+        "reason": {
+          "const": "SOURCE_OBSERVATION_UNAVAILABLE",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "metric",
+        "reason",
+        "capability_matrix"
+      ],
+      "title": "UnavailableMeasurement",
+      "type": "object"
+    },
+    "UnavailableMetricId": {
+      "enum": [
+        "first_nonempty_content_ttft_ns",
+        "terminal_e2e_latency_ns",
+        "upstream_tpot_ns",
+        "exact_achieved_concurrency",
+        "scheduled_offset_ns",
+        "http_status",
+        "finish_reason"
+      ],
+      "title": "UnavailableMetricId",
+      "type": "string"
+    },
+    "Unit": {
+      "enum": [
+        "count",
+        "ratio",
+        "ns",
+        "requests/s",
+        "tokens/s"
+      ],
+      "title": "Unit",
+      "type": "string"
+    }
+  },
+  "$id": "https://schemas.inferdrome.dev/public/v1/measurements.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "execution_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Execution Sha256",
+      "type": "string"
+    },
+    "measurements": {
+      "items": {
+        "$ref": "#/$defs/Measurement"
+      },
+      "title": "Measurements",
+      "type": "array"
+    },
+    "metric_definitions_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Metric Definitions Digest",
+      "type": "string"
+    },
+    "reducer_version": {
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "title": "Reducer Version",
+      "type": "string"
+    },
+    "request_records_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Records Sha256",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^run-[0-9a-f]{32}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.measurements.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "unavailable": {
+      "items": {
+        "$ref": "#/$defs/UnavailableMeasurement"
+      },
+      "title": "Unavailable",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "request_records_sha256",
+    "execution_sha256",
+    "metric_definitions_digest",
+    "reducer_version",
+    "measurements",
+    "unavailable"
+  ],
+  "title": "Measurements",
+  "type": "object"
+}

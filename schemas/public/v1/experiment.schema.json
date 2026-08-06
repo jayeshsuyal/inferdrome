@@ -1,0 +1,592 @@
+{
+  "$comment": "Cross-field semantic invariants are normative; see docs/PUBLIC_CONTRACTS_V1.md and the conformance vectors.",
+  "$defs": {
+    "AttachedVllmTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "api": {
+          "const": "openai_chat_completions",
+          "title": "Api",
+          "type": "string"
+        },
+        "endpoint": {
+          "format": "uri",
+          "minLength": 1,
+          "pattern": "^https?://[^/?#@]+(?:/[^?#]*)?$",
+          "title": "Endpoint",
+          "type": "string"
+        },
+        "engine": {
+          "const": "vllm",
+          "title": "Engine",
+          "type": "string"
+        },
+        "engine_version": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Engine Version"
+        },
+        "model": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$",
+          "title": "Model",
+          "type": "string"
+        },
+        "model_revision": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Revision"
+        },
+        "tokenizer_revision": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tokenizer Revision"
+        }
+      },
+      "required": [
+        "engine",
+        "endpoint",
+        "api",
+        "model",
+        "model_revision",
+        "tokenizer_revision",
+        "engine_version"
+      ],
+      "title": "AttachedVllmTarget",
+      "type": "object"
+    },
+    "CanonicalResponseContentPolicy": {
+      "enum": [
+        "omit",
+        "include"
+      ],
+      "title": "CanonicalResponseContentPolicy",
+      "type": "string"
+    },
+    "ConcurrentTraffic": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "concurrent",
+          "title": "Kind",
+          "type": "string"
+        },
+        "measured_requests": {
+          "exclusiveMinimum": 0,
+          "title": "Measured Requests",
+          "type": "integer"
+        },
+        "warmup_requests": {
+          "minimum": 0,
+          "title": "Warmup Requests",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "concurrency",
+        "warmup_requests",
+        "measured_requests"
+      ],
+      "title": "ConcurrentTraffic",
+      "type": "object"
+    },
+    "EvidenceConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_response_content": {
+          "$ref": "#/$defs/CanonicalResponseContentPolicy"
+        },
+        "include_request_plan": {
+          "const": true,
+          "title": "Include Request Plan",
+          "type": "boolean"
+        },
+        "native_output_sensitivity": {
+          "$ref": "#/$defs/NativeOutputSensitivity"
+        }
+      },
+      "required": [
+        "native_output_sensitivity",
+        "canonical_response_content",
+        "include_request_plan"
+      ],
+      "title": "EvidenceConfig",
+      "type": "object"
+    },
+    "ExperimentIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "hypothesis": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Hypothesis"
+        },
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "hypothesis"
+      ],
+      "title": "ExperimentIdentity",
+      "type": "object"
+    },
+    "ExperimentLinks": {
+      "additionalProperties": false,
+      "properties": {
+        "exitspec_contract_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exitspec Contract Digest"
+        }
+      },
+      "required": [
+        "exitspec_contract_digest"
+      ],
+      "title": "ExperimentLinks",
+      "type": "object"
+    },
+    "FakeExecution": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "const": "fake",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "adapter_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "max_measured_requests": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Max Measured Requests",
+          "type": "integer"
+        },
+        "max_runtime_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Max Runtime Seconds",
+          "type": "integer"
+        },
+        "mode": {
+          "const": "synthetic_fixture",
+          "title": "Mode",
+          "type": "string"
+        },
+        "producer_name": {
+          "const": "inferdrome_fake",
+          "title": "Producer Name",
+          "type": "string"
+        },
+        "producer_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Producer Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "adapter",
+        "adapter_version",
+        "producer_name",
+        "producer_version",
+        "max_runtime_seconds",
+        "max_measured_requests"
+      ],
+      "title": "FakeExecution",
+      "type": "object"
+    },
+    "MeasurementConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "choices_span_definition": {
+          "const": "last_choices_event_span_v1",
+          "title": "Choices Span Definition",
+          "type": "string"
+        },
+        "metric_definitions_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Metric Definitions Version",
+          "type": "string"
+        },
+        "reducer_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Reducer Version",
+          "type": "string"
+        },
+        "streaming": {
+          "const": true,
+          "title": "Streaming",
+          "type": "boolean"
+        },
+        "ttft_definition": {
+          "const": "vllm_first_choices_event_v0_26",
+          "title": "Ttft Definition",
+          "type": "string"
+        }
+      },
+      "required": [
+        "streaming",
+        "ttft_definition",
+        "choices_span_definition",
+        "metric_definitions_version",
+        "reducer_version"
+      ],
+      "title": "MeasurementConfig",
+      "type": "object"
+    },
+    "NativeOutputSensitivity": {
+      "enum": [
+        "RESPONSE_CONTENT",
+        "NON_SENSITIVE_FIXTURE"
+      ],
+      "title": "NativeOutputSensitivity",
+      "type": "string"
+    },
+    "PromptContentPolicy": {
+      "enum": [
+        "hash_only",
+        "include"
+      ],
+      "title": "PromptContentPolicy",
+      "type": "string"
+    },
+    "RequestRateTraffic": {
+      "additionalProperties": false,
+      "properties": {
+        "burstiness": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Burstiness",
+          "type": "string"
+        },
+        "kind": {
+          "const": "request_rate",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_concurrency": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Max Concurrency"
+        },
+        "measured_requests": {
+          "exclusiveMinimum": 0,
+          "title": "Measured Requests",
+          "type": "integer"
+        },
+        "requests_per_second": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Requests Per Second",
+          "type": "string"
+        },
+        "warmup_requests": {
+          "minimum": 0,
+          "title": "Warmup Requests",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "requests_per_second",
+        "burstiness",
+        "max_concurrency",
+        "warmup_requests",
+        "measured_requests"
+      ],
+      "title": "RequestRateTraffic",
+      "type": "object"
+    },
+    "SyntheticTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "api": {
+          "const": "synthetic_fixture",
+          "title": "Api",
+          "type": "string"
+        },
+        "engine": {
+          "const": "fake",
+          "title": "Engine",
+          "type": "string"
+        },
+        "model": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$",
+          "title": "Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "engine",
+        "api",
+        "model"
+      ],
+      "title": "SyntheticTarget",
+      "type": "object"
+    },
+    "VllmExecution": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "const": "vllm_bench_serve",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "adapter_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "max_measured_requests": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Max Measured Requests",
+          "type": "integer"
+        },
+        "max_runtime_seconds": {
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Max Runtime Seconds",
+          "type": "integer"
+        },
+        "mode": {
+          "const": "attached_endpoint",
+          "title": "Mode",
+          "type": "string"
+        },
+        "producer_name": {
+          "const": "vllm",
+          "title": "Producer Name",
+          "type": "string"
+        },
+        "producer_version": {
+          "const": "0.26.0",
+          "title": "Producer Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "adapter",
+        "adapter_version",
+        "producer_name",
+        "producer_version",
+        "max_runtime_seconds",
+        "max_measured_requests"
+      ],
+      "title": "VllmExecution",
+      "type": "object"
+    },
+    "WorkloadConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+          "title": "Path",
+          "type": "string"
+        },
+        "prompt_content_policy": {
+          "$ref": "#/$defs/PromptContentPolicy"
+        },
+        "requested_output_tokens": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Requested Output Tokens",
+          "type": "integer"
+        },
+        "seed": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "temperature": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Temperature",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "prompt_content_policy",
+        "requested_output_tokens",
+        "temperature",
+        "seed"
+      ],
+      "title": "WorkloadConfig",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.inferdrome.dev/public/v1/experiment.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Fully resolved execution specification frozen before measurement.",
+  "properties": {
+    "evidence": {
+      "$ref": "#/$defs/EvidenceConfig"
+    },
+    "execution": {
+      "discriminator": {
+        "mapping": {
+          "attached_endpoint": "#/$defs/VllmExecution",
+          "synthetic_fixture": "#/$defs/FakeExecution"
+        },
+        "propertyName": "mode"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/VllmExecution"
+        },
+        {
+          "$ref": "#/$defs/FakeExecution"
+        }
+      ],
+      "title": "Execution"
+    },
+    "experiment": {
+      "$ref": "#/$defs/ExperimentIdentity"
+    },
+    "links": {
+      "$ref": "#/$defs/ExperimentLinks"
+    },
+    "measurement": {
+      "$ref": "#/$defs/MeasurementConfig"
+    },
+    "schema_version": {
+      "const": "inferdrome.experiment.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "target": {
+      "discriminator": {
+        "mapping": {
+          "fake": "#/$defs/SyntheticTarget",
+          "vllm": "#/$defs/AttachedVllmTarget"
+        },
+        "propertyName": "engine"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AttachedVllmTarget"
+        },
+        {
+          "$ref": "#/$defs/SyntheticTarget"
+        }
+      ],
+      "title": "Target"
+    },
+    "traffic": {
+      "discriminator": {
+        "mapping": {
+          "concurrent": "#/$defs/ConcurrentTraffic",
+          "request_rate": "#/$defs/RequestRateTraffic"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ConcurrentTraffic"
+        },
+        {
+          "$ref": "#/$defs/RequestRateTraffic"
+        }
+      ],
+      "title": "Traffic"
+    },
+    "workload": {
+      "$ref": "#/$defs/WorkloadConfig"
+    }
+  },
+  "required": [
+    "schema_version",
+    "experiment",
+    "execution",
+    "target",
+    "workload",
+    "traffic",
+    "measurement",
+    "evidence",
+    "links"
+  ],
+  "title": "ExperimentSpec",
+  "type": "object"
+}

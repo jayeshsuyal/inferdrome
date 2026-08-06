@@ -1,0 +1,43 @@
+{
+  "schema_version": "inferdrome.request-record.v1",
+  "run_id": "run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "request_id": "req-00000000",
+  "producer_request_id": "inferdrome-test-0",
+  "sequence_index": 0,
+  "native_source": {
+    "artifact_path": "native/benchmark-result.json",
+    "array_index": 0
+  },
+  "producer": {
+    "producer_name": "vllm",
+    "producer_version": "0.26.0",
+    "adapter_name": "vllm_bench_serve",
+    "adapter_version": "1.0.0",
+    "native_schema_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "request_id_derivation": "frozen_order_and_prefix_v1"
+  },
+  "tokens": {
+    "input_tokens": 4,
+    "output_tokens": 2,
+    "input_tokens_semantics": "vllm_output_prompt_len_v0_26",
+    "output_tokens_semantics": "vllm_output_len_v0_26"
+  },
+  "timing": {
+    "clock_domain": "producer_monotonic_normalized_v1",
+    "start_offset_ns": 0,
+    "ttft_ns": 10000000,
+    "ttft_definition": "vllm_first_choices_event_v0_26",
+    "itl_ns": [10000000, 10000000, 10000000],
+    "itl_definition": "vllm_subsequent_choices_event_interval_v0_26"
+  },
+  "outcome": {
+    "status": "SUCCESS",
+    "producer_error": null
+  },
+  "content": {
+    "prompt_sha256": "sha256:65956f54266f67062d25c8ca4e458280c58f00285779017bb2422c72a244263e",
+    "response_sha256": "sha256:1a989ea86150171c687b0727f218eedbb94c4665a7da9b0add1bf5de607f2bf1",
+    "canonical_response_content": null,
+    "native_response_content_present": true
+  }
+}
