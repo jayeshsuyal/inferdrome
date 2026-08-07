@@ -1,6 +1,6 @@
 # Inferdrome architecture
 
-Status: **Normative for v0.1; public schemas frozen**
+Status: **Normative for v0.1; public schemas frozen; dashboard extension accepted**
 
 ## System shape
 
@@ -30,6 +30,10 @@ flowchart LR
     Q --> R["ExitSpec importer"]
     R --> S["Independent recalculation"]
     S --> T["PASS / FAIL / NOT_PROVEN"]
+    Q --> U["Local dashboard bundle reader"]
+    U --> V["Verification and Python recalculation"]
+    V --> W["Bounded read-only projections"]
+    W --> X["Runs / Detail / Compare / Evidence"]
 ```
 
 ## Architectural layers
@@ -147,6 +151,39 @@ sealed directory; it never repairs a completed bundle in place.
 The exact closed layout, manifest semantics, reader limits, cross-artifact
 checks, and mutation guarantees are defined in
 [EVIDENCE_BUNDLE_V1.md](EVIDENCE_BUNDLE_V1.md).
+
+### Local evidence dashboard
+
+The post-v0.1 dashboard is a read-only projection over completed evidence
+bundles. It reuses Inferdrome's bounded reader, offline verification, and
+deterministic Python reduction path before producing browser-facing data. The
+browser formats and visualizes typed projections; it is not an independent
+metric implementation.
+
+The initial dashboard discovers bundles beneath configured run roots, binds to
+loopback by default, rejects non-local HTTP hostnames, and has no database.
+Completed bundles are never modified, repaired, resealed, or deleted. Invalid
+or inconsistent bundles fail closed and may expose only a bounded rejection
+summary rather than claimed measurements. Collection responses use bounded
+cursor pagination, while the packaged React client and static assets ship in
+the Inferdrome wheel.
+
+Projection schemas are allowlisted and bounded. Arbitrary bundle paths and raw
+native-file serving are not part of the interface, and response-bearing content
+is redacted or excluded by default. Pairwise comparison first produces an
+explicit comparability result; incomparable runs have no deltas. Supported
+deltas are neutral arithmetic differences until metric directionality is a
+reviewed, versioned, frozen contract.
+
+The initial dashboard displays a declared ExitSpec contract digest but does not
+ingest receipts or calculate `PASS`, `FAIL`, or `NOT_PROVEN`. A future receipt
+view requires a separately reviewed import and attribution contract. Genuine
+real-GPU bundles follow the same verification, recalculation, projection, and
+view path as other bundles; there is no UI-specific GPU ingestion path.
+
+The normative dashboard product boundary is defined in
+[DASHBOARD.md](DASHBOARD.md) and
+[ADR 0006](adr/0006-local-read-only-evidence-dashboard.md).
 
 ### ExitSpec importer
 
@@ -350,8 +387,10 @@ flag.
 
 ## Extension path
 
-Later versions may add trial sets, comparisons, telemetry, broader deployment
-orchestration, routing decisions, signed manifests, and additional producers.
-These extend the evidence model without weakening v0.1's artifact, provenance,
-and population boundaries. The v0.1 managed launch remains one narrow,
+Later versions may add trial sets, statistical comparisons, telemetry, broader
+deployment orchestration, routing decisions, signed manifests, additional
+producers, and hosted dashboard operation. These extend the evidence model
+without weakening v0.1's artifact, provenance, and population boundaries. The
+local dashboard's initial pairwise inspection is not a statistical trial-set
+comparison and does not make causal or acceptance claims. The v0.1 managed launch remains one narrow,
 loopback-only NVIDIA proof profile rather than a general deployment system.

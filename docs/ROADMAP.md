@@ -278,6 +278,39 @@ See [V0_1_DEFINITION_OF_DONE.md](V0_1_DEFINITION_OF_DONE.md).
 
 ## Post-v0.1 roadmap
 
+### Product slice — Local evidence dashboard
+
+Status: product contract accepted in
+[ADR 0006](adr/0006-local-read-only-evidence-dashboard.md) and
+[DASHBOARD.md](DASHBOARD.md).
+
+This slice may be implemented while the remaining v0.1 external demonstrations
+are pending, but it is not part of the v0.1 release gate and cannot close those
+requirements.
+
+Deliver:
+
+- one local, loopback-default, read-only dashboard;
+- bounded bundle discovery without a database;
+- authoritative Python verification and recalculation before projection;
+- Runs, Run detail, Compare, and Evidence views;
+- bounded and redacted browser-facing projections;
+- pairwise comparison with explicit, deterministic comparability reasons;
+- neutral arithmetic deltas without better-or-worse claims; and
+- one ordinary display path for synthetic, attached-endpoint, and real-GPU
+  bundles.
+
+Gate:
+
+```text
+Every displayed measurement is traceable to authoritative recalculation.
+Invalid evidence fails closed, completed bundles remain unchanged, and the
+dashboard never issues an ExitSpec-owned acceptance verdict.
+```
+
+Pairwise inspection in this slice does not create a trial set, pool request
+populations, estimate uncertainty, or make a controlled-experiment claim.
+
 ### v0.2 — Repeated trials and controlled comparisons
 
 - trial sets and comparison objects;

@@ -22,7 +22,8 @@ PYTHONPATH=src python -m inferdrome --help
 ```
 
 The implementation uses the standard-library argument parser so the executable
-surface does not expand the v0.1 dependency or supply-chain budget.
+surface does not expand the v0.1 dependency or supply-chain budget. The
+post-v0.1 dashboard uses a separate optional dependency group.
 
 ## Validate and resolve
 
@@ -150,6 +151,28 @@ evidence, canonical request records, and metric definitions. It emits the
 canonical `inferdrome.measurements.v1` JSON and refuses a stored/recalculated
 disagreement. `summarize` emits a stable human-oriented JSON projection without
 changing the bundle.
+
+## Local evidence dashboard
+
+Install the optional runtime and start the loopback-only dashboard:
+
+```bash
+uv sync --extra dashboard
+uv run inferdrome dashboard --runs-root runs
+```
+
+The default address is `http://127.0.0.1:8787`. Use `--port` to select another
+loopback port or `--open` to open the URL in the default browser.
+
+The command scans only direct children of the configured root, verifies every
+candidate, independently recalculates its measurements, and serves bounded
+typed projections. It does not mutate bundles, accept arbitrary bundle paths,
+serve response-bearing artifacts, or issue ExitSpec-owned acceptance verdicts.
+The run index is cursor-paginated with at most 200 combined entries per
+response. The server validates the HTTP `Host` header in addition to binding to
+loopback, so non-local hostnames are rejected.
+Its product and comparison boundaries are frozen in
+[DASHBOARD.md](DASHBOARD.md).
 
 ## Failure and cancellation behavior
 
