@@ -26,6 +26,11 @@ example bundle are still pending, so the PR 7 gate is not yet complete.
 Independent acceptance remains a separate consumer boundary; it is not
 implemented inside this repository.
 
+The repository also includes an accepted post-v0.1 local evidence dashboard.
+It presents Runs, Run detail, Compare, and Evidence views over the same bounded
+verification and deterministic recalculation path. It remains read-only,
+loopback-only, database-free, and outside the v0.1 release gate.
+
 ## Quick start
 
 ```bash
@@ -42,6 +47,13 @@ uv run inferdrome reduce \
   runs/run-0123456789abcdef0123456789abcdef/bundle
 uv run inferdrome summarize \
   runs/run-0123456789abcdef0123456789abcdef/bundle
+```
+
+Install the optional dashboard runtime and inspect those bundles locally:
+
+```bash
+uv sync --extra dashboard
+uv run inferdrome dashboard --runs-root runs --open
 ```
 
 The fake path is always marked `SYNTHETIC_ONLY`. An attached-vLLM run requires
@@ -77,6 +89,7 @@ documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
 - [Pinned vLLM 0.26.0 adapter](docs/VLLM_0_26_ADAPTER.md)
 - [Managed real-GPU proof](docs/REAL_GPU_PROOF.md)
 - [CLI and orchestration](docs/CLI.md)
+- [Local evidence dashboard](docs/DASHBOARD.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Pinned-vLLM capability spike](spikes/vllm-0.26.0/README.md)
 
@@ -91,8 +104,10 @@ Public schemas: inferdrome.*
 
 ## Deliberate v0.1 limits
 
-Inferdrome v0.1 does not include a web dashboard, hosted service, cloud or
+Inferdrome v0.1 does not include the dashboard in its release gate. The accepted
+post-v0.1 dashboard remains local and read-only; hosted service, cloud or
 Kubernetes orchestration, GPU telemetry, statistical A/B comparisons, router
-analysis, automatic optimization, or a second serving engine.
+analysis, automatic optimization, and a second serving engine remain outside
+the implemented product.
 
 The first release proves the evidence pipeline before expanding the product.

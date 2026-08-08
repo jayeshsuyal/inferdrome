@@ -37,5 +37,17 @@ class VerificationError(InferdromeError):
     """An offline evidence-bundle integrity invariant failed."""
 
 
+class DashboardError(InferdromeError):
+    """The local read-only dashboard could not be started or queried safely."""
+
+
+class DashboardRunNotFound(DashboardError):
+    """A dashboard run ID was not present in the verified index."""
+
+
+class DashboardPaginationError(DashboardError):
+    """A dashboard collection cursor or page bound was invalid."""
+
+
 class CancellationRequested(InferdromeError):
     """Cooperative execution stopped after a cancellation request."""

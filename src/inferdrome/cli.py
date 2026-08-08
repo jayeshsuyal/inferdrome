@@ -55,6 +55,15 @@ def _gpu_index(value: str) -> int:
     return index
 
 
+def _port(value: str) -> int:
+    if not value or not value.isascii() or not value.isdecimal():
+        raise argparse.ArgumentTypeError("port must be an integer")
+    port = int(value)
+    if port < 1 or port > 65_535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return port
+
+
 def _managed_vllm_config(
     namespace: argparse.Namespace,
 ) -> ManagedVllmConfig | None:
@@ -298,6 +307,17 @@ def _command_summarize(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def _command_dashboard(namespace: argparse.Namespace) -> int:
+    from inferdrome.dashboard.server import run_dashboard
+
+    run_dashboard(
+        _path(namespace, "runs_root"),
+        port=cast(int, namespace.port),
+        open_browser=cast(bool, namespace.open_browser),
+    )
+    return 0
+
+
 def _add_bundle_input(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("bundle", help="sealed Inferdrome bundle directory")
     parser.add_argument(
@@ -381,6 +401,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_bundle_input(summarize)
     summarize.set_defaults(handler=_command_summarize)
+
+    dashboard = commands.add_parser(
+        "dashboard",
+        help="serve the local read-only evidence dashboard",
+    )
+    dashboard.add_argument("--runs-root", default="runs", help="run workspace root")
+    dashboard.add_argument(
+        "--port",
+        type=_port,
+        default=8787,
+        help="loopback port (default: 8787)",
+    )
+    dashboard.add_argument(
+        "--open",
+        dest="open_browser",
+        action="store_true",
+        help="open the dashboard in the default browser",
+    )
+    dashboard.set_defaults(handler=_command_dashboard)
     return parser
 
 
