@@ -250,3 +250,99 @@ export interface Comparison extends ApiObject {
   readonly context_changes: readonly ContextChangeView[];
   readonly directionality: "NEUTRAL";
 }
+
+export interface TrialRunPointView extends ApiObject {
+  readonly repetition_index: number;
+  readonly run_id: string;
+  readonly value: string | null;
+  readonly display_value: string | null;
+  readonly sample_count: number | null;
+}
+
+export interface TrialMetricVariationView extends ApiObject {
+  readonly key: string;
+  readonly metric: string;
+  readonly aggregation: string;
+  readonly label: string;
+  readonly unit: string;
+  readonly total_run_count: number;
+  readonly available_run_count: number;
+  readonly minimum: string | null;
+  readonly maximum: string | null;
+  readonly median: string | null;
+  readonly mean: string | null;
+  readonly span: string | null;
+  readonly sample_standard_deviation: string | null;
+  readonly minimum_display_value: string | null;
+  readonly maximum_display_value: string | null;
+  readonly median_display_value: string | null;
+  readonly mean_display_value: string | null;
+  readonly span_display_value: string | null;
+  readonly sample_standard_deviation_display_value: string | null;
+  readonly points: readonly TrialRunPointView[];
+  readonly population: "run_level_measurements";
+  readonly weighting: "equal_per_run";
+  readonly summary_method: "per_run_scalar_sample_variation_v1";
+}
+
+export interface TrialSetSummary extends ApiObject {
+  readonly trial_set_id: string;
+  readonly experiment_id: string;
+  readonly title: string;
+  readonly created_at: string;
+  readonly member_count: number;
+  readonly earliest_run_at: string;
+  readonly latest_run_at: string;
+  readonly model: string;
+  readonly execution_fingerprint: string;
+  readonly trial_set_digest: string;
+  readonly evidence_eligibilities: readonly string[];
+  readonly environment_status: "CONSISTENT" | "DRIFT_DETECTED";
+}
+
+export interface TrialSetMemberView extends ApiObject {
+  readonly repetition_index: number;
+  readonly run: RunSummary;
+}
+
+export interface TrialSetDetail extends ApiObject {
+  readonly projection_version: "inferdrome.dashboard.v1";
+  readonly summary: TrialSetSummary;
+  readonly hypothesis: string | null;
+  readonly membership_policy: "same_execution_fingerprint_v1";
+  readonly metric_definitions_digest: string;
+  readonly reducer_version: string;
+  readonly members: readonly TrialSetMemberView[];
+  readonly variations: readonly TrialMetricVariationView[];
+  readonly environment_drift_fields: readonly string[];
+  readonly design_status: "RETROSPECTIVE";
+  readonly inference: "DESCRIPTIVE_ONLY";
+  readonly request_population_policy: "separate_per_run_v1";
+}
+
+export interface RejectedTrialSet extends ApiObject {
+  readonly entry: string;
+  readonly status: "REJECTED";
+  readonly code:
+    | "VERIFICATION_FAILED"
+    | "UNSAFE_ENTRY"
+    | "MEMBER_UNAVAILABLE"
+    | "DECLARATION_UNAVAILABLE"
+    | "DUPLICATE_TRIAL_SET_ID";
+  readonly message: string;
+}
+
+export interface TrialSetPageResponse extends ApiObject {
+  readonly projection_version: "inferdrome.dashboard.v1";
+  readonly generated_at: string;
+  readonly trial_sets: readonly TrialSetSummary[];
+  readonly rejected: readonly RejectedTrialSet[];
+  readonly page: PageView;
+}
+
+export interface TrialSetIndex extends ApiObject {
+  readonly projection_version: "inferdrome.dashboard.v1";
+  readonly generated_at: string;
+  readonly trial_sets: readonly TrialSetSummary[];
+  readonly rejected: readonly RejectedTrialSet[];
+}

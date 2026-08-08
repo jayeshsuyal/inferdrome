@@ -100,11 +100,17 @@ def run_fake_bundle(tmp_path: Path) -> Iterator[Callable[..., RunResult]]:
         run_id: str,
         *,
         title: str | None = None,
+        experiment_id: str | None = None,
         model: str | None = None,
         max_runtime_seconds: int | None = None,
     ) -> RunResult:
         source_path = FAKE_SOURCE
-        if title is not None or model is not None or max_runtime_seconds is not None:
+        if (
+            title is not None
+            or experiment_id is not None
+            or model is not None
+            or max_runtime_seconds is not None
+        ):
             source_root = tmp_path / "dashboard-sources" / run_id
             workload_directory = source_root / "workloads"
             workload_directory.mkdir(parents=True)
@@ -114,6 +120,13 @@ def run_fake_bundle(tmp_path: Path) -> Iterator[Callable[..., RunResult]]:
                 original_title = "Deterministic fake-adapter smoke run"
                 assert source_text.count(original_title) == 1
                 source_text = source_text.replace(original_title, title)
+            if experiment_id is not None:
+                original_id = "id: fake-smoke"
+                assert source_text.count(original_id) == 1
+                source_text = source_text.replace(
+                    original_id,
+                    f"id: {experiment_id}",
+                )
             if model is not None:
                 original_model = "inferdrome/fake-model"
                 assert source_text.count(original_model) == 1

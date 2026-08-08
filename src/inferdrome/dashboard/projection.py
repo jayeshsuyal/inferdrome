@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
-from inferdrome.bundle import recalculate_bundle, verify_bundle
+from inferdrome.bundle import BundleAnalysis, recalculate_bundle, verify_bundle
 from inferdrome.bundle.reader import BundleReader, strict_json_value, strict_jsonl_lines
 from inferdrome.dashboard.models import (
     ArtifactView,
@@ -140,6 +140,15 @@ def display_measurement(value: int | str, unit: Unit) -> str:
     if unit is Unit.TOKENS_PER_SECOND:
         return f"{_format_decimal(exact)} tok/s"
     return str(value)
+
+
+def metric_label(metric: str, aggregation: str) -> str:
+    """Return the frozen dashboard label for one metric series."""
+
+    try:
+        return _METRIC_LABELS[(MetricId(metric), Aggregation(aggregation))]
+    except (KeyError, ValueError):
+        raise VerificationError("trial-set metric identity is unsupported") from None
 
 
 def _metric_view(measurement: Measurement) -> MetricView:
@@ -383,7 +392,12 @@ def _signature(model: BaseModel) -> str:
 def load_run_detail(bundle_path: Path) -> RunDetail:
     """Verify, recalculate, and project one immutable evidence bundle."""
 
-    analysis = recalculate_bundle(bundle_path)
+    return project_run_detail(recalculate_bundle(bundle_path))
+
+
+def project_run_detail(analysis: BundleAnalysis) -> RunDetail:
+    """Project one already verified and recalculated bundle analysis."""
+
     report = analysis.verification
     descriptor = report.descriptor
     role_paths = {artifact.role: artifact.path for artifact in descriptor.artifacts}

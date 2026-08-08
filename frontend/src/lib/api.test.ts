@@ -32,6 +32,88 @@ const runSummary = {
   headline_metrics: [],
 };
 
+const secondRunSummary = {
+  ...runSummary,
+  run_id: "run-22222222222222222222222222222222",
+  started_at: "2026-08-07T12:01:00Z",
+  ended_at: "2026-08-07T12:01:01Z",
+};
+
+const trialSetId = "trial-set-11111111111111111111111111111111";
+const trialSetSummary = {
+  trial_set_id: trialSetId,
+  experiment_id: runSummary.experiment_id,
+  title: "Repeated local evidence",
+  created_at: "2026-08-07T12:02:00Z",
+  member_count: 2,
+  earliest_run_at: runSummary.started_at,
+  latest_run_at: secondRunSummary.ended_at,
+  model: runSummary.model,
+  execution_fingerprint: `sha256:${"b".repeat(64)}`,
+  trial_set_digest: `sha256:${"c".repeat(64)}`,
+  evidence_eligibilities: ["SYNTHETIC_ONLY"],
+  environment_status: "CONSISTENT" as const,
+};
+
+const trialVariation = {
+  key: "ttft_ns:p50",
+  metric: "ttft_ns",
+  aggregation: "p50",
+  label: "Time to first token p50",
+  unit: "ns",
+  total_run_count: 2,
+  available_run_count: 2,
+  minimum: "10000000",
+  maximum: "12000000",
+  median: "11000000",
+  mean: "11000000",
+  span: "2000000",
+  sample_standard_deviation: "1414213.562373",
+  minimum_display_value: "10 ms",
+  maximum_display_value: "12 ms",
+  median_display_value: "11 ms",
+  mean_display_value: "11 ms",
+  span_display_value: "2 ms",
+  sample_standard_deviation_display_value: "1.41 ms",
+  points: [
+    {
+      repetition_index: 0,
+      run_id: runSummary.run_id,
+      value: "10000000",
+      display_value: "10 ms",
+      sample_count: 2,
+    },
+    {
+      repetition_index: 1,
+      run_id: secondRunSummary.run_id,
+      value: "12000000",
+      display_value: "12 ms",
+      sample_count: 2,
+    },
+  ],
+  population: "run_level_measurements" as const,
+  weighting: "equal_per_run" as const,
+  summary_method: "per_run_scalar_sample_variation_v1" as const,
+};
+
+const trialSetDetail = {
+  projection_version: projectionVersion,
+  summary: trialSetSummary,
+  hypothesis: "Run-level values should remain visible.",
+  membership_policy: "same_execution_fingerprint_v1" as const,
+  metric_definitions_digest: `sha256:${"d".repeat(64)}`,
+  reducer_version: "1.0.0",
+  members: [
+    { repetition_index: 0, run: runSummary },
+    { repetition_index: 1, run: secondRunSummary },
+  ],
+  variations: [trialVariation],
+  environment_drift_fields: [],
+  design_status: "RETROSPECTIVE" as const,
+  inference: "DESCRIPTIVE_ONLY" as const,
+  request_population_policy: "separate_per_run_v1" as const,
+};
+
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status: 200,
@@ -154,5 +236,70 @@ describe("dashboard API client", () => {
     expect(fetchMock.mock.calls[1][0]).toBe(
       `/api/v1/compare?baseline_run_id=${runSummary.run_id}&candidate_run_id=${comparison.candidate_run_id}`,
     );
+  });
+
+  it("follows bounded trial-set cursors and reads the descriptive detail contract", async () => {
+    const secondTrialSet = {
+      ...trialSetSummary,
+      trial_set_id: "trial-set-22222222222222222222222222222222",
+      title: "Second repeated condition",
+      trial_set_digest: `sha256:${"e".repeat(64)}`,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        projection_version: projectionVersion,
+        generated_at: "2026-08-07T12:03:00Z",
+        trial_sets: [trialSetSummary],
+        rejected: [],
+        page: {
+          limit: 100,
+          returned: 1,
+          total: 2,
+          has_more: true,
+          next_cursor: "djE6MTphYmM",
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        projection_version: projectionVersion,
+        generated_at: "2026-08-07T12:03:01Z",
+        trial_sets: [secondTrialSet],
+        rejected: [],
+        page: {
+          limit: 100,
+          returned: 1,
+          total: 2,
+          has_more: false,
+          next_cursor: null,
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(trialSetDetail));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const index = await api.listTrialSets();
+    const detail = await api.getTrialSet(trialSetId);
+
+    expect(index.trial_sets.map((item) => item.trial_set_id)).toEqual([
+      trialSetId,
+      secondTrialSet.trial_set_id,
+    ]);
+    expect(detail.inference).toBe("DESCRIPTIVE_ONLY");
+    expect(detail.variations[0].points).toHaveLength(2);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "/api/v1/trial-sets?limit=100&cursor=djE6MTphYmM",
+    );
+    expect(fetchMock.mock.calls[2][0]).toBe(`/api/v1/trial-sets/${trialSetId}`);
+  });
+
+  it("rejects trial-set detail whose member order violates the public contract", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...trialSetDetail,
+      members: [...trialSetDetail.members].reverse(),
+    }))));
+
+    await expect(api.getTrialSet(trialSetId)).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("ordered and contiguous"),
+    });
   });
 });

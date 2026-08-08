@@ -20,8 +20,11 @@ from inferdrome.dashboard.models import (
     RunDetail,
     RunIndexResponse,
     RunSummary,
+    TrialSetDetail,
+    TrialSetIndexResponse,
 )
 from inferdrome.dashboard.projection import load_run_detail
+from inferdrome.dashboard.trial_sets import TrialSetDashboardIndex
 from inferdrome.errors import (
     DashboardError,
     DashboardPaginationError,
@@ -111,8 +114,22 @@ def _snapshot_id(entries: tuple[RunSummary | RejectedRun, ...]) -> str:
 class DashboardIndex:
     """Read-only index that resolves URLs exclusively through verified run IDs."""
 
-    def __init__(self, runs_root: Path) -> None:
+    def __init__(
+        self,
+        runs_root: Path,
+        *,
+        trial_sets_root: Path | None = None,
+    ) -> None:
         self.runs_root = runs_root.absolute()
+        selected_trial_sets_root = (
+            trial_sets_root.absolute()
+            if trial_sets_root is not None
+            else self.runs_root.parent / "trial-sets"
+        )
+        self._trial_sets = TrialSetDashboardIndex(
+            selected_trial_sets_root,
+            self.runs_root,
+        )
         self._cache_by_digest: dict[str, RunDetail] = {}
         self._runs: dict[str, RunDetail] = {}
         self._lock = RLock()
@@ -321,3 +338,14 @@ class DashboardIndex:
                     "run is not present in the verified index"
                 )
             return compare_runs(baseline, candidate)
+
+    def list_trial_sets(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = _DEFAULT_PAGE_LIMIT,
+    ) -> TrialSetIndexResponse:
+        return self._trial_sets.refresh(cursor=cursor, limit=limit)
+
+    def get_trial_set(self, trial_set_id: str) -> TrialSetDetail:
+        return self._trial_sets.get(trial_set_id)

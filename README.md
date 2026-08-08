@@ -11,8 +11,8 @@ Inferdrome produces measurements. ExitSpec owns customer acceptance.
 
 ## Project status
 
-The v0.1 product charter, pinned-vLLM `0.26.0` capability contract, and eight
-public v1 schemas are frozen. The Inferdrome producer path now includes strict
+The v0.1 product charter, pinned-vLLM `0.26.0` capability contract, and its
+eight public v1 schemas are frozen. The Inferdrome producer path includes strict
 resolution, immutable workspaces, deterministic reduction, staged read-only
 bundles, exact-byte manifests, attached-endpoint preflight, bounded no-shell
 vLLM execution, version-specific normalization, offline cross-artifact
@@ -31,6 +31,13 @@ It presents Runs, Run detail, Compare, and Evidence views over the same bounded
 verification and deterministic recalculation path. It remains read-only,
 loopback-only, database-free, and outside the v0.1 release gate.
 
+The first v0.2 vertical slice adds an additive ninth public schema for immutable
+same-configuration trial sets. Each set pins 2–100 independently verified runs
+by run ID and bundle digest, keeps every request population separate, and
+reports equal-per-run descriptive variation. These groupings are explicitly
+retrospective; they do not claim experimental control, causality, significance,
+or customer acceptance.
+
 ## Quick start
 
 ```bash
@@ -47,13 +54,20 @@ uv run inferdrome reduce \
   runs/run-0123456789abcdef0123456789abcdef/bundle
 uv run inferdrome summarize \
   runs/run-0123456789abcdef0123456789abcdef/bundle
+
+uv run inferdrome trial-set create \
+  --run run-0123456789abcdef0123456789abcdef \
+  --run run-fedcba9876543210fedcba9876543210 \
+  --title "Repeated serving treatment" \
+  --runs-root runs --trial-sets-root trial-sets
 ```
 
 Install the optional dashboard runtime and inspect those bundles locally:
 
 ```bash
 uv sync --extra dashboard
-uv run inferdrome dashboard --runs-root runs --open
+uv run inferdrome dashboard \
+  --runs-root runs --trial-sets-root trial-sets --open
 ```
 
 The fake path is always marked `SYNTHETIC_ONLY`. An attached-vLLM run requires
@@ -90,6 +104,7 @@ documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
 - [Managed real-GPU proof](docs/REAL_GPU_PROOF.md)
 - [CLI and orchestration](docs/CLI.md)
 - [Local evidence dashboard](docs/DASHBOARD.md)
+- [Repeated trial sets](docs/TRIAL_SETS.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Pinned-vLLM capability spike](spikes/vllm-0.26.0/README.md)
 
@@ -105,9 +120,10 @@ Public schemas: inferdrome.*
 ## Deliberate v0.1 limits
 
 Inferdrome v0.1 does not include the dashboard in its release gate. The accepted
-post-v0.1 dashboard remains local and read-only; hosted service, cloud or
-Kubernetes orchestration, GPU telemetry, statistical A/B comparisons, router
-analysis, automatic optimization, and a second serving engine remain outside
-the implemented product.
+post-v0.1 dashboard remains local and read-only. Descriptive repeated-trial
+grouping is available, but predeclared controlled comparisons, confidence or
+significance claims, hosted service, cloud or Kubernetes orchestration, GPU
+telemetry, router analysis, automatic optimization, and a second serving engine
+remain outside the implemented product.
 
 The first release proves the evidence pipeline before expanding the product.

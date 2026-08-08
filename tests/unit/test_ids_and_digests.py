@@ -12,6 +12,7 @@ from inferdrome.domain.digests import (
 )
 from inferdrome.domain.ids import (
     new_run_id,
+    new_trial_set_id,
     request_id_from_index,
     sha256_digest,
 )
@@ -19,6 +20,10 @@ from inferdrome.domain.ids import (
 
 def test_generated_run_id_matches_public_domain() -> None:
     assert re.fullmatch(r"run-[0-9a-f]{32}", new_run_id())
+
+
+def test_generated_trial_set_id_matches_public_domain() -> None:
+    assert re.fullmatch(r"trial-set-[0-9a-f]{32}", new_trial_set_id())
 
 
 @pytest.mark.parametrize(

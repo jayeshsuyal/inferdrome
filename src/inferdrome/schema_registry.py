@@ -9,6 +9,7 @@ from inferdrome.domain.experiment import ExperimentSpec
 from inferdrome.domain.metrics import Measurements, MetricDefinitions
 from inferdrome.domain.request_plan import RequestPlan
 from inferdrome.domain.request_record import RequestRecord
+from inferdrome.domain.trial_set import TrialSet
 
 SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "experiment.schema.json": ExperimentSpec,
@@ -19,6 +20,7 @@ SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "metric-definitions.schema.json": MetricDefinitions,
     "measurements.schema.json": Measurements,
     "evidence-bundle.schema.json": EvidenceBundle,
+    "trial-set.schema.json": TrialSet,
 }
 
 SCHEMA_BASE_URI = "https://schemas.inferdrome.dev/public/v1/"

@@ -18,6 +18,10 @@ RunId = Annotated[
     str,
     StringConstraints(pattern=r"^run-[0-9a-f]{32}$"),
 ]
+TrialSetId = Annotated[
+    str,
+    StringConstraints(pattern=r"^trial-set-[0-9a-f]{32}$"),
+]
 RequestId = Annotated[
     str,
     StringConstraints(pattern=r"^req-[0-9]{8}$"),
@@ -90,6 +94,12 @@ def new_run_id() -> str:
     """Create a run-scoped random identifier without external dependencies."""
 
     return f"run-{secrets.token_hex(16)}"
+
+
+def new_trial_set_id() -> str:
+    """Create a random trial-set identifier independent of its member runs."""
+
+    return f"trial-set-{secrets.token_hex(16)}"
 
 
 def request_id_from_index(sequence_index: int) -> str:

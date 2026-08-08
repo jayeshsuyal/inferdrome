@@ -307,11 +307,105 @@ def _command_summarize(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def _command_trial_set_create(namespace: argparse.Namespace) -> int:
+    from inferdrome.trials import create_trial_set
+
+    verified = create_trial_set(
+        runs_root=_path(namespace, "runs_root"),
+        trial_sets_root=_path(namespace, "trial_sets_root"),
+        run_ids=cast(list[str], namespace.member_runs),
+        title=cast(str, namespace.title),
+        hypothesis=_optional_text(namespace, "hypothesis"),
+        trial_set_id=_optional_text(namespace, "trial_set_id"),
+    )
+    _json_output(
+        {
+            "member_count": len(verified.descriptor.members),
+            "path": str(verified.path),
+            "trial_set_digest": verified.trial_set_digest,
+            "trial_set_id": verified.descriptor.trial_set_id,
+            "valid": True,
+        }
+    )
+    return 0
+
+
+def _command_trial_set_verify(namespace: argparse.Namespace) -> int:
+    from inferdrome.trials import verify_trial_set
+
+    verified = verify_trial_set(
+        _path(namespace, "trial_set"),
+        runs_root=_path(namespace, "runs_root"),
+        expected_trial_set_digest=_optional_text(namespace, "expected_digest"),
+    )
+    _json_output(
+        {
+            "execution_fingerprint": (
+                verified.descriptor.execution_fingerprint
+            ),
+            "member_count": len(verified.members),
+            "trial_set_digest": verified.trial_set_digest,
+            "trial_set_id": verified.descriptor.trial_set_id,
+            "valid": True,
+        }
+    )
+    return 0
+
+
+def _command_trial_set_summarize(namespace: argparse.Namespace) -> int:
+    from inferdrome.trials import trial_metric_variations, verify_trial_set
+
+    verified = verify_trial_set(
+        _path(namespace, "trial_set"),
+        runs_root=_path(namespace, "runs_root"),
+        expected_trial_set_digest=_optional_text(namespace, "expected_digest"),
+    )
+    variations = trial_metric_variations(verified)
+    _json_output(
+        {
+            "inference": "DESCRIPTIVE_ONLY",
+            "member_count": len(verified.members),
+            "request_population_policy": "separate_per_run_v1",
+            "summary_method": "per_run_scalar_sample_variation_v1",
+            "trial_set_digest": verified.trial_set_digest,
+            "trial_set_id": verified.descriptor.trial_set_id,
+            "variations": [
+                {
+                    "aggregation": item.aggregation,
+                    "available_run_count": item.available_run_count,
+                    "maximum": item.maximum,
+                    "mean": item.mean,
+                    "median": item.median,
+                    "metric": item.metric,
+                    "minimum": item.minimum,
+                    "sample_standard_deviation": (
+                        item.sample_standard_deviation
+                    ),
+                    "span": item.span,
+                    "unit": item.unit,
+                    "values": [
+                        {
+                            "run_id": point.run_id,
+                            "sample_count": point.sample_count,
+                            "value": point.value,
+                        }
+                        for point in item.values
+                    ],
+                }
+                for item in variations
+            ],
+            "weighting": "EQUAL_PER_RUN",
+        }
+    )
+    return 0
+
+
 def _command_dashboard(namespace: argparse.Namespace) -> int:
     from inferdrome.dashboard.server import run_dashboard
 
     run_dashboard(
         _path(namespace, "runs_root"),
+        trial_sets_root=_path(namespace, "trial_sets_root"),
         port=cast(int, namespace.port),
         open_browser=cast(bool, namespace.open_browser),
     )
@@ -402,11 +496,75 @@ def build_parser() -> argparse.ArgumentParser:
     _add_bundle_input(summarize)
     summarize.set_defaults(handler=_command_summarize)
 
+    trial_set = commands.add_parser(
+        "trial-set",
+        help="create and verify descriptive repeated-trial groupings",
+    )
+    trial_set_commands = trial_set.add_subparsers(
+        dest="trial_set_command",
+        required=True,
+    )
+    trial_set_create = trial_set_commands.add_parser(
+        "create",
+        help="group same-configuration completed runs",
+    )
+    trial_set_create.add_argument(
+        "--run",
+        dest="member_runs",
+        action="append",
+        required=True,
+        help="member run ID; repeat for each repetition",
+    )
+    trial_set_create.add_argument("--title", required=True)
+    trial_set_create.add_argument("--hypothesis")
+    trial_set_create.add_argument("--trial-set-id")
+    trial_set_create.add_argument(
+        "--runs-root",
+        default="runs",
+        help="run workspace root",
+    )
+    trial_set_create.add_argument(
+        "--trial-sets-root",
+        default="trial-sets",
+        help="trial-set artifact root",
+    )
+    trial_set_create.set_defaults(handler=_command_trial_set_create)
+
+    for name, help_text, handler in (
+        (
+            "verify",
+            "verify membership and recalculate every run",
+            _command_trial_set_verify,
+        ),
+        (
+            "summarize",
+            "show descriptive run-level variation",
+            _command_trial_set_summarize,
+        ),
+    ):
+        operation = trial_set_commands.add_parser(name, help=help_text)
+        operation.add_argument("trial_set", help="immutable trial-set directory")
+        operation.add_argument(
+            "--runs-root",
+            default="runs",
+            help="run workspace root",
+        )
+        operation.add_argument(
+            "--expected-digest",
+            help="externally retained trial-set digest to require",
+        )
+        operation.set_defaults(handler=handler)
+
     dashboard = commands.add_parser(
         "dashboard",
         help="serve the local read-only evidence dashboard",
     )
     dashboard.add_argument("--runs-root", default="runs", help="run workspace root")
+    dashboard.add_argument(
+        "--trial-sets-root",
+        default="trial-sets",
+        help="trial-set artifact root",
+    )
     dashboard.add_argument(
         "--port",
         type=_port,

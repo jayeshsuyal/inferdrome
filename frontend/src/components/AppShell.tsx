@@ -3,12 +3,13 @@ import {
   Fingerprint,
   GitCompareArrows,
   LayoutDashboard,
+  Layers3,
   Moon,
   Sun,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { PropsWithChildren } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useRuns } from "../context/RunsContext";
 import { formatDateTime } from "../lib/format";
@@ -33,6 +34,8 @@ function selectedRunFromPath(pathname: string): string | null {
 }
 
 function pathLabel(pathname: string): string {
+  if (/^\/trial-sets\/.+/.test(pathname)) return "Evidence / Trial set detail";
+  if (pathname.startsWith("/trial-sets")) return "Evidence / Trial sets";
   if (pathname.startsWith("/compare")) return "Evidence / Compare";
   if (pathname.startsWith("/evidence")) return "Evidence / Bundle";
   if (/^\/runs\/.+/.test(pathname)) return "Evidence / Run detail";
@@ -50,6 +53,8 @@ export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
   const { runs, rejected, generatedAt, status } = useRuns();
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const mainRef = useRef<HTMLElement>(null);
+  const previousPath = useRef(location.pathname);
   const selectedRunId = selectedRunFromPath(location.pathname) || runs[0]?.run_id || null;
 
   useEffect(() => {
@@ -60,9 +65,16 @@ export function AppShell({ children }: PropsWithChildren) {
     if (themeColor) themeColor.content = theme === "dark" ? "#0e110f" : "#f3f5f2";
   }, [theme]);
 
+  useEffect(() => {
+    if (previousPath.current === location.pathname) return;
+    previousPath.current = location.pathname;
+    mainRef.current?.focus({ preventScroll: true });
+  }, [location.pathname]);
+
   const navigation = useMemo<readonly NavigationItem[]>(
     () => [
       { label: "Runs", to: "/runs", icon: LayoutDashboard, end: true },
+      { label: "Trial sets", to: "/trial-sets", icon: Layers3 },
       {
         label: "Run detail",
         to: selectedRunId ? `/runs/${encodeURIComponent(selectedRunId)}` : null,
@@ -126,7 +138,7 @@ export function AppShell({ children }: PropsWithChildren) {
         </div>
       </aside>
 
-      <main className="main" id="dashboard-content">
+      <main className="main" id="dashboard-content" ref={mainRef} tabIndex={-1}>
         <div className="topline">
           <span className="topline-path">{pathLabel(location.pathname)}</span>
           <div className="topline-actions">

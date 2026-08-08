@@ -6,6 +6,8 @@ import { CompareView } from "./views/CompareView";
 import { EvidenceView } from "./views/EvidenceView";
 import { RunDetailView } from "./views/RunDetailView";
 import { RunsView } from "./views/RunsView";
+import { TrialSetDetailView } from "./views/TrialSetDetailView";
+import { TrialSetsView } from "./views/TrialSetsView";
 
 function NotFoundView() {
   return (
@@ -25,6 +27,8 @@ export function App() {
   if (pathname === "/") view = <Navigate to="/runs" replace />;
   else if (pathname === "/runs" || pathname === "/runs/") view = <RunsView />;
   else if (/^\/runs\/[^/]+\/?$/.test(pathname)) view = <RunDetailView />;
+  else if (pathname === "/trial-sets" || pathname === "/trial-sets/") view = <TrialSetsView />;
+  else if (/^\/trial-sets\/[^/]+\/?$/.test(pathname)) view = <TrialSetDetailView />;
   else if (pathname === "/compare" || pathname === "/compare/") view = <CompareView />;
   else if (pathname === "/evidence" || pathname === "/evidence/" || /^\/evidence\/[^/]+\/?$/.test(pathname)) {
     view = <EvidenceView />;

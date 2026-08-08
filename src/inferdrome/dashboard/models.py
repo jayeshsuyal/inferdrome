@@ -244,3 +244,101 @@ class ComparisonResponse(FrozenModel):
     metric_deltas: tuple[MetricDeltaView, ...]
     context_changes: tuple[ContextChangeView, ...]
     directionality: Literal["NEUTRAL"] = "NEUTRAL"
+
+
+class TrialRunPointView(FrozenModel):
+    repetition_index: int
+    run_id: str
+    value: str | None
+    display_value: str | None
+    sample_count: int | None
+
+
+class TrialMetricVariationView(FrozenModel):
+    key: str
+    metric: str
+    aggregation: str
+    label: str
+    unit: str
+    total_run_count: int
+    available_run_count: int
+    minimum: str | None
+    maximum: str | None
+    median: str | None
+    mean: str | None
+    span: str | None
+    sample_standard_deviation: str | None
+    minimum_display_value: str | None
+    maximum_display_value: str | None
+    median_display_value: str | None
+    mean_display_value: str | None
+    span_display_value: str | None
+    sample_standard_deviation_display_value: str | None
+    points: tuple[TrialRunPointView, ...]
+    population: Literal["run_level_measurements"] = "run_level_measurements"
+    weighting: Literal["equal_per_run"] = "equal_per_run"
+    summary_method: Literal["per_run_scalar_sample_variation_v1"] = (
+        "per_run_scalar_sample_variation_v1"
+    )
+
+
+class TrialSetSummary(FrozenModel):
+    trial_set_id: str
+    experiment_id: str
+    title: str
+    created_at: datetime
+    member_count: int
+    earliest_run_at: datetime
+    latest_run_at: datetime
+    model: str
+    execution_fingerprint: str
+    trial_set_digest: str
+    evidence_eligibilities: tuple[str, ...]
+    environment_status: Literal["CONSISTENT", "DRIFT_DETECTED"]
+
+
+class TrialSetMemberView(FrozenModel):
+    repetition_index: int
+    run: RunSummary
+
+
+class TrialSetDetail(FrozenModel):
+    projection_version: Literal["inferdrome.dashboard.v1"] = (
+        "inferdrome.dashboard.v1"
+    )
+    summary: TrialSetSummary
+    hypothesis: str | None
+    membership_policy: Literal["same_execution_fingerprint_v1"]
+    metric_definitions_digest: str
+    reducer_version: str
+    members: tuple[TrialSetMemberView, ...]
+    variations: tuple[TrialMetricVariationView, ...]
+    environment_drift_fields: tuple[str, ...]
+    design_status: Literal["RETROSPECTIVE"] = "RETROSPECTIVE"
+    inference: Literal["DESCRIPTIVE_ONLY"] = "DESCRIPTIVE_ONLY"
+    request_population_policy: Literal["separate_per_run_v1"] = (
+        "separate_per_run_v1"
+    )
+
+
+class RejectedTrialSet(FrozenModel):
+    entry: str
+    status: Literal["REJECTED"] = "REJECTED"
+    code: Literal[
+        "VERIFICATION_FAILED",
+        "UNSAFE_ENTRY",
+        "MEMBER_UNAVAILABLE",
+        "DECLARATION_UNAVAILABLE",
+        "DUPLICATE_TRIAL_SET_ID",
+    ]
+    message: str = "Trial set could not be verified."
+
+
+class TrialSetIndexResponse(FrozenModel):
+    projection_version: Literal["inferdrome.dashboard.v1"] = (
+        "inferdrome.dashboard.v1"
+    )
+    generated_at: datetime
+    trial_sets: tuple[TrialSetSummary, ...]
+    rejected: tuple[RejectedTrialSet, ...]
+    page: PageView

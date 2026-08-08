@@ -1,0 +1,148 @@
+{
+  "$comment": "Cross-field semantic invariants are normative; see docs/PUBLIC_CONTRACTS_V1.md and the conformance vectors.",
+  "$defs": {
+    "TrialSetMember": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Bundle Digest",
+          "type": "string"
+        },
+        "repetition_index": {
+          "maximum": 99,
+          "minimum": 0,
+          "title": "Repetition Index",
+          "type": "integer"
+        },
+        "run_id": {
+          "pattern": "^run-[0-9a-f]{32}$",
+          "title": "Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repetition_index",
+        "run_id",
+        "bundle_digest"
+      ],
+      "title": "TrialSetMember",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.inferdrome.dev/public/v1/trial-set.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable links to same-configuration runs; request populations stay separate.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "design_status": {
+      "const": "RETROSPECTIVE",
+      "title": "Design Status",
+      "type": "string"
+    },
+    "execution_fingerprint": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Execution Fingerprint",
+      "type": "string"
+    },
+    "experiment_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+      "title": "Experiment Id",
+      "type": "string"
+    },
+    "hypothesis": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Hypothesis"
+    },
+    "members": {
+      "items": {
+        "$ref": "#/$defs/TrialSetMember"
+      },
+      "maxItems": 100,
+      "minItems": 2,
+      "title": "Members",
+      "type": "array"
+    },
+    "membership_policy": {
+      "const": "same_execution_fingerprint_v1",
+      "title": "Membership Policy",
+      "type": "string"
+    },
+    "metric_definitions_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Metric Definitions Digest",
+      "type": "string"
+    },
+    "reducer_version": {
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "title": "Reducer Version",
+      "type": "string"
+    },
+    "request_population_policy": {
+      "const": "separate_per_run_v1",
+      "title": "Request Population Policy",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.trial-set.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "statistical_unit": {
+      "const": "run",
+      "title": "Statistical Unit",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "trial_set_id": {
+      "pattern": "^trial-set-[0-9a-f]{32}$",
+      "title": "Trial Set Id",
+      "type": "string"
+    },
+    "weighting": {
+      "const": "equal_per_run",
+      "title": "Weighting",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "trial_set_id",
+    "experiment_id",
+    "title",
+    "hypothesis",
+    "created_at",
+    "design_status",
+    "membership_policy",
+    "request_population_policy",
+    "statistical_unit",
+    "weighting",
+    "execution_fingerprint",
+    "metric_definitions_digest",
+    "reducer_version",
+    "members"
+  ],
+  "title": "TrialSet",
+  "type": "object"
+}

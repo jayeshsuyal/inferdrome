@@ -1,6 +1,6 @@
 # Inferdrome architecture
 
-Status: **Normative for v0.1; public schemas frozen; dashboard extension accepted**
+Status: **Normative for v0.1; public schemas frozen; dashboard and descriptive Trial Set extensions accepted**
 
 ## System shape
 
@@ -34,6 +34,10 @@ flowchart LR
     U --> V["Verification and Python recalculation"]
     V --> W["Bounded read-only projections"]
     W --> X["Runs / Detail / Compare / Evidence"]
+    Q --> Y["Trial Set creator / verifier"]
+    Y --> Z["Immutable Trial Set descriptor"]
+    Z --> AA["Equal-per-run descriptive summary"]
+    AA --> W
 ```
 
 ## Architectural layers
@@ -185,6 +189,41 @@ The normative dashboard product boundary is defined in
 [DASHBOARD.md](DASHBOARD.md) and
 [ADR 0006](adr/0006-local-read-only-evidence-dashboard.md).
 
+### Descriptive Trial Sets
+
+The first v0.2 vertical slice adds `inferdrome.trial-set.v1`, an immutable
+aggregate outside its member evidence bundles. One Trial Set contains 2 through
+100 ordered references, and each reference pins both a `run_id` and the
+out-of-band `bundle_digest` retained for that run.
+
+Creation and verification use the existing bounded bundle reader, offline
+verification, and deterministic recalculation path for every member. All
+members must share one experiment ID, execution fingerprint,
+metric-definitions digest, and reducer version. A failed, missing, mutated, or
+incompatible member invalidates the aggregate; the service never silently
+drops a member.
+
+Request plans and canonical request records remain owned by their individual
+runs. Trial summaries select one run-level scalar per available member, weight
+each run equally, preserve unavailable points, and calculate deterministic
+Decimal minimum, median, maximum, mean, span, and sample standard deviation.
+They never concatenate request populations.
+
+The execution fingerprint is a necessary same-condition membership key, not a
+complete environment attestation. The dashboard compares allowlisted member
+environment projections and discloses changed fields as drift. A Trial Set
+with or without detected drift remains `RETROSPECTIVE` and
+`DESCRIPTIVE_ONLY`; it is not a predeclared controlled comparison.
+
+The descriptor is canonical, read-only, and hashed under a separate Trial Set
+digest domain. Its digest is emitted out of band and can anchor later
+verification without introducing a circular field. The descriptor and digest
+do not alter any member bundle or any of the eight existing v1 schema bytes.
+
+The normative Trial Set boundary is defined in
+[TRIAL_SETS.md](TRIAL_SETS.md) and
+[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md).
+
 ### ExitSpec importer
 
 ExitSpec maintains its own safe reader and metric implementation. It may vendor
@@ -210,7 +249,9 @@ Hash of the canonical, measurement-affecting resolved fields. Human titles,
 output paths, run identifiers, and optional acceptance links do not affect this
 fingerprint.
 
-Runs in one future trial set must share an execution fingerprint.
+Runs in one Trial Set must share an execution fingerprint. This does not imply
+that all observed environment fields match or that a controlled experiment was
+predeclared.
 
 ### `request_plan_digest`
 
@@ -234,6 +275,14 @@ and ExitSpec stores it in its ingestion receipt.
 
 The manifest and bundle digest prove consistency with a received bundle, not
 authorship or execution truth.
+
+### `trial_set_digest`
+
+Hash of the exact canonical `inferdrome.trial-set.v1` descriptor bytes under
+the `inferdrome:trial-set-v1\0` domain. It is emitted out of band rather than
+embedded in the descriptor. The digest anchors the aggregate's exact ordered
+`run_id` and `bundle_digest` references; it does not prove authorship,
+execution truth, or that the grouping existed before its runs.
 
 ## Reference v0.1 bundle layout
 
@@ -387,10 +436,15 @@ flag.
 
 ## Extension path
 
-Later versions may add trial sets, statistical comparisons, telemetry, broader
-deployment orchestration, routing decisions, signed manifests, additional
-producers, and hosted dashboard operation. These extend the evidence model
-without weakening v0.1's artifact, provenance, and population boundaries. The
-local dashboard's initial pairwise inspection is not a statistical trial-set
-comparison and does not make causal or acceptance claims. The v0.1 managed launch remains one narrow,
-loopback-only NVIDIA proof profile rather than a general deployment system.
+The additive Trial Set contract extends the evidence model without changing
+v0.1's artifact, provenance, or request-population boundaries. Later versions
+may add a separately predeclared controlled-comparison design, telemetry,
+broader deployment orchestration, routing decisions, signed manifests,
+additional producers, and hosted dashboard operation.
+
+The local dashboard's initial pairwise inspection is not a Trial Set or a
+controlled comparison. A descriptive Trial Set is also not a confidence,
+significance, causal, prefix-caching, or acceptance claim. Prefix caching first
+requires an explicit typed execution control and fingerprint-capable contract.
+The v0.1 managed launch remains one narrow, loopback-only NVIDIA proof profile
+rather than a general deployment system.

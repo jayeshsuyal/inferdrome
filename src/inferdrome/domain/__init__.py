@@ -7,11 +7,14 @@ from inferdrome.domain.states import (
     RunState,
     validate_run_transition,
 )
+from inferdrome.domain.trial_set import TrialSet, TrialSetMember
 
 __all__ = [
     "EnvironmentCompleteness",
     "EvidenceEligibility",
     "IntegrityStatus",
     "RunState",
+    "TrialSet",
+    "TrialSetMember",
     "validate_run_transition",
 ]
