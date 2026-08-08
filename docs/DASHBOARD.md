@@ -1,10 +1,11 @@
 # Inferdrome local evidence dashboard
 
-Status: **Frozen initial product contract; Trial Sets extension accepted**
+Status: **Frozen initial product contract; Trial Set and controlled-comparison extensions accepted**
 
 Decision records:
-[ADR 0006](adr/0006-local-read-only-evidence-dashboard.md) and
-[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md)
+[ADR 0006](adr/0006-local-read-only-evidence-dashboard.md),
+[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md), and
+[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md)
 
 Release scope: **Post-v0.1 product slices**
 
@@ -27,7 +28,8 @@ the dashboard helps a user:
 3. Compare two runs only where their evidence is meaningfully comparable.
 4. Inspect verification, provenance, artifact, and sensitivity information.
 5. Inspect retrospective run-to-run variation across an immutable Trial Set.
-6. Distinguish Inferdrome evidence status from ExitSpec acceptance outcomes.
+6. Inspect a frozen controlled-comparison design and its verified controls.
+7. Distinguish Inferdrome evidence status from ExitSpec acceptance outcomes.
 
 The dashboard does not make evidence more trustworthy than the underlying
 bundle. It makes the bundle's existing guarantees and limitations visible.
@@ -37,9 +39,9 @@ bundle. It makes the bundle's existing guarantees and limitations visible.
 The normative flow is:
 
 ```text
-configured runs root + configured Trial Set root
+configured run, Trial Set, comparison-plan, and comparison-result roots
         ↓
-bounded bundle and Trial Set discovery
+bounded bundle, Trial Set, plan, and result discovery
         ↓
 Python offline verification
         ↓
@@ -47,7 +49,7 @@ Python deterministic recalculation
         ↓
 typed, bounded display projection
         ↓
-Runs / Run detail / Compare / Evidence / Trial Sets / Trial Set detail
+Runs / Run detail / Compare / Evidence / Trial Sets / Controlled comparisons
 ```
 
 The following invariants apply:
@@ -59,6 +61,8 @@ The following invariants apply:
 - Missing and unavailable observations never become zero.
 - Trial Set variation uses one run-level scalar per available member with equal
   run weighting; browser state never pools request populations.
+- Controlled-comparison outcomes are projected only from an authoritatively
+  verified result; incomparable results contain no outcome arithmetic.
 - A projection can omit sensitive or oversized data, but it cannot invent or
   rewrite evidence.
 - A projection identifies the bundle digest from which it was produced.
@@ -71,7 +75,7 @@ logic and remains in Python.
 
 The initial dashboard is local and single-user:
 
-- It reads bundles below one explicit runs root per process.
+- It reads bundles and descriptors below explicit configured roots per process.
 - It binds to a loopback interface by default.
 - It accepts only `127.0.0.1`, `localhost`, and the in-process test host in the
   HTTP `Host` header, closing the DNS-rebinding path around loopback data.
@@ -136,6 +140,13 @@ and each immutable descriptor contains at most 100 members. Detail lookup uses
 `GET /api/v1/trial-sets/{trial_set_id}`; the identifier is never interpreted as
 an arbitrary path.
 
+`GET /api/v1/controlled-comparisons` uses the same bounded 1-through-200 page
+contract and a snapshot-bound cursor over at most 200 direct plan entries.
+`GET /api/v1/controlled-comparisons/{comparison_plan_id}` resolves only a
+validated direct-child plan ID. Matching result declarations are bounded and
+fully verified before any result data is projected; duplicate or invalid
+results are withheld.
+
 Untouched native artifacts remain part of the evidence bundle, but the
 dashboard does not serve arbitrary bundle files. Response-bearing native output
 is excluded from browser projections by default. Request prompts, generated
@@ -148,6 +159,12 @@ identity digest. The raw endpoint URL is not included in browser responses.
 
 Redaction is a display operation. It never rewrites the native artifact or
 downgrades the bundle's response-content sensitivity classification.
+
+Controlled-comparison detail exposes the frozen treatment, arm identities,
+source and execution digests, memberships, schedule, and analysis policy. It
+does not serialize either arm's full `resolved_experiment` into the browser
+projection; raw target URLs and other non-allowlisted resolved fields remain in
+the immutable plan artifact and CLI verification boundary.
 
 ## Information architecture
 
@@ -275,6 +292,31 @@ winner status, recommendation, or an ExitSpec outcome.
 
 The full aggregate contract is in [TRIAL_SETS.md](TRIAL_SETS.md).
 
+### Controlled comparisons
+
+The route `/comparisons` is the index for immutable
+`inferdrome.controlled-comparison-plan.v1` designs. It keeps the plan state
+separate from result state and shows:
+
+- title, plan identity, treatment path and baseline/candidate values;
+- `PREDECLARED` with explicit `OPERATOR_ATTESTED` assurance;
+- planned pair count and primary outcome;
+- `COMPARABLE`, `INCOMPARABLE`, `NO_RESULT`, or `WITHHELD`; and
+- bounded rejection codes without claimed outcome values.
+
+The detail route `/comparisons/:planId` presents the frozen design first:
+arm digests, preallocated memberships, schedule, outcome, estimator,
+exclusion policy, environment scope, and assurance limitation. It then presents
+all six closed result controls. A single run-level paired plot and exact Decimal
+arithmetic appear only for a verified `COMPARABLE` result. `INCOMPARABLE`,
+missing, duplicate, or withheld results expose no estimate, arm mean, paired
+difference, or run-level outcome value.
+
+`COMPARABLE` means the declared and observed v1 controls matched. It does not
+prove chronology, authorship, causality, significance, preference, complete
+real-world confounder control, customer eligibility, or acceptance. The full
+contract is in [CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md).
+
 ## Pairwise comparison contract
 
 Every pair receives one of three conceptual outcomes:
@@ -306,7 +348,8 @@ fingerprint input is either checked as a hard measurement contract or projected
 as an explicit context field. A fingerprint change without a corresponding
 declared contract or context change is incomparable and suppresses all deltas.
 
-This pairwise policy remains independent of Trial Sets. Neither
+This pairwise policy remains independent of Trial Sets and controlled
+comparison results. Neither
 `COMPARABLE_WITH_CONTEXT_CHANGES` nor membership in a valid retrospective Trial
 Set is upgraded into a predeclared controlled-comparison claim.
 
@@ -376,8 +419,8 @@ visible through the ordinary evidence contract.
 - Bundle upload, mutation, repair, deletion, or resealing.
 - Benchmark execution or orchestration from the browser.
 - Raw arbitrary-file browsing or unrestricted native-content download.
-- Predeclared controlled comparisons, confidence intervals, significance, or
-  pooled request populations.
+- Trusted comparison chronology or authorship, additional treatments,
+  confidence intervals, significance, or pooled request populations.
 - Prefix-caching controls or a canonical prefix-caching experiment.
 - Causal explanations, automatic optimization, or AI tuning advice.
 - Customer acceptance authoring or evaluation.
@@ -409,6 +452,13 @@ The initial dashboard contract is satisfied only when:
     become a controlled or causal claim.
 14. Trial Set views remain `RETROSPECTIVE` and `DESCRIPTIVE_ONLY` and never
     issue confidence, significance, prefix-caching, or ExitSpec claims.
+15. Every comparison design is traceable to one immutable plan and shows
+    `OPERATOR_ATTESTED` beside `PREDECLARED`.
+16. A controlled result is projected only after the plan, both Trial Sets, and
+    every member bundle verify against retained digests.
+17. Any unsatisfied comparison control suppresses all outcome arithmetic.
+18. Comparable paired points preserve one equal-weight scalar per planned run
+    and never imply confidence, causality, preference, or acceptance.
 
 ## Development gate
 
@@ -421,10 +471,10 @@ npm ci --prefix frontend
 INFERDROME_PYTHON=.venv/bin/python ./scripts/dashboard_gate.sh
 ```
 
-The gate type-checks, tests, and builds the frontend, then runs the
-dashboard's Python projection, discovery, pairwise comparison, Trial Set,
-API, packaging, and server tests. It also builds a wheel, installs that wheel
-into an isolated target, and proves the installed HTML, deep links, API, and
+The gate type-checks, tests, and builds the frontend, then runs the dashboard's
+Python projection, discovery, pairwise comparison, Trial Set,
+controlled-comparison, API, packaging, and server tests. It also builds a wheel,
+installs that wheel into an isolated target, and proves the installed HTML, deep links, API, and
 referenced assets are served. The repository's existing
 `scripts/engineering_gate.sh` remains the authoritative v0.1 evidence pipeline
 gate.

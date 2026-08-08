@@ -2,6 +2,10 @@
 
 from pydantic import BaseModel
 
+from inferdrome.domain.controlled_comparison import (
+    ControlledComparisonPlan,
+    ControlledComparisonResult,
+)
 from inferdrome.domain.environment import EnvironmentManifest
 from inferdrome.domain.evidence import EvidenceBundle
 from inferdrome.domain.execution import ExecutionRecord
@@ -21,6 +25,8 @@ SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "measurements.schema.json": Measurements,
     "evidence-bundle.schema.json": EvidenceBundle,
     "trial-set.schema.json": TrialSet,
+    "controlled-comparison-plan.schema.json": ControlledComparisonPlan,
+    "controlled-comparison-result.schema.json": ControlledComparisonResult,
 }
 
 SCHEMA_BASE_URI = "https://schemas.inferdrome.dev/public/v1/"

@@ -10,6 +10,8 @@
   {"name": "valid measurements", "schema": "measurements.schema.json", "fixture": "valid/measurements.json", "valid": true},
   {"name": "valid evidence bundle", "schema": "evidence-bundle.schema.json", "fixture": "valid/evidence-bundle.json", "valid": true},
   {"name": "valid trial set", "schema": "trial-set.schema.json", "fixture": "valid/trial-set.json", "valid": true},
+  {"name": "valid controlled comparison plan", "schema": "controlled-comparison-plan.schema.json", "fixture": "valid/controlled-comparison-plan.json", "valid": true},
+  {"name": "valid controlled comparison result", "schema": "controlled-comparison-result.schema.json", "fixture": "valid/controlled-comparison-result.json", "valid": true},
   {"name": "unknown experiment schema version", "schema": "experiment.schema.json", "fixture": "valid/experiment.json", "valid": false, "mutation": {"operation": "replace", "path": "/schema_version", "value": "inferdrome.experiment.v2"}},
   {"name": "secret-bearing endpoint query", "schema": "experiment.schema.json", "fixture": "valid/experiment.json", "valid": false, "mutation": {"operation": "replace", "path": "/target/endpoint", "value": "http://127.0.0.1:8000?api_key=secret"}},
   {"name": "secret-bearing endpoint userinfo", "schema": "experiment.schema.json", "fixture": "valid/experiment.json", "valid": false, "mutation": {"operation": "replace", "path": "/target/endpoint", "value": "http://user:secret@127.0.0.1:8000"}},
@@ -21,5 +23,9 @@
   {"name": "unknown metric", "schema": "metric-definitions.schema.json", "fixture": "valid/metric-definitions.json", "valid": false, "mutation": {"operation": "replace", "path": "/definitions/0/metric", "value": "magic_score"}},
   {"name": "floating measurement value", "schema": "measurements.schema.json", "fixture": "valid/measurements.json", "valid": false, "mutation": {"operation": "replace", "path": "/measurements/3/value", "value": 0.5}},
   {"name": "in-band circular bundle digest", "schema": "evidence-bundle.schema.json", "fixture": "valid/evidence-bundle.json", "valid": false, "mutation": {"operation": "add", "path": "/bundle_digest", "value": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}},
-  {"name": "malformed trial-set ID", "schema": "trial-set.schema.json", "fixture": "valid/trial-set.json", "valid": false, "mutation": {"operation": "replace", "path": "/trial_set_id", "value": "trial-1"}}
+  {"name": "malformed trial-set ID", "schema": "trial-set.schema.json", "fixture": "valid/trial-set.json", "valid": false, "mutation": {"operation": "replace", "path": "/trial_set_id", "value": "trial-1"}},
+  {"name": "comparison plan uses an unreviewed treatment path", "schema": "controlled-comparison-plan.schema.json", "fixture": "valid/controlled-comparison-plan.json", "valid": false, "mutation": {"operation": "replace", "path": "/independent_variable/path", "value": "target.model"}},
+  {"name": "comparison plan has malformed schedule seed", "schema": "controlled-comparison-plan.schema.json", "fixture": "valid/controlled-comparison-plan.json", "valid": false, "mutation": {"operation": "replace", "path": "/schedule_seed", "value": "abcd"}},
+  {"name": "comparison result uses an unknown status", "schema": "controlled-comparison-result.schema.json", "fixture": "valid/controlled-comparison-result.json", "valid": false, "mutation": {"operation": "replace", "path": "/status", "value": "WINNER"}},
+  {"name": "comparison result uses authoritative free text", "schema": "controlled-comparison-result.schema.json", "fixture": "valid/controlled-comparison-result.json", "valid": false, "mutation": {"operation": "add", "path": "/winner", "value": "candidate"}}
 ]

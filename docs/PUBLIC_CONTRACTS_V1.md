@@ -1,18 +1,21 @@
 # Inferdrome public contracts v1
 
-Status: **Eight v0.1 schemas frozen; additive Trial Set schema accepted**
+Status: **Eight v0.1 schemas frozen; three additive v0.2 schemas accepted**
 
 Freeze date: **2026-08-05**
 
 Trial Set extension date: **2026-08-07**
 
+Controlled-comparison extension date: **2026-08-07**
+
 This document defines the public evidence boundary established by PR 1 and the
-additive post-v0.1 Trial Set aggregate. The eight original evidence contracts
+additive post-v0.1 Trial Set and controlled-comparison contracts. The eight
+original evidence contracts
 are grounded in the pinned vLLM `0.26.0`
 [capability matrix](../spikes/vllm-0.26.0/CAPABILITY_MATRIX.md). They expose
 only observations that the spike established as observed or strictly
-derivable. `inferdrome.trial-set.v1` references those immutable evidence
-objects; it does not reinterpret them.
+derivable. The three v0.2 contracts reference immutable evidence objects; they
+do not reinterpret any original schema.
 
 ## Normative artifacts
 
@@ -29,11 +32,14 @@ The committed Draft 2020-12 schemas live in [`schemas/public/v1`](../schemas/pub
 | `measurements.schema.json` | Deterministic reducer output |
 | `evidence-bundle.schema.json` | Sealed bundle descriptor and inventory |
 | `trial-set.schema.json` | Immutable descriptive grouping of repeated runs |
+| `controlled-comparison-plan.schema.json` | Frozen two-arm comparison design |
+| `controlled-comparison-result.schema.json` | Verified controls and paired estimate |
 
-`trial-set.schema.json` is the ninth public schema and an additive post-v0.1
-contract. Publishing it does not change the bytes, fields, validation, or
-meaning of any of the eight original v1 schemas. It is not added to the closed
-sixteen-role evidence-bundle inventory.
+`trial-set.schema.json` is the ninth public schema; the plan and result schemas
+are the tenth and eleventh. All three are additive post-v0.1 contracts.
+Publishing them does not change the bytes, fields, validation, or meaning of
+any of the eight original v1 schemas. None is added to the closed sixteen-role
+evidence-bundle inventory.
 
 The Pydantic models in [`src/inferdrome/domain`](../src/inferdrome/domain) are
 the reference implementation. ExitSpec and other independent consumers must
@@ -73,8 +79,8 @@ are decimal strings, never binary JSON floats.
   The v1 bytes and meanings remain available for existing bundles.
 - Producer compatibility is exact in v0.1: real evidence names vLLM `0.26.0`
   and the version-specific adapter semantics.
-- Adding `inferdrome.trial-set.v1` alongside the frozen schemas does not permit
-  an existing v1 evidence document to acquire new fields or meanings.
+- Adding aggregate, plan, or result contracts alongside the frozen schemas does
+  not permit an existing v1 evidence document to acquire new fields or meanings.
 
 ## Shared conventions
 
@@ -83,6 +89,8 @@ Identifiers and paths are intentionally narrow:
 ```text
 run ID       run- + 32 lowercase hexadecimal characters
 trial set ID trial-set- + 32 lowercase hexadecimal characters
+comparison plan ID   comparison-plan- + 32 lowercase hexadecimal characters
+comparison result ID comparison-result- + 32 lowercase hexadecimal characters
 request ID   req- + an eight-digit zero-padded sequence index
 digest       sha256: + 64 lowercase hexadecimal characters
 path         normalized relative POSIX path with no dot segments
@@ -98,6 +106,8 @@ inferdrome:request-plan-v1\0
 inferdrome:metric-definitions-v1\0
 inferdrome:bundle-manifest-v1\0
 inferdrome:trial-set-v1\0
+inferdrome:comparison-plan-v1\0
+inferdrome:comparison-result-v1\0
 ```
 
 The source-spec digest applies its domain separator to the exact original
@@ -267,11 +277,45 @@ readers reject arbitrary paths, symlinks, writable or nonregular descriptors,
 duplicate identities, changed bytes, invalid members, and stale aggregate
 state.
 
-This contract does not define a predeclared controlled comparison, confidence
-or significance, causality, prefix caching, metric directionality, or
-ExitSpec-owned `PASS`, `FAIL`, and `NOT_PROVEN` outcomes. See
+The Trial Set contract alone does not define a controlled comparison,
+confidence or significance, causality, prefix caching, metric directionality,
+or ExitSpec-owned `PASS`, `FAIL`, and `NOT_PROVEN` outcomes. See
 [TRIAL_SETS.md](TRIAL_SETS.md) and
 [ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md).
+
+## Controlled-comparison plan and result
+
+`inferdrome.controlled-comparison-plan.v1` freezes exactly two arms before the
+operator executes the local workflow. It contains full resolved specifications,
+source digests, expected fingerprints, preallocated run and Trial Set IDs, a
+seeded permuted-pair schedule, one reviewed `traffic.concurrency` treatment,
+one fully typed primary outcome, a complete-case paired estimator, no
+post-assignment exclusions, and no uncertainty method.
+
+The plan's `PREDECLARED` state has assurance `OPERATOR_ATTESTED`. Its local
+timestamp, reserved-run check, and retained digest express the intended
+workflow but are not trusted timestamping, authorship, or adversarial proof
+that the plan preceded execution.
+
+`inferdrome.controlled-comparison-result.v1` pins the exact plan and both exact
+Trial Set digests. Authoritative verification recalculates every member bundle
+and derives six closed controls covering local plan order, exact membership,
+observed schedule, declared fingerprint difference, complete and equal
+observed-v1 environment, and outcome coverage and semantics.
+
+All controls must be `SATISFIED` for `COMPARABLE`. Any failure produces
+`INCOMPARABLE` and the schema requires every outcome, arm summary, paired
+difference, and estimate to be absent. A comparable estimate is the Decimal
+arithmetic mean of equal-weight candidate-minus-baseline run-pair differences,
+rounded half-even to six places. Separate request populations are never pooled.
+
+The plan digest and result digest hash exact canonical descriptor bytes under
+their respective domains and remain out of band. They anchor received bytes;
+they do not prove execution truth or chronology. `COMPARABLE` covers only the
+declared and observed `OBSERVED_V1_ALLOWLIST_ONLY` scope. It does not mean
+causal, significant, preferred, customer-eligible, or accepted. See
+[CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md) and
+[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md).
 
 ## Developer commands
 

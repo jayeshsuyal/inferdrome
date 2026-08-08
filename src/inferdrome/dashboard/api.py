@@ -12,12 +12,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from inferdrome.dashboard.index import DashboardIndex
 from inferdrome.dashboard.models import (
     ComparisonResponse,
+    ControlledComparisonDetail,
+    ControlledComparisonIndexResponse,
     RunDetail,
     RunIndexResponse,
     TrialSetDetail,
     TrialSetIndexResponse,
 )
 from inferdrome.errors import (
+    DashboardControlledComparisonNotFound,
     DashboardPaginationError,
     DashboardRunNotFound,
     DashboardTrialSetNotFound,
@@ -130,6 +133,40 @@ def create_app(
             raise HTTPException(
                 status_code=404,
                 detail="trial set not found",
+            ) from None
+
+    @app.get(
+        "/api/v1/controlled-comparisons",
+        response_model=ControlledComparisonIndexResponse,
+    )
+    def list_controlled_comparisons(
+        cursor: Annotated[str | None, Query(max_length=128)] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> ControlledComparisonIndexResponse:
+        try:
+            return index.list_controlled_comparisons(
+                cursor=cursor,
+                limit=limit,
+            )
+        except DashboardPaginationError:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid controlled-comparison pagination cursor",
+            ) from None
+
+    @app.get(
+        "/api/v1/controlled-comparisons/{comparison_plan_id}",
+        response_model=ControlledComparisonDetail,
+    )
+    def get_controlled_comparison(
+        comparison_plan_id: str,
+    ) -> ControlledComparisonDetail:
+        try:
+            return index.get_controlled_comparison(comparison_plan_id)
+        except DashboardControlledComparisonNotFound:
+            raise HTTPException(
+                status_code=404,
+                detail="controlled comparison not found",
             ) from None
 
     selected_static = static_dir or Path(__file__).with_name("static")

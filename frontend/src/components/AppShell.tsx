@@ -36,7 +36,9 @@ function selectedRunFromPath(pathname: string): string | null {
 function pathLabel(pathname: string): string {
   if (/^\/trial-sets\/.+/.test(pathname)) return "Evidence / Trial set detail";
   if (pathname.startsWith("/trial-sets")) return "Evidence / Trial sets";
-  if (pathname.startsWith("/compare")) return "Evidence / Compare";
+  if (/^\/comparisons\/.+/.test(pathname)) return "Evidence / Comparison detail";
+  if (pathname.startsWith("/comparisons")) return "Evidence / Controlled comparisons";
+  if (pathname.startsWith("/compare")) return "Evidence / Compare two runs";
   if (pathname.startsWith("/evidence")) return "Evidence / Bundle";
   if (/^\/runs\/.+/.test(pathname)) return "Evidence / Run detail";
   return "Evidence / Runs";
@@ -47,6 +49,7 @@ interface NavigationItem {
   readonly to: string | null;
   readonly icon: LucideIcon;
   readonly end?: boolean;
+  readonly activeOn?: readonly string[];
 }
 
 export function AppShell({ children }: PropsWithChildren) {
@@ -80,7 +83,12 @@ export function AppShell({ children }: PropsWithChildren) {
         to: selectedRunId ? `/runs/${encodeURIComponent(selectedRunId)}` : null,
         icon: Activity,
       },
-      { label: "Compare", to: "/compare", icon: GitCompareArrows },
+      {
+        label: "Comparisons",
+        to: "/comparisons",
+        icon: GitCompareArrows,
+        activeOn: ["/compare"],
+      },
       {
         label: "Evidence",
         to: selectedRunId ? `/evidence/${encodeURIComponent(selectedRunId)}` : null,
@@ -114,9 +122,15 @@ export function AppShell({ children }: PropsWithChildren) {
         </div>
 
         <nav className="primary-nav" aria-label="Dashboard views">
-          {navigation.map(({ label, to, icon: Icon, end }) =>
+          {navigation.map(({ activeOn, label, to, icon: Icon, end }) =>
             to ? (
-              <NavLink key={label} className="nav-link" to={to} end={end}>
+              <NavLink
+                key={label}
+                activeOn={activeOn}
+                className="nav-link"
+                to={to}
+                end={end}
+              >
                 <Icon aria-hidden="true" />
                 <span>{label}</span>
               </NavLink>

@@ -12,7 +12,14 @@ from typing import Any, NoReturn, cast
 
 from inferdrome import __version__
 from inferdrome.bundle import recalculate_bundle, verify_bundle
+from inferdrome.domain.controlled_comparison import (
+    ConcurrencyIndependentVariable,
+    OutcomeSelector,
+    frozen_outcome_selector,
+)
 from inferdrome.domain.digests import canonical_json_bytes
+from inferdrome.domain.experiment import ConcurrentTraffic
+from inferdrome.domain.metrics import Aggregation, MetricId
 from inferdrome.domain.states import EvidenceEligibility, RunState
 from inferdrome.errors import (
     AdapterError,
@@ -64,6 +71,30 @@ def _port(value: str) -> int:
     return port
 
 
+def _comparison_repetitions(value: str) -> int:
+    if not value or not value.isascii() or not value.isdecimal():
+        raise argparse.ArgumentTypeError("repetitions must be an integer")
+    repetitions = int(value)
+    if not 2 <= repetitions <= 100:
+        raise argparse.ArgumentTypeError(
+            "repetitions must be between 2 and 100 per arm"
+        )
+    return repetitions
+
+
+def _outcome_selector(value: str) -> OutcomeSelector:
+    try:
+        metric_text, aggregation_text = value.split(":", maxsplit=1)
+        return frozen_outcome_selector(
+            MetricId(metric_text),
+            Aggregation(aggregation_text),
+        )
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            "primary outcome must be a valid METRIC:AGGREGATION pair"
+        ) from None
+
+
 def _managed_vllm_config(
     namespace: argparse.Namespace,
 ) -> ManagedVllmConfig | None:
@@ -77,14 +108,10 @@ def _managed_vllm_config(
             or gpu_index is not None
             or startup_timeout is not None
         ):
-            raise AdapterError(
-                "managed vLLM options require --managed-local-vllm"
-            )
+            raise AdapterError("managed vLLM options require --managed-local-vllm")
         return None
     if model_path is None:
-        raise AdapterError(
-            "--managed-local-vllm requires --managed-model-path"
-        )
+        raise AdapterError("--managed-local-vllm requires --managed-model-path")
     return ManagedVllmConfig(
         model_path=model_path.absolute(),
         gpu_indices=(gpu_index if gpu_index is not None else 0,),
@@ -340,9 +367,7 @@ def _command_trial_set_verify(namespace: argparse.Namespace) -> int:
     )
     _json_output(
         {
-            "execution_fingerprint": (
-                verified.descriptor.execution_fingerprint
-            ),
+            "execution_fingerprint": (verified.descriptor.execution_fingerprint),
             "member_count": len(verified.members),
             "trial_set_digest": verified.trial_set_digest,
             "trial_set_id": verified.descriptor.trial_set_id,
@@ -378,9 +403,7 @@ def _command_trial_set_summarize(namespace: argparse.Namespace) -> int:
                     "median": item.median,
                     "metric": item.metric,
                     "minimum": item.minimum,
-                    "sample_standard_deviation": (
-                        item.sample_standard_deviation
-                    ),
+                    "sample_standard_deviation": (item.sample_standard_deviation),
                     "span": item.span,
                     "unit": item.unit,
                     "values": [
@@ -400,12 +423,195 @@ def _command_trial_set_summarize(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def _command_comparison_plan_create(namespace: argparse.Namespace) -> int:
+    from inferdrome.comparisons import create_comparison_plan
+
+    baseline = resolve_experiment(
+        _path(namespace, "baseline_source"),
+        run_id="run-11111111111111111111111111111111",
+    )
+    candidate = resolve_experiment(
+        _path(namespace, "candidate_source"),
+        run_id="run-22222222222222222222222222222222",
+    )
+    baseline_traffic = baseline.resolved_spec.traffic
+    candidate_traffic = candidate.resolved_spec.traffic
+    if not isinstance(baseline_traffic, ConcurrentTraffic) or not isinstance(
+        candidate_traffic,
+        ConcurrentTraffic,
+    ):
+        raise AdapterError(
+            "controlled-comparison v1 requires concurrent traffic in both sources"
+        )
+    verified = create_comparison_plan(
+        runs_root=_path(namespace, "runs_root"),
+        comparison_plans_root=_path(namespace, "comparison_plans_root"),
+        experiment_id=baseline.resolved_spec.experiment.id,
+        title=cast(str, namespace.title),
+        hypothesis=cast(str, namespace.hypothesis),
+        planned_repetitions_per_arm=cast(int, namespace.repetitions),
+        independent_variable=ConcurrencyIndependentVariable(
+            value_type="integer",
+            path="traffic.concurrency",
+            baseline_value=baseline_traffic.concurrency,
+            candidate_value=candidate_traffic.concurrency,
+        ),
+        primary_outcome=cast(OutcomeSelector, namespace.primary_outcome),
+        baseline_resolved_experiment=baseline.resolved_spec,
+        baseline_source_spec_digest=baseline.source_spec_digest,
+        baseline_execution_fingerprint=baseline.execution_fingerprint,
+        candidate_resolved_experiment=candidate.resolved_spec,
+        candidate_source_spec_digest=candidate.source_spec_digest,
+        candidate_execution_fingerprint=candidate.execution_fingerprint,
+        comparison_plan_id=_optional_text(namespace, "comparison_plan_id"),
+        baseline_trial_set_id=_optional_text(namespace, "baseline_trial_set_id"),
+        candidate_trial_set_id=_optional_text(namespace, "candidate_trial_set_id"),
+        schedule_seed=_optional_text(namespace, "schedule_seed"),
+    )
+    descriptor = verified.descriptor
+    _json_output(
+        {
+            "arms": {
+                "baseline": {
+                    "concurrency": descriptor.independent_variable.baseline_value,
+                    "planned_trial_set_id": (
+                        descriptor.baseline_arm.planned_trial_set_id
+                    ),
+                    "run_ids": descriptor.baseline_arm.run_ids,
+                    "source": str(_path(namespace, "baseline_source")),
+                },
+                "candidate": {
+                    "concurrency": descriptor.independent_variable.candidate_value,
+                    "planned_trial_set_id": (
+                        descriptor.candidate_arm.planned_trial_set_id
+                    ),
+                    "run_ids": descriptor.candidate_arm.run_ids,
+                    "source": str(_path(namespace, "candidate_source")),
+                },
+            },
+            "comparison_plan_digest": verified.comparison_plan_digest,
+            "comparison_plan_id": descriptor.comparison_plan_id,
+            "path": str(verified.path),
+            "predeclaration_assurance": descriptor.predeclaration_assurance,
+            "schedule": [
+                {
+                    "arm": slot.arm.value,
+                    "block_index": slot.block_index,
+                    "run_id": slot.run_id,
+                    "sequence_index": slot.sequence_index,
+                }
+                for slot in descriptor.ordered_schedule
+            ],
+            "valid": True,
+        }
+    )
+    return 0
+
+
+def _command_comparison_plan_verify(namespace: argparse.Namespace) -> int:
+    from inferdrome.comparisons import verify_comparison_plan
+
+    verified = verify_comparison_plan(
+        _path(namespace, "comparison_plan"),
+        expected_comparison_plan_digest=_optional_text(
+            namespace,
+            "expected_digest",
+        ),
+    )
+    descriptor = verified.descriptor
+    _json_output(
+        {
+            "comparison_plan_digest": verified.comparison_plan_digest,
+            "comparison_plan_id": descriptor.comparison_plan_id,
+            "planned_repetitions_per_arm": (descriptor.planned_repetitions_per_arm),
+            "predeclaration_assurance": descriptor.predeclaration_assurance,
+            "primary_outcome": descriptor.primary_outcome.model_dump(mode="json"),
+            "valid": True,
+        }
+    )
+    return 0
+
+
+def _comparison_result_json(verified: object) -> dict[str, object]:
+    from inferdrome.comparisons import VerifiedComparisonResult
+
+    if not isinstance(verified, VerifiedComparisonResult):
+        raise TypeError("comparison result has an unexpected type")
+    descriptor = verified.descriptor
+    return {
+        "comparison_plan_id": descriptor.comparison_plan_id,
+        "comparison_result_digest": verified.comparison_result_digest,
+        "comparison_result_id": descriptor.comparison_result_id,
+        "environment_control_scope": descriptor.environment_control_scope,
+        "inference_scope": descriptor.inference_scope,
+        "outcomes": [
+            outcome.model_dump(mode="json", by_alias=True, exclude_none=False)
+            for outcome in descriptor.outcomes
+        ],
+        "path": str(verified.path),
+        "predeclaration_assurance": descriptor.predeclaration_assurance,
+        "status": descriptor.status.value,
+        "unsatisfied_controls": [
+            control.value for control in descriptor.unsatisfied_controls
+        ],
+        "valid": True,
+    }
+
+
+def _command_comparison_result_create(namespace: argparse.Namespace) -> int:
+    from inferdrome.comparisons import create_comparison_result
+
+    verified = create_comparison_result(
+        runs_root=_path(namespace, "runs_root"),
+        trial_sets_root=_path(namespace, "trial_sets_root"),
+        comparison_plans_root=_path(namespace, "comparison_plans_root"),
+        comparison_results_root=_path(namespace, "comparison_results_root"),
+        comparison_plan_id=cast(str, namespace.comparison_plan_id),
+        expected_comparison_plan_digest=cast(
+            str,
+            namespace.expected_plan_digest,
+        ),
+        baseline_trial_set_id=cast(str, namespace.baseline_trial_set_id),
+        expected_baseline_trial_set_digest=cast(
+            str,
+            namespace.expected_baseline_digest,
+        ),
+        candidate_trial_set_id=cast(str, namespace.candidate_trial_set_id),
+        expected_candidate_trial_set_digest=cast(
+            str,
+            namespace.expected_candidate_digest,
+        ),
+        comparison_result_id=_optional_text(namespace, "comparison_result_id"),
+    )
+    _json_output(_comparison_result_json(verified))
+    return 0
+
+
+def _command_comparison_result_verify(namespace: argparse.Namespace) -> int:
+    from inferdrome.comparisons import verify_comparison_result
+
+    verified = verify_comparison_result(
+        _path(namespace, "comparison_result"),
+        runs_root=_path(namespace, "runs_root"),
+        trial_sets_root=_path(namespace, "trial_sets_root"),
+        comparison_plans_root=_path(namespace, "comparison_plans_root"),
+        expected_comparison_result_digest=_optional_text(
+            namespace,
+            "expected_digest",
+        ),
+    )
+    _json_output(_comparison_result_json(verified))
+    return 0
+
+
 def _command_dashboard(namespace: argparse.Namespace) -> int:
     from inferdrome.dashboard.server import run_dashboard
 
     run_dashboard(
         _path(namespace, "runs_root"),
         trial_sets_root=_path(namespace, "trial_sets_root"),
+        comparison_plans_root=_path(namespace, "comparison_plans_root"),
+        comparison_results_root=_path(namespace, "comparison_results_root"),
         port=cast(int, namespace.port),
         open_browser=cast(bool, namespace.open_browser),
     )
@@ -555,6 +761,139 @@ def build_parser() -> argparse.ArgumentParser:
         )
         operation.set_defaults(handler=handler)
 
+    comparison_plan = commands.add_parser(
+        "comparison-plan",
+        help="create and verify operator-attested controlled-comparison designs",
+    )
+    comparison_plan_commands = comparison_plan.add_subparsers(
+        dest="comparison_plan_command",
+        required=True,
+    )
+    comparison_plan_create = comparison_plan_commands.add_parser(
+        "create",
+        help="freeze two concurrent-traffic arms before execution",
+    )
+    comparison_plan_create.add_argument("--baseline-source", required=True)
+    comparison_plan_create.add_argument("--candidate-source", required=True)
+    comparison_plan_create.add_argument("--title", required=True)
+    comparison_plan_create.add_argument("--hypothesis", required=True)
+    comparison_plan_create.add_argument(
+        "--repetitions",
+        required=True,
+        type=_comparison_repetitions,
+        help="planned run pairs (2-100 per arm)",
+    )
+    comparison_plan_create.add_argument(
+        "--primary-outcome",
+        required=True,
+        type=_outcome_selector,
+        help="frozen METRIC:AGGREGATION selector",
+    )
+    comparison_plan_create.add_argument("--comparison-plan-id")
+    comparison_plan_create.add_argument("--baseline-trial-set-id")
+    comparison_plan_create.add_argument("--candidate-trial-set-id")
+    comparison_plan_create.add_argument(
+        "--schedule-seed",
+        help="optional 64-character lowercase hex seed",
+    )
+    comparison_plan_create.add_argument(
+        "--runs-root",
+        default="runs",
+        help="future run workspace root",
+    )
+    comparison_plan_create.add_argument(
+        "--comparison-plans-root",
+        default="comparison-plans",
+        help="comparison-plan artifact root",
+    )
+    comparison_plan_create.set_defaults(handler=_command_comparison_plan_create)
+
+    comparison_plan_verify = comparison_plan_commands.add_parser(
+        "verify",
+        help="verify immutable design bytes and an optional retained digest",
+    )
+    comparison_plan_verify.add_argument(
+        "comparison_plan",
+        help="immutable comparison-plan directory",
+    )
+    comparison_plan_verify.add_argument(
+        "--expected-digest",
+        help="externally retained comparison-plan digest to require",
+    )
+    comparison_plan_verify.set_defaults(handler=_command_comparison_plan_verify)
+
+    comparison_result = commands.add_parser(
+        "comparison-result",
+        help="evaluate and verify controlled-comparison results",
+    )
+    comparison_result_commands = comparison_result.add_subparsers(
+        dest="comparison_result_command",
+        required=True,
+    )
+    comparison_result_create = comparison_result_commands.add_parser(
+        "create",
+        help="publish a point estimate or explicit INCOMPARABLE result",
+    )
+    comparison_result_create.add_argument("--comparison-plan-id", required=True)
+    comparison_result_create.add_argument(
+        "--expected-plan-digest",
+        required=True,
+    )
+    comparison_result_create.add_argument(
+        "--baseline-trial-set-id",
+        required=True,
+    )
+    comparison_result_create.add_argument(
+        "--expected-baseline-digest",
+        required=True,
+    )
+    comparison_result_create.add_argument(
+        "--candidate-trial-set-id",
+        required=True,
+    )
+    comparison_result_create.add_argument(
+        "--expected-candidate-digest",
+        required=True,
+    )
+    comparison_result_create.add_argument("--comparison-result-id")
+    comparison_result_create.add_argument("--runs-root", default="runs")
+    comparison_result_create.add_argument(
+        "--trial-sets-root",
+        default="trial-sets",
+    )
+    comparison_result_create.add_argument(
+        "--comparison-plans-root",
+        default="comparison-plans",
+    )
+    comparison_result_create.add_argument(
+        "--comparison-results-root",
+        default="comparison-results",
+    )
+    comparison_result_create.set_defaults(handler=_command_comparison_result_create)
+
+    comparison_result_verify = comparison_result_commands.add_parser(
+        "verify",
+        help="recalculate a stored result from every referenced artifact",
+    )
+    comparison_result_verify.add_argument(
+        "comparison_result",
+        help="immutable comparison-result directory",
+    )
+    comparison_result_verify.add_argument("--runs-root", default="runs")
+    comparison_result_verify.add_argument(
+        "--trial-sets-root",
+        default="trial-sets",
+    )
+    comparison_result_verify.add_argument(
+        "--comparison-plans-root",
+        default="comparison-plans",
+    )
+    comparison_result_verify.add_argument(
+        "--expected-digest",
+        help="externally retained comparison-result digest to require",
+    )
+    comparison_result_verify.set_defaults(handler=_command_comparison_result_verify)
+
     dashboard = commands.add_parser(
         "dashboard",
         help="serve the local read-only evidence dashboard",
@@ -564,6 +903,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--trial-sets-root",
         default="trial-sets",
         help="trial-set artifact root",
+    )
+    dashboard.add_argument(
+        "--comparison-plans-root",
+        default="comparison-plans",
+        help="controlled-comparison plan root",
+    )
+    dashboard.add_argument(
+        "--comparison-results-root",
+        default="comparison-results",
+        help="controlled-comparison result root",
     )
     dashboard.add_argument(
         "--port",

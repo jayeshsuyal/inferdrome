@@ -12,8 +12,8 @@ Inferdrome produces measurements. ExitSpec owns customer acceptance.
 ## Project status
 
 The v0.1 product charter, pinned-vLLM `0.26.0` capability contract, and its
-eight public v1 schemas are frozen. The Inferdrome producer path includes strict
-resolution, immutable workspaces, deterministic reduction, staged read-only
+eight original public v1 schemas are frozen. The Inferdrome producer path
+includes strict resolution, immutable workspaces, deterministic reduction, staged read-only
 bundles, exact-byte manifests, attached-endpoint preflight, bounded no-shell
 vLLM execution, version-specific normalization, offline cross-artifact
 recalculation, and the chartered command-line workflow.
@@ -38,6 +38,16 @@ reports equal-per-run descriptive variation. These groupings are explicitly
 retrospective; they do not claim experimental control, causality, significance,
 or customer acceptance.
 
+The second v0.2 vertical slice adds separate immutable controlled-comparison
+plan and result contracts, bringing the public schema count to eleven. The
+initial design is intentionally narrow: two arms, one typed
+`traffic.concurrency` treatment, 2–100 permuted run pairs, one frozen primary
+outcome, complete-case paired arithmetic, and no uncertainty estimate. A result
+is `COMPARABLE` only when every planned bundle, schedule, fingerprint,
+allowlisted environment field, and outcome semantic verifies; otherwise all
+outcome arithmetic is suppressed. Predeclaration is `OPERATOR_ATTESTED`, not
+trusted proof of chronology, and comparability is not causality or acceptance.
+
 ## Quick start
 
 ```bash
@@ -60,6 +70,15 @@ uv run inferdrome trial-set create \
   --run run-fedcba9876543210fedcba9876543210 \
   --title "Repeated serving treatment" \
   --runs-root runs --trial-sets-root trial-sets
+
+uv run inferdrome comparison-plan create \
+  --baseline-source examples/controlled-concurrency-2.yaml \
+  --candidate-source examples/controlled-concurrency-4.yaml \
+  --title "Concurrency 2 versus 4" \
+  --hypothesis "Concurrency may change attempted throughput" \
+  --repetitions 2 \
+  --primary-outcome attempted_request_throughput_per_s:rate \
+  --runs-root runs --comparison-plans-root comparison-plans
 ```
 
 Install the optional dashboard runtime and inspect those bundles locally:
@@ -67,7 +86,9 @@ Install the optional dashboard runtime and inspect those bundles locally:
 ```bash
 uv sync --extra dashboard
 uv run inferdrome dashboard \
-  --runs-root runs --trial-sets-root trial-sets --open
+  --runs-root runs --trial-sets-root trial-sets \
+  --comparison-plans-root comparison-plans \
+  --comparison-results-root comparison-results --open
 ```
 
 The fake path is always marked `SYNTHETIC_ONLY`. An attached-vLLM run requires
@@ -105,6 +126,7 @@ documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
 - [CLI and orchestration](docs/CLI.md)
 - [Local evidence dashboard](docs/DASHBOARD.md)
 - [Repeated trial sets](docs/TRIAL_SETS.md)
+- [Controlled comparisons](docs/CONTROLLED_COMPARISONS.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Pinned-vLLM capability spike](spikes/vllm-0.26.0/README.md)
 
@@ -120,8 +142,9 @@ Public schemas: inferdrome.*
 ## Deliberate v0.1 limits
 
 Inferdrome v0.1 does not include the dashboard in its release gate. The accepted
-post-v0.1 dashboard remains local and read-only. Descriptive repeated-trial
-grouping is available, but predeclared controlled comparisons, confidence or
+post-v0.1 dashboard remains local and read-only. Descriptive Trial Sets and the
+narrow operator-attested controlled-comparison workflow are available.
+Trusted chronology or authorship, additional treatments, confidence or
 significance claims, hosted service, cloud or Kubernetes orchestration, GPU
 telemetry, router analysis, automatic optimization, and a second serving engine
 remain outside the implemented product.

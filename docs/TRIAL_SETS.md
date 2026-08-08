@@ -281,15 +281,15 @@ closed and requires a fresh load.
 - Cached projections are disposable and keyed by immutable digest. Refresh
   revalidates members before a result remains usable.
 
-## Next slice
+## Controlled-comparison consumer
 
-A later ADR must define a separate predeclared controlled-comparison plan and
-result contract. That work must freeze arm assignment, repeat count, allowed
-independent variables, outcomes, estimator, and exclusion policy before
-execution, then prove that cross-arm fingerprint differences are exactly the
-declared differences.
+The second v0.2 slice now defines separate immutable plan and result contracts
+in [CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md). It consumes one exact
+Trial Set per arm, verifies every retained member and digest, and requires the
+ordered membership to equal the run IDs frozen in the plan.
 
-Trial Sets are the per-condition inputs to that future work; they are not a
-substitute for it. Prefix caching additionally requires an explicit typed
-execution control and a new fingerprint-capable execution contract before it
-can be used as a canonical treatment.
+This does not change Trial Set semantics: a Trial Set remains retrospective and
+descriptive when used alone. It does not become evidence of pre-run chronology,
+assignment, control, uncertainty, or causality. Prefix caching remains
+unsupported because it lacks a reviewed typed execution control and
+fingerprint-capable contract.

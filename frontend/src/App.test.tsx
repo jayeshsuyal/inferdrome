@@ -1,8 +1,14 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { MemoryRouter } from "./lib/router";
+import {
+  comparableControlledDetail,
+  controlledComparisonIndex,
+  incomparableControlledDetail,
+} from "./test/controlledComparisonFixtures";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -132,6 +138,10 @@ function dashboardFetch(input: RequestInfo | URL): Promise<Response> {
   if (path === "/api/v1/runs?limit=200") return Promise.resolve(response(emptyRunsIndex));
   if (path === "/api/v1/trial-sets?limit=100") return Promise.resolve(response(trialIndex));
   if (path === `/api/v1/trial-sets/${trialSetId}`) return Promise.resolve(response(trialDetail));
+  if (path === "/api/v1/controlled-comparisons?limit=100") return Promise.resolve(response(controlledComparisonIndex));
+  if (path === `/api/v1/controlled-comparisons/${comparableControlledDetail.summary.comparison_plan_id}`) {
+    return Promise.resolve(response(comparableControlledDetail));
+  }
   return Promise.resolve(response({ detail: "Not found" }, 404));
 }
 
@@ -191,5 +201,83 @@ describe("Trial sets views", () => {
     expect(screen.getAllByText("11 ms").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/Each point is one verified run-level scalar/)).toBeInTheDocument();
     expect(screen.getByText(/Every member contributes at most one run-level scalar/)).toBeInTheDocument();
+  });
+});
+
+describe("Controlled comparisons views", () => {
+  it("shows operator-attested plans, result filters, and the ad hoc comparison utility", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(dashboardFetch));
+
+    render(<MemoryRouter initialEntries={["/comparisons"]}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "Controlled comparisons" })).toBeInTheDocument();
+    expect(screen.getAllByText("OPERATOR_ATTESTED").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Plan chronology is not independently proven/)).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /Compare two runs/ }).every(
+      (link) => link.getAttribute("href") === "/compare",
+    )).toBe(true);
+    expect(screen.getAllByText("Suppressed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("No result artifact").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Withheld").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Incomparable" }));
+    expect(screen.getAllByText("Concurrency control mismatch").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("Concurrency 1 versus 2")).toHaveLength(0);
+    expect(screen.queryAllByText("Concurrency plan awaiting evidence")).toHaveLength(0);
+    expect(screen.queryAllByText("Concurrency result withheld")).toHaveLength(0);
+  });
+
+  it("renders the allowlisted design, controls, shared-axis points, and neutral estimate copy", async () => {
+    vi.stubGlobal("fetch", vi.fn(dashboardFetch));
+
+    render(
+      <MemoryRouter initialEntries={[`/comparisons/${comparableControlledDetail.summary.comparison_plan_id}`]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Concurrency 1 versus 2" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Predeclared design" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Comparability result" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Outcome estimate" })).toBeInTheDocument();
+    expect(screen.getByText("OBSERVED_V1_ALLOWLIST_ONLY")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Baseline repeat 1/ })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Candidate repeat 2/ })).toBeInTheDocument();
+    expect(screen.getByText("Exact paired run differences")).toBeInTheDocument();
+    expect(screen.getAllByText("+1000000 ns")).toHaveLength(2);
+    expect(screen.getByText(/colors represent arm roles only/)).toBeInTheDocument();
+    expect(screen.getByText(/No confidence interval, significance test, causal attribution/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Baseline concurrency trials/ })).toHaveAttribute(
+      "href",
+      `/trial-sets/${comparableControlledDetail.baseline_trial_set.trial_set_id}`,
+    );
+  });
+
+  it("keeps controls but withholds Trial Set projections and every estimate when incomparable", async () => {
+    const incomparableFetch = (input: RequestInfo | URL): Promise<Response> => {
+      const path = String(input);
+      if (path === `/api/v1/controlled-comparisons/${incomparableControlledDetail.summary.comparison_plan_id}`) {
+        return Promise.resolve(response(incomparableControlledDetail));
+      }
+      return dashboardFetch(input);
+    };
+    vi.stubGlobal("fetch", vi.fn(incomparableFetch));
+
+    render(
+      <MemoryRouter initialEntries={[`/comparisons/${incomparableControlledDetail.summary.comparison_plan_id}`]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Comparability result" })).toBeInTheDocument();
+    expect(screen.getAllByText("INCOMPARABLE").length).toBeGreaterThan(0);
+    expect(screen.getByText("Unsatisfied")).toBeInTheDocument();
+    expect(screen.getByText(/Trial Set summaries and run-level measurements are withheld/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Outcome estimate" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Exact paired run differences")).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Baseline repeat/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("1 ms")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Baseline concurrency trials/ })).not.toBeInTheDocument();
   });
 });

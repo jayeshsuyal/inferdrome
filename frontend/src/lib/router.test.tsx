@@ -19,9 +19,13 @@ function RouterProbe() {
       <output aria-label="Current path">{location.pathname}</output>
       <output aria-label="Current run">{params.runId ?? "none"}</output>
       <output aria-label="Current trial set">{params.trialSetId ?? "none"}</output>
+      <output aria-label="Current comparison">{params.comparisonPlanId ?? "none"}</output>
       <NavLink to="/runs" end>Runs</NavLink>
+      <NavLink to="/comparisons" activeOn={["/compare"]}>Comparisons</NavLink>
       <Link to="/runs/run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">Open run</Link>
       <Link to="/trial-sets/trial-set-11111111111111111111111111111111">Open trial set</Link>
+      <Link to="/comparisons/comparison-plan-11111111111111111111111111111111">Open comparison</Link>
+      <Link to="/compare">Ad hoc compare</Link>
     </>
   );
 }
@@ -67,5 +71,20 @@ describe("local dashboard router", () => {
       "trial-set-11111111111111111111111111111111",
     );
     expect(screen.getByLabelText("Current run")).toHaveTextContent("none");
+  });
+
+  it("decodes controlled-comparison plans and keeps the shared nav active for ad hoc compare", async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={["/comparisons"]}><RouterProbe /></MemoryRouter>);
+
+    expect(screen.getByRole("link", { name: "Comparisons" })).toHaveAttribute("aria-current", "page");
+    await user.click(screen.getByRole("link", { name: "Open comparison" }));
+    expect(screen.getByLabelText("Current comparison")).toHaveTextContent(
+      "comparison-plan-11111111111111111111111111111111",
+    );
+
+    await user.click(screen.getByRole("link", { name: "Ad hoc compare" }));
+    expect(screen.getByLabelText("Current path")).toHaveTextContent("/compare");
+    expect(screen.getByRole("link", { name: "Comparisons" })).toHaveAttribute("aria-current", "page");
   });
 });

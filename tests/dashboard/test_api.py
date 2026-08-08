@@ -138,6 +138,11 @@ def test_dashboard_api_routes_reject_mutating_methods(
         f"/api/v1/runs/{BASELINE_RUN_ID}",
         "/api/v1/trial-sets",
         "/api/v1/trial-sets/trial-set-11111111111111111111111111111111",
+        "/api/v1/controlled-comparisons",
+        (
+            "/api/v1/controlled-comparisons/"
+            "comparison-plan-11111111111111111111111111111111"
+        ),
         (
             "/api/v1/compare"
             f"?baseline_run_id={BASELINE_RUN_ID}"
@@ -176,6 +181,9 @@ def test_packaged_frontend_supports_deep_links_without_masking_api_404s(
         trial_set_deep_link = client.get(
             "/trial-sets/trial-set-11111111111111111111111111111111"
         )
+        comparison_deep_link = client.get(
+            "/comparisons/comparison-plan-11111111111111111111111111111111"
+        )
         asset = client.get("/assets/app.js")
         missing_api = client.get("/api/v1/not-a-route")
 
@@ -185,6 +193,8 @@ def test_packaged_frontend_supports_deep_links_without_masking_api_404s(
     assert deep_link.content == index_bytes
     assert trial_set_deep_link.status_code == 200
     assert trial_set_deep_link.content == index_bytes
+    assert comparison_deep_link.status_code == 200
+    assert comparison_deep_link.content == index_bytes
     assert asset.status_code == 200
     assert asset.content == b"export {};"
     assert missing_api.status_code == 404

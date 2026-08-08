@@ -1,6 +1,7 @@
 """The public CLI exercises the same verified library boundaries."""
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -63,8 +64,7 @@ def test_cli_fake_run_inspect_verify_reduce_and_summarize(
     summary = json.loads(capsys.readouterr().out)
     assert summary["run_id"] == RUN_ID
     assert any(
-        item["metric"] == "measured_request_count"
-        and item["value"] == 2
+        item["metric"] == "measured_request_count" and item["value"] == 2
         for item in summary["measurements"]
     )
 
@@ -275,3 +275,76 @@ def test_cli_trial_set_create_verify_and_summarize(
     assert summary["weighting"] == "EQUAL_PER_RUN"
     assert summary["request_population_policy"] == "separate_per_run_v1"
     assert all(item["available_run_count"] == 2 for item in summary["variations"])
+
+
+def test_cli_comparison_plan_create_and_verify(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    baseline_root = tmp_path / "baseline"
+    candidate_root = tmp_path / "candidate"
+    for root in (baseline_root, candidate_root):
+        (root / "workloads").mkdir(parents=True)
+        shutil.copy2(
+            REPOSITORY_ROOT / "examples" / "workloads" / "fake-smoke.jsonl",
+            root / "workloads" / "fake-smoke.jsonl",
+        )
+    source_text = (REPOSITORY_ROOT / "examples" / "fake-smoke.yaml").read_text(
+        encoding="utf-8"
+    )
+    baseline_source = baseline_root / "experiment.yaml"
+    candidate_source = candidate_root / "experiment.yaml"
+    baseline_source.write_text(source_text, encoding="utf-8")
+    candidate_source.write_text(
+        source_text.replace("concurrency: 2", "concurrency: 4"),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "comparison-plan",
+                "create",
+                "--baseline-source",
+                str(baseline_source),
+                "--candidate-source",
+                str(candidate_source),
+                "--title",
+                "CLI controlled comparison",
+                "--hypothesis",
+                "Concurrency may change throughput.",
+                "--repetitions",
+                "2",
+                "--primary-outcome",
+                "measured_request_count:count",
+                "--runs-root",
+                str(tmp_path / "runs"),
+                "--comparison-plans-root",
+                str(tmp_path / "comparison-plans"),
+                "--schedule-seed",
+                "00" * 32,
+            ]
+        )
+        == 0
+    )
+    created = json.loads(capsys.readouterr().out)
+    assert created["predeclaration_assurance"] == "OPERATOR_ATTESTED"
+    assert len(created["schedule"]) == 4
+    assert created["arms"]["baseline"]["concurrency"] == 2
+    assert created["arms"]["candidate"]["concurrency"] == 4
+
+    assert (
+        main(
+            [
+                "comparison-plan",
+                "verify",
+                created["path"],
+                "--expected-digest",
+                created["comparison_plan_digest"],
+            ]
+        )
+        == 0
+    )
+    verified = json.loads(capsys.readouterr().out)
+    assert verified["comparison_plan_id"] == created["comparison_plan_id"]
+    assert verified["valid"] is True

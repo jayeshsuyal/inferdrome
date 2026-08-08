@@ -1,0 +1,92 @@
+{
+  "schema_version": "inferdrome.controlled-comparison-result.v1",
+  "comparison_result_id": "comparison-result-11111111111111111111111111111111",
+  "comparison_plan_id": "comparison-plan-11111111111111111111111111111111",
+  "comparison_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "created_at": "2026-08-07T01:00:00Z",
+  "baseline_trial_set": {
+    "trial_set_id": "trial-set-11111111111111111111111111111111",
+    "trial_set_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "candidate_trial_set": {
+    "trial_set_id": "trial-set-22222222222222222222222222222222",
+    "trial_set_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "status": "COMPARABLE",
+  "inference_scope": "POINT_ESTIMATE_ONLY",
+  "predeclaration_assurance": "OPERATOR_ATTESTED",
+  "environment_control_scope": "OBSERVED_V1_ALLOWLIST_ONLY",
+  "statistical_unit": "run",
+  "weighting": "equal_per_run",
+  "estimator": "paired_run_mean_difference_v1",
+  "contrast_direction": "candidate_minus_baseline",
+  "uncertainty_method": "none_v1",
+  "control_checks": [
+    {"check": "LOCAL_PLAN_ORDER", "status": "SATISFIED"},
+    {"check": "EXACT_ARM_MEMBERSHIP", "status": "SATISFIED"},
+    {"check": "OBSERVED_SCHEDULE", "status": "SATISFIED"},
+    {"check": "DECLARED_FINGERPRINT_DIFFERENCE", "status": "SATISFIED"},
+    {"check": "COMPLETE_EQUAL_OBSERVED_ENVIRONMENT", "status": "SATISFIED"},
+    {"check": "OUTCOME_COVERAGE_AND_SEMANTICS", "status": "SATISFIED"}
+  ],
+  "unsatisfied_controls": [],
+  "outcomes": [
+    {
+      "selector": {
+        "metric": "measured_request_count",
+        "aggregation": "count",
+        "definition_id": "measured_request_count_v1",
+        "unit": "count",
+        "population": "all_measured_requests",
+        "quantile_method": null,
+        "rounding_policy": "none"
+      },
+      "unit": "count",
+      "baseline_values": [
+        {
+          "repetition_index": 0,
+          "run_id": "run-11111111111111111111111111111111",
+          "value": "10",
+          "sample_count": 10
+        },
+        {
+          "repetition_index": 1,
+          "run_id": "run-22222222222222222222222222222222",
+          "value": "12",
+          "sample_count": 12
+        }
+      ],
+      "candidate_values": [
+        {
+          "repetition_index": 0,
+          "run_id": "run-33333333333333333333333333333333",
+          "value": "14",
+          "sample_count": 14
+        },
+        {
+          "repetition_index": 1,
+          "run_id": "run-44444444444444444444444444444444",
+          "value": "14",
+          "sample_count": 14
+        }
+      ],
+      "paired_differences": [
+        {
+          "block_index": 0,
+          "baseline_run_id": "run-11111111111111111111111111111111",
+          "candidate_run_id": "run-33333333333333333333333333333333",
+          "candidate_minus_baseline": "4"
+        },
+        {
+          "block_index": 1,
+          "baseline_run_id": "run-22222222222222222222222222222222",
+          "candidate_run_id": "run-44444444444444444444444444444444",
+          "candidate_minus_baseline": "2"
+        }
+      ],
+      "baseline_mean": "11",
+      "candidate_mean": "14",
+      "estimate": "3"
+    }
+  ]
+}

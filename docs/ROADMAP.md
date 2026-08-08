@@ -343,9 +343,13 @@ No request pooling, controlled-experiment claim, confidence claim, causal
 claim, prefix-caching claim, or ExitSpec outcome is introduced.
 ```
 
-### v0.2 slice 2 — Predeclared controlled comparisons
+### v0.2 slice 2 — Operator-attested controlled comparisons
 
-The next slice introduces a separate design and result contract. It must:
+Status: implemented; product and public-contract boundary accepted in
+[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md) and
+[CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md).
+
+This slice introduces separate immutable plan and result contracts. It:
 
 - freeze the hypothesis, disjoint arm membership policy, planned repeat count,
   ordered schedule, outcome selectors, estimator, and exclusion policy before
@@ -358,11 +362,23 @@ The next slice introduces a separate design and result contract. It must:
   arithmetic; and
 - remain separate from ExitSpec acceptance.
 
-Confidence intervals require a separately reviewed repeat-count and estimator
-contract. Three runs are an example grouping, not an automatic statistical
-guarantee.
+The v1 implementation is limited to one typed `traffic.concurrency` treatment,
+2–100 seeded permuted pairs, one primary outcome, no exclusions, complete-case
+paired mean-difference arithmetic, and no uncertainty method. Any failed
+control returns `INCOMPARABLE` and suppresses every outcome value.
 
-Prefix caching remains outside slice 1 and is not yet a representable treatment.
+`PREDECLARED` has machine-readable assurance `OPERATOR_ATTESTED`: local
+timestamps and retained digests record the workflow but do not independently
+prove chronology. `COMPARABLE` covers complete equality of the observed v1
+allowlist, not every possible real-world confounder, and is never a causal,
+preference, significance, or acceptance claim.
+
+Confidence intervals require a separately reviewed repeat-count, estimator,
+and uncertainty contract. Three runs are an example design, not an automatic
+statistical guarantee.
+
+Prefix caching remains outside slices 1 and 2 and is not a representable
+treatment.
 It first requires an explicit typed execution control, fingerprint coverage,
 managed-server invocation evidence, and offline verification. A future
 prefix-caching comparison cannot be represented as an unbound label on a

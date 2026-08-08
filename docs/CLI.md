@@ -1,6 +1,6 @@
 # Inferdrome CLI and orchestration
 
-Status: **Implemented for v0.1 hardening; descriptive Trial Set extension accepted**
+Status: **Implemented for v0.1 hardening; Trial Set and controlled-comparison extensions accepted**
 
 Implementation date: **2026-08-06**
 
@@ -202,6 +202,68 @@ prefix caching, or issue ExitSpec outcomes.
 
 The full contract is in [TRIAL_SETS.md](TRIAL_SETS.md).
 
+## Create and verify a controlled comparison
+
+The second v0.2 slice uses a separate immutable design and result. Create a
+plan from two source specifications that are identical except for concurrent
+`traffic.concurrency`:
+
+```bash
+inferdrome comparison-plan create \
+  --baseline-source examples/controlled-concurrency-2.yaml \
+  --candidate-source examples/controlled-concurrency-4.yaml \
+  --title "Concurrency 2 versus 4" \
+  --hypothesis "Concurrency may change attempted throughput" \
+  --repetitions 2 \
+  --primary-outcome attempted_request_throughput_per_s:rate \
+  --runs-root runs \
+  --comparison-plans-root comparison-plans
+```
+
+The command emits preallocated arm run IDs, Trial Set IDs, the exact execution
+schedule, and an out-of-band plan digest. Retain the digest, execute each
+planned run in schedule order with its arm's source, then create the two Trial
+Sets with the exact planned IDs and ordered memberships.
+
+Verify the immutable design bytes against that retained digest at any time:
+
+```bash
+inferdrome comparison-plan verify \
+  comparison-plans/comparison-plan-<id> \
+  --expected-digest "$PLAN_DIGEST"
+```
+
+Create a result only with all three retained input digests:
+
+```bash
+inferdrome comparison-result create \
+  --comparison-plan-id comparison-plan-<id> \
+  --expected-plan-digest "$PLAN_DIGEST" \
+  --baseline-trial-set-id trial-set-<baseline-id> \
+  --expected-baseline-digest "$BASELINE_TRIAL_SET_DIGEST" \
+  --candidate-trial-set-id trial-set-<candidate-id> \
+  --expected-candidate-digest "$CANDIDATE_TRIAL_SET_DIGEST" \
+  --runs-root runs --trial-sets-root trial-sets \
+  --comparison-plans-root comparison-plans \
+  --comparison-results-root comparison-results
+```
+
+Verification is read-only and may anchor the exact result bytes to a retained
+digest:
+
+```bash
+inferdrome comparison-result verify \
+  comparison-results/comparison-result-<id> \
+  --runs-root runs --trial-sets-root trial-sets \
+  --comparison-plans-root comparison-plans \
+  --expected-digest "$COMPARISON_RESULT_DIGEST"
+```
+
+Any unsatisfied control yields `INCOMPARABLE` with no outcome arithmetic. The
+workflow is `OPERATOR_ATTESTED`; it does not provide trusted chronology,
+confidence, causality, preference, or ExitSpec acceptance. The exact contract
+is in [CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md).
+
 ## Local evidence dashboard
 
 Install the optional runtime and start the loopback-only dashboard:
@@ -210,7 +272,9 @@ Install the optional runtime and start the loopback-only dashboard:
 uv sync --extra dashboard
 uv run inferdrome dashboard \
   --runs-root runs \
-  --trial-sets-root trial-sets
+  --trial-sets-root trial-sets \
+  --comparison-plans-root comparison-plans \
+  --comparison-results-root comparison-results
 ```
 
 The default address is `http://127.0.0.1:8787`. Use `--port` to select another
@@ -230,14 +294,22 @@ The Trial Set extension adds read-only browser routes `/trial-sets` and
 snapshot-bound. Detail projections remain `RETROSPECTIVE` and
 `DESCRIPTIVE_ONLY` and disclose projected environment drift.
 
+The controlled-comparison extension adds `/comparisons` and
+`/comparisons/:planId`, backed by GET-only APIs beneath
+`/api/v1/controlled-comparisons`. The design is shown before result controls;
+estimates appear only for verified `COMPARABLE` results. `/compare` remains the
+separate retrospective two-run utility.
+
 Its product and comparison boundaries are frozen in
-[DASHBOARD.md](DASHBOARD.md) and [TRIAL_SETS.md](TRIAL_SETS.md).
+[DASHBOARD.md](DASHBOARD.md), [TRIAL_SETS.md](TRIAL_SETS.md), and
+[CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md).
 
 ## Failure and cancellation behavior
 
 Expected validation, resolution, execution, normalization, reduction, bundle,
-Trial Set, and verification failures print one bounded error to stderr and exit
-nonzero without a traceback. Argument errors use the parser's exit code `2`.
+Trial Set, controlled-comparison, and verification failures print one bounded
+error to stderr and exit nonzero without a traceback. Argument errors use the
+parser's exit code `2`.
 
 `SIGINT` and `SIGTERM` request cooperative cancellation. The subprocess
 supervisor then performs bounded terminate/kill handling. A safely writable

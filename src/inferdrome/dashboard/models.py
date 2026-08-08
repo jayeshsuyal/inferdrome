@@ -4,6 +4,12 @@ from datetime import datetime
 from typing import Literal
 
 from inferdrome.domain.base import FrozenModel
+from inferdrome.domain.controlled_comparison import (
+    ComparisonScheduleSlot,
+    ConcurrencyIndependentVariable,
+    ControlledComparisonResult,
+    OutcomeSelector,
+)
 
 
 class MetricView(FrozenModel):
@@ -158,9 +164,7 @@ class ComparisonContractView(FrozenModel):
 
 
 class RunDetail(FrozenModel):
-    projection_version: Literal["inferdrome.dashboard.v1"] = (
-        "inferdrome.dashboard.v1"
-    )
+    projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
     summary: RunSummary
     hypothesis: str | None
     verification: VerificationView
@@ -197,9 +201,7 @@ class PageView(FrozenModel):
 
 
 class RunIndexResponse(FrozenModel):
-    projection_version: Literal["inferdrome.dashboard.v1"] = (
-        "inferdrome.dashboard.v1"
-    )
+    projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
     generated_at: datetime
     runs: tuple[RunSummary, ...]
     rejected: tuple[RejectedRun, ...]
@@ -230,9 +232,7 @@ class ContextChangeView(FrozenModel):
 
 
 class ComparisonResponse(FrozenModel):
-    projection_version: Literal["inferdrome.dashboard.v1"] = (
-        "inferdrome.dashboard.v1"
-    )
+    projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
     baseline_run_id: str
     candidate_run_id: str
     status: Literal[
@@ -303,9 +303,7 @@ class TrialSetMemberView(FrozenModel):
 
 
 class TrialSetDetail(FrozenModel):
-    projection_version: Literal["inferdrome.dashboard.v1"] = (
-        "inferdrome.dashboard.v1"
-    )
+    projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
     summary: TrialSetSummary
     hypothesis: str | None
     membership_policy: Literal["same_execution_fingerprint_v1"]
@@ -316,9 +314,7 @@ class TrialSetDetail(FrozenModel):
     environment_drift_fields: tuple[str, ...]
     design_status: Literal["RETROSPECTIVE"] = "RETROSPECTIVE"
     inference: Literal["DESCRIPTIVE_ONLY"] = "DESCRIPTIVE_ONLY"
-    request_population_policy: Literal["separate_per_run_v1"] = (
-        "separate_per_run_v1"
-    )
+    request_population_policy: Literal["separate_per_run_v1"] = "separate_per_run_v1"
 
 
 class RejectedTrialSet(FrozenModel):
@@ -335,10 +331,117 @@ class RejectedTrialSet(FrozenModel):
 
 
 class TrialSetIndexResponse(FrozenModel):
-    projection_version: Literal["inferdrome.dashboard.v1"] = (
-        "inferdrome.dashboard.v1"
-    )
+    projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
     generated_at: datetime
     trial_sets: tuple[TrialSetSummary, ...]
     rejected: tuple[RejectedTrialSet, ...]
     page: PageView
+
+
+class ControlledComparisonSummary(FrozenModel):
+    comparison_plan_id: str
+    comparison_plan_digest: str
+    experiment_id: str
+    title: str
+    created_at: datetime
+    treatment_path: Literal["traffic.concurrency"]
+    baseline_value: int
+    candidate_value: int
+    planned_repetitions_per_arm: int
+    baseline_trial_set_id: str
+    candidate_trial_set_id: str
+    design_status: Literal["PREDECLARED"]
+    predeclaration_assurance: Literal["OPERATOR_ATTESTED"]
+    primary_outcome_key: str
+    primary_outcome_label: str
+    primary_outcome_unit: str
+    result_status: Literal[
+        "COMPARABLE",
+        "INCOMPARABLE",
+        "NO_RESULT",
+        "WITHHELD",
+    ]
+    comparison_result_id: str | None
+    comparison_result_digest: str | None
+    estimate: str | None
+    estimate_display_value: str | None
+
+
+class RejectedControlledComparison(FrozenModel):
+    entry: str
+    status: Literal["REJECTED"] = "REJECTED"
+    code: Literal[
+        "UNSAFE_ENTRY",
+        "DECLARATION_UNAVAILABLE",
+        "PLAN_VERIFICATION_FAILED",
+        "RESULT_VERIFICATION_FAILED",
+        "DUPLICATE_RESULT_FOR_PLAN",
+        "ORPHAN_RESULT",
+    ]
+    failure_fingerprint: str
+    message: str = "Controlled comparison declaration could not be verified."
+
+
+class ControlledComparisonIndexResponse(FrozenModel):
+    projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
+    generated_at: datetime
+    comparisons: tuple[ControlledComparisonSummary, ...]
+    rejected: tuple[RejectedControlledComparison, ...]
+    page: PageView
+
+
+class ControlledComparisonArmPlanView(FrozenModel):
+    arm: Literal["BASELINE", "CANDIDATE"]
+    planned_trial_set_id: str
+    source_spec_digest: str
+    expected_execution_fingerprint: str
+    run_ids: tuple[str, ...]
+
+
+class ControlledComparisonPlanView(FrozenModel):
+    schema_version: Literal["inferdrome.controlled-comparison-plan.v1"]
+    comparison_plan_id: str
+    experiment_id: str
+    title: str
+    hypothesis: str
+    created_at: datetime
+    design_status: Literal["PREDECLARED"]
+    arm_membership_policy: Literal["exact_ordered_run_ids_v1"]
+    schedule_policy: Literal["predeclared_permuted_pairs_v1"]
+    schedule_seed: str
+    statistical_unit: Literal["run"]
+    request_population_policy: Literal["separate_per_run_v1"]
+    weighting: Literal["equal_per_run"]
+    planned_repetitions_per_arm: int
+    independent_variable: ConcurrencyIndependentVariable
+    baseline_arm: ControlledComparisonArmPlanView
+    candidate_arm: ControlledComparisonArmPlanView
+    ordered_schedule: tuple[ComparisonScheduleSlot, ...]
+    primary_outcome: OutcomeSelector
+    metric_definitions_digest: str
+    reducer_version: str
+    estimator: Literal["paired_run_mean_difference_v1"]
+    contrast_direction: Literal["candidate_minus_baseline"]
+    uncertainty_method: Literal["none_v1"]
+    missing_data_policy: Literal["incomparable_if_any_outcome_missing_v1"]
+    exclusion_policy: Literal["no_post_assignment_exclusions_v1"]
+    environment_policy: Literal["complete_and_equal_observed_environment_v1"]
+    environment_control_scope: Literal["OBSERVED_V1_ALLOWLIST_ONLY"]
+    predeclaration_anchor: Literal["operator_retained_plan_digest_required_v1"]
+    predeclaration_assurance: Literal["OPERATOR_ATTESTED"]
+
+
+class ControlledComparisonDetail(FrozenModel):
+    projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
+    summary: ControlledComparisonSummary
+    plan: ControlledComparisonPlanView
+    result: ControlledComparisonResult | None
+    baseline_trial_set: TrialSetSummary | None
+    candidate_trial_set: TrialSetSummary | None
+    result_issue: (
+        Literal[
+            "RESULT_VERIFICATION_FAILED",
+            "DUPLICATE_RESULT_FOR_PLAN",
+        ]
+        | None
+    )
