@@ -1,14 +1,18 @@
 # Inferdrome public contracts v1
 
-Status: **Frozen for v0.1**
+Status: **Eight v0.1 schemas frozen; additive Trial Set schema accepted**
 
 Freeze date: **2026-08-05**
 
-This document defines the public evidence boundary established by PR 1. The
-contracts are grounded in the pinned vLLM `0.26.0`
+Trial Set extension date: **2026-08-07**
+
+This document defines the public evidence boundary established by PR 1 and the
+additive post-v0.1 Trial Set aggregate. The eight original evidence contracts
+are grounded in the pinned vLLM `0.26.0`
 [capability matrix](../spikes/vllm-0.26.0/CAPABILITY_MATRIX.md). They expose
 only observations that the spike established as observed or strictly
-derivable.
+derivable. `inferdrome.trial-set.v1` references those immutable evidence
+objects; it does not reinterpret them.
 
 ## Normative artifacts
 
@@ -24,6 +28,12 @@ The committed Draft 2020-12 schemas live in [`schemas/public/v1`](../schemas/pub
 | `metric-definitions.schema.json` | Frozen metric meanings |
 | `measurements.schema.json` | Deterministic reducer output |
 | `evidence-bundle.schema.json` | Sealed bundle descriptor and inventory |
+| `trial-set.schema.json` | Immutable descriptive grouping of repeated runs |
+
+`trial-set.schema.json` is the ninth public schema and an additive post-v0.1
+contract. Publishing it does not change the bytes, fields, validation, or
+meaning of any of the eight original v1 schemas. It is not added to the closed
+sixteen-role evidence-bundle inventory.
 
 The Pydantic models in [`src/inferdrome/domain`](../src/inferdrome/domain) are
 the reference implementation. ExitSpec and other independent consumers must
@@ -63,6 +73,8 @@ are decimal strings, never binary JSON floats.
   The v1 bytes and meanings remain available for existing bundles.
 - Producer compatibility is exact in v0.1: real evidence names vLLM `0.26.0`
   and the version-specific adapter semantics.
+- Adding `inferdrome.trial-set.v1` alongside the frozen schemas does not permit
+  an existing v1 evidence document to acquire new fields or meanings.
 
 ## Shared conventions
 
@@ -70,6 +82,7 @@ Identifiers and paths are intentionally narrow:
 
 ```text
 run ID       run- + 32 lowercase hexadecimal characters
+trial set ID trial-set- + 32 lowercase hexadecimal characters
 request ID   req- + an eight-digit zero-padded sequence index
 digest       sha256: + 64 lowercase hexadecimal characters
 path         normalized relative POSIX path with no dot segments
@@ -84,6 +97,7 @@ inferdrome:execution-fingerprint-v1\0
 inferdrome:request-plan-v1\0
 inferdrome:metric-definitions-v1\0
 inferdrome:bundle-manifest-v1\0
+inferdrome:trial-set-v1\0
 ```
 
 The source-spec digest applies its domain separator to the exact original
@@ -208,6 +222,56 @@ The fake producer is always `SYNTHETIC_ONLY`. Real vLLM evidence uses attached
 endpoint mode and cannot hide that detailed native output contains response
 content. Integrity proves consistency with the received bytes; it does not
 prove authorship, trusted execution, or that an attached server reported truth.
+
+## Descriptive Trial Set aggregate
+
+`inferdrome.trial-set.v1` is an immutable aggregate over 2 through 100 completed
+runs of one execution condition. It is created after its member runs and is
+therefore retrospective. Its timestamp and optional hypothesis are metadata,
+not evidence that a design, outcome, repeat count, or exclusion policy was
+predeclared.
+
+Each ordered member carries a contiguous zero-based `repetition_index`, one
+`run_id`, and that run's retained `bundle_digest`. Run IDs and bundle digests
+are independently unique. Verification resolves IDs beneath one explicit runs
+root, requires each digest, applies full offline bundle verification, and
+authoritatively recalculates every member.
+
+Every member must share the descriptor's experiment ID, execution fingerprint,
+metric-definitions digest, and reducer version. Request-plan digests need not
+match because each run has run-specific request identity. Canonical request
+records remain separate per run and are never pooled into one synthetic
+population.
+
+Descriptive variation gives one available run-level measurement scalar one
+unit of weight, regardless of that run's request sample count. It preserves all
+member points and availability, then uses deterministic Decimal arithmetic for
+minimum, median, maximum, arithmetic mean, span, and sample standard deviation.
+Unavailable measurements remain unavailable rather than becoming zero.
+
+The execution fingerprint does not include every observed environment field.
+Consumers must keep evidence integrity, same-condition membership, environment
+drift, and statistical interpretation separate. The dashboard discloses
+projected environment differences; it does not turn them into experimental
+variables or a causal explanation.
+
+The Trial Set digest is SHA-256 over the exact canonical descriptor bytes under
+`inferdrome:trial-set-v1\0`. It is emitted and retained out of band rather than
+embedded in the descriptor. Expected-digest verification anchors the exact
+aggregate bytes but does not prove authorship, execution truth, or pre-run
+timing.
+
+The descriptor is bounded to 262,144 bytes and 100 members. It is strict,
+closed, canonical, read-only, and addressed by a narrow Trial Set ID. Safe
+readers reject arbitrary paths, symlinks, writable or nonregular descriptors,
+duplicate identities, changed bytes, invalid members, and stale aggregate
+state.
+
+This contract does not define a predeclared controlled comparison, confidence
+or significance, causality, prefix caching, metric directionality, or
+ExitSpec-owned `PASS`, `FAIL`, and `NOT_PROVEN` outcomes. See
+[TRIAL_SETS.md](TRIAL_SETS.md) and
+[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md).
 
 ## Developer commands
 

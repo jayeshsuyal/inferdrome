@@ -24,3 +24,4 @@ a new ADR that supersedes the old one.
 ## Post-v0.1 decisions
 
 - [ADR 0006: Add a local read-only evidence dashboard](0006-local-read-only-evidence-dashboard.md)
+- [ADR 0007: Add immutable descriptive Trial Sets](0007-add-immutable-descriptive-trial-sets.md)

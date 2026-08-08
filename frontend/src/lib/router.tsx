@@ -128,13 +128,19 @@ export function useNavigate(): Navigate {
   return useRouter().navigate;
 }
 
-export function useParams(): { readonly runId?: string } {
-  const { pathname } = useRouter();
-  const match = pathname.match(/^\/(?:runs|evidence)\/([^/]+)\/?$/);
-  if (!match) return {};
+function decodeRouteParam(value: string): string {
   try {
-    return { runId: decodeURIComponent(match[1]) };
+    return decodeURIComponent(value);
   } catch {
-    return { runId: match[1] };
+    return value;
   }
+}
+
+export function useParams(): { readonly runId?: string; readonly trialSetId?: string } {
+  const { pathname } = useRouter();
+  const runMatch = pathname.match(/^\/(?:runs|evidence)\/([^/]+)\/?$/);
+  if (runMatch) return { runId: decodeRouteParam(runMatch[1]) };
+  const trialSetMatch = pathname.match(/^\/trial-sets\/([^/]+)\/?$/);
+  if (trialSetMatch) return { trialSetId: decodeRouteParam(trialSetMatch[1]) };
+  return {};
 }

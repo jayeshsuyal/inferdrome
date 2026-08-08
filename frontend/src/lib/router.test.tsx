@@ -18,8 +18,10 @@ function RouterProbe() {
     <>
       <output aria-label="Current path">{location.pathname}</output>
       <output aria-label="Current run">{params.runId ?? "none"}</output>
+      <output aria-label="Current trial set">{params.trialSetId ?? "none"}</output>
       <NavLink to="/runs" end>Runs</NavLink>
       <Link to="/runs/run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">Open run</Link>
+      <Link to="/trial-sets/trial-set-11111111111111111111111111111111">Open trial set</Link>
     </>
   );
 }
@@ -53,5 +55,17 @@ describe("local dashboard router", () => {
       "aria-label",
       "Current path",
     );
+  });
+
+  it("decodes the trial-set detail route independently from run routes", async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={["/trial-sets"]}><RouterProbe /></MemoryRouter>);
+
+    await user.click(screen.getByRole("link", { name: "Open trial set" }));
+
+    expect(screen.getByLabelText("Current trial set")).toHaveTextContent(
+      "trial-set-11111111111111111111111111111111",
+    );
+    expect(screen.getByLabelText("Current run")).toHaveTextContent("none");
   });
 });

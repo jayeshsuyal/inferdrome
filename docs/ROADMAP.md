@@ -311,16 +311,62 @@ dashboard never issues an ExitSpec-owned acceptance verdict.
 Pairwise inspection in this slice does not create a trial set, pool request
 populations, estimate uncertainty, or make a controlled-experiment claim.
 
-### v0.2 — Repeated trials and controlled comparisons
+### v0.2 slice 1 — Immutable descriptive Trial Sets
 
-- trial sets and comparison objects;
-- execution-fingerprint comparability gate;
-- per-run statistics and run-to-run variation;
-- predeclared experimental variables; and
-- a prefix-caching comparison.
+Status: implemented; product and public-contract boundary accepted in
+[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md) and
+[TRIAL_SETS.md](TRIAL_SETS.md).
 
-Confidence intervals require a defensible repeat count and estimator; three
-runs are an example grouping, not an automatic statistical guarantee.
+This is the first v0.2 vertical slice. It adds repeated-run visibility without
+claiming that a retrospective grouping is a controlled experiment.
+
+Deliver:
+
+- additive `inferdrome.trial-set.v1` public schema without changing any of the
+  eight existing v1 schema files;
+- immutable 2-through-100-run membership bound by `run_id` and
+  `bundle_digest`;
+- one shared experiment ID, execution fingerprint, metric-definition set, and
+  reducer version;
+- authoritative verification and recalculation of every member;
+- separate request populations and equal-per-run descriptive statistics;
+- environment-drift disclosure;
+- an out-of-band, domain-separated Trial Set digest;
+- `trial-set create`, `verify`, and `summarize` CLI operations; and
+- local dashboard Trial Sets index and detail routes.
+
+Gate:
+
+```text
+Every Trial Set remains traceable to immutable verified member bundles.
+No request pooling, controlled-experiment claim, confidence claim, causal
+claim, prefix-caching claim, or ExitSpec outcome is introduced.
+```
+
+### v0.2 slice 2 — Predeclared controlled comparisons
+
+The next slice introduces a separate design and result contract. It must:
+
+- freeze the hypothesis, disjoint arm membership policy, planned repeat count,
+  ordered schedule, outcome selectors, estimator, and exclusion policy before
+  execution;
+- allow only reviewed, typed independent-variable paths;
+- prove that cross-arm execution-fingerprint differences are exactly the
+  predeclared differences;
+- require complete material control context or return `INCOMPARABLE`;
+- preserve one-run statistical units and neutral candidate-minus-baseline
+  arithmetic; and
+- remain separate from ExitSpec acceptance.
+
+Confidence intervals require a separately reviewed repeat-count and estimator
+contract. Three runs are an example grouping, not an automatic statistical
+guarantee.
+
+Prefix caching remains outside slice 1 and is not yet a representable treatment.
+It first requires an explicit typed execution control, fingerprint coverage,
+managed-server invocation evidence, and offline verification. A future
+prefix-caching comparison cannot be represented as an unbound label on a
+Trial Set.
 
 ### v0.2 — Telemetry
 

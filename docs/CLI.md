@@ -1,6 +1,6 @@
 # Inferdrome CLI and orchestration
 
-Status: **Implemented for v0.1 hardening**
+Status: **Implemented for v0.1 hardening; descriptive Trial Set extension accepted**
 
 Implementation date: **2026-08-06**
 
@@ -152,13 +152,65 @@ canonical `inferdrome.measurements.v1` JSON and refuses a stored/recalculated
 disagreement. `summarize` emits a stable human-oriented JSON projection without
 changing the bundle.
 
+## Create, verify, and summarize a Trial Set
+
+The first v0.2 slice groups 2 through 100 completed runs of one execution
+condition into an immutable, retrospective `inferdrome.trial-set.v1`
+descriptor. Repeat `--run` in the intended repetition order:
+
+```bash
+inferdrome trial-set create \
+  --run run-0123456789abcdef0123456789abcdef \
+  --run run-11111111111111111111111111111111 \
+  --title "Repeated serving condition" \
+  --hypothesis "Inspect run-to-run variation" \
+  --runs-root runs \
+  --trial-sets-root trial-sets
+```
+
+Creation verifies and recalculates every member, requires the same experiment
+ID, execution fingerprint, metric-definitions digest, and reducer version, and
+publishes `trial-sets/<trial-set-id>/trial-set.json` read-only. Every member is
+pinned by both `run_id` and `bundle_digest`. The command prints the new Trial
+Set ID and out-of-band digest.
+
+Verify the immutable descriptor and all member bundles, optionally anchoring it
+to the externally retained digest:
+
+```bash
+inferdrome trial-set verify \
+  trial-sets/trial-set-0123456789abcdef0123456789abcdef \
+  --runs-root runs \
+  --expected-digest "$TRIAL_SET_DIGEST"
+```
+
+Produce deterministic run-level variation without pooling requests:
+
+```bash
+inferdrome trial-set summarize \
+  trial-sets/trial-set-0123456789abcdef0123456789abcdef \
+  --runs-root runs \
+  --expected-digest "$TRIAL_SET_DIGEST"
+```
+
+The summary exposes every run-level value and sample count, weights each
+available run equally, and reports Decimal minimum, median, maximum, mean, span,
+and sample standard deviation. Missing values remain unavailable rather than
+becoming zero. Output is `DESCRIPTIVE_ONLY`; these commands do not create a
+predeclared controlled comparison, infer confidence or causality, configure
+prefix caching, or issue ExitSpec outcomes.
+
+The full contract is in [TRIAL_SETS.md](TRIAL_SETS.md).
+
 ## Local evidence dashboard
 
 Install the optional runtime and start the loopback-only dashboard:
 
 ```bash
 uv sync --extra dashboard
-uv run inferdrome dashboard --runs-root runs
+uv run inferdrome dashboard \
+  --runs-root runs \
+  --trial-sets-root trial-sets
 ```
 
 The default address is `http://127.0.0.1:8787`. Use `--port` to select another
@@ -171,14 +223,21 @@ serve response-bearing artifacts, or issue ExitSpec-owned acceptance verdicts.
 The run index is cursor-paginated with at most 200 combined entries per
 response. The server validates the HTTP `Host` header in addition to binding to
 loopback, so non-local hostnames are rejected.
+
+The Trial Set extension adds read-only browser routes `/trial-sets` and
+`/trial-sets/:trialSetId`, with GET-only index and detail APIs beneath
+`/api/v1/trial-sets`. Trial Set discovery is bounded, cursor-paginated, and
+snapshot-bound. Detail projections remain `RETROSPECTIVE` and
+`DESCRIPTIVE_ONLY` and disclose projected environment drift.
+
 Its product and comparison boundaries are frozen in
-[DASHBOARD.md](DASHBOARD.md).
+[DASHBOARD.md](DASHBOARD.md) and [TRIAL_SETS.md](TRIAL_SETS.md).
 
 ## Failure and cancellation behavior
 
 Expected validation, resolution, execution, normalization, reduction, bundle,
-and verification failures print one bounded error to stderr and exit nonzero
-without a traceback. Argument errors use the parser's exit code `2`.
+Trial Set, and verification failures print one bounded error to stderr and exit
+nonzero without a traceback. Argument errors use the parser's exit code `2`.
 
 `SIGINT` and `SIGTERM` request cooperative cancellation. The subprocess
 supervisor then performs bounded terminate/kill handling. A safely writable

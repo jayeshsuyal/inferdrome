@@ -13,6 +13,7 @@ class DigestDomain(StrEnum):
     REQUEST_PLAN = "request-plan-v1"
     METRIC_DEFINITIONS = "metric-definitions-v1"
     BUNDLE_MANIFEST = "bundle-manifest-v1"
+    TRIAL_SET = "trial-set-v1"
 
 
 def digest_bytes(domain: DigestDomain, payload: bytes) -> str:

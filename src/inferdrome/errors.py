@@ -37,12 +37,20 @@ class VerificationError(InferdromeError):
     """An offline evidence-bundle integrity invariant failed."""
 
 
+class TrialSetError(InferdromeError):
+    """A repeated-trial grouping could not be created or verified safely."""
+
+
 class DashboardError(InferdromeError):
     """The local read-only dashboard could not be started or queried safely."""
 
 
 class DashboardRunNotFound(DashboardError):
     """A dashboard run ID was not present in the verified index."""
+
+
+class DashboardTrialSetNotFound(DashboardError):
+    """A dashboard trial-set ID was not present in the verified index."""
 
 
 class DashboardPaginationError(DashboardError):

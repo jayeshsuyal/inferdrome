@@ -14,8 +14,14 @@ from inferdrome.dashboard.models import (
     ComparisonResponse,
     RunDetail,
     RunIndexResponse,
+    TrialSetDetail,
+    TrialSetIndexResponse,
 )
-from inferdrome.errors import DashboardPaginationError, DashboardRunNotFound
+from inferdrome.errors import (
+    DashboardPaginationError,
+    DashboardRunNotFound,
+    DashboardTrialSetNotFound,
+)
 
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
@@ -99,6 +105,32 @@ def create_app(
             return index.compare(baseline_run_id, candidate_run_id)
         except DashboardRunNotFound:
             raise HTTPException(status_code=404, detail="run not found") from None
+
+    @app.get("/api/v1/trial-sets", response_model=TrialSetIndexResponse)
+    def list_trial_sets(
+        cursor: Annotated[str | None, Query(max_length=128)] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> TrialSetIndexResponse:
+        try:
+            return index.list_trial_sets(cursor=cursor, limit=limit)
+        except DashboardPaginationError:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid trial-set pagination cursor",
+            ) from None
+
+    @app.get(
+        "/api/v1/trial-sets/{trial_set_id}",
+        response_model=TrialSetDetail,
+    )
+    def get_trial_set(trial_set_id: str) -> TrialSetDetail:
+        try:
+            return index.get_trial_set(trial_set_id)
+        except DashboardTrialSetNotFound:
+            raise HTTPException(
+                status_code=404,
+                detail="trial set not found",
+            ) from None
 
     selected_static = static_dir or Path(__file__).with_name("static")
     if (selected_static / "index.html").is_file():

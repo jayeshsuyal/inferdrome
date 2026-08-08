@@ -1,10 +1,12 @@
 # Inferdrome local evidence dashboard
 
-Status: **Frozen initial product contract**
+Status: **Frozen initial product contract; Trial Sets extension accepted**
 
-Decision record: [ADR 0006](adr/0006-local-read-only-evidence-dashboard.md)
+Decision records:
+[ADR 0006](adr/0006-local-read-only-evidence-dashboard.md) and
+[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md)
 
-Release scope: **Post-v0.1 product slice**
+Release scope: **Post-v0.1 product slices**
 
 The dashboard makes Inferdrome runs understandable without weakening the
 evidence model. It is a local, read-only view over verified bundles. Inferdrome
@@ -24,7 +26,8 @@ the dashboard helps a user:
 2. Understand the measurements and execution context of one run.
 3. Compare two runs only where their evidence is meaningfully comparable.
 4. Inspect verification, provenance, artifact, and sensitivity information.
-5. Distinguish Inferdrome evidence status from ExitSpec acceptance outcomes.
+5. Inspect retrospective run-to-run variation across an immutable Trial Set.
+6. Distinguish Inferdrome evidence status from ExitSpec acceptance outcomes.
 
 The dashboard does not make evidence more trustworthy than the underlying
 bundle. It makes the bundle's existing guarantees and limitations visible.
@@ -34,9 +37,9 @@ bundle. It makes the bundle's existing guarantees and limitations visible.
 The normative flow is:
 
 ```text
-configured runs root
+configured runs root + configured Trial Set root
         ↓
-bounded bundle discovery
+bounded bundle and Trial Set discovery
         ↓
 Python offline verification
         ↓
@@ -44,7 +47,7 @@ Python deterministic recalculation
         ↓
 typed, bounded display projection
         ↓
-Runs / Run detail / Compare / Evidence
+Runs / Run detail / Compare / Evidence / Trial Sets / Trial Set detail
 ```
 
 The following invariants apply:
@@ -54,6 +57,8 @@ The following invariants apply:
 - Displayed measurement values preserve metric identity, definition, unit,
   population, aggregation, sample count, and availability semantics.
 - Missing and unavailable observations never become zero.
+- Trial Set variation uses one run-level scalar per available member with equal
+  run weighting; browser state never pools request populations.
 - A projection can omit sensitive or oversized data, but it cannot invent or
   rewrite evidence.
 - A projection identifies the bundle digest from which it was produced.
@@ -125,6 +130,12 @@ follows at most five 200-entry pages, matching the 1,000-entry discovery bound;
 each cursor is bound to the ordered run/digest snapshot, so if the index changes
 between pages the request fails closed and asks for a fresh load.
 
+`GET /api/v1/trial-sets` uses the same 1-through-200 page limit and an opaque,
+snapshot-bound cursor. Trial Set discovery examines at most 200 direct entries,
+and each immutable descriptor contains at most 100 members. Detail lookup uses
+`GET /api/v1/trial-sets/{trial_set_id}`; the identifier is never interpreted as
+an arbitrary path.
+
 Untouched native artifacts remain part of the evidence bundle, but the
 dashboard does not serve arbitrary bundle files. Response-bearing native output
 is excluded from browser projections by default. Request prompts, generated
@@ -140,10 +151,11 @@ downgrades the bundle's response-content sensitivity classification.
 
 ## Information architecture
 
-The accepted visual direction is the balanced Runs / Run detail / Compare /
-Evidence design. It uses familiar hierarchy for fast comprehension while
-keeping evidence integrity and provenance visible. This document is the
-committed reference; implementation does not depend on an external design file.
+The accepted visual direction begins with the balanced Runs / Run detail /
+Compare / Evidence design. The Trial Sets extension adds one index and one
+detail view using the same hierarchy, evidence status, responsive behavior, and
+neutral language. This document is the committed reference; implementation
+does not depend on an external design file.
 
 ### Runs
 
@@ -212,6 +224,57 @@ It shows:
 Integrity is not labeled authorship, execution truth, trusted attestation, or
 customer acceptance.
 
+### Trial Sets
+
+The Trial Sets index answers, "Which immutable repeated-run groupings are
+available, and can every member still be verified?"
+
+The browser route is `/trial-sets`. It shows:
+
+- searchable verified Trial Sets ordered by latest member run;
+- Trial Set identity, title, experiment, model, member count, and short
+  fingerprint and digest context;
+- evidence-eligibility diversity and projected environment status; and
+- bounded rejection codes for unsafe, unavailable, duplicate, or unverifiable
+  declarations.
+
+The index does not infer membership from run title or experiment ID. It reads
+only explicit immutable `inferdrome.trial-set.v1` descriptors beneath the
+configured Trial Set root.
+
+### Trial Set detail
+
+The detail route `/trial-sets/:trialSetId` answers, "What was grouped, how did
+the run-level measurements vary, and what prevents stronger interpretation?"
+
+It shows:
+
+- `RETROSPECTIVE` design status and `DESCRIPTIVE_ONLY` inference status;
+- the out-of-band Trial Set digest, membership policy, execution fingerprint,
+  metric-definitions digest, and reducer version;
+- ordered member runs with exact run and bundle identities;
+- total and available run counts for each metric;
+- backend-derived minimum, median, maximum, arithmetic mean, span, and sample
+  standard deviation;
+- every run-level point with its exact value and sample count; and
+- `CONSISTENT` or `DRIFT_DETECTED` environment status plus changed field names.
+
+Every point represents one verified run-level measurement and has equal run
+weight. Request records remain separate. Missing values remain unavailable;
+they do not become zero. The browser renders the backend projection and does
+not recalculate variation.
+
+Environment consistency means only that projected fields did not differ. It is
+not proof that all material environment facts were observed or controlled.
+Drift is disclosed, not promoted into a declared treatment.
+
+Trial Set validity, environment consistency, descriptive sufficiency, and
+customer acceptance remain separate concepts. No chart or label claims
+confidence, significance, stability, causality, improvement, regression,
+winner status, recommendation, or an ExitSpec outcome.
+
+The full aggregate contract is in [TRIAL_SETS.md](TRIAL_SETS.md).
+
 ## Pairwise comparison contract
 
 Every pair receives one of three conceptual outcomes:
@@ -242,6 +305,10 @@ The verified execution fingerprint is part of the comparison contract. Every
 fingerprint input is either checked as a hard measurement contract or projected
 as an explicit context field. A fingerprint change without a corresponding
 declared contract or context change is incomparable and suppresses all deltas.
+
+This pairwise policy remains independent of Trial Sets. Neither
+`COMPARABLE_WITH_CONTEXT_CHANGES` nor membership in a valid retrospective Trial
+Set is upgraded into a predeclared controlled-comparison claim.
 
 For supported matching values, a delta is the candidate value minus the
 baseline value, with unit and calculation displayed. Relative percentages are
@@ -309,7 +376,9 @@ visible through the ordinary evidence contract.
 - Bundle upload, mutation, repair, deletion, or resealing.
 - Benchmark execution or orchestration from the browser.
 - Raw arbitrary-file browsing or unrestricted native-content download.
-- Statistical trial sets, confidence intervals, or pooled populations.
+- Predeclared controlled comparisons, confidence intervals, significance, or
+  pooled request populations.
+- Prefix-caching controls or a canonical prefix-caching experiment.
 - Causal explanations, automatic optimization, or AI tuning advice.
 - Customer acceptance authoring or evaluation.
 - Replacement of the CLI, public evidence schemas, or ExitSpec importer.
@@ -332,6 +401,14 @@ The initial dashboard contract is satisfied only when:
    support keyboard and narrow-screen use.
 10. A genuine real-GPU bundle appears through the ordinary bundle path without
     UI-specific ingestion or measurement code.
+11. Every displayed Trial Set is traceable to 2 through 100 currently verified
+    `run_id` and `bundle_digest` member pairs.
+12. Trial Set summaries preserve all run-level points, use equal run weighting,
+    and never pool request records.
+13. Environment drift is disclosed independently from integrity and does not
+    become a controlled or causal claim.
+14. Trial Set views remain `RETROSPECTIVE` and `DESCRIPTIVE_ONLY` and never
+    issue confidence, significance, prefix-caching, or ExitSpec claims.
 
 ## Development gate
 
@@ -345,8 +422,9 @@ INFERDROME_PYTHON=.venv/bin/python ./scripts/dashboard_gate.sh
 ```
 
 The gate type-checks, tests, and builds the frontend, then runs the
-dashboard's Python projection, discovery, comparison, API, packaging, and
-server tests. It also builds a wheel, installs that wheel into an isolated
-target, and proves the installed HTML, deep links, API, and referenced assets
-are served. The repository's existing `scripts/engineering_gate.sh` remains the
-authoritative v0.1 evidence pipeline gate.
+dashboard's Python projection, discovery, pairwise comparison, Trial Set,
+API, packaging, and server tests. It also builds a wheel, installs that wheel
+into an isolated target, and proves the installed HTML, deep links, API, and
+referenced assets are served. The repository's existing
+`scripts/engineering_gate.sh` remains the authoritative v0.1 evidence pipeline
+gate.

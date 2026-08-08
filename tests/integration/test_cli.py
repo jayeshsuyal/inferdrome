@@ -9,6 +9,7 @@ from inferdrome.cli import main
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "run-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+SECOND_RUN_ID = "run-ffffffffffffffffffffffffffffffff"
 
 
 def test_cli_fake_run_inspect_verify_reduce_and_summarize(
@@ -192,3 +193,85 @@ def test_cli_managed_options_fail_before_reserving_fake_workspace(
     assert captured.out == ""
     assert "managed vLLM is only valid for attached execution" in captured.err
     assert not runs_root.exists()
+
+
+def test_cli_trial_set_create_verify_and_summarize(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runs_root = tmp_path / "runs"
+    trial_sets_root = tmp_path / "trial-sets"
+    source = str(REPOSITORY_ROOT / "examples" / "fake-smoke.yaml")
+    for run_id in (RUN_ID, SECOND_RUN_ID):
+        assert (
+            main(
+                [
+                    "run",
+                    source,
+                    "--runs-root",
+                    str(runs_root),
+                    "--run-id",
+                    run_id,
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "trial-set",
+                "create",
+                "--run",
+                RUN_ID,
+                "--run",
+                SECOND_RUN_ID,
+                "--title",
+                "CLI repeated trial",
+                "--runs-root",
+                str(runs_root),
+                "--trial-sets-root",
+                str(trial_sets_root),
+                "--trial-set-id",
+                "trial-set-11111111111111111111111111111111",
+            ]
+        )
+        == 0
+    )
+    created = json.loads(capsys.readouterr().out)
+    assert created["member_count"] == 2
+
+    assert (
+        main(
+            [
+                "trial-set",
+                "verify",
+                created["path"],
+                "--runs-root",
+                str(runs_root),
+                "--expected-digest",
+                created["trial_set_digest"],
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["valid"] is True
+
+    assert (
+        main(
+            [
+                "trial-set",
+                "summarize",
+                created["path"],
+                "--runs-root",
+                str(runs_root),
+            ]
+        )
+        == 0
+    )
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["inference"] == "DESCRIPTIVE_ONLY"
+    assert summary["weighting"] == "EQUAL_PER_RUN"
+    assert summary["request_population_policy"] == "separate_per_run_v1"
+    assert all(item["available_run_count"] == 2 for item in summary["variations"])

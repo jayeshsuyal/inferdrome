@@ -11,12 +11,16 @@ from fastapi.testclient import TestClient
 
 import inferdrome
 from inferdrome.dashboard.api import create_app
+from inferdrome.domain.trial_set import TrialSet
+from inferdrome.trials import verify_trial_set
 
 _ASSET_REFERENCE = re.compile(r'(?:src|href)="(/assets/[^"?]+)')
 _CSS_ASSET_REFERENCE = re.compile(r"url\((/assets/[^)?]+)")
 
 
 def verify_install(expected_package_root: Path | None = None) -> None:
+    if TrialSet.__name__ != "TrialSet" or not callable(verify_trial_set):
+        raise AssertionError("installed trial-set runtime is unavailable")
     package_file = Path(inferdrome.__file__).resolve()
     if expected_package_root is not None and not package_file.is_relative_to(
         expected_package_root.resolve()
@@ -68,15 +72,24 @@ def verify_install(expected_package_root: Path | None = None) -> None:
         with TestClient(app) as client:
             dashboard = client.get("/")
             deep_link = client.get("/compare")
+            trial_deep_link = client.get("/trial-sets")
             health = client.get("/api/v1/health")
+            trial_sets = client.get("/api/v1/trial-sets?limit=200")
             assets = [client.get(asset_path) for asset_path in sorted(asset_paths)]
 
     if dashboard.status_code != 200 or "Inferdrome" not in dashboard.text:
         raise AssertionError("installed dashboard HTML is not served")
     if deep_link.status_code != 200 or deep_link.content != dashboard.content:
         raise AssertionError("installed dashboard deep links are not served")
+    if (
+        trial_deep_link.status_code != 200
+        or trial_deep_link.content != dashboard.content
+    ):
+        raise AssertionError("installed trial-set deep link is not served")
     if health.status_code != 200 or health.json() != {"status": "ok"}:
         raise AssertionError("installed dashboard API health route failed")
+    if trial_sets.status_code != 200 or trial_sets.json().get("trial_sets") != []:
+        raise AssertionError("installed trial-set API route failed")
     if any(response.status_code != 200 for response in assets):
         raise AssertionError("one or more installed dashboard assets are not served")
 
