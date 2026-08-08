@@ -130,7 +130,7 @@ def _format_decimal(value: Decimal, places: int = 2) -> str:
 def display_measurement(value: int | str, unit: Unit) -> str:
     exact = Decimal(str(value))
     if unit is Unit.COUNT:
-        return f"{int(exact):,}"
+        return format(exact, ",f")
     if unit is Unit.RATIO:
         return f"{_format_decimal(exact * 100)}%"
     if unit is Unit.NANOSECONDS:

@@ -1,6 +1,6 @@
 # Inferdrome v0.1 threat model
 
-Status: **Frozen baseline for v0.1**
+Status: **Frozen baseline for v0.1; controlled-comparison supplement accepted**
 
 Threat-model date: **2026-08-05**
 
@@ -210,6 +210,43 @@ v0.1 performs no automatic retry.
 7. Secrets are never intentionally written to the evidence bundle.
 8. Content sensitivity is determined by all artifacts, including native output.
 9. Digest verification is never described as execution attestation.
+
+## Post-v0.1 controlled-comparison supplement
+
+Controlled-comparison plans, results, and their retained out-of-band digests
+are additional protected assets. Their roots and descriptors are untrusted
+filesystem input; plan authors and operators remain inside the operational
+trust boundary rather than becoming independently attested identities.
+
+The comparison reader accepts only validated direct-child IDs and an exact
+one-file immutable descriptor directory. It opens directory-relative with
+no-follow semantics, requires a regular file with one hard link, enforces byte
+and entry bounds, and checks stable file and directory identity around reads.
+Canonical bytes, closed schemas, distinct plan/result digest domains, retained
+expected digests, exact member IDs, and full bundle re-verification address
+accidental drift, substitution, unsafe paths, ambiguous inventory, stale Trial
+Sets, invented arithmetic, selective membership, and result/plan mismatch.
+
+The treatment is a closed typed union containing only
+`traffic.concurrency`. Full resolved arm specifications and recomputed
+fingerprints must differ at exactly that path. Six closed result controls make
+schedule, membership, environment, and outcome failures explicit; any failure
+returns `INCOMPARABLE` and the public result contains no outcome values. This
+prevents a failed control from leaking a selectively filtered estimate.
+
+These controls do not address a malicious operator backdating a plan,
+fabricating a complete internally consistent run, manipulating the host clock,
+or controlling an unobserved confounder. `PREDECLARED` is therefore paired with
+`OPERATOR_ATTESTED`, and local plan-order checks are internal consistency only.
+Environment equality is explicitly `OBSERVED_V1_ALLOWLIST_ONLY`; unobserved
+host, service, thermal, network, or workload conditions may still differ.
+
+Likewise, plan and result digests prove consistency with retained bytes, not
+authorship, chronology, execution truth, causal identification, statistical
+significance, preference, or customer acceptance. Independent chronology would
+require a future signed plan-to-assignment binding and a trusted timestamp or
+transparency receipt. Broader causal claims would require separately reviewed
+design and observation controls.
 
 ## Future controls
 

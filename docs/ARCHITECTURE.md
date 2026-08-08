@@ -1,6 +1,6 @@
 # Inferdrome architecture
 
-Status: **Normative for v0.1; public schemas frozen; dashboard and descriptive Trial Set extensions accepted**
+Status: **Normative for v0.1; public schemas frozen; dashboard, Trial Set, and controlled-comparison extensions accepted**
 
 ## System shape
 
@@ -224,6 +224,39 @@ The normative Trial Set boundary is defined in
 [TRIAL_SETS.md](TRIAL_SETS.md) and
 [ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md).
 
+### Operator-attested controlled comparisons
+
+The second v0.2 slice adds separate immutable
+`inferdrome.controlled-comparison-plan.v1` and
+`inferdrome.controlled-comparison-result.v1` artifacts outside evidence
+bundles. A plan freezes two complete resolved arms, one reviewed
+`traffic.concurrency` treatment, preallocated run and Trial Set IDs, a seeded
+permuted-pair schedule, one primary outcome, a complete-case paired estimator,
+and no post-assignment exclusions or uncertainty method.
+
+Plan creation verifies that the complete resolved specifications and their
+execution-fingerprint projections differ at exactly the declared treatment.
+It also refuses already-reserved planned run IDs. These controls record an
+operator workflow; `PREDECLARED` is explicitly `OPERATOR_ATTESTED` because no
+trusted timestamp or signed plan-to-run binding exists.
+
+Result creation anchors the exact plan and both exact Trial Set digests, then
+reuses bounded bundle verification and deterministic recalculation for every
+member. Six ordered controls cover local plan order, exact membership,
+observed schedule, declared fingerprint difference, complete and equal
+observed-v1 environment, and outcome coverage and semantics. Any unsatisfied
+control produces `INCOMPARABLE` and suppresses all outcome fields.
+
+A comparable result preserves one equal-weight run scalar per arm member and
+calculates the Decimal mean of paired candidate-minus-baseline differences.
+Request records remain owned by each run and are never pooled. Comparability is
+limited to `OBSERVED_V1_ALLOWLIST_ONLY`; it is not chronology proof, causal
+inference, significance, preference, or ExitSpec acceptance.
+
+The normative boundary is defined in
+[CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md) and
+[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md).
+
 ### ExitSpec importer
 
 ExitSpec maintains its own safe reader and metric implementation. It may vendor
@@ -283,6 +316,20 @@ the `inferdrome:trial-set-v1\0` domain. It is emitted out of band rather than
 embedded in the descriptor. The digest anchors the aggregate's exact ordered
 `run_id` and `bundle_digest` references; it does not prove authorship,
 execution truth, or that the grouping existed before its runs.
+
+### `comparison_plan_digest`
+
+Hash of the exact canonical controlled-comparison plan bytes under the
+`inferdrome:comparison-plan-v1\0` domain. It anchors the frozen design and is
+supplied out of band when creating or verifying a result. It does not prove
+when or by whom the plan was created.
+
+### `comparison_result_digest`
+
+Hash of the exact canonical controlled-comparison result bytes under the
+`inferdrome:comparison-result-v1\0` domain. It anchors the verified control
+states and any comparable arithmetic but does not prove execution truth,
+causality, or acceptance.
 
 ## Reference v0.1 bundle layout
 
@@ -436,15 +483,19 @@ flag.
 
 ## Extension path
 
-The additive Trial Set contract extends the evidence model without changing
-v0.1's artifact, provenance, or request-population boundaries. Later versions
-may add a separately predeclared controlled-comparison design, telemetry,
-broader deployment orchestration, routing decisions, signed manifests,
-additional producers, and hosted dashboard operation.
+The additive Trial Set and controlled-comparison contracts extend the evidence
+model without changing v0.1's artifact, provenance, or request-population
+boundaries. Later versions may add trusted plan chronology, reviewed additional
+treatments, uncertainty methods, telemetry, broader deployment orchestration,
+routing decisions, signed manifests, additional producers, and hosted
+dashboard operation.
 
 The local dashboard's initial pairwise inspection is not a Trial Set or a
 controlled comparison. A descriptive Trial Set is also not a confidence,
-significance, causal, prefix-caching, or acceptance claim. Prefix caching first
-requires an explicit typed execution control and fingerprint-capable contract.
+significance, causal, prefix-caching, or acceptance claim. A verified controlled
+comparison narrows observed configuration and environment differences but still
+does not establish chronology, causality, preference, or acceptance. Prefix
+caching first requires an explicit typed execution control and
+fingerprint-capable contract.
 The v0.1 managed launch remains one narrow, loopback-only NVIDIA proof profile
 rather than a general deployment system.

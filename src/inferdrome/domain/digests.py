@@ -14,6 +14,8 @@ class DigestDomain(StrEnum):
     METRIC_DEFINITIONS = "metric-definitions-v1"
     BUNDLE_MANIFEST = "bundle-manifest-v1"
     TRIAL_SET = "trial-set-v1"
+    COMPARISON_PLAN = "comparison-plan-v1"
+    COMPARISON_RESULT = "comparison-result-v1"
 
 
 def digest_bytes(domain: DigestDomain, payload: bytes) -> str:

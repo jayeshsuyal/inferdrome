@@ -101,14 +101,19 @@ export function Link({ children, onClick, target, to, ...props }: LinkProps) {
 
 interface NavLinkProps extends LinkProps {
   readonly end?: boolean;
+  readonly activeOn?: readonly string[];
 }
 
-export function NavLink({ className, end = false, to, ...props }: NavLinkProps) {
+export function NavLink({ activeOn = [], className, end = false, to, ...props }: NavLinkProps) {
   const { pathname } = useRouter();
-  const destination = internalPath(to)?.split(/[?#]/, 1)[0] ?? "";
-  const active = end
-    ? pathname === destination
-    : pathname === destination || pathname.startsWith(`${destination}/`);
+  const destinations = [to, ...activeOn]
+    .map((destination) => internalPath(destination)?.split(/[?#]/, 1)[0] ?? "")
+    .filter(Boolean);
+  const active = destinations.some((destination) => (
+    end
+      ? pathname === destination
+      : pathname === destination || pathname.startsWith(`${destination}/`)
+  ));
   const classes = [className, active ? "active" : null].filter(Boolean).join(" ");
   return <Link {...props} className={classes || undefined} to={to} aria-current={active ? "page" : undefined} />;
 }
@@ -136,11 +141,19 @@ function decodeRouteParam(value: string): string {
   }
 }
 
-export function useParams(): { readonly runId?: string; readonly trialSetId?: string } {
+export function useParams(): {
+  readonly comparisonPlanId?: string;
+  readonly runId?: string;
+  readonly trialSetId?: string;
+} {
   const { pathname } = useRouter();
   const runMatch = pathname.match(/^\/(?:runs|evidence)\/([^/]+)\/?$/);
   if (runMatch) return { runId: decodeRouteParam(runMatch[1]) };
   const trialSetMatch = pathname.match(/^\/trial-sets\/([^/]+)\/?$/);
   if (trialSetMatch) return { trialSetId: decodeRouteParam(trialSetMatch[1]) };
+  const comparisonMatch = pathname.match(/^\/comparisons\/([^/]+)\/?$/);
+  if (comparisonMatch) {
+    return { comparisonPlanId: decodeRouteParam(comparisonMatch[1]) };
+  }
   return {};
 }

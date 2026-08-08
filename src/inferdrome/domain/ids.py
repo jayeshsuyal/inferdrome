@@ -2,6 +2,7 @@
 
 import hashlib
 import secrets
+from decimal import Decimal
 from typing import Annotated
 
 from pydantic import AfterValidator, StringConstraints
@@ -21,6 +22,14 @@ RunId = Annotated[
 TrialSetId = Annotated[
     str,
     StringConstraints(pattern=r"^trial-set-[0-9a-f]{32}$"),
+]
+ComparisonPlanId = Annotated[
+    str,
+    StringConstraints(pattern=r"^comparison-plan-[0-9a-f]{32}$"),
+]
+ComparisonResultId = Annotated[
+    str,
+    StringConstraints(pattern=r"^comparison-result-[0-9a-f]{32}$"),
 ]
 RequestId = Annotated[
     str,
@@ -70,6 +79,26 @@ DecimalString = Annotated[
     str,
     StringConstraints(pattern=r"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$"),
 ]
+
+
+def _reject_negative_zero(value: str) -> str:
+    if value.startswith("-") and Decimal(value) == 0:
+        raise ValueError("signed decimal strings cannot represent negative zero")
+    return value
+
+
+SignedDecimalString = Annotated[
+    str,
+    StringConstraints(
+        max_length=64,
+        pattern=r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$",
+    ),
+    AfterValidator(_reject_negative_zero),
+]
+ScheduleSeed = Annotated[
+    str,
+    StringConstraints(pattern=r"^[0-9a-f]{64}$"),
+]
 NonEmptyText = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
 
 
@@ -100,6 +129,18 @@ def new_trial_set_id() -> str:
     """Create a random trial-set identifier independent of its member runs."""
 
     return f"trial-set-{secrets.token_hex(16)}"
+
+
+def new_comparison_plan_id() -> str:
+    """Create a random identity for one immutable comparison plan."""
+
+    return f"comparison-plan-{secrets.token_hex(16)}"
+
+
+def new_comparison_result_id() -> str:
+    """Create a random identity for one immutable comparison result."""
+
+    return f"comparison-result-{secrets.token_hex(16)}"
 
 
 def request_id_from_index(sequence_index: int) -> str:

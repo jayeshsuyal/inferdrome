@@ -1,0 +1,206 @@
+{
+  "schema_version": "inferdrome.controlled-comparison-plan.v1",
+  "comparison_plan_id": "comparison-plan-11111111111111111111111111111111",
+  "experiment_id": "inferdrome-smoke",
+  "title": "Concurrency controlled comparison",
+  "hypothesis": "Concurrency may change measured request throughput.",
+  "created_at": "2026-08-07T00:00:00Z",
+  "design_status": "PREDECLARED",
+  "arm_membership_policy": "exact_ordered_run_ids_v1",
+  "schedule_policy": "predeclared_permuted_pairs_v1",
+  "schedule_seed": "0000000000000000000000000000000000000000000000000000000000000000",
+  "statistical_unit": "run",
+  "request_population_policy": "separate_per_run_v1",
+  "weighting": "equal_per_run",
+  "planned_repetitions_per_arm": 2,
+  "independent_variable": {
+    "value_type": "integer",
+    "path": "traffic.concurrency",
+    "baseline_value": 2,
+    "candidate_value": 4
+  },
+  "baseline_arm": {
+    "arm": "BASELINE",
+    "planned_trial_set_id": "trial-set-11111111111111111111111111111111",
+    "source_spec_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "expected_execution_fingerprint": "sha256:42bba15d697ca168a2976ad4d7b9685aeb5543d99b6d255f229a3390edebac34",
+    "resolved_experiment": {
+      "schema_version": "inferdrome.experiment.v1",
+      "experiment": {
+        "id": "inferdrome-smoke",
+        "title": "Inferdrome schema smoke test",
+        "hypothesis": null
+      },
+      "execution": {
+        "mode": "attached_endpoint",
+        "adapter": "vllm_bench_serve",
+        "adapter_version": "1.0.0",
+        "producer_name": "vllm",
+        "producer_version": "0.26.0",
+        "max_runtime_seconds": 900,
+        "max_measured_requests": 100
+      },
+      "target": {
+        "engine": "vllm",
+        "endpoint": "http://127.0.0.1:8000/",
+        "api": "openai_chat_completions",
+        "model": "inferdrome/mock-model",
+        "model_revision": null,
+        "tokenizer_revision": null,
+        "engine_version": null
+      },
+      "workload": {
+        "path": "examples/workloads/smoke.jsonl",
+        "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "prompt_content_policy": "include",
+        "requested_output_tokens": 2,
+        "temperature": "0",
+        "seed": 42
+      },
+      "traffic": {
+        "kind": "concurrent",
+        "concurrency": 2,
+        "warmup_requests": 2,
+        "measured_requests": 1
+      },
+      "measurement": {
+        "streaming": true,
+        "ttft_definition": "vllm_first_choices_event_v0_26",
+        "choices_span_definition": "last_choices_event_span_v1",
+        "metric_definitions_version": "1.0.0",
+        "reducer_version": "1.0.0"
+      },
+      "evidence": {
+        "native_output_sensitivity": "RESPONSE_CONTENT",
+        "canonical_response_content": "omit",
+        "include_request_plan": true
+      },
+      "links": {
+        "exitspec_contract_digest": null
+      }
+    },
+    "run_ids": [
+      "run-11111111111111111111111111111111",
+      "run-22222222222222222222222222222222"
+    ]
+  },
+  "candidate_arm": {
+    "arm": "CANDIDATE",
+    "planned_trial_set_id": "trial-set-22222222222222222222222222222222",
+    "source_spec_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "expected_execution_fingerprint": "sha256:30fc59ca7dbe2d2b8698b3f24e87a140bb0784562eb06e80ade57c5ffd41520f",
+    "resolved_experiment": {
+      "schema_version": "inferdrome.experiment.v1",
+      "experiment": {
+        "id": "inferdrome-smoke",
+        "title": "Inferdrome schema smoke test",
+        "hypothesis": null
+      },
+      "execution": {
+        "mode": "attached_endpoint",
+        "adapter": "vllm_bench_serve",
+        "adapter_version": "1.0.0",
+        "producer_name": "vllm",
+        "producer_version": "0.26.0",
+        "max_runtime_seconds": 900,
+        "max_measured_requests": 100
+      },
+      "target": {
+        "engine": "vllm",
+        "endpoint": "http://127.0.0.1:8000/",
+        "api": "openai_chat_completions",
+        "model": "inferdrome/mock-model",
+        "model_revision": null,
+        "tokenizer_revision": null,
+        "engine_version": null
+      },
+      "workload": {
+        "path": "examples/workloads/smoke.jsonl",
+        "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "prompt_content_policy": "include",
+        "requested_output_tokens": 2,
+        "temperature": "0",
+        "seed": 42
+      },
+      "traffic": {
+        "kind": "concurrent",
+        "concurrency": 4,
+        "warmup_requests": 2,
+        "measured_requests": 1
+      },
+      "measurement": {
+        "streaming": true,
+        "ttft_definition": "vllm_first_choices_event_v0_26",
+        "choices_span_definition": "last_choices_event_span_v1",
+        "metric_definitions_version": "1.0.0",
+        "reducer_version": "1.0.0"
+      },
+      "evidence": {
+        "native_output_sensitivity": "RESPONSE_CONTENT",
+        "canonical_response_content": "omit",
+        "include_request_plan": true
+      },
+      "links": {
+        "exitspec_contract_digest": null
+      }
+    },
+    "run_ids": [
+      "run-33333333333333333333333333333333",
+      "run-44444444444444444444444444444444"
+    ]
+  },
+  "ordered_schedule": [
+    {
+      "sequence_index": 0,
+      "block_index": 0,
+      "within_block_position": 0,
+      "arm": "BASELINE",
+      "repetition_index": 0,
+      "run_id": "run-11111111111111111111111111111111"
+    },
+    {
+      "sequence_index": 1,
+      "block_index": 0,
+      "within_block_position": 1,
+      "arm": "CANDIDATE",
+      "repetition_index": 0,
+      "run_id": "run-33333333333333333333333333333333"
+    },
+    {
+      "sequence_index": 2,
+      "block_index": 1,
+      "within_block_position": 0,
+      "arm": "BASELINE",
+      "repetition_index": 1,
+      "run_id": "run-22222222222222222222222222222222"
+    },
+    {
+      "sequence_index": 3,
+      "block_index": 1,
+      "within_block_position": 1,
+      "arm": "CANDIDATE",
+      "repetition_index": 1,
+      "run_id": "run-44444444444444444444444444444444"
+    }
+  ],
+  "primary_outcome": {
+    "metric": "measured_request_count",
+    "aggregation": "count",
+    "definition_id": "measured_request_count_v1",
+    "unit": "count",
+    "population": "all_measured_requests",
+    "quantile_method": null,
+    "rounding_policy": "none"
+  },
+  "metric_definitions_digest": "sha256:e237ff8613c6eec52a6053b3f6b47563ffc758c957ee298e57fe3c482a389131",
+  "reducer_version": "1.0.0",
+  "estimator": "paired_run_mean_difference_v1",
+  "contrast_direction": "candidate_minus_baseline",
+  "uncertainty_method": "none_v1",
+  "missing_data_policy": "incomparable_if_any_outcome_missing_v1",
+  "exclusion_policy": "no_post_assignment_exclusions_v1",
+  "environment_policy": "complete_and_equal_observed_environment_v1",
+  "environment_control_scope": "OBSERVED_V1_ALLOWLIST_ONLY",
+  "predeclaration_anchor": "operator_retained_plan_digest_required_v1",
+  "predeclaration_assurance": "OPERATOR_ATTESTED"
+}

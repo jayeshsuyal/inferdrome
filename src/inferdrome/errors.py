@@ -41,6 +41,10 @@ class TrialSetError(InferdromeError):
     """A repeated-trial grouping could not be created or verified safely."""
 
 
+class ControlledComparisonError(InferdromeError):
+    """A controlled comparison could not be created or verified safely."""
+
+
 class DashboardError(InferdromeError):
     """The local read-only dashboard could not be started or queried safely."""
 
@@ -51,6 +55,10 @@ class DashboardRunNotFound(DashboardError):
 
 class DashboardTrialSetNotFound(DashboardError):
     """A dashboard trial-set ID was not present in the verified index."""
+
+
+class DashboardControlledComparisonNotFound(DashboardError):
+    """A comparison-plan ID was not present in the verified dashboard index."""
 
 
 class DashboardPaginationError(DashboardError):

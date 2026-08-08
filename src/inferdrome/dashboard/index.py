@@ -13,8 +13,13 @@ from threading import RLock
 
 from inferdrome.bundle import verify_bundle
 from inferdrome.dashboard.comparison import compare_runs
+from inferdrome.dashboard.controlled_comparisons import (
+    ControlledComparisonDashboardIndex,
+)
 from inferdrome.dashboard.models import (
     ComparisonResponse,
+    ControlledComparisonDetail,
+    ControlledComparisonIndexResponse,
     PageView,
     RejectedRun,
     RunDetail,
@@ -67,9 +72,7 @@ def _file_without_follow(path: Path) -> bool:
 
 
 def _encode_cursor(offset: int, snapshot_id: str) -> str:
-    encoded = base64.urlsafe_b64encode(
-        f"v1:{offset}:{snapshot_id}".encode("ascii")
-    )
+    encoded = base64.urlsafe_b64encode(f"v1:{offset}:{snapshot_id}".encode("ascii"))
     return encoded.decode("ascii").rstrip("=")
 
 
@@ -119,6 +122,8 @@ class DashboardIndex:
         runs_root: Path,
         *,
         trial_sets_root: Path | None = None,
+        comparison_plans_root: Path | None = None,
+        comparison_results_root: Path | None = None,
     ) -> None:
         self.runs_root = runs_root.absolute()
         selected_trial_sets_root = (
@@ -127,6 +132,22 @@ class DashboardIndex:
             else self.runs_root.parent / "trial-sets"
         )
         self._trial_sets = TrialSetDashboardIndex(
+            selected_trial_sets_root,
+            self.runs_root,
+        )
+        selected_comparison_plans_root = (
+            comparison_plans_root.absolute()
+            if comparison_plans_root is not None
+            else self.runs_root.parent / "comparison-plans"
+        )
+        selected_comparison_results_root = (
+            comparison_results_root.absolute()
+            if comparison_results_root is not None
+            else self.runs_root.parent / "comparison-results"
+        )
+        self._controlled_comparisons = ControlledComparisonDashboardIndex(
+            selected_comparison_plans_root,
+            selected_comparison_results_root,
             selected_trial_sets_root,
             self.runs_root,
         )
@@ -182,9 +203,7 @@ class DashboardIndex:
             elif _directory_without_follow(workspace_bundle):
                 candidates.append(_Candidate(entry=label, bundle_path=workspace_bundle))
             elif _RUN_ID.fullmatch(entry.name):
-                rejected.append(
-                    RejectedRun(entry=label, code="BUNDLE_UNAVAILABLE")
-                )
+                rejected.append(RejectedRun(entry=label, code="BUNDLE_UNAVAILABLE"))
         return tuple(candidates), tuple(rejected)
 
     def refresh(
@@ -257,8 +276,7 @@ class DashboardIndex:
 
             self._runs = run_by_id
             self._cache_by_digest = {
-                detail.summary.bundle_digest: detail
-                for detail in run_by_id.values()
+                detail.summary.bundle_digest: detail for detail in run_by_id.values()
             }
             summaries = tuple(
                 detail.summary
@@ -273,10 +291,7 @@ class DashboardIndex:
                 *tuple(rejected),
             )
             snapshot_id = _snapshot_id(entries)
-            if (
-                expected_snapshot_id is not None
-                and expected_snapshot_id != snapshot_id
-            ):
+            if expected_snapshot_id is not None and expected_snapshot_id != snapshot_id:
                 raise DashboardPaginationError(
                     "dashboard cursor refers to a stale snapshot"
                 )
@@ -301,9 +316,7 @@ class DashboardIndex:
                     total=len(entries),
                     has_more=has_more,
                     next_cursor=(
-                        _encode_cursor(next_offset, snapshot_id)
-                        if has_more
-                        else None
+                        _encode_cursor(next_offset, snapshot_id) if has_more else None
                     ),
                 ),
             )
@@ -315,9 +328,7 @@ class DashboardIndex:
         with self._lock:
             detail = self._runs.get(run_id)
             if detail is None:
-                raise DashboardRunNotFound(
-                    "run is not present in the verified index"
-                )
+                raise DashboardRunNotFound("run is not present in the verified index")
             return detail
 
     def compare(
@@ -334,9 +345,7 @@ class DashboardIndex:
             baseline = self._runs.get(baseline_run_id)
             candidate = self._runs.get(candidate_run_id)
             if baseline is None or candidate is None:
-                raise DashboardRunNotFound(
-                    "run is not present in the verified index"
-                )
+                raise DashboardRunNotFound("run is not present in the verified index")
             return compare_runs(baseline, candidate)
 
     def list_trial_sets(
@@ -349,3 +358,17 @@ class DashboardIndex:
 
     def get_trial_set(self, trial_set_id: str) -> TrialSetDetail:
         return self._trial_sets.get(trial_set_id)
+
+    def list_controlled_comparisons(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = _DEFAULT_PAGE_LIMIT,
+    ) -> ControlledComparisonIndexResponse:
+        return self._controlled_comparisons.refresh(cursor=cursor, limit=limit)
+
+    def get_controlled_comparison(
+        self,
+        comparison_plan_id: str,
+    ) -> ControlledComparisonDetail:
+        return self._controlled_comparisons.get(comparison_plan_id)

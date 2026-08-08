@@ -3,6 +3,8 @@ import { EmptyState, PageHeader } from "./components/Primitives";
 import { RunsProvider } from "./context/RunsContext";
 import { Navigate, useLocation } from "./lib/router";
 import { CompareView } from "./views/CompareView";
+import { ControlledComparisonDetailView } from "./views/ControlledComparisonDetailView";
+import { ControlledComparisonsView } from "./views/ControlledComparisonsView";
 import { EvidenceView } from "./views/EvidenceView";
 import { RunDetailView } from "./views/RunDetailView";
 import { RunsView } from "./views/RunsView";
@@ -29,6 +31,8 @@ export function App() {
   else if (/^\/runs\/[^/]+\/?$/.test(pathname)) view = <RunDetailView />;
   else if (pathname === "/trial-sets" || pathname === "/trial-sets/") view = <TrialSetsView />;
   else if (/^\/trial-sets\/[^/]+\/?$/.test(pathname)) view = <TrialSetDetailView />;
+  else if (pathname === "/comparisons" || pathname === "/comparisons/") view = <ControlledComparisonsView />;
+  else if (/^\/comparisons\/[^/]+\/?$/.test(pathname)) view = <ControlledComparisonDetailView />;
   else if (pathname === "/compare" || pathname === "/compare/") view = <CompareView />;
   else if (pathname === "/evidence" || pathname === "/evidence/" || /^\/evidence\/[^/]+\/?$/.test(pathname)) {
     view = <EvidenceView />;

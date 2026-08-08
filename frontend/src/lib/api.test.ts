@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
+import {
+  baselineTrialSetSummary,
+  comparableControlledDetail,
+  controlledComparisonIndex,
+  incomparableControlledDetail,
+} from "../test/controlledComparisonFixtures";
 
 const projectionVersion = "inferdrome.dashboard.v1" as const;
 
@@ -300,6 +306,110 @@ describe("dashboard API client", () => {
     await expect(api.getTrialSet(trialSetId)).rejects.toMatchObject({
       status: 502,
       message: expect.stringContaining("ordered and contiguous"),
+    });
+  });
+
+  it("reads the controlled-comparison index from its bounded endpoint", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(controlledComparisonIndex)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const index = await api.listControlledComparisons();
+
+    expect(index.comparisons).toHaveLength(4);
+    expect(index.comparisons.map((item) => item.result_status)).toEqual([
+      "COMPARABLE",
+      "INCOMPARABLE",
+      "NO_RESULT",
+      "WITHHELD",
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/controlled-comparisons?limit=100",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("reads an allowlisted comparable detail without raw resolved configuration", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(comparableControlledDetail)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const detail = await api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    );
+
+    expect(detail.result?.status).toBe("COMPARABLE");
+    expect(detail.result?.outcomes[0].estimate).toBe("1000000");
+    expect(detail.baseline_trial_set?.trial_set_id).toBe(
+      comparableControlledDetail.result.baseline_trial_set.trial_set_id,
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v1/controlled-comparisons/${comparableControlledDetail.summary.comparison_plan_id}`,
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("requires incomparable details to withhold both Trial Set projections", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(incomparableControlledDetail))));
+
+    const detail = await api.getControlledComparison(
+      incomparableControlledDetail.summary.comparison_plan_id,
+    );
+
+    expect(detail.result?.status).toBe("INCOMPARABLE");
+    expect(detail.result?.outcomes).toEqual([]);
+    expect(detail.baseline_trial_set).toBeNull();
+    expect(detail.candidate_trial_set).toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...incomparableControlledDetail,
+      baseline_trial_set: baselineTrialSetSummary,
+    }))));
+    await expect(api.getControlledComparison(
+      incomparableControlledDetail.summary.comparison_plan_id,
+    )).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("must withhold Trial Set projections"),
+    });
+  });
+
+  it("rejects a detail arm that exposes raw resolved experiment configuration", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...comparableControlledDetail,
+      plan: {
+        ...comparableControlledDetail.plan,
+        baseline_arm: {
+          ...comparableControlledDetail.plan.baseline_arm,
+          resolved_experiment: {
+            target: { endpoint: "https://secret.example/v1" },
+          },
+        },
+      },
+    }))));
+
+    await expect(api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    )).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("resolved_experiment is forbidden"),
+    });
+  });
+
+  it("rejects controlled outcomes outside the frozen v1 selector vocabulary", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...comparableControlledDetail,
+      plan: {
+        ...comparableControlledDetail.plan,
+        primary_outcome: {
+          ...comparableControlledDetail.plan.primary_outcome,
+          aggregation: "median",
+        },
+      },
+    }))));
+
+    await expect(api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    )).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("frozen v1 outcome semantics"),
     });
   });
 });

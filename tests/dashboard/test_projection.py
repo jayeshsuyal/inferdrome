@@ -6,7 +6,8 @@ from typing import Any
 
 import inferdrome.dashboard.projection as projection_module
 from inferdrome.bundle import recalculate_bundle as authoritative_recalculate
-from inferdrome.dashboard.projection import load_run_detail
+from inferdrome.dashboard.projection import display_measurement, load_run_detail
+from inferdrome.domain.metrics import Unit
 
 
 def _measurement_map(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], Any]:
@@ -21,6 +22,12 @@ def _object_keys(value: object) -> set[str]:
     if isinstance(value, list):
         return {key for nested in value for key in _object_keys(nested)}
     return set()
+
+
+def test_fractional_run_level_count_summaries_are_not_truncated() -> None:
+    assert display_measurement("1000", Unit.COUNT) == "1,000"
+    assert display_measurement("1.5", Unit.COUNT) == "1.5"
+    assert display_measurement("-0.5", Unit.COUNT) == "-0.5"
 
 
 def test_summary_and_detail_preserve_authoritative_measurements(

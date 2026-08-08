@@ -1,0 +1,457 @@
+{
+  "$comment": "Cross-field semantic invariants are normative; see docs/PUBLIC_CONTRACTS_V1.md and the conformance vectors.",
+  "$defs": {
+    "Aggregation": {
+      "enum": [
+        "count",
+        "ratio",
+        "mean",
+        "p50",
+        "p95",
+        "p99",
+        "rate"
+      ],
+      "title": "Aggregation",
+      "type": "string"
+    },
+    "ComparabilityStatus": {
+      "enum": [
+        "COMPARABLE",
+        "INCOMPARABLE"
+      ],
+      "title": "ComparabilityStatus",
+      "type": "string"
+    },
+    "ComparisonControlCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/ControlCheckId"
+        },
+        "status": {
+          "enum": [
+            "SATISFIED",
+            "UNSATISFIED"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "check",
+        "status"
+      ],
+      "title": "ComparisonControlCheck",
+      "type": "object"
+    },
+    "ControlCheckId": {
+      "enum": [
+        "LOCAL_PLAN_ORDER",
+        "EXACT_ARM_MEMBERSHIP",
+        "OBSERVED_SCHEDULE",
+        "DECLARED_FINGERPRINT_DIFFERENCE",
+        "COMPLETE_EQUAL_OBSERVED_ENVIRONMENT",
+        "OUTCOME_COVERAGE_AND_SEMANTICS"
+      ],
+      "title": "ControlCheckId",
+      "type": "string"
+    },
+    "ControlledOutcomeEstimate": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_mean": {
+          "maxLength": 64,
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Baseline Mean",
+          "type": "string"
+        },
+        "baseline_values": {
+          "items": {
+            "$ref": "#/$defs/ControlledRunValue"
+          },
+          "maxItems": 100,
+          "minItems": 2,
+          "title": "Baseline Values",
+          "type": "array"
+        },
+        "candidate_mean": {
+          "maxLength": 64,
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Candidate Mean",
+          "type": "string"
+        },
+        "candidate_values": {
+          "items": {
+            "$ref": "#/$defs/ControlledRunValue"
+          },
+          "maxItems": 100,
+          "minItems": 2,
+          "title": "Candidate Values",
+          "type": "array"
+        },
+        "estimate": {
+          "maxLength": 64,
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Estimate",
+          "type": "string"
+        },
+        "paired_differences": {
+          "items": {
+            "$ref": "#/$defs/PairedRunDifference"
+          },
+          "maxItems": 100,
+          "minItems": 2,
+          "title": "Paired Differences",
+          "type": "array"
+        },
+        "selector": {
+          "$ref": "#/$defs/OutcomeSelector"
+        },
+        "unit": {
+          "$ref": "#/$defs/Unit"
+        }
+      },
+      "required": [
+        "selector",
+        "unit",
+        "baseline_values",
+        "candidate_values",
+        "paired_differences",
+        "baseline_mean",
+        "candidate_mean",
+        "estimate"
+      ],
+      "title": "ControlledOutcomeEstimate",
+      "type": "object"
+    },
+    "ControlledRunValue": {
+      "additionalProperties": false,
+      "properties": {
+        "repetition_index": {
+          "maximum": 99,
+          "minimum": 0,
+          "title": "Repetition Index",
+          "type": "integer"
+        },
+        "run_id": {
+          "pattern": "^run-[0-9a-f]{32}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "sample_count": {
+          "minimum": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "value": {
+          "maxLength": 64,
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repetition_index",
+        "run_id",
+        "value",
+        "sample_count"
+      ],
+      "title": "ControlledRunValue",
+      "type": "object"
+    },
+    "DefinitionId": {
+      "enum": [
+        "measured_request_count_v1",
+        "successful_request_count_v1",
+        "failed_request_count_v1",
+        "measured_failure_ratio_v1",
+        "vllm_first_choices_event_v0_26",
+        "last_choices_event_span_v1",
+        "attempted_measured_requests_per_window_second_v1",
+        "successful_measured_requests_per_window_second_v1",
+        "successful_output_tokens_per_window_second_v1"
+      ],
+      "title": "DefinitionId",
+      "type": "string"
+    },
+    "MetricId": {
+      "enum": [
+        "measured_request_count",
+        "successful_request_count",
+        "failed_request_count",
+        "error_rate",
+        "ttft_ns",
+        "last_choices_event_span_ns",
+        "attempted_request_throughput_per_s",
+        "successful_request_throughput_per_s",
+        "output_token_throughput_per_s"
+      ],
+      "title": "MetricId",
+      "type": "string"
+    },
+    "OutcomeSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation": {
+          "$ref": "#/$defs/Aggregation"
+        },
+        "definition_id": {
+          "$ref": "#/$defs/DefinitionId"
+        },
+        "metric": {
+          "$ref": "#/$defs/MetricId"
+        },
+        "population": {
+          "$ref": "#/$defs/Population"
+        },
+        "quantile_method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuantileMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rounding_policy": {
+          "$ref": "#/$defs/RoundingPolicy"
+        },
+        "unit": {
+          "$ref": "#/$defs/Unit"
+        }
+      },
+      "required": [
+        "metric",
+        "aggregation",
+        "definition_id",
+        "unit",
+        "population",
+        "quantile_method",
+        "rounding_policy"
+      ],
+      "title": "OutcomeSelector",
+      "type": "object"
+    },
+    "PairedRunDifference": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_run_id": {
+          "pattern": "^run-[0-9a-f]{32}$",
+          "title": "Baseline Run Id",
+          "type": "string"
+        },
+        "block_index": {
+          "maximum": 99,
+          "minimum": 0,
+          "title": "Block Index",
+          "type": "integer"
+        },
+        "candidate_minus_baseline": {
+          "maxLength": 64,
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+          "title": "Candidate Minus Baseline",
+          "type": "string"
+        },
+        "candidate_run_id": {
+          "pattern": "^run-[0-9a-f]{32}$",
+          "title": "Candidate Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "block_index",
+        "baseline_run_id",
+        "candidate_run_id",
+        "candidate_minus_baseline"
+      ],
+      "title": "PairedRunDifference",
+      "type": "object"
+    },
+    "Population": {
+      "enum": [
+        "all_measured_requests",
+        "successful_measured_requests",
+        "failed_measured_requests",
+        "successful_measured_requests_with_observed_ttft"
+      ],
+      "title": "Population",
+      "type": "string"
+    },
+    "QuantileMethod": {
+      "enum": [
+        "nearest_rank_v1"
+      ],
+      "title": "QuantileMethod",
+      "type": "string"
+    },
+    "RoundingPolicy": {
+      "enum": [
+        "none",
+        "decimal_half_even_6_v1"
+      ],
+      "title": "RoundingPolicy",
+      "type": "string"
+    },
+    "TrialSetReference": {
+      "additionalProperties": false,
+      "properties": {
+        "trial_set_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Trial Set Digest",
+          "type": "string"
+        },
+        "trial_set_id": {
+          "pattern": "^trial-set-[0-9a-f]{32}$",
+          "title": "Trial Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trial_set_id",
+        "trial_set_digest"
+      ],
+      "title": "TrialSetReference",
+      "type": "object"
+    },
+    "Unit": {
+      "enum": [
+        "count",
+        "ratio",
+        "ns",
+        "requests/s",
+        "tokens/s"
+      ],
+      "title": "Unit",
+      "type": "string"
+    }
+  },
+  "$id": "https://schemas.inferdrome.dev/public/v1/controlled-comparison-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable point estimates or an explicit incomparable determination.",
+  "properties": {
+    "baseline_trial_set": {
+      "$ref": "#/$defs/TrialSetReference"
+    },
+    "candidate_trial_set": {
+      "$ref": "#/$defs/TrialSetReference"
+    },
+    "comparison_plan_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Comparison Plan Digest",
+      "type": "string"
+    },
+    "comparison_plan_id": {
+      "pattern": "^comparison-plan-[0-9a-f]{32}$",
+      "title": "Comparison Plan Id",
+      "type": "string"
+    },
+    "comparison_result_id": {
+      "pattern": "^comparison-result-[0-9a-f]{32}$",
+      "title": "Comparison Result Id",
+      "type": "string"
+    },
+    "contrast_direction": {
+      "const": "candidate_minus_baseline",
+      "title": "Contrast Direction",
+      "type": "string"
+    },
+    "control_checks": {
+      "items": {
+        "$ref": "#/$defs/ComparisonControlCheck"
+      },
+      "maxItems": 6,
+      "minItems": 6,
+      "title": "Control Checks",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "environment_control_scope": {
+      "const": "OBSERVED_V1_ALLOWLIST_ONLY",
+      "title": "Environment Control Scope",
+      "type": "string"
+    },
+    "estimator": {
+      "const": "paired_run_mean_difference_v1",
+      "title": "Estimator",
+      "type": "string"
+    },
+    "inference_scope": {
+      "const": "POINT_ESTIMATE_ONLY",
+      "title": "Inference Scope",
+      "type": "string"
+    },
+    "outcomes": {
+      "items": {
+        "$ref": "#/$defs/ControlledOutcomeEstimate"
+      },
+      "maxItems": 1,
+      "title": "Outcomes",
+      "type": "array"
+    },
+    "predeclaration_assurance": {
+      "const": "OPERATOR_ATTESTED",
+      "title": "Predeclaration Assurance",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.controlled-comparison-result.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "statistical_unit": {
+      "const": "run",
+      "title": "Statistical Unit",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/ComparabilityStatus"
+    },
+    "uncertainty_method": {
+      "const": "none_v1",
+      "title": "Uncertainty Method",
+      "type": "string"
+    },
+    "unsatisfied_controls": {
+      "items": {
+        "$ref": "#/$defs/ControlCheckId"
+      },
+      "maxItems": 6,
+      "title": "Unsatisfied Controls",
+      "type": "array"
+    },
+    "weighting": {
+      "const": "equal_per_run",
+      "title": "Weighting",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "comparison_result_id",
+    "comparison_plan_id",
+    "comparison_plan_digest",
+    "created_at",
+    "baseline_trial_set",
+    "candidate_trial_set",
+    "status",
+    "inference_scope",
+    "predeclaration_assurance",
+    "environment_control_scope",
+    "statistical_unit",
+    "weighting",
+    "estimator",
+    "contrast_direction",
+    "uncertainty_method",
+    "control_checks",
+    "unsatisfied_controls",
+    "outcomes"
+  ],
+  "title": "ControlledComparisonResult",
+  "type": "object"
+}
