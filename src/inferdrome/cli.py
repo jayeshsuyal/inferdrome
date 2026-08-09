@@ -532,6 +532,53 @@ def _command_comparison_plan_verify(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def _command_comparison_plan_execute(namespace: argparse.Namespace) -> int:
+    from inferdrome.comparisons import execute_comparison_plan
+
+    cancellation = CancellationToken()
+    with _signal_cancellation(cancellation):
+        executed = execute_comparison_plan(
+            _path(namespace, "comparison_plan"),
+            expected_comparison_plan_digest=cast(
+                str,
+                namespace.expected_digest,
+            ),
+            baseline_source=_path(namespace, "baseline_source"),
+            candidate_source=_path(namespace, "candidate_source"),
+            runs_root=_path(namespace, "runs_root"),
+            trial_sets_root=_path(namespace, "trial_sets_root"),
+            comparison_results_root=_path(namespace, "comparison_results_root"),
+            tokenizer_path=_optional_path(namespace, "tokenizer_path"),
+            managed_vllm=_managed_vllm_config(namespace),
+            cancellation=cancellation,
+        )
+    value = _comparison_result_json(executed.result)
+    value.update(
+        {
+            "baseline_trial_set_digest": (
+                executed.baseline_trial_set.trial_set_digest
+            ),
+            "baseline_trial_set_id": (
+                executed.baseline_trial_set.descriptor.trial_set_id
+            ),
+            "candidate_trial_set_digest": (
+                executed.candidate_trial_set.trial_set_digest
+            ),
+            "candidate_trial_set_id": (
+                executed.candidate_trial_set.descriptor.trial_set_id
+            ),
+            "comparison_plan_digest": executed.plan.comparison_plan_digest,
+            "executed_run_ids": executed.executed_run_ids,
+            "planned_run_count": len(
+                executed.plan.descriptor.ordered_schedule
+            ),
+            "reused_run_ids": executed.reused_run_ids,
+        }
+    )
+    _json_output(value)
+    return 0
+
+
 def _comparison_result_json(verified: object) -> dict[str, object]:
     from inferdrome.comparisons import VerifiedComparisonResult
 
@@ -821,6 +868,63 @@ def build_parser() -> argparse.ArgumentParser:
         help="externally retained comparison-plan digest to require",
     )
     comparison_plan_verify.set_defaults(handler=_command_comparison_plan_verify)
+
+    comparison_plan_execute = comparison_plan_commands.add_parser(
+        "execute",
+        help="run the exact frozen schedule and finalize its evidence",
+    )
+    comparison_plan_execute.add_argument(
+        "comparison_plan",
+        help="immutable comparison-plan directory",
+    )
+    comparison_plan_execute.add_argument(
+        "--expected-digest",
+        required=True,
+        help="externally retained comparison-plan digest to require",
+    )
+    comparison_plan_execute.add_argument("--baseline-source", required=True)
+    comparison_plan_execute.add_argument("--candidate-source", required=True)
+    comparison_plan_execute.add_argument(
+        "--runs-root",
+        default="runs",
+        help="run workspace root",
+    )
+    comparison_plan_execute.add_argument(
+        "--trial-sets-root",
+        default="trial-sets",
+        help="trial-set artifact root",
+    )
+    comparison_plan_execute.add_argument(
+        "--comparison-results-root",
+        default="comparison-results",
+        help="comparison-result artifact root",
+    )
+    comparison_plan_execute.add_argument(
+        "--tokenizer-path",
+        help="local tokenizer directory required by attached vLLM execution",
+    )
+    comparison_plan_execute.add_argument(
+        "--managed-local-vllm",
+        action="store_true",
+        help="launch one pinned local-vLLM server for each planned run",
+    )
+    comparison_plan_execute.add_argument(
+        "--managed-model-path",
+        help="absolute local model snapshot used by managed vLLM",
+    )
+    comparison_plan_execute.add_argument(
+        "--managed-gpu-index",
+        type=_gpu_index,
+        help="physical NVIDIA GPU index (default: 0)",
+    )
+    comparison_plan_execute.add_argument(
+        "--managed-startup-timeout-seconds",
+        type=float,
+        help="bounded model-load and server-readiness timeout (default: 900)",
+    )
+    comparison_plan_execute.set_defaults(
+        handler=_command_comparison_plan_execute
+    )
 
     comparison_result = commands.add_parser(
         "comparison-result",

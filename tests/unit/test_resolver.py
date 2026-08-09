@@ -1,6 +1,7 @@
 """Resolver behavior over untrusted source YAML and custom JSONL."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,10 @@ from inferdrome.domain.ids import sha256_digest
 from inferdrome.domain.request_plan import DigestOnlyPrompt, InlinePrompt
 from inferdrome.domain.states import Replayability
 from inferdrome.errors import ResolutionError, SourceInputError
-from inferdrome.resolution.resolver import resolve_experiment
+from inferdrome.resolution.resolver import (
+    resolve_experiment,
+    validate_resolution_result,
+)
 from inferdrome.resolution.workload import parse_custom_workload
 from inferdrome.resolution.yaml_loader import load_strict_yaml
 
@@ -125,6 +129,32 @@ def test_same_inputs_and_run_id_resolve_byte_identically(tmp_path: Path) -> None
     assert first.request_plan_bytes == second.request_plan_bytes
     assert first.execution_fingerprint == second.execution_fingerprint
     assert first.request_plan_digest == second.request_plan_digest
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_spec_digest",
+        "execution_fingerprint",
+        "request_plan_digest",
+        "resolved_spec_bytes",
+        "request_plan_bytes",
+    ],
+)
+def test_resolution_validator_rejects_forged_execution_fields(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    source_path, _, _ = _write_source(tmp_path)
+    result = resolve_experiment(source_path, run_id=RUN_ID)
+    forged_value: str | bytes = f"sha256:{'f' * 64}"
+    if field.endswith("_bytes"):
+        forged_value = getattr(result, field) + b" "
+
+    forged = replace(result, **{field: forged_value})
+
+    with pytest.raises(ResolutionError, match="internally inconsistent"):
+        validate_resolution_result(forged)
 
 
 def test_human_title_does_not_change_execution_fingerprint(tmp_path: Path) -> None:

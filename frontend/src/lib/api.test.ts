@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
 import {
+  baselineRunIds,
   baselineTrialSetSummary,
   comparableControlledDetail,
   controlledComparisonIndex,
@@ -338,6 +339,13 @@ describe("dashboard API client", () => {
 
     expect(detail.result?.status).toBe("COMPARABLE");
     expect(detail.result?.outcomes[0].estimate).toBe("1000000");
+    expect(detail.execution).toMatchObject({
+      status: "EVIDENCE_COMPLETE",
+      result_published: true,
+      completed_run_count: 4,
+      planned_run_count: 4,
+      exact_schedule_prefix: true,
+    });
     expect(detail.baseline_trial_set?.trial_set_id).toBe(
       comparableControlledDetail.result.baseline_trial_set.trial_set_id,
     );
@@ -345,6 +353,35 @@ describe("dashboard API client", () => {
       `/api/v1/controlled-comparisons/${comparableControlledDetail.summary.comparison_plan_id}`,
       expect.objectContaining({ method: "GET" }),
     );
+  });
+
+  it("keeps a published result when current workspace inspection is blocked", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...comparableControlledDetail,
+      execution: {
+        ...comparableControlledDetail.execution,
+        status: "BLOCKED",
+        completed_run_count: 3,
+        next_sequence_index: null,
+        exact_schedule_prefix: false,
+        slots: comparableControlledDetail.execution.slots.map((slot, index) => ({
+          ...slot,
+          state: index === 0 ? "INVALID" : "COMPLETE",
+          verified_bundle: index !== 0,
+        })),
+      },
+    }))));
+
+    const detail = await api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    );
+
+    expect(detail.result?.status).toBe("COMPARABLE");
+    expect(detail.execution).toMatchObject({
+      status: "BLOCKED",
+      result_published: true,
+      exact_schedule_prefix: false,
+    });
   });
 
   it("requires incomparable details to withhold both Trial Set projections", async () => {
@@ -368,6 +405,136 @@ describe("dashboard API client", () => {
     )).rejects.toMatchObject({
       status: 502,
       message: expect.stringContaining("must withhold Trial Set projections"),
+    });
+  });
+
+  it("accepts exact-prefix operational progress without upgrading it to evidence", async () => {
+    const partialExecution = {
+      ...comparableControlledDetail.execution,
+      status: "PARTIAL",
+      result_published: false,
+      completed_run_count: 1,
+      next_sequence_index: 1,
+      slots: comparableControlledDetail.execution.slots.map((slot, index) => ({
+        ...slot,
+        state: index === 0 ? "COMPLETE" : "PENDING",
+        verified_bundle: index === 0,
+      })),
+    };
+    const detailWithoutResult = {
+      ...comparableControlledDetail,
+      summary: {
+        ...comparableControlledDetail.summary,
+        result_status: "NO_RESULT",
+        comparison_result_id: null,
+        comparison_result_digest: null,
+        estimate: null,
+        estimate_display_value: null,
+      },
+      execution: partialExecution,
+      result: null,
+      baseline_trial_set: null,
+      candidate_trial_set: null,
+    };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(detailWithoutResult))));
+
+    const detail = await api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    );
+
+    expect(detail.execution.status).toBe("PARTIAL");
+    expect(detail.result).toBeNull();
+  });
+
+  it("rejects controlled progress with a mismatched run identity", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...comparableControlledDetail,
+      execution: {
+        ...comparableControlledDetail.execution,
+        slots: comparableControlledDetail.execution.slots.map((slot, index) => (
+          index === 1 ? { ...slot, run_id: baselineRunIds[0] } : slot
+        )),
+      },
+    }))));
+
+    await expect(api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    )).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("disagrees with verified progress"),
+    });
+  });
+
+  it("rejects partial progress whose next slot is not the frozen prefix boundary", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...comparableControlledDetail,
+      summary: {
+        ...comparableControlledDetail.summary,
+        result_status: "NO_RESULT",
+        comparison_result_id: null,
+        comparison_result_digest: null,
+        estimate: null,
+        estimate_display_value: null,
+      },
+      execution: {
+        ...comparableControlledDetail.execution,
+        status: "PARTIAL",
+        result_published: false,
+        completed_run_count: 1,
+        next_sequence_index: 2,
+        slots: comparableControlledDetail.execution.slots.map((slot, index) => ({
+          ...slot,
+          state: index === 0 ? "COMPLETE" : "PENDING",
+          verified_bundle: index === 0,
+        })),
+      },
+      result: null,
+      baseline_trial_set: null,
+      candidate_trial_set: null,
+    }))));
+
+    await expect(api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    )).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("status disagrees with its slot states"),
+    });
+  });
+
+  it("rejects a pending hole followed by a nonterminal workspace", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...comparableControlledDetail,
+      summary: {
+        ...comparableControlledDetail.summary,
+        result_status: "NO_RESULT",
+        comparison_result_id: null,
+        comparison_result_digest: null,
+        estimate: null,
+        estimate_display_value: null,
+      },
+      execution: {
+        ...comparableControlledDetail.execution,
+        status: "PARTIAL",
+        result_published: false,
+        completed_run_count: 0,
+        next_sequence_index: 0,
+        exact_schedule_prefix: true,
+        slots: comparableControlledDetail.execution.slots.map((slot, index) => ({
+          ...slot,
+          state: index === 1 ? "CREATED" : "PENDING",
+          verified_bundle: false,
+        })),
+      },
+      result: null,
+      baseline_trial_set: null,
+      candidate_trial_set: null,
+    }))));
+
+    await expect(api.getControlledComparison(
+      comparableControlledDetail.summary.comparison_plan_id,
+    )).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("completion arithmetic is inconsistent"),
     });
   });
 

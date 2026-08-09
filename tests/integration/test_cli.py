@@ -277,7 +277,7 @@ def test_cli_trial_set_create_verify_and_summarize(
     assert all(item["available_run_count"] == 2 for item in summary["variations"])
 
 
-def test_cli_comparison_plan_create_and_verify(
+def test_cli_comparison_plan_create_verify_and_execute(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -348,3 +348,35 @@ def test_cli_comparison_plan_create_and_verify(
     verified = json.loads(capsys.readouterr().out)
     assert verified["comparison_plan_id"] == created["comparison_plan_id"]
     assert verified["valid"] is True
+
+    assert (
+        main(
+            [
+                "comparison-plan",
+                "execute",
+                created["path"],
+                "--expected-digest",
+                created["comparison_plan_digest"],
+                "--baseline-source",
+                str(baseline_source),
+                "--candidate-source",
+                str(candidate_source),
+                "--runs-root",
+                str(tmp_path / "runs"),
+                "--trial-sets-root",
+                str(tmp_path / "trial-sets"),
+                "--comparison-results-root",
+                str(tmp_path / "comparison-results"),
+            ]
+        )
+        == 0
+    )
+    executed = json.loads(capsys.readouterr().out)
+    assert executed["comparison_plan_id"] == created["comparison_plan_id"]
+    assert executed["planned_run_count"] == 4
+    assert executed["executed_run_ids"] == [
+        slot["run_id"] for slot in created["schedule"]
+    ]
+    assert executed["reused_run_ids"] == []
+    assert executed["status"] == "INCOMPARABLE"
+    assert executed["valid"] is True

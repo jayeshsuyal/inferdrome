@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from inferdrome.dashboard.api import create_app
 from inferdrome.dashboard.index import DashboardIndex
 from inferdrome.errors import DashboardPaginationError
+from inferdrome.immutable import STAGING_DIRECTORY, STAGING_PREFIX
 from inferdrome.trials import create_trial_set
 
 
@@ -78,6 +79,34 @@ def test_trial_set_index_and_detail_are_descriptive_only(
             '"NOT_PROVEN"',
         ):
             assert forbidden not in rendered
+    finally:
+        _make_tree_writable(trial_sets_root)
+
+
+def test_private_publication_stages_are_not_trial_set_entries(
+    tmp_path: Path,
+    run_fake_bundle: Any,
+) -> None:
+    runs_root, run_ids = _two_runs(tmp_path, run_fake_bundle)
+    trial_sets_root = tmp_path / "trial-sets"
+    try:
+        create_trial_set(
+            runs_root=runs_root,
+            trial_sets_root=trial_sets_root,
+            run_ids=run_ids,
+            title="Published Trial Set",
+        )
+        (trial_sets_root / STAGING_DIRECTORY).mkdir(exist_ok=True)
+        (trial_sets_root / f"{STAGING_PREFIX}orphan").mkdir()
+
+        listing = DashboardIndex(
+            runs_root,
+            trial_sets_root=trial_sets_root,
+        ).list_trial_sets()
+
+        assert len(listing.trial_sets) == 1
+        assert listing.rejected == ()
+        assert listing.page.total == 1
     finally:
         _make_tree_writable(trial_sets_root)
 

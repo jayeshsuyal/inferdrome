@@ -8,6 +8,8 @@ Trial Set extension date: **2026-08-07**
 
 Controlled-comparison extension date: **2026-08-07**
 
+Fail-closed comparison-executor date: **2026-08-08 (no schema change)**
+
 This document defines the public evidence boundary established by PR 1 and the
 additive post-v0.1 Trial Set and controlled-comparison contracts. The eight
 original evidence contracts
@@ -16,6 +18,10 @@ are grounded in the pinned vLLM `0.26.0`
 only observations that the spike established as observed or strictly
 derivable. The three v0.2 contracts reference immutable evidence objects; they
 do not reinterpret any original schema.
+
+The third v0.2 slice automates the frozen controlled-comparison workflow and
+adds dashboard-only operational progress. Neither is a public evidence
+artifact, so the public schema count remains eleven.
 
 ## Normative artifacts
 

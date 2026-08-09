@@ -52,6 +52,7 @@ from inferdrome.domain.ids import (
 from inferdrome.domain.metrics import Measurement, frozen_metric_definitions_v1
 from inferdrome.domain.states import EnvironmentCompleteness
 from inferdrome.errors import ControlledComparisonError
+from inferdrome.immutable import publish_immutable_directory
 from inferdrome.resolution.canonicalization import execution_fingerprint_projection
 from inferdrome.trials import VerifiedTrialSet, verify_trial_set
 
@@ -128,27 +129,6 @@ def _node_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _write_new(path: Path, content: bytes, *, label: str) -> None:
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError(f"short {label} write")
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _publish_descriptor(
     *,
     root: Path,
@@ -165,19 +145,18 @@ def _publish_descriptor(
         raise ControlledComparisonError(f"{root_label} could not be created") from None
     if not _real_directory(selected_root):
         raise ControlledComparisonError(f"{root_label} must be a real directory")
-    destination = selected_root / artifact_id
     try:
-        destination.mkdir(mode=0o700)
-        temporary = destination / f".{filename}.next"
-        _write_new(temporary, content, label=artifact_label)
-        os.replace(temporary, destination / filename)
-        (destination / filename).chmod(0o400)
-        destination.chmod(0o500)
+        destination = publish_immutable_directory(
+            root=selected_root,
+            artifact_id=artifact_id,
+            filename=filename,
+            content=content,
+        )
     except FileExistsError:
         raise ControlledComparisonError(
             f"{artifact_label} ID is already reserved"
         ) from None
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise ControlledComparisonError(
             f"{artifact_label} publication failed closed"
         ) from error

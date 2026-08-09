@@ -48,6 +48,14 @@ allowlisted environment field, and outcome semantic verifies; otherwise all
 outcome arithmetic is suppressed. Predeclaration is `OPERATOR_ATTESTED`, not
 trusted proof of chronology, and comparability is not causality or acceptance.
 
+The third v0.2 vertical slice adds a fail-closed executor for that frozen
+design without adding another public schema. One command verifies the retained
+plan digest and exact arm inputs, executes only the preallocated schedule,
+reuses only an independently verified `COMPLETE` prefix, creates both planned
+Trial Sets, publishes the result, and reverifies the full evidence chain. The
+dashboard exposes this operational progress without treating it as execution
+attestation or portable evidence.
+
 ## Quick start
 
 ```bash
@@ -79,6 +87,14 @@ uv run inferdrome comparison-plan create \
   --repetitions 2 \
   --primary-outcome attempted_request_throughput_per_s:rate \
   --runs-root runs --comparison-plans-root comparison-plans
+
+uv run inferdrome comparison-plan execute \
+  comparison-plans/comparison-plan-<id> \
+  --expected-digest "$PLAN_DIGEST" \
+  --baseline-source examples/controlled-concurrency-2.yaml \
+  --candidate-source examples/controlled-concurrency-4.yaml \
+  --runs-root runs --trial-sets-root trial-sets \
+  --comparison-results-root comparison-results
 ```
 
 Install the optional dashboard runtime and inspect those bundles locally:

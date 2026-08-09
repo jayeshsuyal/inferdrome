@@ -331,3 +331,85 @@ def resolve_experiment(
             plan.model_dump(mode="json", by_alias=True, exclude_none=False),
         ),
     )
+
+
+def validate_resolution_result(resolution: ResolutionResult) -> None:
+    """Rebuild and verify every execution-relevant field without rereading paths."""
+
+    if (
+        not isinstance(resolution.source_bytes, bytes)
+        or not isinstance(resolution.workload_bytes, bytes)
+        or len(resolution.source_bytes) > MAX_SOURCE_BYTES
+        or len(resolution.workload_bytes) > MAX_WORKLOAD_BYTES
+        or resolution.source_path != resolution.source_path.absolute()
+        or resolution.workload_path != resolution.workload_path.absolute()
+    ):
+        raise ResolutionError("resolved execution input is internally inconsistent")
+    source_value = load_strict_yaml(resolution.source_bytes)
+    try:
+        source_json = json.dumps(source_value, allow_nan=False)
+        source = SourceExperimentSpec.model_validate_json(source_json)
+        selected_run_id = TypeAdapter(RunId).validate_python(
+            resolution.run_id,
+            strict=True,
+        )
+    except (TypeError, ValueError, ValidationError):
+        raise ResolutionError(
+            "resolved execution input is internally inconsistent"
+        ) from None
+    expected_workload_path = resolve_safe_child(
+        resolution.source_path.parent,
+        source.workload.path,
+        label="workload",
+    )
+    workload_sha256 = sha256_digest(resolution.workload_bytes)
+    if (
+        expected_workload_path != resolution.workload_path
+        or (
+            source.workload.sha256 is not None
+            and not hmac.compare_digest(
+                source.workload.sha256,
+                workload_sha256,
+            )
+        )
+    ):
+        raise ResolutionError("resolved execution input is internally inconsistent")
+    prompts = parse_custom_workload(resolution.workload_bytes)
+    source_digest = digest_bytes(
+        DigestDomain.SOURCE_SPEC,
+        resolution.source_bytes,
+    )
+    try:
+        spec = _resolve_public_spec(source, workload_sha256)
+        plan = _build_request_plan(
+            run_id=selected_run_id,
+            source_digest=source_digest,
+            spec=spec,
+            prompts=prompts,
+        )
+    except ValidationError:
+        raise ResolutionError(
+            "resolved execution input is internally inconsistent"
+        ) from None
+    resolved_bytes = canonical_model_bytes(spec)
+    plan_bytes = canonical_model_bytes(plan)
+    request_plan_digest = digest_canonical_json(
+        DigestDomain.REQUEST_PLAN,
+        plan.model_dump(mode="json", by_alias=True, exclude_none=False),
+    )
+    if not (
+        resolution.resolved_spec == spec
+        and resolution.request_plan == plan
+        and resolution.resolved_spec_bytes == resolved_bytes
+        and resolution.request_plan_bytes == plan_bytes
+        and hmac.compare_digest(resolution.source_spec_digest, source_digest)
+        and hmac.compare_digest(
+            resolution.execution_fingerprint,
+            execution_fingerprint(spec),
+        )
+        and hmac.compare_digest(
+            resolution.request_plan_digest,
+            request_plan_digest,
+        )
+    ):
+        raise ResolutionError("resolved execution input is internally inconsistent")

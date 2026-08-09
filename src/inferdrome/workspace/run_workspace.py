@@ -271,23 +271,39 @@ class RunWorkspace:
 
     def verify_frozen_inputs(self) -> None:
         for expected in self.metadata.frozen_inputs:
-            path = self.path / expected.path
-            try:
-                file_stat = path.stat(follow_symlinks=False)
-            except OSError:
-                raise WorkspaceError("frozen input is missing or unsafe") from None
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise WorkspaceError("frozen input must remain a regular file")
-            if stat.S_IMODE(file_stat.st_mode) & 0o222:
-                raise WorkspaceError("frozen input became writable")
-            content = _read_regular(
-                path,
-                limit=expected.size_bytes + 1,
-            )
-            if len(content) != expected.size_bytes:
-                raise WorkspaceError("frozen input size changed")
-            if _tagged_sha256(content) != expected.sha256:
-                raise WorkspaceError("frozen input digest changed")
+            self.read_frozen_input(expected.path)
+
+    def read_frozen_input(self, relative_path: str) -> bytes:
+        """Read one declared frozen input after exact metadata verification."""
+
+        expected = next(
+            (
+                candidate
+                for candidate in self.metadata.frozen_inputs
+                if candidate.path == relative_path
+            ),
+            None,
+        )
+        if expected is None:
+            raise WorkspaceError("frozen input path is not declared")
+        path = self.path / expected.path
+        try:
+            file_stat = path.stat(follow_symlinks=False)
+        except OSError:
+            raise WorkspaceError("frozen input is missing or unsafe") from None
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise WorkspaceError("frozen input must remain a regular file")
+        if stat.S_IMODE(file_stat.st_mode) & 0o222:
+            raise WorkspaceError("frozen input became writable")
+        content = _read_regular(
+            path,
+            limit=expected.size_bytes + 1,
+        )
+        if len(content) != expected.size_bytes:
+            raise WorkspaceError("frozen input size changed")
+        if _tagged_sha256(content) != expected.sha256:
+            raise WorkspaceError("frozen input digest changed")
+        return content
 
     def _state_path(self) -> Path:
         return self.control_directory / "state.json"

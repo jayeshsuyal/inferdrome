@@ -21,6 +21,7 @@ from inferdrome.domain.ids import RunId, new_trial_set_id
 from inferdrome.domain.metrics import Measurement
 from inferdrome.domain.trial_set import TrialSet, TrialSetMember
 from inferdrome.errors import TrialSetError
+from inferdrome.immutable import publish_immutable_directory
 
 _TRIAL_SET_FILENAME = "trial-set.json"
 _MAX_TRIAL_SET_BYTES = 262_144
@@ -99,27 +100,6 @@ def _read_regular(path: Path, *, limit: int) -> bytes:
         if len(content) > limit:
             raise TrialSetError("trial-set descriptor exceeds its byte limit")
         return bytes(content)
-    finally:
-        os.close(descriptor)
-
-
-def _write_new(path: Path, content: bytes) -> None:
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short trial-set write")
-            view = view[written:]
-        os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
@@ -323,17 +303,16 @@ def create_trial_set(
         raise TrialSetError("trial-sets root could not be created") from None
     if not _is_real_directory(root):
         raise TrialSetError("trial-sets root must be a real directory")
-    destination = root / descriptor.trial_set_id
     try:
-        destination.mkdir(mode=0o700)
-        temporary = destination / f".{_TRIAL_SET_FILENAME}.next"
-        _write_new(temporary, content)
-        os.replace(temporary, destination / _TRIAL_SET_FILENAME)
-        (destination / _TRIAL_SET_FILENAME).chmod(0o400)
-        destination.chmod(0o500)
+        destination = publish_immutable_directory(
+            root=root,
+            artifact_id=descriptor.trial_set_id,
+            filename=_TRIAL_SET_FILENAME,
+            content=content,
+        )
     except FileExistsError:
         raise TrialSetError("trial-set ID is already reserved") from None
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise TrialSetError("trial-set publication failed closed") from error
     return verify_trial_set(destination, runs_root=runs_root)
 

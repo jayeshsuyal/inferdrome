@@ -34,6 +34,7 @@ from inferdrome.errors import (
     DashboardTrialSetNotFound,
     InferdromeError,
 )
+from inferdrome.immutable import is_internal_staging_entry
 from inferdrome.trials import (
     TrialMetricVariation,
     VerifiedTrialSet,
@@ -272,7 +273,14 @@ class TrialSetDashboardIndex:
             )
         try:
             with os.scandir(self.trial_sets_root) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name)
+                entries = sorted(
+                    (
+                        entry
+                        for entry in iterator
+                        if not is_internal_staging_entry(entry.name)
+                    ),
+                    key=lambda item: item.name,
+                )
         except OSError:
             raise DashboardError("trial-sets root could not be scanned") from None
         if len(entries) > _MAX_DISCOVERED_ENTRIES:

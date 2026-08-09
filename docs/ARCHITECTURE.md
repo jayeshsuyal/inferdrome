@@ -1,6 +1,6 @@
 # Inferdrome architecture
 
-Status: **Normative for v0.1; public schemas frozen; dashboard, Trial Set, and controlled-comparison extensions accepted**
+Status: **Normative for v0.1; public schemas frozen; post-v0.1 comparison execution accepted**
 
 ## System shape
 
@@ -256,6 +256,35 @@ inference, significance, preference, or ExitSpec acceptance.
 The normative boundary is defined in
 [CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md) and
 [ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md).
+
+### Fail-closed comparison execution
+
+The third v0.2 slice adds an orchestration boundary around the existing frozen
+plan and result contracts; it does not add a public artifact. The executor
+verifies the retained plan digest and both exact arm sources, snapshots the
+already-read source and workload bytes, and executes only the plan's
+preallocated schedule under one runs-root advisory lock.
+
+An existing run is reusable only when all earlier schedule slots are also
+present, its workspace is `COMPLETE`, its bundle independently recalculates,
+and exact frozen workspace inputs equal the corresponding bundle artifacts.
+Terminal failures, interrupted attempts, nonterminal reservations, holes, or
+chronology disagreement block the plan. No retry or replacement identity is
+available in v1.
+
+Trial Set and comparison descriptors use private same-root staging followed by
+frozen no-replace publication and parent-directory fsync. Private stages are
+excluded from discovery and cannot reserve a public identity. On Linux the
+publish primitive uses `renameat2(RENAME_NOREPLACE)`; on macOS cooperating
+publishers serialize a destination check and rename beneath a local
+publication lock. Neither mechanism claims protection from hostile same-user
+filesystem mutation or distributed-filesystem behavior.
+
+Dashboard progress is recomputed from plan slots, run workspaces, and verified
+bundles. It is a local read-only projection, not evidence of liveness,
+authorship, trusted chronology, or execution attestation. The normative
+execution decision is recorded in
+[ADR 0009](adr/0009-add-fail-closed-comparison-execution.md).
 
 ### ExitSpec importer
 
