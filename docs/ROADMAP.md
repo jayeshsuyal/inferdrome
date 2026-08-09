@@ -416,6 +416,11 @@ at the front of the comparison schedule. It is unrelated to model KV prefix
 caching, which remains outside slices 1 through 3 and is not a representable
 treatment.
 
+The managed real-GPU proof runner now has an opt-in four-run comparison mode
+that verifies every customer-eligible bundle, both Trial Sets, the result, and
+an all-reused second executor invocation. A genuine Linux/NVIDIA receipt remains
+host-executed evidence and is not claimed by the static engineering gate.
+
 ### v0.2 — Telemetry
 
 - vLLM metrics collection;

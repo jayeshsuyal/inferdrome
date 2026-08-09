@@ -240,6 +240,19 @@ The JSON response distinguishes `executed_run_ids` from independently verified
 digest and status. Exit code `0` for an `INCOMPARABLE` result means the pipeline
 finalized and verified; it does not mean the experimental comparison succeeded.
 
+On a prepared Linux/NVIDIA host, the pinned managed-vLLM proof runner exercises
+this full workflow with two concurrency arms and two repetitions per arm:
+
+```bash
+.inferdrome-gpu/venv/bin/python \
+  scripts/run_real_gpu_demo.py --comparison
+```
+
+It independently verifies all four customer-eligible bundles, both Trial Sets,
+and the result, then invokes the executor again and requires exact reuse without
+new execution. See [REAL_GPU_PROOF.md](REAL_GPU_PROOF.md) for the receipt and
+review boundary.
+
 The lower-level commands remain available for manual protocol inspection. If
 used, run every preallocated ID in schedule order, create both exact planned
 Trial Sets, then create the result with all retained digests:

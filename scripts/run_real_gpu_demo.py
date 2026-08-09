@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and challenge one managed real-GPU Inferdrome evidence bundle."""
+"""Run one managed real-GPU proof or a controlled-comparison proof pack."""
 
 from __future__ import annotations
 
@@ -21,16 +21,31 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from inferdrome.comparisons import (
+    VerifiedComparisonPlan,
+    VerifiedComparisonResult,
+    verify_comparison_plan,
+    verify_comparison_result,
+)
 from inferdrome.domain.experiment import AttachedVllmTarget, ConcurrentTraffic
+from inferdrome.errors import InferdromeError
 from inferdrome.gpu_proof import expected_vllm_source_wheel
-from inferdrome.resolution import resolve_experiment
+from inferdrome.resolution import ResolutionResult, resolve_experiment
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PATH = REPOSITORY_ROOT / "examples" / "real-gpu-smoke.yaml"
+BASELINE_SOURCE_PATH = (
+    REPOSITORY_ROOT / "examples" / "real-gpu-concurrency-2.yaml"
+)
+CANDIDATE_SOURCE_PATH = (
+    REPOSITORY_ROOT / "examples" / "real-gpu-concurrency-4.yaml"
+)
 HOST_PIN_PATH = REPOSITORY_ROOT / "examples" / "real-gpu" / "host-pin.json"
 PRODUCER_PIN_PATH = REPOSITORY_ROOT / "spikes" / "vllm-0.26.0" / "producer-pin.json"
 FAKE_SOURCE_PATH = REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"
 STATIC_RUN_ID = "run-00000000000000000000000000000000"
+COMPARISON_REPETITIONS_PER_ARM = 2
+COMPARISON_SCHEDULE_SEED = "6a" * 32
 _MAX_PACKAGE_INVENTORY_BYTES = 2_097_152
 
 
@@ -195,10 +210,14 @@ def _producer_wheel_pin(machine: str, version: str) -> dict[str, str]:
     return {name: str(wheel[name]) for name in expected}
 
 
-def _check_static_assets() -> dict[str, str]:
-    pin = _host_pin()
+def _check_real_gpu_source(
+    source_path: Path,
+    pin: dict[str, str],
+    *,
+    expected_concurrency: int,
+) -> ResolutionResult:
     resolution = resolve_experiment(
-        SOURCE_PATH,
+        source_path,
         run_id=STATIC_RUN_ID,
         strict=True,
     )
@@ -217,9 +236,45 @@ def _check_static_assets() -> dict[str, str]:
         or str(target.endpoint).rstrip("/") != "http://127.0.0.1:18080"
         or traffic.measured_requests != 100
         or traffic.warmup_requests != 10
-        or traffic.concurrency != 4
+        or traffic.concurrency != expected_concurrency
     ):
         raise DemoError("real-GPU example and host pin disagree")
+    return resolution
+
+
+def _check_static_assets() -> dict[str, str]:
+    pin = _host_pin()
+    _check_real_gpu_source(SOURCE_PATH, pin, expected_concurrency=4)
+    baseline = _check_real_gpu_source(
+        BASELINE_SOURCE_PATH,
+        pin,
+        expected_concurrency=2,
+    )
+    candidate = _check_real_gpu_source(
+        CANDIDATE_SOURCE_PATH,
+        pin,
+        expected_concurrency=4,
+    )
+    baseline_projection = baseline.resolved_spec.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude_none=False,
+    )
+    candidate_projection = candidate.resolved_spec.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude_none=False,
+    )
+    baseline_projection["traffic"]["concurrency"] = 0
+    candidate_projection["traffic"]["concurrency"] = 0
+    if (
+        baseline_projection != candidate_projection
+        or baseline.source_spec_digest == candidate.source_spec_digest
+        or baseline.execution_fingerprint == candidate.execution_fingerprint
+    ):
+        raise DemoError(
+            "real-GPU comparison arms must differ only by traffic concurrency"
+        )
     for architecture in ("aarch64", "x86_64"):
         wheel = _producer_wheel_pin(architecture, pin["vllm_version"])
         if expected_vllm_source_wheel(architecture) != (
@@ -251,7 +306,7 @@ def _run_cli(
         raise DemoError(f"{name} could not be started") from None
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as interruption:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
         try:
@@ -262,6 +317,10 @@ def _run_cli(
             stdout, stderr = process.communicate()
         (demo_directory / f"{name}.stdout").write_bytes(stdout)
         (demo_directory / f"{name}.stderr").write_bytes(stderr)
+        if isinstance(interruption, KeyboardInterrupt):
+            raise DemoError(
+                f"{name} was interrupted; inspect its saved diagnostics"
+            ) from None
         raise DemoError(f"{name} exceeded its outer demo timeout") from None
     (demo_directory / f"{name}.stdout").write_bytes(stdout)
     (demo_directory / f"{name}.stderr").write_bytes(stderr)
@@ -373,16 +432,188 @@ def _bundle_output(
     identities = (bundle_text, digest, run_id)
     if not all(isinstance(item, str) and item for item in identities):
         raise DemoError("run output omits its bundle identity")
-    bundle = Path(str(bundle_text)).absolute()
     try:
-        bundle.relative_to(demo_directory.absolute())
-    except ValueError:
+        bundle = Path(str(bundle_text)).resolve(strict=True)
+        proof_root = demo_directory.resolve(strict=True)
+        bundle.relative_to(proof_root)
+    except (OSError, ValueError):
         raise DemoError(
             "run output points outside the demonstration directory"
         ) from None
     if not bundle.is_dir():
         raise DemoError("run output bundle is unavailable")
     return bundle, str(digest), str(run_id)
+
+
+def _required_text(value: dict[str, Any], key: str, *, label: str) -> str:
+    selected = value.get(key)
+    if not isinstance(selected, str) or not selected:
+        raise DemoError(f"{label} omits {key}")
+    return selected
+
+
+def _contained_directory(
+    value: dict[str, Any],
+    key: str,
+    *,
+    root: Path,
+    label: str,
+) -> Path:
+    try:
+        selected = Path(
+            _required_text(value, key, label=label)
+        ).resolve(strict=True)
+        proof_root = root.resolve(strict=True)
+        selected.relative_to(proof_root)
+    except (OSError, ValueError):
+        raise DemoError(f"{label} points outside its proof root") from None
+    if not selected.is_dir():
+        raise DemoError(f"{label} directory is unavailable")
+    return selected
+
+
+def _comparison_plan_output(
+    output: dict[str, Any],
+    *,
+    comparison_plans_root: Path,
+) -> VerifiedComparisonPlan:
+    label = "comparison plan output"
+    path = _contained_directory(
+        output,
+        "path",
+        root=comparison_plans_root,
+        label=label,
+    )
+    digest = _required_text(output, "comparison_plan_digest", label=label)
+    try:
+        verified = verify_comparison_plan(
+            path,
+            expected_comparison_plan_digest=digest,
+        )
+    except InferdromeError:
+        raise DemoError("comparison plan output failed verification") from None
+    descriptor = verified.descriptor
+    expected_arms = {
+        "baseline": {
+            "concurrency": descriptor.independent_variable.baseline_value,
+            "planned_trial_set_id": (
+                descriptor.baseline_arm.planned_trial_set_id
+            ),
+            "run_ids": list(descriptor.baseline_arm.run_ids),
+            "source": str(BASELINE_SOURCE_PATH.absolute()),
+        },
+        "candidate": {
+            "concurrency": descriptor.independent_variable.candidate_value,
+            "planned_trial_set_id": (
+                descriptor.candidate_arm.planned_trial_set_id
+            ),
+            "run_ids": list(descriptor.candidate_arm.run_ids),
+            "source": str(CANDIDATE_SOURCE_PATH.absolute()),
+        },
+    }
+    expected_schedule = [
+        {
+            "arm": slot.arm.value,
+            "block_index": slot.block_index,
+            "run_id": slot.run_id,
+            "sequence_index": slot.sequence_index,
+        }
+        for slot in descriptor.ordered_schedule
+    ]
+    if (
+        output.get("valid") is not True
+        or output.get("comparison_plan_id") != descriptor.comparison_plan_id
+        or output.get("predeclaration_assurance") != "OPERATOR_ATTESTED"
+        or output.get("arms") != expected_arms
+        or output.get("schedule") != expected_schedule
+    ):
+        raise DemoError("comparison plan output disagrees with its artifact")
+    return verified
+
+
+def _comparison_result_output(
+    output: dict[str, Any],
+    *,
+    plan: VerifiedComparisonPlan,
+    runs_root: Path,
+    trial_sets_root: Path,
+    comparison_plans_root: Path,
+    comparison_results_root: Path,
+    expected_executed_run_ids: tuple[str, ...],
+    expected_reused_run_ids: tuple[str, ...],
+) -> VerifiedComparisonResult:
+    label = "comparison execution output"
+    path = _contained_directory(
+        output,
+        "path",
+        root=comparison_results_root,
+        label=label,
+    )
+    digest = _required_text(output, "comparison_result_digest", label=label)
+    try:
+        verified = verify_comparison_result(
+            path,
+            runs_root=runs_root,
+            trial_sets_root=trial_sets_root,
+            comparison_plans_root=comparison_plans_root,
+            expected_comparison_result_digest=digest,
+        )
+    except InferdromeError:
+        raise DemoError("comparison execution output failed verification") from None
+    descriptor = verified.descriptor
+    if (
+        output.get("valid") is not True
+        or output.get("comparison_result_id") != descriptor.comparison_result_id
+        or output.get("comparison_plan_id") != descriptor.comparison_plan_id
+        or output.get("comparison_plan_digest") != plan.comparison_plan_digest
+        or output.get("status") != descriptor.status.value
+        or output.get("planned_run_count")
+        != len(plan.descriptor.ordered_schedule)
+        or output.get("executed_run_ids") != list(expected_executed_run_ids)
+        or output.get("reused_run_ids") != list(expected_reused_run_ids)
+        or output.get("baseline_trial_set_id")
+        != verified.baseline.descriptor.trial_set_id
+        or output.get("baseline_trial_set_digest")
+        != verified.baseline.trial_set_digest
+        or output.get("candidate_trial_set_id")
+        != verified.candidate.descriptor.trial_set_id
+        or output.get("candidate_trial_set_digest")
+        != verified.candidate.trial_set_digest
+    ):
+        raise DemoError("comparison execution output disagrees with its artifacts")
+    return verified
+
+
+def _inspected_customer_bundle(
+    output: dict[str, Any],
+    *,
+    run_id: str,
+    runs_root: Path,
+) -> dict[str, Any]:
+    bundle = output.get("bundle")
+    if not isinstance(bundle, dict):
+        raise DemoError("run inspection omits its bundle")
+    path = _contained_directory(
+        bundle,
+        "path",
+        root=runs_root / run_id,
+        label="inspected bundle",
+    )
+    digest = _required_text(bundle, "bundle_digest", label="inspected bundle")
+    if (
+        output.get("run_id") != run_id
+        or output.get("state") != "COMPLETE"
+        or output.get("integrity_status") != "VALID"
+        or bundle.get("evidence_eligibility") != "CUSTOMER_ELIGIBLE"
+    ):
+        raise DemoError("run inspection is not valid customer evidence")
+    return {
+        "bundle_digest": digest,
+        "bundle_path": str(path),
+        "environment_completeness": bundle.get("environment_completeness"),
+        "evidence_eligibility": bundle.get("evidence_eligibility"),
+        "run_id": run_id,
+    }
 
 
 def _corrupt_bundle_copy(bundle: Path, demo_directory: Path) -> Path:
@@ -426,6 +657,108 @@ def _write_receipt(
         "synthetic_fixture_rejected": True,
     }
     path = demo_directory / "demo-receipt.json"
+    path.write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_comparison_receipt(
+    demo_directory: Path,
+    *,
+    host_preparation_path: Path,
+    repository_commit: str,
+    plan: VerifiedComparisonPlan,
+    result: VerifiedComparisonResult,
+    run_evidence: list[dict[str, Any]],
+) -> Path:
+    schedule = plan.descriptor.ordered_schedule
+    verified_run_descriptors = {
+        member.verification.run_id: member.verification.descriptor
+        for member in (*result.baseline.members, *result.candidate.members)
+    }
+    if (
+        set(verified_run_descriptors)
+        != {slot.run_id for slot in schedule}
+        or any(
+            descriptor.evidence_eligibility.value != "CUSTOMER_ELIGIBLE"
+            or descriptor.environment_completeness.value != "COMPLETE"
+            for descriptor in verified_run_descriptors.values()
+        )
+        or len(run_evidence) != len(schedule)
+        or any(
+            evidence.get("run_id") != slot.run_id
+            or evidence.get("arm") != slot.arm.value
+            or evidence.get("block_index") != slot.block_index
+            or evidence.get("sequence_index") != slot.sequence_index
+            or evidence.get("evidence_eligibility") != "CUSTOMER_ELIGIBLE"
+            or evidence.get("environment_completeness") != "COMPLETE"
+            for evidence, slot in zip(run_evidence, schedule, strict=True)
+        )
+    ):
+        raise DemoError("comparison receipt run evidence is inconsistent")
+    host_receipt_bytes = host_preparation_path.read_bytes()
+    descriptor = result.descriptor
+    receipt = {
+        "acceptance_boundary": "PENDING_EXTERNAL_EXITSPEC",
+        "all_bundles_customer_eligible": True,
+        "comparison_plan": {
+            "comparison_plan_digest": plan.comparison_plan_digest,
+            "comparison_plan_id": plan.descriptor.comparison_plan_id,
+            "path": str(plan.path),
+            "predeclaration_assurance": (
+                plan.descriptor.predeclaration_assurance
+            ),
+            "schedule": [
+                {
+                    "arm": slot.arm.value,
+                    "block_index": slot.block_index,
+                    "run_id": slot.run_id,
+                    "sequence_index": slot.sequence_index,
+                }
+                for slot in plan.descriptor.ordered_schedule
+            ],
+        },
+        "comparison_result": {
+            "comparison_result_digest": result.comparison_result_digest,
+            "comparison_result_id": descriptor.comparison_result_id,
+            "inference_scope": descriptor.inference_scope,
+            "outcomes": [
+                outcome.model_dump(
+                    mode="json",
+                    by_alias=True,
+                    exclude_none=False,
+                )
+                for outcome in descriptor.outcomes
+            ],
+            "path": str(result.path),
+            "status": descriptor.status.value,
+            "unsatisfied_controls": [
+                control.value for control in descriptor.unsatisfied_controls
+            ],
+        },
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "host_preparation_sha256": "sha256:"
+        + hashlib.sha256(host_receipt_bytes).hexdigest(),
+        "repository_commit": repository_commit,
+        "resume_reverification_succeeded": True,
+        "runs": run_evidence,
+        "schema_version": "inferdrome.real-gpu-comparison-demo-receipt.v1",
+        "trial_sets": {
+            "baseline": {
+                "path": str(result.baseline.path),
+                "trial_set_digest": result.baseline.trial_set_digest,
+                "trial_set_id": result.baseline.descriptor.trial_set_id,
+            },
+            "candidate": {
+                "path": str(result.candidate.path),
+                "trial_set_digest": result.candidate.trial_set_digest,
+                "trial_set_id": result.candidate.descriptor.trial_set_id,
+            },
+        },
+    }
+    path = demo_directory / "comparison-demo-receipt.json"
     path.write_text(
         json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -573,6 +906,315 @@ def _execute(args: argparse.Namespace) -> Path:
     )
 
 
+def _execute_comparison(args: argparse.Namespace) -> Path:
+    pin = _check_static_assets()
+    state_root = Path(args.state_root).absolute()
+    model_path, repository_commit = _require_clean_prepared_host(
+        state_root,
+        pin,
+    )
+    output_root = Path(args.output_root).absolute()
+    output_root.mkdir(parents=True, exist_ok=True)
+    demo_directory = Path(
+        tempfile.mkdtemp(prefix="real-gpu-comparison-", dir=output_root)
+    ).absolute()
+    runs_root = demo_directory / "runs"
+    trial_sets_root = demo_directory / "trial-sets"
+    comparison_plans_root = demo_directory / "comparison-plans"
+    comparison_results_root = demo_directory / "comparison-results"
+
+    _run_cli(
+        demo_directory,
+        "01-validate-baseline",
+        ["validate", str(BASELINE_SOURCE_PATH)],
+        expect_success=True,
+    )
+    _run_cli(
+        demo_directory,
+        "02-validate-candidate",
+        ["validate", str(CANDIDATE_SOURCE_PATH)],
+        expect_success=True,
+    )
+    created = _run_cli(
+        demo_directory,
+        "03-create-plan",
+        [
+            "comparison-plan",
+            "create",
+            "--baseline-source",
+            str(BASELINE_SOURCE_PATH),
+            "--candidate-source",
+            str(CANDIDATE_SOURCE_PATH),
+            "--title",
+            "Managed real-GPU concurrency 2 versus 4",
+            "--hypothesis",
+            "Increasing concurrency from 2 to 4 changes attempted throughput.",
+            "--repetitions",
+            str(COMPARISON_REPETITIONS_PER_ARM),
+            "--primary-outcome",
+            "attempted_request_throughput_per_s:rate",
+            "--schedule-seed",
+            COMPARISON_SCHEDULE_SEED,
+            "--runs-root",
+            str(runs_root),
+            "--comparison-plans-root",
+            str(comparison_plans_root),
+        ],
+        expect_success=True,
+    )
+    created_output = _strict_json_bytes(
+        created.stdout,
+        label="comparison plan output",
+    )
+    plan = _comparison_plan_output(
+        created_output,
+        comparison_plans_root=comparison_plans_root,
+    )
+    retained_plan_digest = demo_directory / "retained-plan-digest.txt"
+    retained_plan_digest.write_text(
+        plan.comparison_plan_digest + "\n",
+        encoding="ascii",
+    )
+    retained_plan_digest.chmod(0o400)
+
+    verified_plan = _run_cli(
+        demo_directory,
+        "04-verify-plan",
+        [
+            "comparison-plan",
+            "verify",
+            str(plan.path),
+            "--expected-digest",
+            plan.comparison_plan_digest,
+        ],
+        expect_success=True,
+    )
+    verified_plan_output = _strict_json_bytes(
+        verified_plan.stdout,
+        label="verified comparison plan output",
+    )
+    if (
+        verified_plan_output.get("valid") is not True
+        or verified_plan_output.get("comparison_plan_id")
+        != plan.descriptor.comparison_plan_id
+        or verified_plan_output.get("comparison_plan_digest")
+        != plan.comparison_plan_digest
+    ):
+        raise DemoError("verified comparison plan output disagrees")
+
+    execution_arguments = [
+        "comparison-plan",
+        "execute",
+        str(plan.path),
+        "--expected-digest",
+        plan.comparison_plan_digest,
+        "--baseline-source",
+        str(BASELINE_SOURCE_PATH),
+        "--candidate-source",
+        str(CANDIDATE_SOURCE_PATH),
+        "--runs-root",
+        str(runs_root),
+        "--trial-sets-root",
+        str(trial_sets_root),
+        "--comparison-results-root",
+        str(comparison_results_root),
+        "--tokenizer-path",
+        str(model_path),
+        "--managed-local-vllm",
+        "--managed-model-path",
+        str(model_path),
+        "--managed-gpu-index",
+        str(args.gpu_index),
+        "--managed-startup-timeout-seconds",
+        str(args.startup_timeout_seconds),
+    ]
+    scheduled_run_ids = tuple(
+        slot.run_id for slot in plan.descriptor.ordered_schedule
+    )
+    outer_timeout = (
+        len(scheduled_run_ids)
+        * (math.ceil(args.startup_timeout_seconds) + 1020)
+        + 600
+    )
+    executed = _run_cli(
+        demo_directory,
+        "05-execute-comparison",
+        execution_arguments,
+        expect_success=True,
+        timeout_seconds=outer_timeout,
+    )
+    executed_output = _strict_json_bytes(
+        executed.stdout,
+        label="comparison execution output",
+    )
+    result = _comparison_result_output(
+        executed_output,
+        plan=plan,
+        runs_root=runs_root,
+        trial_sets_root=trial_sets_root,
+        comparison_plans_root=comparison_plans_root,
+        comparison_results_root=comparison_results_root,
+        expected_executed_run_ids=scheduled_run_ids,
+        expected_reused_run_ids=(),
+    )
+
+    run_evidence: list[dict[str, Any]] = []
+    step = 6
+    for slot in plan.descriptor.ordered_schedule:
+        inspected = _run_cli(
+            demo_directory,
+            f"{step:02d}-inspect-run-{slot.sequence_index + 1}",
+            ["inspect", slot.run_id, "--runs-root", str(runs_root)],
+            expect_success=True,
+        )
+        inspected_output = _strict_json_bytes(
+            inspected.stdout,
+            label=f"run {slot.sequence_index + 1} inspection",
+        )
+        evidence = _inspected_customer_bundle(
+            inspected_output,
+            run_id=slot.run_id,
+            runs_root=runs_root,
+        )
+        evidence.update(
+            {
+                "arm": slot.arm.value,
+                "block_index": slot.block_index,
+                "sequence_index": slot.sequence_index,
+            }
+        )
+        step += 1
+        customer_verified = _run_cli(
+            demo_directory,
+            f"{step:02d}-verify-run-{slot.sequence_index + 1}",
+            [
+                "bundle",
+                "verify",
+                str(evidence["bundle_path"]),
+                "--expected-digest",
+                str(evidence["bundle_digest"]),
+                "--require-customer-eligible",
+            ],
+            expect_success=True,
+        )
+        customer_output = _strict_json_bytes(
+            customer_verified.stdout,
+            label=f"run {slot.sequence_index + 1} customer verification",
+        )
+        if (
+            customer_output.get("valid") is not True
+            or customer_output.get("run_id") != slot.run_id
+            or customer_output.get("bundle_digest")
+            != evidence["bundle_digest"]
+            or customer_output.get("evidence_eligibility")
+            != "CUSTOMER_ELIGIBLE"
+            or customer_output.get("integrity_status") != "VALID"
+        ):
+            raise DemoError("customer bundle verification output disagrees")
+        run_evidence.append(evidence)
+        step += 1
+
+    for arm_name, verified_trial_set in (
+        ("baseline", result.baseline),
+        ("candidate", result.candidate),
+    ):
+        verified_trial = _run_cli(
+            demo_directory,
+            f"{step:02d}-verify-{arm_name}-trial-set",
+            [
+                "trial-set",
+                "verify",
+                str(verified_trial_set.path),
+                "--runs-root",
+                str(runs_root),
+                "--expected-digest",
+                verified_trial_set.trial_set_digest,
+            ],
+            expect_success=True,
+        )
+        trial_output = _strict_json_bytes(
+            verified_trial.stdout,
+            label=f"{arm_name} Trial Set verification",
+        )
+        if (
+            trial_output.get("valid") is not True
+            or trial_output.get("trial_set_id")
+            != verified_trial_set.descriptor.trial_set_id
+            or trial_output.get("trial_set_digest")
+            != verified_trial_set.trial_set_digest
+            or trial_output.get("member_count")
+            != COMPARISON_REPETITIONS_PER_ARM
+        ):
+            raise DemoError(f"{arm_name} Trial Set verification disagrees")
+        step += 1
+
+    verified_result = _run_cli(
+        demo_directory,
+        f"{step:02d}-verify-comparison-result",
+        [
+            "comparison-result",
+            "verify",
+            str(result.path),
+            "--runs-root",
+            str(runs_root),
+            "--trial-sets-root",
+            str(trial_sets_root),
+            "--comparison-plans-root",
+            str(comparison_plans_root),
+            "--expected-digest",
+            result.comparison_result_digest,
+        ],
+        expect_success=True,
+    )
+    verified_result_output = _strict_json_bytes(
+        verified_result.stdout,
+        label="verified comparison result output",
+    )
+    if (
+        verified_result_output.get("valid") is not True
+        or verified_result_output.get("comparison_result_id")
+        != result.descriptor.comparison_result_id
+        or verified_result_output.get("comparison_result_digest")
+        != result.comparison_result_digest
+        or verified_result_output.get("status") != result.descriptor.status.value
+    ):
+        raise DemoError("verified comparison result output disagrees")
+    step += 1
+
+    resumed = _run_cli(
+        demo_directory,
+        f"{step:02d}-resume-reverification",
+        execution_arguments,
+        expect_success=True,
+        timeout_seconds=600,
+    )
+    resumed_output = _strict_json_bytes(
+        resumed.stdout,
+        label="resumed comparison execution output",
+    )
+    resumed_result = _comparison_result_output(
+        resumed_output,
+        plan=plan,
+        runs_root=runs_root,
+        trial_sets_root=trial_sets_root,
+        comparison_plans_root=comparison_plans_root,
+        comparison_results_root=comparison_results_root,
+        expected_executed_run_ids=(),
+        expected_reused_run_ids=scheduled_run_ids,
+    )
+    if resumed_result.comparison_result_digest != result.comparison_result_digest:
+        raise DemoError("resume changed the comparison result identity")
+
+    return _write_comparison_receipt(
+        demo_directory,
+        host_preparation_path=state_root / "host-preparation.json",
+        repository_commit=repository_commit,
+        plan=plan,
+        result=result,
+        run_evidence=run_evidence,
+    )
+
+
 def _gpu_index(value: str) -> int:
     if not value or not value.isascii() or not value.isdecimal():
         raise argparse.ArgumentTypeError("GPU index must be an integer")
@@ -598,10 +1240,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the pinned Inferdrome managed real-GPU demonstration"
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="validate static pins and example inputs without requiring a GPU",
+    )
+    mode.add_argument(
+        "--comparison",
+        action="store_true",
+        help="run a two-arm controlled comparison and emit its proof receipt",
     )
     parser.add_argument(
         "--state-root",
@@ -635,7 +1283,7 @@ def main() -> int:
             _check_static_assets()
             print("real-GPU demonstration assets: OK")
             return 0
-        receipt = _execute(args)
+        receipt = _execute_comparison(args) if args.comparison else _execute(args)
     except DemoError as error:
         print(f"real-gpu-demo: {error}", file=sys.stderr)
         return 1

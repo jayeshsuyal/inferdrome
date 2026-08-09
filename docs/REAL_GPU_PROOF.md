@@ -51,7 +51,9 @@ The script uses no `sudo`, refuses a dirty checkout, refuses to reuse an
 existing destination, verifies the exact vLLM wheel hash before installation,
 downloads the model at the exact revision, rejects snapshot symlinks, checks
 CUDA through the installed Torch runtime, and records the checkout commit and
-resolved Python package inventory. Immediately before measurement, the demo
+resolved Python package inventory. It installs Inferdrome with its dashboard
+extra so the documented post-run inspection command does not depend on
+transitive vLLM packages. Immediately before measurement, the demo
 regenerates that inventory byte-for-byte and reruns `pip check`; package drift
 or a newly inconsistent environment fails before proof output is reserved.
 
@@ -172,6 +174,64 @@ results. `acceptance_boundary` remains `PENDING_EXTERNAL_EXITSPEC` by design.
 The native vLLM result includes generated text and is classified
 `RESPONSE_CONTENT`. Review sharing and retention accordingly.
 
+## Run the controlled-comparison proof
+
+The same prepared checkout can execute a genuine two-arm comparison with two
+preallocated repetitions per arm:
+
+```bash
+.inferdrome-gpu/venv/bin/python \
+  scripts/run_real_gpu_demo.py --comparison
+```
+
+Alternate state, output, GPU-index, and startup-timeout options are identical
+to the single-run proof. Comparison mode creates a fresh
+`real-gpu-comparison-*` directory beneath `gpu-proof-output/` and performs:
+
+1. strict validation of the pinned concurrency-2 and concurrency-4 sources;
+2. immutable plan creation before any run is reserved;
+3. retention and independent verification of the exact plan digest;
+4. four managed local-vLLM runs in the frozen permuted-pair schedule;
+5. customer-eligibility verification of every sealed bundle;
+6. independent verification of both planned Trial Sets and the final result;
+7. a second executor invocation that must reuse all four verified runs without
+   launching another workload; and
+8. publication of `comparison-demo-receipt.json`.
+
+The receipt anchors the checkout and host-preparation identities, plan and
+result digests, ordered run and bundle identities, Trial Set digests, result
+status and bounded outcome, and successful resume reverification. A fresh proof
+is expected to execute all four planned runs; the second invocation must report
+all four as reused and none as executed.
+
+`COMPARABLE` is emitted only if every frozen and observed v1 control is
+satisfied. A fully verified `INCOMPARABLE` result is still a successful proof
+of the evidence pipeline and contains no outcome estimate. Neither status is a
+winner label, causal claim, significance claim, or ExitSpec acceptance result.
+
+Inspect the finished proof through the locked read-only dashboard by replacing
+`<proof-directory>` with the directory containing the printed receipt:
+
+```bash
+<prepared-venv>/bin/inferdrome dashboard \
+  --runs-root <proof-directory>/runs \
+  --trial-sets-root <proof-directory>/trial-sets \
+  --comparison-plans-root <proof-directory>/comparison-plans \
+  --comparison-results-root <proof-directory>/comparison-results
+```
+
+The server remains bound to `127.0.0.1:8787`. For a headless remote GPU host,
+forward that loopback port from the reviewing workstation instead of exposing
+the dashboard publicly:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 <gpu-host>
+```
+
+Comparison mode launches one managed server per planned run. Budget host time
+for four bounded model loads plus four benchmark executions. Do not interrupt a
+reserved run unless you intend the frozen plan to remain blocked.
+
 ## Review and promotion gate
 
 Do not hand-edit generated evidence. Retain the printed bundle digest outside
@@ -188,3 +248,7 @@ A real bundle may be promoted as a committed example only after review records
 the exact checkout commit, engineering-gate result, GPU bundle digest, host
 preparation receipt digest, and later the separate ExitSpec receipt digest.
 Until that capture exists, PR 7 and the v0.1 release gate remain open.
+
+The comparison receipt and its four retained bundle digests are additional
+post-v0.1 proof; they do not replace the single-bundle promotion review or the
+separately owned ExitSpec demonstrations.

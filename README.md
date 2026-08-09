@@ -114,6 +114,15 @@ server-reported facts into locally verified evidence.
 
 The managed NVIDIA reproduction path and its one-command rejection demo are
 documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
+The same pinned host can produce a four-run controlled-comparison proof pack:
+
+```bash
+.inferdrome-gpu/venv/bin/python scripts/run_real_gpu_demo.py --comparison
+```
+
+That mode retains the plan digest before execution, verifies every
+customer-eligible bundle and both Trial Sets, reverifies the result, and proves
+that a second executor invocation reuses the exact completed schedule.
 
 ## v0.1 principles
 

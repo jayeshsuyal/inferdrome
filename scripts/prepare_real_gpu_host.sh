@@ -163,7 +163,8 @@ chmod a-w "$wheel_path"
 "$host_python" -m venv "$virtual_environment"
 environment_python="$virtual_environment/bin/python"
 "$environment_python" -m pip install "$wheel_path"
-"$environment_python" -m pip install "pandas==$pandas_version" "$repository_root"
+"$environment_python" -m pip install \
+  "pandas==$pandas_version" "$repository_root[dashboard]"
 "$environment_python" -m pip check
 
 installed_vllm_version=$(
@@ -252,3 +253,4 @@ PY
 
 echo "Prepared pinned GPU environment: $state_root"
 echo "Next: $virtual_environment/bin/python scripts/run_real_gpu_demo.py"
+echo "Comparison: $virtual_environment/bin/python scripts/run_real_gpu_demo.py --comparison"
