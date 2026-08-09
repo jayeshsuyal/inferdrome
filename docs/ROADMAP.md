@@ -377,12 +377,44 @@ Confidence intervals require a separately reviewed repeat-count, estimator,
 and uncertainty contract. Three runs are an example design, not an automatic
 statistical guarantee.
 
-Prefix caching remains outside slices 1 and 2 and is not a representable
+Prefix caching remains outside slices 1 through 3 and is not a representable
 treatment.
 It first requires an explicit typed execution control, fingerprint coverage,
 managed-server invocation evidence, and offline verification. A future
 prefix-caching comparison cannot be represented as an unbound label on a
 Trial Set.
+
+### v0.2 slice 3 — Fail-closed controlled-comparison execution
+
+Status: implemented; execution boundary accepted in
+[ADR 0009](adr/0009-add-fail-closed-comparison-execution.md).
+
+This slice automates the already frozen slice-2 protocol without changing any
+of the eleven public schemas. It adds:
+
+- retained-plan-digest and exact arm-source verification before reservation;
+- immutable private source/workload snapshots for the whole schedule;
+- one cooperating-process lock keyed by plan identity beneath the runs root;
+- exact preallocated schedule execution with no retries or replacements;
+- resume from every independently verified `COMPLETE` schedule prefix;
+- exact workspace-to-bundle byte binding before a run can be reused;
+- crash-safe no-replace publication for Trial Sets and results;
+- automatic Trial Set and result finalization with full reverification; and
+- dashboard-only per-slot operational progress.
+
+Gate:
+
+```text
+Automation may reduce operator error but cannot increase assurance. A hole,
+tampered run, failed/interrupted attempt, or abandoned reserved workspace
+blocks the frozen plan. OPERATOR_ATTESTED, RETROSPECTIVE, SYNTHETIC_ONLY,
+POINT_ESTIMATE_ONLY, and ExitSpec ownership remain unchanged.
+```
+
+The "verified completed prefix" above refers only to completed run workspaces
+at the front of the comparison schedule. It is unrelated to model KV prefix
+caching, which remains outside slices 1 through 3 and is not a representable
+treatment.
 
 ### v0.2 — Telemetry
 

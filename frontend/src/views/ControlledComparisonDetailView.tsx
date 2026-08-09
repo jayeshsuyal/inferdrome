@@ -476,7 +476,28 @@ function scheduleEvidence(
   detail: ControlledComparisonDetail,
   slot: ControlledComparisonScheduleSlot,
 ): ReactNode {
-  if (!detail.result) return <span className="comparison-schedule-state">Planned</span>;
+  const progress = detail.execution.slots[slot.sequence_index];
+  if (!detail.result) {
+    if (progress?.state === "COMPLETE" && progress.verified_bundle) {
+      return (
+        <Link className="comparison-run-link" to={`/runs/${encodeURIComponent(slot.run_id)}`}>
+          Verified<ArrowUpRight aria-hidden="true" />
+        </Link>
+      );
+    }
+    if (progress && ["FAILED", "INTERRUPTED", "INVALID"].includes(progress.state)) {
+      return (
+        <span className="comparison-schedule-state comparison-schedule-state-blocked">
+          {humanize(progress.state)}
+        </span>
+      );
+    }
+    return (
+      <span className="comparison-schedule-state">
+        {progress && progress.state !== "PENDING" ? `Workspace · ${humanize(progress.state)}` : "Planned"}
+      </span>
+    );
+  }
   if (detail.result.status === "INCOMPARABLE") {
     return <span className="comparison-schedule-state">Projection withheld</span>;
   }
@@ -522,7 +543,13 @@ function ArmEvidence({ detail }: { readonly detail: ControlledComparisonDetail }
       <div className="comparison-schedule-heading">
         <div>
           <Layers3 aria-hidden="true" />
-          <div><strong>Ordered execution schedule</strong><span>Frozen paired blocks; no replacement slots</span></div>
+          <div>
+            <strong>Ordered execution schedule</strong>
+            <span>
+              {detail.execution.completed_run_count} of {detail.execution.planned_run_count} workspaces verified · {humanize(detail.execution.status)}
+              {detail.execution.result_published ? " · result published" : ""}
+            </span>
+          </div>
         </div>
         <code>predeclared_permuted_pairs_v1</code>
       </div>

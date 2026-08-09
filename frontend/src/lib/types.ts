@@ -481,6 +481,40 @@ export interface ControlledComparisonPlanView extends ApiObject {
   readonly predeclaration_assurance: "OPERATOR_ATTESTED";
 }
 
+export type ControlledComparisonRunProgressState =
+  | "PENDING"
+  | "CREATED"
+  | "PREFLIGHT"
+  | "WARMUP"
+  | "MEASURING"
+  | "FINALIZING"
+  | "COMPLETE"
+  | "FAILED"
+  | "INTERRUPTED"
+  | "INVALID";
+
+export interface ControlledComparisonRunProgress extends ApiObject {
+  readonly sequence_index: number;
+  readonly run_id: string;
+  readonly state: ControlledComparisonRunProgressState;
+  readonly verified_bundle: boolean;
+}
+
+export interface ControlledComparisonExecutionView extends ApiObject {
+  readonly status:
+    | "NOT_STARTED"
+    | "PARTIAL"
+    | "BLOCKED"
+    | "EVIDENCE_COMPLETE";
+  readonly result_published: boolean;
+  readonly completed_run_count: number;
+  readonly planned_run_count: number;
+  readonly next_sequence_index: number | null;
+  readonly exact_schedule_prefix: boolean;
+  readonly issue: "PROGRESS_INSPECTION_FAILED" | null;
+  readonly slots: readonly ControlledComparisonRunProgress[];
+}
+
 export interface ControlledComparisonControlCheck extends ApiObject {
   readonly check: ControlledComparisonCheckId;
   readonly status: "SATISFIED" | "UNSATISFIED";
@@ -543,6 +577,7 @@ export interface ControlledComparisonDetail extends ApiObject {
   readonly projection_version: "inferdrome.dashboard.v1";
   readonly summary: ControlledComparisonSummary;
   readonly plan: ControlledComparisonPlanView;
+  readonly execution: ControlledComparisonExecutionView;
   readonly result: ControlledComparisonResult | null;
   readonly baseline_trial_set: TrialSetSummary | null;
   readonly candidate_trial_set: TrialSetSummary | null;

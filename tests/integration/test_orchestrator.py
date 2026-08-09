@@ -1,7 +1,9 @@
 """Executable orchestration converges on one verified evidence format."""
 
+import hashlib
 import json
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,14 +16,24 @@ from inferdrome.adapters.vllm_bench import (
     VllmVersionProbeCapture,
     preflight_attached_endpoint,
 )
-from inferdrome.bundle import verify_bundle
+from inferdrome.bundle import (
+    recalculate_bundle,
+    verify_bundle,
+    verify_bundle_matches_workspace,
+)
+from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.domain.experiment import AttachedVllmTarget
 from inferdrome.domain.states import (
     EnvironmentCompleteness,
     EvidenceEligibility,
     RunState,
 )
-from inferdrome.errors import AdapterError, CancellationRequested
+from inferdrome.errors import (
+    AdapterError,
+    CancellationRequested,
+    ResolutionError,
+    VerificationError,
+)
 from inferdrome.execution.cancellation import (
     CancellationReason,
     CancellationToken,
@@ -72,6 +84,78 @@ def test_fake_orchestrator_executes_seals_and_verifies(tmp_path: Path) -> None:
         EvidenceEligibility.SYNTHETIC_ONLY
     )
     assert result.workspace.current_state().state is RunState.COMPLETE
+
+
+def test_bundle_analysis_cannot_be_reused_for_a_different_workspace(
+    tmp_path: Path,
+) -> None:
+    first = orchestrator.run_experiment(
+        REPOSITORY_ROOT / "examples" / "fake-smoke.yaml",
+        runs_root=tmp_path / "first-runs",
+        run_id=FAKE_RUN_ID,
+    )
+    second = orchestrator.run_experiment(
+        REPOSITORY_ROOT / "examples" / "fake-smoke.yaml",
+        runs_root=tmp_path / "second-runs",
+        run_id="run-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    )
+    second_analysis = recalculate_bundle(second.sealed_bundle.path)
+
+    with pytest.raises(VerificationError, match="not attached"):
+        verify_bundle_matches_workspace(first.workspace, second_analysis)
+
+
+def test_bundle_must_match_exact_frozen_workspace_bytes(tmp_path: Path) -> None:
+    result = orchestrator.run_experiment(
+        REPOSITORY_ROOT / "examples" / "fake-smoke.yaml",
+        runs_root=tmp_path / "runs",
+        run_id=FAKE_RUN_ID,
+    )
+    analysis = recalculate_bundle(result.sealed_bundle.path)
+    resolved_path = (
+        result.workspace.path / "inputs" / "experiment.resolved.json"
+    )
+    changed_bytes = resolved_path.read_bytes() + b" "
+    resolved_path.chmod(0o600)
+    resolved_path.write_bytes(changed_bytes)
+    resolved_path.chmod(0o400)
+
+    metadata = result.workspace.metadata
+    changed_inputs = tuple(
+        descriptor.model_copy(
+            update={
+                "size_bytes": len(changed_bytes),
+                "sha256": f"sha256:{hashlib.sha256(changed_bytes).hexdigest()}",
+            }
+        )
+        if descriptor.path == "inputs/experiment.resolved.json"
+        else descriptor
+        for descriptor in metadata.frozen_inputs
+    )
+    changed_metadata = metadata.model_copy(
+        update={"frozen_inputs": changed_inputs}
+    )
+    metadata_path = result.workspace.path / "control" / "resolution.json"
+    metadata_path.chmod(0o600)
+    metadata_path.write_bytes(
+        canonical_json_bytes(
+            changed_metadata.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude_none=False,
+            )
+        )
+    )
+    metadata_path.chmod(0o400)
+
+    changed_workspace = RunWorkspace.open(result.workspace.path)
+    changed_workspace.verify_frozen_inputs()
+    assert recalculate_bundle(result.sealed_bundle.path) == analysis
+    with pytest.raises(
+        VerificationError,
+        match="bundle bytes disagree with frozen workspace inputs",
+    ):
+        verify_bundle_matches_workspace(changed_workspace, analysis)
 
 
 def test_attached_vllm_orchestrator_preserves_real_shape_without_network_or_gpu(
@@ -457,6 +541,59 @@ def test_invalid_run_option_does_not_reserve_workspace(tmp_path: Path) -> None:
             tokenizer_path=tmp_path,
         )
 
+    assert not runs_root.exists()
+
+
+def test_forged_resolution_is_rejected_before_workspace_reservation(
+    tmp_path: Path,
+) -> None:
+    resolution = resolve_experiment(
+        REPOSITORY_ROOT / "examples" / "fake-smoke.yaml",
+        run_id=FAKE_RUN_ID,
+    )
+    forged = replace(
+        resolution,
+        request_plan_digest=f"sha256:{'f' * 64}",
+    )
+    runs_root = tmp_path / "runs"
+
+    with pytest.raises(ResolutionError, match="internally inconsistent"):
+        orchestrator.run_resolved_experiment(
+            forged,
+            runs_root=runs_root,
+        )
+
+    assert not runs_root.exists()
+
+
+def test_attached_runtime_paths_are_checked_before_workspace_reservation(
+    tmp_path: Path,
+) -> None:
+    source_path = (
+        REPOSITORY_ROOT / "tests" / "fixtures" / "vllm" / "v0_26" / "source.yaml"
+    )
+    runs_root = tmp_path / "runs"
+
+    with pytest.raises(AdapterError, match="requires a tokenizer directory"):
+        orchestrator.run_experiment(
+            source_path,
+            runs_root=runs_root,
+            run_id=VLLM_RUN_ID,
+        )
+    assert not runs_root.exists()
+
+    with pytest.raises(AdapterError, match="model path must be a real directory"):
+        orchestrator.run_experiment(
+            source_path,
+            runs_root=runs_root,
+            run_id=VLLM_RUN_ID,
+            tokenizer_path=(
+                REPOSITORY_ROOT / "spikes" / "vllm-0.26.0" / "tokenizer"
+            ),
+            managed_vllm=ManagedVllmConfig(
+                model_path=tmp_path / "missing-model"
+            ),
+        )
     assert not runs_root.exists()
 
 

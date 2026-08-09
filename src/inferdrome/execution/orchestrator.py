@@ -1,6 +1,7 @@
 """End-to-end execution orchestration for the frozen Inferdrome v0.1 paths."""
 
 import os
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,7 +67,11 @@ from inferdrome.normalization.vllm_0_26 import (
     VLLM_ADAPTER_VERSION,
     VLLM_VERSION,
 )
-from inferdrome.resolution import ResolutionResult, resolve_experiment
+from inferdrome.resolution import (
+    ResolutionResult,
+    resolve_experiment,
+    validate_resolution_result,
+)
 from inferdrome.workspace import RunWorkspace
 
 
@@ -107,6 +112,14 @@ def _write_capture_file(path: Path, content: bytes) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _real_directory(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path.absolute())
+    except OSError:
+        return False
+    return stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode)
 
 
 def _write_managed_server_capture(
@@ -464,6 +477,28 @@ def run_experiment(
     selected_cancellation = cancellation or CancellationToken()
     selected_cancellation.raise_if_requested()
     resolution = resolve_experiment(source_path, run_id=run_id, strict=strict)
+    return run_resolved_experiment(
+        resolution,
+        runs_root=runs_root,
+        tokenizer_path=tokenizer_path,
+        managed_vllm=managed_vllm,
+        cancellation=selected_cancellation,
+    )
+
+
+def run_resolved_experiment(
+    resolution: ResolutionResult,
+    *,
+    runs_root: Path,
+    tokenizer_path: Path | None = None,
+    managed_vllm: ManagedVllmConfig | None = None,
+    cancellation: CancellationToken | None = None,
+) -> RunResult:
+    """Execute one already-resolved input without rereading its source files."""
+
+    selected_cancellation = cancellation or CancellationToken()
+    selected_cancellation.raise_if_requested()
+    validate_resolution_result(resolution)
     is_fake = isinstance(resolution.resolved_spec.execution, FakeExecution)
     if is_fake and tokenizer_path is not None:
         raise AdapterError("tokenizer path is only valid for attached vLLM execution")
@@ -471,6 +506,12 @@ def run_experiment(
         raise AdapterError("managed vLLM is only valid for attached execution")
     if not is_fake and tokenizer_path is None:
         raise AdapterError("attached vLLM execution requires a tokenizer directory")
+    if not is_fake and tokenizer_path is not None and not _real_directory(
+        tokenizer_path
+    ):
+        raise AdapterError("attached vLLM tokenizer path must be a real directory")
+    if managed_vllm is not None and not _real_directory(managed_vllm.model_path):
+        raise AdapterError("managed vLLM model path must be a real directory")
     workspace = RunWorkspace.reserve(runs_root, resolution)
     try:
         if is_fake:

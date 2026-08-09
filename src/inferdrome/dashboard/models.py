@@ -431,10 +431,45 @@ class ControlledComparisonPlanView(FrozenModel):
     predeclaration_assurance: Literal["OPERATOR_ATTESTED"]
 
 
+class ControlledComparisonRunProgress(FrozenModel):
+    sequence_index: int
+    run_id: str
+    state: Literal[
+        "PENDING",
+        "CREATED",
+        "PREFLIGHT",
+        "WARMUP",
+        "MEASURING",
+        "FINALIZING",
+        "COMPLETE",
+        "FAILED",
+        "INTERRUPTED",
+        "INVALID",
+    ]
+    verified_bundle: bool
+
+
+class ControlledComparisonExecutionView(FrozenModel):
+    status: Literal[
+        "NOT_STARTED",
+        "PARTIAL",
+        "BLOCKED",
+        "EVIDENCE_COMPLETE",
+    ]
+    result_published: bool
+    completed_run_count: int
+    planned_run_count: int
+    next_sequence_index: int | None
+    exact_schedule_prefix: bool
+    issue: Literal["PROGRESS_INSPECTION_FAILED"] | None
+    slots: tuple[ControlledComparisonRunProgress, ...]
+
+
 class ControlledComparisonDetail(FrozenModel):
     projection_version: Literal["inferdrome.dashboard.v1"] = "inferdrome.dashboard.v1"
     summary: ControlledComparisonSummary
     plan: ControlledComparisonPlanView
+    execution: ControlledComparisonExecutionView
     result: ControlledComparisonResult | None
     baseline_trial_set: TrialSetSummary | None
     candidate_trial_set: TrialSetSummary | None

@@ -1,6 +1,6 @@
 # Inferdrome CLI and orchestration
 
-Status: **Implemented for v0.1 hardening; Trial Set and controlled-comparison extensions accepted**
+Status: **Implemented for v0.1 hardening and v0.2 comparison execution**
 
 Implementation date: **2026-08-06**
 
@@ -221,9 +221,7 @@ inferdrome comparison-plan create \
 ```
 
 The command emits preallocated arm run IDs, Trial Set IDs, the exact execution
-schedule, and an out-of-band plan digest. Retain the digest, execute each
-planned run in schedule order with its arm's source, then create the two Trial
-Sets with the exact planned IDs and ordered memberships.
+schedule, and an out-of-band plan digest. Retain that digest.
 
 Verify the immutable design bytes against that retained digest at any time:
 
@@ -233,7 +231,35 @@ inferdrome comparison-plan verify \
   --expected-digest "$PLAN_DIGEST"
 ```
 
-Create a result only with all three retained input digests:
+Execute every missing schedule slot, create both planned Trial Sets, create the
+result, and reverify the full chain with one command:
+
+```bash
+inferdrome comparison-plan execute \
+  comparison-plans/comparison-plan-<id> \
+  --expected-digest "$PLAN_DIGEST" \
+  --baseline-source examples/controlled-concurrency-2.yaml \
+  --candidate-source examples/controlled-concurrency-4.yaml \
+  --runs-root runs \
+  --trial-sets-root trial-sets \
+  --comparison-results-root comparison-results
+```
+
+The executor verifies source bytes before reservation, runs only preallocated
+IDs in the frozen order, and resumes only an exact independently verified
+`COMPLETE` prefix. It never retries `FAILED` or `INTERRUPTED` attempts and never
+generates replacement IDs. Its local per-plan lock coordinates cooperating
+Inferdrome executors beneath one runs root; it is not distributed execution
+attestation.
+
+The response includes executed and reused run IDs, both Trial Set identities
+and digests, and the final result. A finalized `INCOMPARABLE` result exits `0`
+with no outcome arithmetic because the pipeline succeeded even though one or
+more comparison controls did not.
+
+The low-level assembly path remains available. Create a result only after
+manually executing the exact schedule and creating both planned Trial Sets,
+using all three retained input digests:
 
 ```bash
 inferdrome comparison-result create \
@@ -298,7 +324,9 @@ The controlled-comparison extension adds `/comparisons` and
 `/comparisons/:planId`, backed by GET-only APIs beneath
 `/api/v1/controlled-comparisons`. The design is shown before result controls;
 estimates appear only for verified `COMPARABLE` results. `/compare` remains the
-separate retrospective two-run utility.
+separate retrospective two-run utility. Detail responses also project verified
+schedule-prefix progress. These fields are dashboard-only operational state,
+not a twelfth public evidence schema or execution attestation.
 
 Its product and comparison boundaries are frozen in
 [DASHBOARD.md](DASHBOARD.md), [TRIAL_SETS.md](TRIAL_SETS.md), and
@@ -316,6 +344,10 @@ supervisor then performs bounded terminate/kill handling. A safely writable
 reserved workspace records `INTERRUPTED`; other execution failures record
 `FAILED`. A run reaches `COMPLETE` only through successful sealing and offline
 verification.
+
+For `comparison-plan execute`, cancellation between completed slots is
+resumable. Once a planned ID has been reserved, an interrupted or failed run is
+terminal and the v1 plan blocks rather than retrying or replacing that attempt.
 
 The attached-vLLM workspace preserves invocation evidence, producer-version
 output, stdout, stderr, exit status, and any producer-written native result in

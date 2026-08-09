@@ -1,6 +1,10 @@
 """Evidence-bundle writing and offline verification."""
 
-from inferdrome.bundle.analysis import BundleAnalysis, recalculate_bundle
+from inferdrome.bundle.analysis import (
+    BundleAnalysis,
+    recalculate_bundle,
+    verify_bundle_matches_workspace,
+)
 from inferdrome.bundle.verifier import VerificationReport, verify_bundle
 from inferdrome.bundle.writer import (
     BundleMetadata,
@@ -16,4 +20,5 @@ __all__ = [
     "recalculate_bundle",
     "seal_bundle",
     "verify_bundle",
+    "verify_bundle_matches_workspace",
 ]

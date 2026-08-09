@@ -1071,12 +1071,168 @@ function parseControlledResult(value: unknown, context: string): ControlledCompa
   return value as unknown as ControlledComparisonResult;
 }
 
+function parseControlledExecution(
+  value: unknown,
+  plan: ControlledComparisonPlanView,
+  context: string,
+): ControlledComparisonDetail["execution"] {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  const allowedKeys = new Set([
+    "status",
+    "result_published",
+    "completed_run_count",
+    "planned_run_count",
+    "next_sequence_index",
+    "exact_schedule_prefix",
+    "issue",
+    "slots",
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw protocolError(`${context} contains a field outside the progress allowlist`);
+  }
+  const statuses = [
+    "NOT_STARTED",
+    "PARTIAL",
+    "BLOCKED",
+    "EVIDENCE_COMPLETE",
+  ];
+  if (!statuses.includes(value.status as string)) {
+    throw protocolError(`${context}.status is unknown`);
+  }
+  if (typeof value.result_published !== "boolean") {
+    throw protocolError(`${context}.result_published must be boolean`);
+  }
+  const planned = requiredInteger(value, "planned_run_count", context, 4);
+  const completed = requiredInteger(value, "completed_run_count", context);
+  if (planned !== plan.ordered_schedule.length || completed > planned) {
+    throw protocolError(`${context} run counts disagree with the frozen schedule`);
+  }
+  const next = value.next_sequence_index;
+  if (
+    next !== null && (
+      typeof next !== "number" ||
+      !Number.isInteger(next) ||
+      next < 0 ||
+      next >= planned
+    )
+  ) {
+    throw protocolError(`${context}.next_sequence_index is invalid`);
+  }
+  if (typeof value.exact_schedule_prefix !== "boolean") {
+    throw protocolError(`${context}.exact_schedule_prefix must be boolean`);
+  }
+  const issue = nullableString(value, "issue", context);
+  if (issue !== null && issue !== "PROGRESS_INSPECTION_FAILED") {
+    throw protocolError(`${context}.issue is unknown`);
+  }
+  if (!Array.isArray(value.slots) || value.slots.length !== planned) {
+    throw protocolError(`${context}.slots must cover the frozen schedule`);
+  }
+  const states = new Set([
+    "PENDING",
+    "CREATED",
+    "PREFLIGHT",
+    "WARMUP",
+    "MEASURING",
+    "FINALIZING",
+    "COMPLETE",
+    "FAILED",
+    "INTERRUPTED",
+    "INVALID",
+  ]);
+  let observedCompleted = 0;
+  let noncompleteSeen = false;
+  let pendingSeen = false;
+  let locallyExactPrefix = true;
+  let firstNoncompleteIndex: number | null = null;
+  let hasBlockingSlot = false;
+  let hasOperationalSlot = false;
+  value.slots.forEach((slot, index) => {
+    if (!isRecord(slot)) throw protocolError(`${context}.slots[${index}] must be an object`);
+    const allowedSlotKeys = new Set(["sequence_index", "run_id", "state", "verified_bundle"]);
+    if (Object.keys(slot).some((key) => !allowedSlotKeys.has(key))) {
+      throw protocolError(`${context}.slots[${index}] contains an unknown field`);
+    }
+    if (
+      requiredInteger(slot, "sequence_index", `${context}.slots[${index}]`) !== index ||
+      requiredString(slot, "run_id", `${context}.slots[${index}]`) !== plan.ordered_schedule[index].run_id ||
+      !states.has(slot.state as string) ||
+      typeof slot.verified_bundle !== "boolean" ||
+      slot.verified_bundle !== (slot.state === "COMPLETE")
+    ) {
+      throw protocolError(`${context}.slots[${index}] disagrees with verified progress`);
+    }
+    if (slot.state === "PENDING") {
+      pendingSeen = true;
+    } else if (pendingSeen) {
+      locallyExactPrefix = false;
+    }
+    if (slot.state === "COMPLETE") {
+      observedCompleted += 1;
+      if (noncompleteSeen) locallyExactPrefix = false;
+    } else {
+      noncompleteSeen = true;
+      firstNoncompleteIndex ??= index;
+      if (["FAILED", "INTERRUPTED", "INVALID"].includes(slot.state as string)) {
+        hasBlockingSlot = true;
+      }
+      if (slot.state !== "PENDING") hasOperationalSlot = true;
+    }
+  });
+  if (
+    observedCompleted !== completed ||
+    (value.exact_schedule_prefix && !locallyExactPrefix)
+  ) {
+    throw protocolError(`${context} completion arithmetic is inconsistent`);
+  }
+  if (
+    (value.status === "NOT_STARTED" && (
+      completed !== 0 ||
+      next !== 0 ||
+      issue !== null ||
+      !value.exact_schedule_prefix ||
+      hasOperationalSlot
+    )) ||
+    (value.status === "EVIDENCE_COMPLETE" && (
+      completed !== planned || next !== null || !value.exact_schedule_prefix || issue !== null
+    )) ||
+    (value.status === "BLOCKED" && (
+      next !== null ||
+      (!hasBlockingSlot && value.exact_schedule_prefix) ||
+      (!hasBlockingSlot && completed === 0 && !hasOperationalSlot && issue === null) ||
+      (issue !== null && (
+        issue !== "PROGRESS_INSPECTION_FAILED" ||
+        completed !== 0 ||
+        value.exact_schedule_prefix ||
+        value.slots.some((slot) => !isRecord(slot) || slot.state !== "INVALID")
+      ))
+    )) ||
+    (value.status === "PARTIAL" && (
+      completed >= planned ||
+      next === null ||
+      next !== firstNoncompleteIndex ||
+      issue !== null ||
+      !value.exact_schedule_prefix ||
+      hasBlockingSlot ||
+      (!hasOperationalSlot && completed === 0)
+    ))
+  ) {
+    throw protocolError(`${context}.status disagrees with its slot states`);
+  }
+  return value as unknown as ControlledComparisonDetail["execution"];
+}
+
 function parseControlledComparisonDetail(payload: unknown): ControlledComparisonDetail {
   if (!isRecord(payload) || payload.projection_version !== "inferdrome.dashboard.v1") {
     throw protocolError("the controlled-comparison detail projection version is unsupported");
   }
   const summary = parseControlledSummary(payload.summary, "controlled-comparison summary");
   const plan = parseControlledPlan(payload.plan, "controlled-comparison plan");
+  const execution = parseControlledExecution(
+    payload.execution,
+    plan,
+    "controlled-comparison execution",
+  );
   if (
     summary.comparison_plan_id !== plan.comparison_plan_id ||
     summary.experiment_id !== plan.experiment_id ||
@@ -1102,13 +1258,19 @@ function parseControlledComparisonDetail(payload: unknown): ControlledComparison
     : parseTrialSetSummary(payload.candidate_trial_set, "controlled-comparison candidate_trial_set");
   if (result === null) {
     const expectedStatus = issue === null ? "NO_RESULT" : "WITHHELD";
-    if (summary.result_status !== expectedStatus || baselineTrialSet !== null || candidateTrialSet !== null) {
+    if (
+      summary.result_status !== expectedStatus ||
+      baselineTrialSet !== null ||
+      candidateTrialSet !== null ||
+      execution.result_published
+    ) {
       throw protocolError("controlled-comparison missing-result projection is inconsistent");
     }
     return payload as unknown as ControlledComparisonDetail;
   }
   if (
     issue !== null ||
+    !execution.result_published ||
     summary.result_status !== result.status ||
     summary.comparison_result_id !== result.comparison_result_id ||
     summary.comparison_result_digest === null ||

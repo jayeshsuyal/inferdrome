@@ -247,6 +247,9 @@ describe("Controlled comparisons views", () => {
     expect(screen.getByText("Exact paired run differences")).toBeInTheDocument();
     expect(screen.getAllByText("+1000000 ns")).toHaveLength(2);
     expect(screen.getByText(/colors represent arm roles only/)).toBeInTheDocument();
+    expect(screen.getByText(
+      /4 of 4 workspaces verified.*EVIDENCE COMPLETE.*result published/,
+    )).toBeInTheDocument();
     expect(screen.getByText(/No confidence interval, significance test, causal attribution/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Baseline concurrency trials/ })).toHaveAttribute(
       "href",

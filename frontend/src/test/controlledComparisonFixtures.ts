@@ -180,10 +180,27 @@ export const comparableControlledResult = {
   outcomes: [controlledOutcome],
 };
 
+export const publishedExecutionProgress = {
+  status: "EVIDENCE_COMPLETE",
+  result_published: true,
+  completed_run_count: controlledPlanView.ordered_schedule.length,
+  planned_run_count: controlledPlanView.ordered_schedule.length,
+  next_sequence_index: null,
+  exact_schedule_prefix: true,
+  issue: null,
+  slots: controlledPlanView.ordered_schedule.map((slot) => ({
+    sequence_index: slot.sequence_index,
+    run_id: slot.run_id,
+    state: "COMPLETE",
+    verified_bundle: true,
+  })),
+};
+
 export const comparableControlledDetail = {
   projection_version: "inferdrome.dashboard.v1",
   summary: comparableControlledSummary,
   plan: controlledPlanView,
+  execution: publishedExecutionProgress,
   result: comparableControlledResult,
   baseline_trial_set: baselineTrialSetSummary,
   candidate_trial_set: candidateTrialSetSummary,
@@ -238,6 +255,7 @@ export const incomparableControlledDetail = {
   projection_version: "inferdrome.dashboard.v1",
   summary: incomparableControlledSummary,
   plan: controlledPlanView,
+  execution: publishedExecutionProgress,
   result: incomparableControlledResult,
   baseline_trial_set: null,
   candidate_trial_set: null,

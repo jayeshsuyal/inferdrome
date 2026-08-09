@@ -16,14 +16,17 @@ from inferdrome.comparisons import (
     ComparisonResultDeclaration,
     VerifiedComparisonPlan,
     VerifiedComparisonResult,
+    inspect_comparison_execution,
     inspect_comparison_result_declaration,
     verify_comparison_plan,
     verify_comparison_result,
 )
 from inferdrome.dashboard.models import (
     ControlledComparisonDetail,
+    ControlledComparisonExecutionView,
     ControlledComparisonIndexResponse,
     ControlledComparisonPlanView,
+    ControlledComparisonRunProgress,
     ControlledComparisonSummary,
     PageView,
     RejectedControlledComparison,
@@ -36,6 +39,7 @@ from inferdrome.errors import (
     DashboardPaginationError,
     InferdromeError,
 )
+from inferdrome.immutable import is_internal_staging_entry
 
 _PLAN_ID = re.compile(r"^comparison-plan-[0-9a-f]{32}$")
 _RESULT_ID = re.compile(r"^comparison-result-[0-9a-f]{32}$")
@@ -204,7 +208,14 @@ def _discover(
         return ((_Candidate(entry=_entry_label(root.name), path=root),), ())
     try:
         with os.scandir(root) as iterator:
-            entries = sorted(iterator, key=lambda item: item.name)
+            entries = sorted(
+                (
+                    entry
+                    for entry in iterator
+                    if not is_internal_staging_entry(entry.name)
+                ),
+                key=lambda item: item.name,
+            )
     except OSError:
         raise DashboardError(f"{root_label} could not be scanned") from None
     if len(entries) > _MAX_DISCOVERED_ENTRIES:
@@ -286,9 +297,57 @@ def _summary(
     )
 
 
+def _execution_view(
+    plan: VerifiedComparisonPlan,
+    result: VerifiedComparisonResult | None,
+    runs_root: Path,
+) -> ControlledComparisonExecutionView:
+    schedule = plan.descriptor.ordered_schedule
+    try:
+        progress = inspect_comparison_execution(plan, runs_root)
+    except (InferdromeError, OSError, ValueError):
+        return ControlledComparisonExecutionView(
+            status="BLOCKED",
+            result_published=result is not None,
+            completed_run_count=0,
+            planned_run_count=len(schedule),
+            next_sequence_index=None,
+            exact_schedule_prefix=False,
+            issue="PROGRESS_INSPECTION_FAILED",
+            slots=tuple(
+                ControlledComparisonRunProgress(
+                    sequence_index=slot.sequence_index,
+                    run_id=slot.run_id,
+                    state="INVALID",
+                    verified_bundle=False,
+                )
+                for slot in schedule
+            ),
+        )
+    return ControlledComparisonExecutionView(
+        status=progress.status,
+        result_published=result is not None,
+        completed_run_count=progress.completed_run_count,
+        planned_run_count=progress.planned_run_count,
+        next_sequence_index=progress.next_sequence_index,
+        exact_schedule_prefix=progress.exact_schedule_prefix,
+        issue=None,
+        slots=tuple(
+            ControlledComparisonRunProgress(
+                sequence_index=slot.sequence_index,
+                run_id=slot.run_id,
+                state=slot.state,
+                verified_bundle=slot.verified_bundle,
+            )
+            for slot in progress.slots
+        ),
+    )
+
+
 def _detail(
     plan: VerifiedComparisonPlan,
     result: VerifiedComparisonResult | None,
+    runs_root: Path,
     *,
     result_issue: _ResultIssue | None = None,
 ) -> ControlledComparisonDetail:
@@ -310,6 +369,7 @@ def _detail(
                 },
             )
         ),
+        execution=_execution_view(plan, result, runs_root),
         result=None if result is None else result.descriptor,
         baseline_trial_set=(
             project_trial_set(result.baseline).summary
@@ -339,7 +399,6 @@ class ControlledComparisonDashboardIndex:
         self.comparison_results_root = comparison_results_root.absolute()
         self.trial_sets_root = trial_sets_root.absolute()
         self.runs_root = runs_root.absolute()
-        self._details: dict[str, ControlledComparisonDetail] = {}
         self._lock = RLock()
 
     def _plan_candidates(
@@ -415,7 +474,7 @@ class ControlledComparisonDashboardIndex:
                     [],
                 ).append((candidate, declaration))
 
-            details: dict[str, ControlledComparisonDetail] = {}
+            summaries_by_plan: dict[str, ControlledComparisonSummary] = {}
             for plan_id, plan in plans.items():
                 declarations = declarations_by_plan.get(plan_id, [])
                 if len(declarations) > 1:
@@ -423,14 +482,14 @@ class ControlledComparisonDashboardIndex:
                         rejected.append(
                             _rejected(candidate, "DUPLICATE_RESULT_FOR_PLAN")
                         )
-                    details[plan_id] = _detail(
+                    summaries_by_plan[plan_id] = _summary(
                         plan,
                         None,
-                        result_issue="DUPLICATE_RESULT_FOR_PLAN",
+                        result_withheld=True,
                     )
                     continue
                 if not declarations:
-                    details[plan_id] = _detail(plan, None)
+                    summaries_by_plan[plan_id] = _summary(plan, None)
                     continue
                 candidate, declaration = declarations[0]
                 if (
@@ -438,32 +497,31 @@ class ControlledComparisonDashboardIndex:
                     != plan.comparison_plan_digest
                 ):
                     rejected.append(_rejected(candidate, "RESULT_VERIFICATION_FAILED"))
-                    details[plan_id] = _detail(
+                    summaries_by_plan[plan_id] = _summary(
                         plan,
                         None,
-                        result_issue="RESULT_VERIFICATION_FAILED",
+                        result_withheld=True,
                     )
                     continue
                 try:
                     result = self._verified_result(declaration)
                 except (InferdromeError, OSError, ValueError):
                     rejected.append(_rejected(candidate, "RESULT_VERIFICATION_FAILED"))
-                    details[plan_id] = _detail(
+                    summaries_by_plan[plan_id] = _summary(
                         plan,
                         None,
-                        result_issue="RESULT_VERIFICATION_FAILED",
+                        result_withheld=True,
                     )
                     continue
-                details[plan_id] = _detail(plan, result)
+                summaries_by_plan[plan_id] = _summary(plan, result)
 
-            self._details = details
             summaries = tuple(
-                detail.summary
-                for detail in sorted(
-                    details.values(),
+                summary
+                for summary in sorted(
+                    summaries_by_plan.values(),
                     key=lambda item: (
-                        item.summary.created_at,
-                        item.summary.comparison_plan_id,
+                        item.created_at,
+                        item.comparison_plan_id,
                     ),
                     reverse=True,
                 )
@@ -534,10 +592,11 @@ class ControlledComparisonDashboardIndex:
             return _detail(
                 plan,
                 None,
+                self.runs_root,
                 result_issue="DUPLICATE_RESULT_FOR_PLAN",
             )
         if not matching:
-            return _detail(plan, None)
+            return _detail(plan, None, self.runs_root)
         if (
             matching[0][1].descriptor.comparison_plan_digest
             != plan.comparison_plan_digest
@@ -545,6 +604,7 @@ class ControlledComparisonDashboardIndex:
             return _detail(
                 plan,
                 None,
+                self.runs_root,
                 result_issue="RESULT_VERIFICATION_FAILED",
             )
         try:
@@ -553,6 +613,7 @@ class ControlledComparisonDashboardIndex:
             return _detail(
                 plan,
                 None,
+                self.runs_root,
                 result_issue="RESULT_VERIFICATION_FAILED",
             )
-        return _detail(plan, result)
+        return _detail(plan, result, self.runs_root)

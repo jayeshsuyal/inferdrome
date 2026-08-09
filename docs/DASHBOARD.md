@@ -1,11 +1,12 @@
 # Inferdrome local evidence dashboard
 
-Status: **Frozen initial product contract; Trial Set and controlled-comparison extensions accepted**
+Status: **Frozen initial contract; aggregate, comparison, and execution-progress extensions accepted**
 
 Decision records:
 [ADR 0006](adr/0006-local-read-only-evidence-dashboard.md),
-[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md), and
-[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md)
+[ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md),
+[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md), and
+[ADR 0009](adr/0009-add-fail-closed-comparison-execution.md)
 
 Release scope: **Post-v0.1 product slices**
 
@@ -312,6 +313,20 @@ arithmetic appear only for a verified `COMPARABLE` result. `INCOMPARABLE`,
 missing, duplicate, or withheld results expose no estimate, arm mean, paired
 difference, or run-level outcome value.
 
+The frozen schedule includes a dashboard-only operational projection. It shows
+the verified completed count, next frozen slot when execution can continue,
+and each planned workspace state. `COMPLETE` is displayed as verified only
+after bundle recalculation and exact workspace binding. A schedule hole,
+terminal failed/interrupted attempt, invalid workspace, or chronology conflict
+is `BLOCKED`. A nonterminal workspace is merely observed; the dashboard does
+not claim that an executor is currently running. These fields are not a public
+evidence schema and do not alter any result control.
+
+Result publication is projected as a separate fact from operational workspace
+status. A valid immutable result remains visible even if later local workspace
+inspection is blocked or unavailable; the dashboard never fabricates completed
+slots from the existence of that result.
+
 `COMPARABLE` means the declared and observed v1 controls matched. It does not
 prove chronology, authorship, causality, significance, preference, complete
 real-world confounder control, customer eligibility, or acceptance. The full
@@ -459,6 +474,10 @@ The initial dashboard contract is satisfied only when:
 17. Any unsatisfied comparison control suppresses all outcome arithmetic.
 18. Comparable paired points preserve one equal-weight scalar per planned run
     and never imply confidence, causality, preference, or acceptance.
+19. Operational schedule progress labels a slot verified only after workspace,
+    bundle, arm, and prefix checks succeed.
+20. Progress remains GET-only local observation and never becomes execution
+    attestation, trusted chronology, or a substitute for a result artifact.
 
 ## Development gate
 

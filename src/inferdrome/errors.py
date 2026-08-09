@@ -45,6 +45,10 @@ class ControlledComparisonError(InferdromeError):
     """A controlled comparison could not be created or verified safely."""
 
 
+class ControlledComparisonExecutionError(ControlledComparisonError):
+    """A frozen controlled-comparison schedule could not execute safely."""
+
+
 class DashboardError(InferdromeError):
     """The local read-only dashboard could not be started or queried safely."""
 

@@ -1,11 +1,12 @@
 # Inferdrome controlled comparisons
 
-Status: **Frozen v0.2 second-slice contract**
+Status: **Frozen v0.2 contract; fail-closed executor implemented**
 
-Decision record:
-[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md)
+Decision records:
+[ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md) and
+[ADR 0009](adr/0009-add-fail-closed-comparison-execution.md)
 
-Release scope: **Post-v0.1, v0.2 second vertical slice**
+Release scope: **Post-v0.1, v0.2 second and third vertical slices**
 
 An Inferdrome controlled comparison freezes one narrow two-arm design before
 its local workflow executes, then independently recalculates every planned run
@@ -32,13 +33,17 @@ This slice provides:
 - full member-bundle verification and deterministic recalculation;
 - complete and equal observed-v1-environment checks;
 - equal-per-run paired candidate-minus-baseline arithmetic;
-- CLI plan/result creation and verification; and
+- fail-closed execution of the exact frozen schedule;
+- verified-prefix resume with no retries or replacement runs;
+- crash-safe immutable Trial Set and result publication;
+- CLI plan/result creation, execution, and verification; and
 - read-only dashboard index and detail views.
 
 This slice does **not** provide trusted timing or authorship, causal inference,
 confidence intervals, p-values, significance, winner labels, recommendations,
-prefix-caching controls, automatic execution, request pooling, telemetry-backed
-explanations, or ExitSpec acceptance.
+model prefix-caching controls, retry or replacement policies, distributed
+orchestration, request pooling, telemetry-backed explanations, or ExitSpec
+acceptance.
 
 ## Artifact layout
 
@@ -90,6 +95,48 @@ Plan creation generates all run IDs before execution and refuses a plan if any
 of those IDs is already reserved beneath the selected runs root. The generated
 schedule orders pairs from a 256-bit seed. Within each pair, both arms occur
 exactly once; pair order is deterministic and independently reproducible.
+
+## Fail-closed executor
+
+`comparison-plan execute` treats the immutable plan as the only schedule. It
+requires the externally retained plan digest and both original arm sources,
+then resolves and verifies both sources before any planned run is reserved.
+The already-read source and workload bytes are copied into private temporary
+snapshots; every scheduled run resolves from those snapshots, so later edits to
+the original paths cannot change the active comparison.
+
+The executor holds one nonblocking advisory lock beneath the selected runs
+root, keyed by plan ID and retained digest, until final result reverification.
+This excludes a second cooperating local Inferdrome executor even if it chooses
+a different result root. It is not a distributed lock or a defense against a
+hostile filesystem writer, and an independent manual `inferdrome run` process
+does not participate in the plan lock.
+
+Resume is deliberately narrower than retry. Existing planned workspaces are
+accepted only when they form the exact leading schedule prefix, are `COMPLETE`,
+and their bundles independently recalculate and exact-match their frozen
+workspace inputs. A missing bundle, tampered input, schedule hole,
+`FAILED`/`INTERRUPTED` run, or abandoned nonterminal workspace blocks the plan.
+No consumed run ID is retried and no replacement identity is generated.
+
+Cancellation before reservation or between completed slots can resume from the
+last verified boundary. Cancellation after reservation terminalizes that run as
+`INTERRUPTED` when possible and therefore blocks this v1 plan. Hard termination
+during a run can leave a nonterminal workspace, which also blocks rather than
+being guessed safe.
+
+After all runs verify, the executor creates or reuses the exact planned Trial
+Sets and one deterministic result ID. Descriptor directories are fully written,
+fsynced, frozen, and then published with no-replace semantics. Private orphan
+stages are ignored, so a crash before publication cannot reserve the public
+artifact identity. A crash after publication is recovered by independently
+verifying the existing artifact.
+
+These controls automate the workflow but do not upgrade its claims:
+`PREDECLARED` remains `OPERATOR_ATTESTED`, Trial Sets remain `RETROSPECTIVE`,
+synthetic runs remain `SYNTHETIC_ONLY`, and `COMPARABLE` remains a neutral
+point-estimate eligibility state rather than causality, preference, or
+acceptance.
 
 ## Result contract and controls
 
@@ -175,19 +222,31 @@ inferdrome comparison-plan verify \
   --expected-digest sha256:<plan-digest>
 ```
 
-Execute the emitted run IDs in the exact schedule order, using the source
-associated with each arm:
+Execute and finalize the exact frozen workflow with the retained digest:
+
+```bash
+inferdrome comparison-plan execute \
+  comparison-plans/comparison-plan-<id> \
+  --expected-digest sha256:<plan-digest> \
+  --baseline-source examples/controlled-concurrency-2.yaml \
+  --candidate-source examples/controlled-concurrency-4.yaml \
+  --runs-root runs \
+  --trial-sets-root trial-sets \
+  --comparison-results-root comparison-results
+```
+
+The JSON response distinguishes `executed_run_ids` from independently verified
+`reused_run_ids` and includes both Trial Set digests plus the final result
+digest and status. Exit code `0` for an `INCOMPARABLE` result means the pipeline
+finalized and verified; it does not mean the experimental comparison succeeded.
+
+The lower-level commands remain available for manual protocol inspection. If
+used, run every preallocated ID in schedule order, create both exact planned
+Trial Sets, then create the result with all retained digests:
 
 ```bash
 inferdrome run examples/controlled-concurrency-2.yaml \
   --runs-root runs --run-id run-<planned-baseline-id>
-inferdrome run examples/controlled-concurrency-4.yaml \
-  --runs-root runs --run-id run-<planned-candidate-id>
-```
-
-Create each Trial Set with the exact preallocated ID and ordered arm run IDs:
-
-```bash
 inferdrome trial-set create \
   --trial-set-id trial-set-<planned-baseline-id> \
   --run run-<baseline-repeat-1> --run run-<baseline-repeat-2> \
@@ -234,8 +293,14 @@ inferdrome dashboard \
 `/comparisons` lists verified plans and separates `PREDECLARED` design state
 from `COMPARABLE`, `INCOMPARABLE`, no-result, and withheld result states.
 `/comparisons/:planId` shows the frozen design first, then all controls, then a
-single run-level dot plot only when a comparable result exists. `/compare`
-remains an ad hoc two-run arithmetic utility.
+single run-level dot plot only when a comparable result exists. The schedule
+also shows bounded operational states—`NOT_STARTED`, `PARTIAL`, `BLOCKED`,
+or `EVIDENCE_COMPLETE`—and marks a run verified only after workspace and bundle
+recalculation. Result publication is shown separately from current workspace
+progress, so a valid portable result can coexist with blocked local inspection.
+This projection is local observation, not portable evidence or proof that an
+executor is currently alive. `/compare` remains an ad hoc two-run arithmetic
+utility.
 
 All APIs are GET-only. Invalid plans or results are withheld with bounded reason
 codes. Result detail lookup resolves one validated plan ID directly and never
