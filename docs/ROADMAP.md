@@ -245,6 +245,12 @@ and permits customer eligibility only after offline cross-verification. The
 checked-in host-preparation and demo scripts also exercise corruption and
 synthetic-flow rejection without modifying the original bundle.
 
+Operational hardening added on 2026-08-11: an operator-provided SSH controller
+transfers the exact clean Git commit, bounds host workload time, runs the
+single and controlled-comparison proofs, retrieves a checksumed capture pack,
+and independently reverifies every bundle, Trial Set, plan, and result on the
+workstation. It does not provision or terminate billable cloud infrastructure.
+
 Still required to close PR 7: execute the script on a clean compatible NVIDIA
 host, review and promote one genuine bundle, and run the separately owned
 ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations. Ordinary attached

@@ -37,6 +37,36 @@ state_root=$(
 repository_status=$(git -C "$repository_root" status --porcelain --untracked-files=normal)
 [[ -z "$repository_status" ]] || fail "the Inferdrome checkout must be clean"
 repository_commit=$(git -C "$repository_root" rev-parse --verify HEAD)
+repository_version=$(
+  "$host_python" - "$repository_root/src/inferdrome/__init__.py" <<'PY'
+import ast
+from pathlib import Path
+import sys
+
+module = ast.parse(Path(sys.argv[1]).read_text(encoding="utf-8"))
+versions = []
+for statement in module.body:
+    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+        continue
+    targets = (
+        statement.targets
+        if isinstance(statement, ast.Assign)
+        else [statement.target]
+    )
+    if not any(
+        isinstance(target, ast.Name) and target.id == "__version__"
+        for target in targets
+    ):
+        continue
+    value = statement.value
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        versions.append(value.value)
+if len(versions) != 1 or not versions[0] or "\n" in versions[0]:
+    raise SystemExit("Inferdrome source version is invalid")
+print(versions[0])
+PY
+)
+[[ -n "$repository_version" ]] || fail "Inferdrome source version cannot be read"
 
 mapfile -t host_pin < <(
   "$host_python" - "$host_pin_path" <<'PY'
@@ -173,6 +203,18 @@ installed_vllm_version=$(
 )
 [[ "$installed_vllm_version" == "$vllm_version" ]] || \
   fail "installed vLLM version differs from the pin"
+installed_inferdrome_version=$(
+  "$environment_python" -c \
+    'import importlib.metadata; print(importlib.metadata.version("inferdrome"))'
+)
+[[ "$installed_inferdrome_version" == "$repository_version" ]] || \
+  fail "installed Inferdrome version differs from the checkout"
+installed_inferdrome_source=$(
+  "$environment_python" -c \
+    'import inferdrome; print(inferdrome.__file__)'
+)
+[[ $installed_inferdrome_source == "$virtual_environment"/* ]] || \
+  fail "Inferdrome was not installed into the prepared environment"
 [[ -x "$virtual_environment/bin/hf" ]] || \
   fail "the installed environment does not provide the hf downloader"
 

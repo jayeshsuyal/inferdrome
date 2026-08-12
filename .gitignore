@@ -13,6 +13,7 @@ dist/
 # a reviewed bundle is promoted deliberately.
 .inferdrome-gpu/
 gpu-proof-output/
+gpu-proof-retrieved/
 
 # Capability-spike runs are reviewed before selected artifacts are promoted to
 # committed fixtures.

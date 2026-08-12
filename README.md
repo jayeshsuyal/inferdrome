@@ -123,6 +123,10 @@ The same pinned host can produce a four-run controlled-comparison proof pack:
 That mode retains the plan digest before execution, verifies every
 customer-eligible bundle and both Trial Sets, reverifies the result, and proves
 that a second executor invocation reuses the exact completed schedule.
+For an operator-provided SSH GPU VM, the runbook also includes one bounded
+controller that transfers the exact clean Git commit, runs both proof modes,
+retrieves a checksumed archive, and independently verifies it on the local
+workstation. It deliberately does not create or terminate cloud instances.
 
 ## v0.1 principles
 

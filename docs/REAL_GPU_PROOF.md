@@ -75,6 +75,77 @@ The default destination is `.inferdrome-gpu/`, which is ignored by Git. Keep
 receipt; they are supporting reproduction records, not substitutes for the
 sealed bundle's own provenance.
 
+## Bounded SSH capture and retrieval
+
+When the compatible GPU is an operator-provided SSH VM, the workstation can
+run the full single-proof and controlled-comparison pack without manually
+copying commands or evidence paths. The controller does not contain a cloud
+provider integration: it cannot create, resize, stop, or terminate an
+instance, and it never receives billing credentials.
+
+Before starting the paid host, make sure the intended Inferdrome commit is
+committed and the checkout is clean. After the provider reports an SSH
+destination, inspect the exact workflow without making a network connection:
+
+```bash
+.venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  <user@gpu-host> \
+  --identity-file <private-key-path> \
+  --expected-commit "$(git rev-parse HEAD)" \
+  --dry-run
+```
+
+Then start the capture by removing `--dry-run`:
+
+```bash
+.venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  <user@gpu-host> \
+  --identity-file <private-key-path> \
+  --expected-commit "$(git rev-parse HEAD)"
+```
+
+The controller:
+
+1. refuses a dirty checkout or an unexpected commit;
+2. creates and locally verifies a Git bundle for exact `HEAD`;
+3. checks Linux, Python 3.12, NVIDIA visibility, and required host tools;
+4. uploads the bundle and clones it into a private temporary directory;
+5. gives the host workload a default 9,900-second outer timeout;
+6. prepares the pinned environment and runs both proof modes;
+7. retrieves `capture.tar.gz` plus its host SHA-256;
+8. rejects unsafe archive members before extraction; and
+9. independently verifies the single bundle, all four comparison bundles,
+   both Trial Sets, the frozen plan, and the comparison result locally.
+
+The first SSH connection uses `StrictHostKeyChecking=accept-new` with a
+capture-specific `known_hosts` file. Its digest is retained in the local
+retrieval receipt. This is SSH trust-on-first-use, not cloud hardware
+attestation. If the provider exposes the expected host key through a separate
+authenticated channel, pass the lowercase hex digest of the exact
+capture-specific `known_hosts` bytes as `--host-key-sha256` to replace that
+trust-on-first-use check with an explicit pin.
+
+Successful captures are retained beneath the ignored
+`gpu-proof-retrieved/` directory. A failed host run is explicitly labeled
+`INCOMPLETE_NOT_EVIDENCE`; when its archive is available, the controller keeps
+the diagnostic logs without upgrading them into proof.
+
+The timeout bounds the proof process, not provider billing. Immediately after
+the controller prints `CAPTURE VERIFIED`, terminate the instance in the cloud
+console. Also terminate it at the operator's predeclared spend deadline even
+if preparation, capture, retrieval, or verification has not completed.
+
+For a manually launched Lambda VM, the operator checklist is deliberately
+short:
+
+1. resolve billing and tax-address requirements;
+2. confirm the displayed rate, GPU type, Ubuntu image, and SSH key;
+3. record a hard termination deadline before clicking **Launch**;
+4. copy the provider's exact SSH destination into the controller command;
+5. terminate the instance after success, failure, or deadline—whichever comes
+   first; and
+6. confirm the console reports no running instances.
+
 ## Exact managed server launch
 
 The demo never asks the operator to start an unobserved server. During
