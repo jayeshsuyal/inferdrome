@@ -145,6 +145,7 @@ workstation. It deliberately does not create or terminate cloud instances.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [v0.1 definition of done](docs/V0_1_DEFINITION_OF_DONE.md)
+- [v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md)
 - [Build roadmap](docs/ROADMAP.md)
 - [Public contracts v1](docs/PUBLIC_CONTRACTS_V1.md)
 - [Resolution and run workspace](docs/RESOLUTION_AND_WORKSPACE.md)
@@ -158,6 +159,7 @@ workstation. It deliberately does not create or terminate cloud instances.
 - [Controlled comparisons](docs/CONTROLLED_COMPARISONS.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Pinned-vLLM capability spike](spikes/vllm-0.26.0/README.md)
+- [Contribution guide](CONTRIBUTING.md)
 
 ## Naming
 

@@ -271,8 +271,11 @@ Deliver:
 
 In progress: the chartered `validate`, `resolve`, `run`, `inspect`, `bundle
 verify`, `reduce`, and `summarize` commands now share the same fail-closed
-library boundaries used by tests. Remaining polish is tracked by the release
-gate rather than by adding new product scope.
+library boundaries used by tests. The release shield runs the engineering and
+populated-dashboard gates in GitHub Actions and maps remaining evidence in
+`V0_1_RELEASE_CHECKLIST.md`. Genuine GPU and ExitSpec demonstrations, human
+security sign-off, license selection, and the release tag remain open. Remaining
+polish is tracked by the release gate rather than by adding new product scope.
 
 Gate:
 
