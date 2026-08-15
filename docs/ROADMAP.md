@@ -245,6 +245,12 @@ and permits customer eligibility only after offline cross-verification. The
 checked-in host-preparation and demo scripts also exercise corruption and
 synthetic-flow rejection without modifying the original bundle.
 
+Operational hardening added on 2026-08-11: an operator-provided SSH controller
+transfers the exact clean Git commit, bounds host workload time, runs the
+single and controlled-comparison proofs, retrieves a checksumed capture pack,
+and independently reverifies every bundle, Trial Set, plan, and result on the
+workstation. It does not provision or terminate billable cloud infrastructure.
+
 Still required to close PR 7: execute the script on a clean compatible NVIDIA
 host, review and promote one genuine bundle, and run the separately owned
 ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations. Ordinary attached
@@ -265,8 +271,11 @@ Deliver:
 
 In progress: the chartered `validate`, `resolve`, `run`, `inspect`, `bundle
 verify`, `reduce`, and `summarize` commands now share the same fail-closed
-library boundaries used by tests. Remaining polish is tracked by the release
-gate rather than by adding new product scope.
+library boundaries used by tests. The release shield runs the engineering and
+populated-dashboard gates in GitHub Actions and maps remaining evidence in
+`V0_1_RELEASE_CHECKLIST.md`. Genuine GPU and ExitSpec demonstrations, human
+security sign-off, license selection, and the release tag remain open. Remaining
+polish is tracked by the release gate rather than by adding new product scope.
 
 Gate:
 
@@ -415,6 +424,11 @@ The "verified completed prefix" above refers only to completed run workspaces
 at the front of the comparison schedule. It is unrelated to model KV prefix
 caching, which remains outside slices 1 through 3 and is not a representable
 treatment.
+
+The managed real-GPU proof runner now has an opt-in four-run comparison mode
+that verifies every customer-eligible bundle, both Trial Sets, the result, and
+an all-reused second executor invocation. A genuine Linux/NVIDIA receipt remains
+host-executed evidence and is not claimed by the static engineering gate.
 
 ### v0.2 — Telemetry
 

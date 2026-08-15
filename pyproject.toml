@@ -30,8 +30,10 @@ dev = [
   "mypy>=1.14,<2",
   "pytest>=8.3,<10",
   "ruff>=0.9,<1",
+  "setuptools>=83,<84",
   "types-PyYAML>=6.0.12,<7",
   "uvicorn>=0.30,<1",
+  "wheel",
 ]
 
 [tool.setuptools.packages.find]

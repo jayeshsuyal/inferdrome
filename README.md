@@ -114,6 +114,19 @@ server-reported facts into locally verified evidence.
 
 The managed NVIDIA reproduction path and its one-command rejection demo are
 documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
+The same pinned host can produce a four-run controlled-comparison proof pack:
+
+```bash
+.inferdrome-gpu/venv/bin/python scripts/run_real_gpu_demo.py --comparison
+```
+
+That mode retains the plan digest before execution, verifies every
+customer-eligible bundle and both Trial Sets, reverifies the result, and proves
+that a second executor invocation reuses the exact completed schedule.
+For an operator-provided SSH GPU VM, the runbook also includes one bounded
+controller that transfers the exact clean Git commit, runs both proof modes,
+retrieves a checksumed archive, and independently verifies it on the local
+workstation. It deliberately does not create or terminate cloud instances.
 
 ## v0.1 principles
 
@@ -132,6 +145,7 @@ documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
 - [Architecture](docs/ARCHITECTURE.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [v0.1 definition of done](docs/V0_1_DEFINITION_OF_DONE.md)
+- [v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md)
 - [Build roadmap](docs/ROADMAP.md)
 - [Public contracts v1](docs/PUBLIC_CONTRACTS_V1.md)
 - [Resolution and run workspace](docs/RESOLUTION_AND_WORKSPACE.md)
@@ -145,6 +159,7 @@ documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
 - [Controlled comparisons](docs/CONTROLLED_COMPARISONS.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Pinned-vLLM capability spike](spikes/vllm-0.26.0/README.md)
+- [Contribution guide](CONTRIBUTING.md)
 
 ## Naming
 

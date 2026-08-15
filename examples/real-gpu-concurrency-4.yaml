@@ -1,0 +1,36 @@
+schema_version: inferdrome.source-experiment.v1
+
+experiment:
+  id: qwen2-5-0-5b-real-gpu-concurrency
+  title: Pinned Qwen2.5 0.5B managed-vLLM concurrency comparison
+  hypothesis: Increasing concurrency from 2 to 4 changes attempted request throughput.
+
+execution:
+  mode: attached_endpoint
+  max_runtime_seconds: 900
+  max_measured_requests: 100
+
+target:
+  engine: vllm
+  endpoint: http://127.0.0.1:18080
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  model_revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  tokenizer_revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  engine_version: 0.26.0
+
+workload:
+  path: real-gpu/workload.jsonl
+  sha256: sha256:22bf3389cc29ee946ae567870d7f8d7b458594224542a796e8990c15b1cfcd63
+  prompt_content_policy: include
+  requested_output_tokens: 32
+  temperature: 0
+  seed: 42
+
+traffic:
+  kind: concurrent
+  concurrency: 4
+  warmup_requests: 10
+  measured_requests: 100
+
+evidence:
+  canonical_response_content: omit

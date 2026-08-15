@@ -51,7 +51,9 @@ The script uses no `sudo`, refuses a dirty checkout, refuses to reuse an
 existing destination, verifies the exact vLLM wheel hash before installation,
 downloads the model at the exact revision, rejects snapshot symlinks, checks
 CUDA through the installed Torch runtime, and records the checkout commit and
-resolved Python package inventory. Immediately before measurement, the demo
+resolved Python package inventory. It installs Inferdrome with its dashboard
+extra so the documented post-run inspection command does not depend on
+transitive vLLM packages. Immediately before measurement, the demo
 regenerates that inventory byte-for-byte and reruns `pip check`; package drift
 or a newly inconsistent environment fails before proof output is reserved.
 
@@ -72,6 +74,77 @@ The default destination is `.inferdrome-gpu/`, which is ignored by Git. Keep
 `host-preparation.json` and `python-packages.txt` with the demonstration
 receipt; they are supporting reproduction records, not substitutes for the
 sealed bundle's own provenance.
+
+## Bounded SSH capture and retrieval
+
+When the compatible GPU is an operator-provided SSH VM, the workstation can
+run the full single-proof and controlled-comparison pack without manually
+copying commands or evidence paths. The controller does not contain a cloud
+provider integration: it cannot create, resize, stop, or terminate an
+instance, and it never receives billing credentials.
+
+Before starting the paid host, make sure the intended Inferdrome commit is
+committed and the checkout is clean. After the provider reports an SSH
+destination, inspect the exact workflow without making a network connection:
+
+```bash
+.venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  <user@gpu-host> \
+  --identity-file <private-key-path> \
+  --expected-commit "$(git rev-parse HEAD)" \
+  --dry-run
+```
+
+Then start the capture by removing `--dry-run`:
+
+```bash
+.venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  <user@gpu-host> \
+  --identity-file <private-key-path> \
+  --expected-commit "$(git rev-parse HEAD)"
+```
+
+The controller:
+
+1. refuses a dirty checkout or an unexpected commit;
+2. creates and locally verifies a Git bundle for exact `HEAD`;
+3. checks Linux, Python 3.12, NVIDIA visibility, and required host tools;
+4. uploads the bundle and clones it into a private temporary directory;
+5. gives the host workload a default 9,900-second outer timeout;
+6. prepares the pinned environment and runs both proof modes;
+7. retrieves `capture.tar.gz` plus its host SHA-256;
+8. rejects unsafe archive members before extraction; and
+9. independently verifies the single bundle, all four comparison bundles,
+   both Trial Sets, the frozen plan, and the comparison result locally.
+
+The first SSH connection uses `StrictHostKeyChecking=accept-new` with a
+capture-specific `known_hosts` file. Its digest is retained in the local
+retrieval receipt. This is SSH trust-on-first-use, not cloud hardware
+attestation. If the provider exposes the expected host key through a separate
+authenticated channel, pass the lowercase hex digest of the exact
+capture-specific `known_hosts` bytes as `--host-key-sha256` to replace that
+trust-on-first-use check with an explicit pin.
+
+Successful captures are retained beneath the ignored
+`gpu-proof-retrieved/` directory. A failed host run is explicitly labeled
+`INCOMPLETE_NOT_EVIDENCE`; when its archive is available, the controller keeps
+the diagnostic logs without upgrading them into proof.
+
+The timeout bounds the proof process, not provider billing. Immediately after
+the controller prints `CAPTURE VERIFIED`, terminate the instance in the cloud
+console. Also terminate it at the operator's predeclared spend deadline even
+if preparation, capture, retrieval, or verification has not completed.
+
+For a manually launched Lambda VM, the operator checklist is deliberately
+short:
+
+1. resolve billing and tax-address requirements;
+2. confirm the displayed rate, GPU type, Ubuntu image, and SSH key;
+3. record a hard termination deadline before clicking **Launch**;
+4. copy the provider's exact SSH destination into the controller command;
+5. terminate the instance after success, failure, or deadline—whichever comes
+   first; and
+6. confirm the console reports no running instances.
 
 ## Exact managed server launch
 
@@ -172,6 +245,64 @@ results. `acceptance_boundary` remains `PENDING_EXTERNAL_EXITSPEC` by design.
 The native vLLM result includes generated text and is classified
 `RESPONSE_CONTENT`. Review sharing and retention accordingly.
 
+## Run the controlled-comparison proof
+
+The same prepared checkout can execute a genuine two-arm comparison with two
+preallocated repetitions per arm:
+
+```bash
+.inferdrome-gpu/venv/bin/python \
+  scripts/run_real_gpu_demo.py --comparison
+```
+
+Alternate state, output, GPU-index, and startup-timeout options are identical
+to the single-run proof. Comparison mode creates a fresh
+`real-gpu-comparison-*` directory beneath `gpu-proof-output/` and performs:
+
+1. strict validation of the pinned concurrency-2 and concurrency-4 sources;
+2. immutable plan creation before any run is reserved;
+3. retention and independent verification of the exact plan digest;
+4. four managed local-vLLM runs in the frozen permuted-pair schedule;
+5. customer-eligibility verification of every sealed bundle;
+6. independent verification of both planned Trial Sets and the final result;
+7. a second executor invocation that must reuse all four verified runs without
+   launching another workload; and
+8. publication of `comparison-demo-receipt.json`.
+
+The receipt anchors the checkout and host-preparation identities, plan and
+result digests, ordered run and bundle identities, Trial Set digests, result
+status and bounded outcome, and successful resume reverification. A fresh proof
+is expected to execute all four planned runs; the second invocation must report
+all four as reused and none as executed.
+
+`COMPARABLE` is emitted only if every frozen and observed v1 control is
+satisfied. A fully verified `INCOMPARABLE` result is still a successful proof
+of the evidence pipeline and contains no outcome estimate. Neither status is a
+winner label, causal claim, significance claim, or ExitSpec acceptance result.
+
+Inspect the finished proof through the locked read-only dashboard by replacing
+`<proof-directory>` with the directory containing the printed receipt:
+
+```bash
+<prepared-venv>/bin/inferdrome dashboard \
+  --runs-root <proof-directory>/runs \
+  --trial-sets-root <proof-directory>/trial-sets \
+  --comparison-plans-root <proof-directory>/comparison-plans \
+  --comparison-results-root <proof-directory>/comparison-results
+```
+
+The server remains bound to `127.0.0.1:8787`. For a headless remote GPU host,
+forward that loopback port from the reviewing workstation instead of exposing
+the dashboard publicly:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 <gpu-host>
+```
+
+Comparison mode launches one managed server per planned run. Budget host time
+for four bounded model loads plus four benchmark executions. Do not interrupt a
+reserved run unless you intend the frozen plan to remain blocked.
+
 ## Review and promotion gate
 
 Do not hand-edit generated evidence. Retain the printed bundle digest outside
@@ -188,3 +319,7 @@ A real bundle may be promoted as a committed example only after review records
 the exact checkout commit, engineering-gate result, GPU bundle digest, host
 preparation receipt digest, and later the separate ExitSpec receipt digest.
 Until that capture exists, PR 7 and the v0.1 release gate remain open.
+
+The comparison receipt and its four retained bundle digests are additional
+post-v0.1 proof; they do not replace the single-bundle promotion review or the
+separately owned ExitSpec demonstrations.

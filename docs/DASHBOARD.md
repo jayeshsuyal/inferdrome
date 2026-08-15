@@ -487,13 +487,19 @@ the dedicated dashboard gate:
 ```bash
 uv sync --extra dev --extra dashboard
 npm ci --prefix frontend
+npm --prefix frontend exec -- playwright install chromium
 INFERDROME_PYTHON=.venv/bin/python ./scripts/dashboard_gate.sh
 ```
 
-The gate type-checks, tests, and builds the frontend, then runs the dashboard's
-Python projection, discovery, pairwise comparison, Trial Set,
-controlled-comparison, API, packaging, and server tests. It also builds a wheel,
-installs that wheel into an isolated target, and proves the installed HTML, deep links, API, and
-referenced assets are served. The repository's existing
+The gate type-checks and unit-tests the frontend, builds the production assets,
+then runs one populated Playwright journey in Chromium. That browser test creates
+a real four-run synthetic controlled comparison through the production CLI,
+boots the loopback FastAPI server, clicks every navigable dashboard route, reloads
+every deep link, rejects browser or network errors, and confirms dashboard API
+traffic remains GET-only. The gate then runs the dashboard's Python projection,
+discovery, pairwise comparison, Trial Set, controlled-comparison, API, packaging,
+and server tests. It also builds a wheel, installs that wheel into an isolated
+target, and proves the installed HTML, deep links, API, and referenced assets are
+served. The repository's existing
 `scripts/engineering_gate.sh` remains the authoritative v0.1 evidence pipeline
 gate.

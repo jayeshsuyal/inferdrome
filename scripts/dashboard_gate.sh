@@ -20,7 +20,7 @@ fi
 
 npm --prefix "$repository_root/frontend" run typecheck
 npm --prefix "$repository_root/frontend" run test
-npm --prefix "$repository_root/frontend" run build
+npm --prefix "$repository_root/frontend" run test:e2e
 if [[ ! -f "$repository_root/src/inferdrome/dashboard/static/index.html" ]]; then
     echo "dashboard gate: packaged frontend entry point was not built" >&2
     exit 1
