@@ -107,6 +107,19 @@ uv run inferdrome dashboard \
   --comparison-results-root comparison-results --open
 ```
 
+For a recording-ready Mac walkthrough, one command prepares an exact four-run
+synthetic comparison, independently reverifies it, and opens the populated
+dashboard:
+
+```bash
+./scripts/run_local_demo.py
+```
+
+This path is always labeled `SYNTHETIC_ONLY`; it demonstrates the real product
+workflow without claiming genuine GPU performance. See the
+[local product demo runbook](docs/LOCAL_DEMO.md) for the recording route and
+approved claim boundary.
+
 The fake path is always marked `SYNTHETIC_ONLY`. An attached-vLLM run requires
 an explicit local tokenizer directory and remains `INELIGIBLE` until the
 real-GPU provenance gate is satisfied; the CLI never upgrades configured or
@@ -155,6 +168,7 @@ workstation. It deliberately does not create or terminate cloud instances.
 - [Managed real-GPU proof](docs/REAL_GPU_PROOF.md)
 - [CLI and orchestration](docs/CLI.md)
 - [Local evidence dashboard](docs/DASHBOARD.md)
+- [Local product demo](docs/LOCAL_DEMO.md)
 - [Repeated trial sets](docs/TRIAL_SETS.md)
 - [Controlled comparisons](docs/CONTROLLED_COMPARISONS.md)
 - [Architecture decision records](docs/adr/README.md)
