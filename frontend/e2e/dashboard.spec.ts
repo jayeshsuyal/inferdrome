@@ -25,17 +25,21 @@ const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../.."
 const SOURCE_ROOT = join(REPOSITORY_ROOT, "src");
 const FIXTURE_PREFIX = "inferdrome-dashboard-e2e-";
 const PLAN_ID = "comparison-plan-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-const BASELINE_TRIAL_SET_ID = "trial-set-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const CANDIDATE_TRIAL_SET_ID = "trial-set-cccccccccccccccccccccccccccccccc";
 
-interface CreatedPlan {
-  readonly comparison_plan_digest: string;
-  readonly path: string;
-}
-
-interface ExecutedPlan {
-  readonly executed_run_ids: readonly string[];
-  readonly planned_run_count: number;
+interface LocalDemoSummary {
+  readonly claim_boundary: string;
+  readonly comparison: {
+    readonly executed_run_ids: readonly string[];
+    readonly planned_run_count: number;
+    readonly reused_run_ids: readonly string[];
+    readonly status: string;
+  };
+  readonly roots: {
+    readonly comparison_plans: string;
+    readonly comparison_results: string;
+    readonly runs: string;
+    readonly trial_sets: string;
+  };
 }
 
 interface FixturePaths {
@@ -69,10 +73,16 @@ function inferdromeEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-function runInferdromeJson<T>(arguments_: readonly string[]): T {
+function prepareLocalDemoFixture(root: string): LocalDemoSummary {
   const result = spawnSync(
     pythonExecutable(),
-    ["-m", "inferdrome", ...arguments_],
+    [
+      join(REPOSITORY_ROOT, "scripts", "run_local_demo.py"),
+      "--workspace",
+      root,
+      "--prepare-only",
+      "--json",
+    ],
     {
       cwd: REPOSITORY_ROOT,
       encoding: "utf8",
@@ -84,14 +94,14 @@ function runInferdromeJson<T>(arguments_: readonly string[]): T {
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(
-      `Inferdrome command failed (${arguments_.slice(0, 2).join(" ")}):\n${result.stderr || result.stdout}`,
+      `Inferdrome local demo preparation failed:\n${result.stderr || result.stdout}`,
     );
   }
   try {
-    return JSON.parse(result.stdout) as T;
+    return JSON.parse(result.stdout) as LocalDemoSummary;
   } catch (error) {
     throw new Error(
-      `Inferdrome command did not return JSON:\n${result.stdout}`,
+      `Inferdrome local demo preparation did not return JSON:\n${result.stdout}`,
       { cause: error },
     );
   }
@@ -106,64 +116,25 @@ function createPopulatedFixture(): FixturePaths {
     comparisonPlans: join(root, "comparison-plans"),
     comparisonResults: join(root, "comparison-results"),
   };
-  const baselineSource = join(
-    REPOSITORY_ROOT,
-    "examples",
-    "controlled-concurrency-2.yaml",
-  );
-  const candidateSource = join(
-    REPOSITORY_ROOT,
-    "examples",
-    "controlled-concurrency-4.yaml",
-  );
   try {
-    const created = runInferdromeJson<CreatedPlan>([
-      "comparison-plan",
-      "create",
-      "--baseline-source",
-      baselineSource,
-      "--candidate-source",
-      candidateSource,
-      "--title",
-      "Browser release comparison",
-      "--hypothesis",
-      "Concurrency may change attempted throughput.",
-      "--repetitions",
-      "2",
-      "--primary-outcome",
-      "attempted_request_throughput_per_s:rate",
-      "--comparison-plan-id",
-      PLAN_ID,
-      "--baseline-trial-set-id",
-      BASELINE_TRIAL_SET_ID,
-      "--candidate-trial-set-id",
-      CANDIDATE_TRIAL_SET_ID,
-      "--schedule-seed",
-      "0".repeat(64),
-      "--runs-root",
-      paths.runs,
-      "--comparison-plans-root",
-      paths.comparisonPlans,
-    ]);
-    const executed = runInferdromeJson<ExecutedPlan>([
-      "comparison-plan",
-      "execute",
-      created.path,
-      "--expected-digest",
-      created.comparison_plan_digest,
-      "--baseline-source",
-      baselineSource,
-      "--candidate-source",
-      candidateSource,
-      "--runs-root",
-      paths.runs,
-      "--trial-sets-root",
-      paths.trialSets,
-      "--comparison-results-root",
-      paths.comparisonResults,
-    ]);
-    if (executed.planned_run_count !== 4 || executed.executed_run_ids.length !== 4) {
+    const prepared = prepareLocalDemoFixture(root);
+    if (
+      prepared.claim_boundary !== "SYNTHETIC_ONLY"
+      || prepared.comparison.status !== "INCOMPARABLE"
+      || prepared.comparison.planned_run_count !== 4
+      || prepared.comparison.executed_run_ids.length !== 4
+      || prepared.comparison.reused_run_ids.length !== 0
+    ) {
       throw new Error("The populated dashboard fixture did not execute all four planned runs.");
+    }
+    const preparedRoots = prepared.roots;
+    if (
+      resolve(preparedRoots.runs) !== resolve(paths.runs)
+      || resolve(preparedRoots.trial_sets) !== resolve(paths.trialSets)
+      || resolve(preparedRoots.comparison_plans) !== resolve(paths.comparisonPlans)
+      || resolve(preparedRoots.comparison_results) !== resolve(paths.comparisonResults)
+    ) {
+      throw new Error("The local demo prepared dashboard roots outside its fixture.");
     }
     return paths;
   } catch (error) {
@@ -376,6 +347,7 @@ test.describe("populated dashboard", () => {
     visitedByClick.add(runPath);
     await expect(page.getByRole("heading", { name: runId, level: 1 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Observed distributions", level: 2 })).toBeVisible();
+    await expect(page.getByText("Synthetic only", { exact: true }).first()).toBeVisible();
 
     await dashboardNavigation(page).getByRole("link", { name: "Evidence", exact: true }).click();
     const evidencePath = `/evidence/${runId}`;
@@ -418,7 +390,7 @@ test.describe("populated dashboard", () => {
     await comparisonLink.click();
     await expectPath(page, comparisonPath);
     visitedByClick.add(comparisonPath);
-    await expect(page.getByRole("heading", { name: "Browser release comparison", level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inferdrome local product demo", level: 1 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Comparability result", level: 2 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Arm evidence", level: 2 })).toBeVisible();
 
@@ -458,7 +430,7 @@ test.describe("populated dashboard", () => {
       ["/trial-sets", "Trial sets"],
       [trialSetPath, null],
       ["/comparisons", "Controlled comparisons"],
-      [comparisonPath, "Browser release comparison"],
+      [comparisonPath, "Inferdrome local product demo"],
       ["/compare", "Compare runs"],
       ["/evidence", "Evidence"],
       [evidencePath, "Evidence"],
