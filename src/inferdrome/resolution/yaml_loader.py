@@ -11,7 +11,7 @@ from inferdrome.errors import SourceInputError
 
 class _StrictSafeLoader(yaml.SafeLoader):
     def compose_node(self, parent: Any, index: Any) -> Any:
-        if self.check_event(AliasEvent):  # type: ignore[no-untyped-call]
+        if self.check_event(AliasEvent):
             raise SourceInputError("YAML aliases are not supported")
         return super().compose_node(parent, index)
 
