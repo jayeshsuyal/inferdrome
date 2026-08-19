@@ -249,12 +249,28 @@ Operational hardening added on 2026-08-11: an operator-provided SSH controller
 transfers the exact clean Git commit, bounds host workload time, runs the
 single and controlled-comparison proofs, retrieves a checksumed capture pack,
 and independently reverifies every bundle, Trial Set, plan, and result on the
-workstation. It does not provision or terminate billable cloud infrastructure.
+workstation. It does not provision billable cloud infrastructure.
 
-Still required to close PR 7: execute the script on a clean compatible NVIDIA
-host, review and promote one genuine bundle, and run the separately owned
-ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations. Ordinary attached
-endpoint runs deliberately remain `INELIGIBLE`.
+Capture progress on 2026-08-18: one genuine Lambda A10 single-run bundle is
+sealed, independently valid, customer-eligible, and visible through the
+ordinary dashboard bundle path. The retained outer archive is explicitly
+`INCOMPLETE_NOT_EVIDENCE` because a post-run single-proof harness assertion
+failed and the controlled comparison never started; the materialized receipt
+is correspondingly limited to `SINGLE_BUNDLE_ONLY`.
+
+Lifecycle hardening on 2026-08-19 adds an opt-in Lambda API cost guard. It
+requires the actual billing origin, fails closed on missing rate or endpoint
+identity, subtracts a fixed termination safety margin, waits for a detached
+watchdog readiness handshake, calls provider termination on every controller
+exit path, and polls until termination is confirmed. It cannot launch an
+instance, and its API key remains environment-only. It is a local circuit
+breaker rather than an exact provider-billing guarantee.
+
+Still required to close PR 7: complete and review the fresh four-run GPU capture,
+decide whether to promote the recovered single bundle as a committed example,
+and run the separately owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN`
+demonstrations. Ordinary attached endpoint runs deliberately remain
+`INELIGIBLE`.
 
 ## PR 8 — v0.1 hardening and release
 
@@ -427,8 +443,9 @@ treatment.
 
 The managed real-GPU proof runner now has an opt-in four-run comparison mode
 that verifies every customer-eligible bundle, both Trial Sets, the result, and
-an all-reused second executor invocation. A genuine Linux/NVIDIA receipt remains
-host-executed evidence and is not claimed by the static engineering gate.
+an all-reused second executor invocation. One genuine A10 single-run receipt is
+retained; the four-run comparison remains pending. Linux/NVIDIA receipts remain
+host-executed evidence and are not claimed by the static engineering gate.
 
 ### v0.2 — Telemetry
 

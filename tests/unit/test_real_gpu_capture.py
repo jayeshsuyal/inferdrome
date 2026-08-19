@@ -6,7 +6,10 @@ import io
 import json
 import stat
 import tarfile
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -111,6 +114,110 @@ def test_remote_command_pins_commit_and_bounds_workload() -> None:
     assert "unset CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES" in script
 
 
+def test_remote_preflight_requires_build_tools_and_python_headers() -> None:
+    script = remote._remote_preflight_script("/tmp/inferdrome-safe")
+
+    assert "bash curl git ninja python3.12 nvidia-smi" in script
+    assert "Python.h" in script
+    assert "Python 3.12 development headers" in script
+
+
+def test_lambda_guard_requires_actual_billing_start() -> None:
+    args = SimpleNamespace(
+        lambda_billing_started_at=None,
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        max_cost_usd=Decimal("2.58"),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="billing-started-at"):
+        remote._lambda_guard_requested(args)
+
+
+def test_lambda_guard_binds_explicit_instance_to_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def arm(reference: str, **kwargs: object) -> SimpleNamespace:
+        observed["reference"] = reference
+        observed["expected_endpoint"] = kwargs["expected_endpoint"]
+        return SimpleNamespace(
+            cost_window=SimpleNamespace(
+                deadline=datetime(2026, 8, 18, 22, 0, tzinfo=UTC),
+            ),
+            state_directory=Path("/tmp/inferdrome-test-guard"),
+        )
+
+    monkeypatch.setattr(remote.lambda_gpu_guard, "arm_watchdog", arm)
+    args = SimpleNamespace(
+        destination="ubuntu@capture.example.test",
+        lambda_billing_started_at=datetime(2026, 8, 18, 20, 0, tzinfo=UTC),
+        lambda_guard_state_root="/tmp/inferdrome-test-guards",
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        max_cost_usd=Decimal("2.58"),
+    )
+
+    remote._arm_lambda_watchdog(args)
+
+    assert observed == {
+        "expected_endpoint": "capture.example.test",
+        "reference": "b" * 32,
+    }
+
+
+def test_capture_terminates_guarded_instance_even_after_capture_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watchdog = SimpleNamespace(
+        instance=SimpleNamespace(instance_id="b" * 32),
+    )
+    observed: list[object] = []
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+
+    def fail_capture(*_args: object) -> Path:
+        raise remote.RemoteCaptureError("proof failed")
+
+    monkeypatch.setattr(remote, "_capture_over_ssh", fail_capture)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        lambda handle: observed.append(handle)
+        or SimpleNamespace(final_status="absent"),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="proof failed"):
+        remote._capture(SimpleNamespace(), COMMIT, None)
+
+    assert observed == [watchdog]
+
+
+def test_guard_failure_does_not_mask_the_capture_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watchdog = SimpleNamespace(
+        instance=SimpleNamespace(instance_id="b" * 32),
+    )
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+
+    def fail_capture(*_args: object) -> Path:
+        raise remote.RemoteCaptureError("original proof failure")
+
+    def fail_termination(_handle: object) -> None:
+        raise remote.lambda_gpu_guard.LambdaGuardError("provider unavailable")
+
+    monkeypatch.setattr(remote, "_capture_over_ssh", fail_capture)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        fail_termination,
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="original proof failure"):
+        remote._capture(SimpleNamespace(), COMMIT, None)
+
+
 def test_completed_capture_manifest_anchors_receipts_and_support(
     tmp_path: Path,
 ) -> None:
@@ -187,6 +294,28 @@ def test_failure_receipt_is_explicitly_not_evidence(tmp_path: Path) -> None:
     assert value["process_exit_code"] == 143
     assert stat.S_IMODE(path.stat().st_mode) & 0o222 == 0
 
+    verified = capture.verify_failure_capture(
+        root,
+        expected_repository_commit=COMMIT,
+    )
+    assert verified == value
+
+
+def test_failure_receipt_verification_rejects_commit_drift(tmp_path: Path) -> None:
+    root = tmp_path / "capture"
+    capture.write_failure_receipt(
+        root,
+        COMMIT,
+        failed_step="single-proof",
+        exit_code=1,
+    )
+
+    with pytest.raises(capture.CaptureError, match="not the expected commit"):
+        capture.verify_failure_capture(
+            root,
+            expected_repository_commit="b" * 40,
+        )
+
 
 def _archive_with_member(path: Path, member: tarfile.TarInfo, content: bytes) -> None:
     with tarfile.open(path, mode="w:gz") as archive:
@@ -210,6 +339,102 @@ def test_capture_archive_extracts_only_bounded_regular_tree(tmp_path: Path) -> N
     extracted = capture.extract_capture_archive(archive, tmp_path / "retrieved")
 
     assert (extracted / "capture-failure.json").read_bytes() == b"{}\n"
+    assert stat.S_IMODE(extracted.stat().st_mode) == 0o700
+    assert stat.S_IMODE(
+        (extracted / "capture-failure.json").stat().st_mode
+    ) == 0o444
+
+
+def test_capture_archive_preserves_sealed_bundle_modes(tmp_path: Path) -> None:
+    archive = tmp_path / "capture.tar.gz"
+    with tarfile.open(archive, mode="w:gz") as retained:
+        for name, mode in (
+            ("capture", 0o700),
+            ("capture/single", 0o700),
+            ("capture/single/example", 0o700),
+            ("capture/single/example/runs", 0o700),
+            ("capture/single/example/runs/run-" + "a" * 32, 0o700),
+            (
+                "capture/single/example/runs/run-"
+                + "a" * 32
+                + "/bundle",
+                0o500,
+            ),
+        ):
+            member = tarfile.TarInfo(name)
+            member.type = tarfile.DIRTYPE
+            member.mode = mode
+            retained.addfile(member)
+        descriptor = tarfile.TarInfo(
+            "capture/single/example/runs/run-"
+            + "a" * 32
+            + "/bundle/bundle.json"
+        )
+        descriptor.mode = 0o400
+        descriptor.size = 3
+        retained.addfile(descriptor, io.BytesIO(b"{}\n"))
+
+    extracted = capture.extract_capture_archive(archive, tmp_path / "retrieved")
+    bundle = (
+        extracted
+        / "single"
+        / "example"
+        / "runs"
+        / ("run-" + "a" * 32)
+        / "bundle"
+    )
+
+    assert stat.S_IMODE(bundle.stat().st_mode) == 0o500
+    assert stat.S_IMODE((bundle / "bundle.json").stat().st_mode) == 0o400
+
+
+def test_capture_archive_rejects_too_many_members_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "directory-tarbomb.tar.gz"
+    with tarfile.open(archive, mode="w:gz") as retained:
+        for name in ("capture", "capture/one", "capture/two"):
+            member = tarfile.TarInfo(name)
+            member.type = tarfile.DIRTYPE
+            member.mode = 0o700
+            retained.addfile(member)
+    monkeypatch.setattr(capture, "_MAX_CAPTURE_MEMBERS", 2)
+    destination = tmp_path / "retrieved"
+
+    with pytest.raises(capture.CaptureError, match="safety limits"):
+        capture.extract_capture_archive(archive, destination)
+
+    assert not (destination / "capture").exists()
+
+
+def test_capture_archive_bounds_implicit_directories_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "implicit-directory-tarbomb.tar.gz"
+    member = tarfile.TarInfo("capture/one/two/value.json")
+    member.mode = 0o400
+    _archive_with_member(archive, member, b"{}\n")
+    monkeypatch.setattr(capture, "_MAX_CAPTURE_DIRECTORIES", 2)
+    destination = tmp_path / "retrieved"
+
+    with pytest.raises(capture.CaptureError, match="safety limits"):
+        capture.extract_capture_archive(archive, destination)
+
+    assert not (destination / "capture").exists()
+
+
+def test_capture_tree_rejects_too_many_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    (root / "one" / "two").mkdir(parents=True)
+    monkeypatch.setattr(capture, "_MAX_CAPTURE_DIRECTORIES", 2)
+
+    with pytest.raises(capture.CaptureError, match="safety limits"):
+        capture._validate_capture_tree(root)
 
 
 @pytest.mark.parametrize("kind", ["traversal", "symlink"])

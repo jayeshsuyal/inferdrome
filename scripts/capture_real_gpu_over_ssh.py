@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from scripts import real_gpu_capture
+    from scripts import lambda_gpu_guard, real_gpu_capture
 else:
+    import lambda_gpu_guard
     import real_gpu_capture
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -224,9 +225,20 @@ def _remote_preflight_script(remote_root: str) -> str:
     return f"""set -euo pipefail
 umask 077
 [[ $(uname -s) == Linux ]]
-for executable in bash git python3.12 nvidia-smi sha256sum tar timeout; do
-  command -v "$executable" >/dev/null
+for executable in bash curl git ninja python3.12 nvidia-smi sha256sum tar timeout; do
+  command -v "$executable" >/dev/null || {{
+    echo "missing required host executable: $executable" >&2
+    exit 1
+  }}
 done
+python3.12 - <<'PY'
+from pathlib import Path
+import sysconfig
+
+include = sysconfig.get_path("include")
+if not include or not (Path(include) / "Python.h").is_file():
+    raise SystemExit("missing Python.h; install the Python 3.12 development headers")
+PY
 [[ ! -e {quoted_root} && ! -L {quoted_root} ]]
 mkdir -m 700 -- {quoted_root}
 nvidia-smi --query-gpu=index,name,uuid,driver_version --format=csv,noheader,nounits
@@ -304,6 +316,7 @@ def _static_check() -> None:
         REPOSITORY_ROOT / "scripts" / "run_real_gpu_capture.sh",
         REPOSITORY_ROOT / "scripts" / "run_real_gpu_demo.py",
         REPOSITORY_ROOT / "scripts" / "real_gpu_capture.py",
+        REPOSITORY_ROOT / "scripts" / "lambda_gpu_guard.py",
     ]
     for path in required:
         if not path.is_file() or path.is_symlink():
@@ -312,13 +325,87 @@ def _static_check() -> None:
             )
 
 
+def _destination_host(destination: str) -> str:
+    host = destination.rsplit("@", 1)[-1]
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
+def _lambda_guard_requested(args: argparse.Namespace) -> bool:
+    selected = (
+        args.lambda_instance_id,
+        args.lambda_hourly_rate_usd,
+        args.max_cost_usd,
+        args.lambda_billing_started_at,
+    )
+    if not any(value is not None for value in selected):
+        return False
+    if (
+        args.lambda_hourly_rate_usd is None
+        or args.max_cost_usd is None
+        or args.lambda_billing_started_at is None
+    ):
+        raise RemoteCaptureError(
+            "Lambda protection requires --lambda-hourly-rate-usd, --max-cost-usd, "
+            "and --lambda-billing-started-at"
+        )
+    return True
+
+
+def _arm_lambda_watchdog(
+    args: argparse.Namespace,
+) -> lambda_gpu_guard.WatchdogHandle | None:
+    if not _lambda_guard_requested(args):
+        return None
+    host = _destination_host(args.destination)
+    reference = args.lambda_instance_id or host
+    try:
+        handle = lambda_gpu_guard.arm_watchdog(
+            reference,
+            hourly_rate_usd=args.lambda_hourly_rate_usd,
+            max_cost_usd=args.max_cost_usd,
+            billing_started_at=args.lambda_billing_started_at,
+            state_root=Path(args.lambda_guard_state_root),
+            expected_endpoint=host,
+        )
+    except lambda_gpu_guard.LambdaGuardError as error:
+        raise RemoteCaptureError(
+            f"Lambda cost guard could not be armed: {error}"
+        ) from None
+    print(
+        "Lambda termination watchdog armed for "
+        f"{lambda_gpu_guard._timestamp(handle.cost_window.deadline)}."
+    )
+    print(f"Lambda guard state: {handle.state_directory}")
+    return handle
+
+
 def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> None:
     remote_root = f"/tmp/inferdrome-gpu-{commit[:12]}-<random>"
+    guarded = _lambda_guard_requested(args)
     plan = {
-        "billing_boundary": "THE CONTROLLER DOES NOT TERMINATE THE CLOUD INSTANCE",
+        "billing_boundary": (
+            "LAMBDA API TERMINATION WATCHDOG PLUS CONTROLLER FINALLY"
+            if guarded
+            else "OPERATOR MUST TERMINATE THE CLOUD INSTANCE"
+        ),
         "destination": args.destination,
         "gpu_index": args.gpu_index,
         "identity_file_configured": identity is not None,
+        "lambda_cost_guard": (
+            {
+                "billing_started_at": lambda_gpu_guard._timestamp(
+                    args.lambda_billing_started_at
+                ),
+                "hourly_rate_usd": str(args.lambda_hourly_rate_usd),
+                "instance_reference": args.lambda_instance_id
+                or _destination_host(args.destination),
+                "max_cost_usd": str(args.max_cost_usd),
+            }
+            if guarded
+            else None
+        ),
         "repository_commit": commit,
         "remote_root": remote_root,
         "remote_timeout_seconds": args.remote_timeout_seconds,
@@ -331,13 +418,21 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
             "run the single proof and four-run controlled comparison",
             "download a SHA-256-anchored capture archive",
             "independently verify every retrieved proof artifact locally",
-            "prompt the operator to terminate the billable instance",
+            (
+                "terminate and confirm the Lambda instance through its API"
+                if guarded
+                else "prompt the operator to terminate the billable instance"
+            ),
         ],
     }
     print(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def _capture(args: argparse.Namespace, commit: str, identity: Path | None) -> Path:
+def _capture_over_ssh(
+    args: argparse.Namespace,
+    commit: str,
+    identity: Path | None,
+) -> Path:
     for executable in ("ssh", "scp", "git"):
         if shutil.which(executable) is None:
             raise RemoteCaptureError(f"{executable} is required")
@@ -522,7 +617,10 @@ def _capture(args: argparse.Namespace, commit: str, identity: Path | None) -> Pa
             )
         raise
 
-    print("\nCAPTURE VERIFIED. TERMINATE THE BILLABLE GPU INSTANCE NOW.")
+    if _lambda_guard_requested(args):
+        print("\nCAPTURE VERIFIED. LAMBDA TERMINATION IS BEING CONFIRMED.")
+    else:
+        print("\nCAPTURE VERIFIED. TERMINATE THE BILLABLE GPU INSTANCE NOW.")
     print(f"Local capture record: {final_path}")
     print(f"Remote workspace retained until instance termination: {remote_root}")
     comparison_roots = sorted(
@@ -549,6 +647,43 @@ def _capture(args: argparse.Namespace, commit: str, identity: Path | None) -> Pa
         print("Dashboard inspection command:")
         print("  " + shlex.join(dashboard_arguments))
     return final_path
+
+
+def _capture(args: argparse.Namespace, commit: str, identity: Path | None) -> Path:
+    watchdog = _arm_lambda_watchdog(args)
+    try:
+        return _capture_over_ssh(args, commit, identity)
+    finally:
+        if watchdog is not None:
+            capture_failed = sys.exc_info()[0] is not None
+            try:
+                result = lambda_gpu_guard.terminate_guarded_instance(watchdog)
+            except lambda_gpu_guard.LambdaGuardFinalizationError as error:
+                print(
+                    "WARNING: local Lambda guard finalization failed after confirmed "
+                    f"termination: {error}",
+                    file=sys.stderr,
+                )
+                if not capture_failed:
+                    raise RemoteCaptureError(
+                        "capture completed and Lambda terminated, but local guard "
+                        "finalization failed"
+                    ) from None
+            except lambda_gpu_guard.LambdaGuardError as error:
+                print(
+                    "CRITICAL: immediate Lambda termination was not confirmed; "
+                    f"the deadline watchdog remains armed: {error}",
+                    file=sys.stderr,
+                )
+                if not capture_failed:
+                    raise RemoteCaptureError(
+                        "capture completed, but Lambda termination was not confirmed"
+                    ) from None
+            else:
+                print(
+                    "Lambda termination confirmed: "
+                    f"{watchdog.instance.instance_id} ({result.final_status})."
+                )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -586,6 +721,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-root",
         default=str(REPOSITORY_ROOT / "gpu-proof-retrieved"),
     )
+    parser.add_argument(
+        "--lambda-instance-id",
+        type=lambda_gpu_guard.parse_instance_id,
+        help=(
+            "optional Lambda instance ID; otherwise resolve the SSH host "
+            "through the API"
+        ),
+    )
+    parser.add_argument(
+        "--lambda-hourly-rate-usd",
+        type=lambda_gpu_guard.parse_hourly_rate,
+        help="displayed Lambda hourly rate; checked against the API",
+    )
+    parser.add_argument(
+        "--max-cost-usd",
+        type=lambda_gpu_guard.parse_max_cost,
+        help="operator spend budget used for the buffered termination deadline",
+    )
+    parser.add_argument(
+        "--lambda-billing-started-at",
+        type=lambda_gpu_guard.parse_utc_timestamp,
+        help="required actual provider billing start in ISO 8601",
+    )
+    parser.add_argument(
+        "--lambda-guard-state-root",
+        default=str(Path.home() / ".inferdrome" / "lambda-guards"),
+    )
     return parser
 
 
@@ -594,9 +756,13 @@ def main() -> int:
     try:
         _static_check()
         if args.check:
-            if args.destination is not None or args.dry_run:
+            if (
+                args.destination is not None
+                or args.dry_run
+                or _lambda_guard_requested(args)
+            ):
                 raise RemoteCaptureError(
-                    "--check does not accept a destination or --dry-run"
+                    "--check does not accept a destination, --dry-run, or Lambda guard"
                 )
             print("real-GPU remote capture assets: OK")
             return 0

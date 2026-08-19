@@ -3,6 +3,7 @@
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -10,7 +11,9 @@ from pathlib import Path
 import pytest
 
 import scripts.run_real_gpu_demo as demo
+from inferdrome.bundle import verify_bundle
 from inferdrome.cli import build_parser as build_cli_parser
+from inferdrome.errors import VerificationError
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -299,6 +302,28 @@ def test_customer_bundle_inspection_is_bounded_to_its_workspace(
             run_id=run_id,
             runs_root=tmp_path / "runs",
         )
+
+
+def test_corrupted_bundle_copy_is_resealed_and_rejected_by_hash(
+    sealed_fake_bundle: object,
+    tmp_path: Path,
+) -> None:
+    sealed = sealed_fake_bundle.sealed  # type: ignore[attr-defined]
+    corrupted = demo._corrupt_bundle_copy(sealed.path, tmp_path)
+
+    try:
+        native_result = corrupted / "native" / "benchmark-result.json"
+        assert stat.S_IMODE(native_result.stat().st_mode) & 0o222 == 0
+        with pytest.raises(
+            VerificationError,
+            match="artifact hash does not match manifest",
+        ):
+            verify_bundle(
+                corrupted,
+                expected_bundle_digest=sealed.bundle_digest,
+            )
+    finally:
+        _make_tree_writable(corrupted)
 
 
 def test_cli_wrapper_terminates_its_process_group_on_interrupt(
