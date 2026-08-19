@@ -117,7 +117,8 @@ def test_remote_command_pins_commit_and_bounds_workload() -> None:
 def test_remote_preflight_requires_build_tools_and_python_headers() -> None:
     script = remote._remote_preflight_script("/tmp/inferdrome-safe")
 
-    assert "bash curl git ninja python3.12 nvidia-smi" in script
+    assert "bash curl git python3.12 nvidia-smi" in script
+    assert "command -v ninja" not in script
     assert "Python.h" in script
     assert "Python 3.12 development headers" in script
 

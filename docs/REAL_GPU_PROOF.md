@@ -39,8 +39,8 @@ Use a clean checkout at the commit that will be recorded in release sign-off.
 The preparation script requires:
 
 - Linux `x86_64` or `aarch64`;
-- Python 3.12 plus its development headers (`Python.h`), Bash, Git, curl,
-  Ninja, and GNU `sha256sum`;
+- Python 3.12 plus its development headers (`Python.h`), Bash, Git, curl, and
+  GNU `sha256sum`;
 - an NVIDIA GPU supported by the pinned vLLM wheel;
 - `nvidia-smi` and a driver compatible with the wheel's CUDA runtime; and
 - unset `CUDA_VISIBLE_DEVICES` and `NVIDIA_VISIBLE_DEVICES`, so recorded device
@@ -52,11 +52,13 @@ The script uses no `sudo`, refuses a dirty checkout, refuses to reuse an
 existing destination, verifies the exact vLLM wheel hash before installation,
 downloads the model at the exact revision, rejects snapshot symlinks, checks
 CUDA through the installed Torch runtime, and records the checkout commit and
-resolved Python package inventory. It installs Inferdrome with its dashboard
-extra so the documented post-run inspection command does not depend on
-transitive vLLM packages. Immediately before measurement, the demo
-regenerates that inventory byte-for-byte and reruns `pip check`; package drift
-or a newly inconsistent environment fails before proof output is reserved.
+resolved Python package inventory. It requires the installed vLLM environment
+to provide its own Ninja executable rather than depending on an unrecorded
+system copy. It installs Inferdrome with its dashboard extra so the documented
+post-run inspection command does not depend on transitive vLLM packages.
+Immediately before measurement, the demo regenerates that inventory
+byte-for-byte and reruns `pip check`; package drift or a newly inconsistent
+environment fails before proof output is reserved.
 
 From the repository root:
 
@@ -167,8 +169,8 @@ The controller:
 
 1. refuses a dirty checkout or an unexpected commit;
 2. creates and locally verifies a Git bundle for exact `HEAD`;
-3. checks Linux, Python 3.12 headers, Ninja, NVIDIA visibility, and required
-   host tools;
+3. checks Linux, Python 3.12 headers, NVIDIA visibility, and required host
+   tools;
 4. uploads the bundle and clones it into a private temporary directory;
 5. gives the host workload a default 9,900-second outer timeout;
 6. prepares the pinned environment and runs both proof modes;

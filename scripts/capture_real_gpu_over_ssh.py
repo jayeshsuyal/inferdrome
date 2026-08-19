@@ -225,7 +225,7 @@ def _remote_preflight_script(remote_root: str) -> str:
     return f"""set -euo pipefail
 umask 077
 [[ $(uname -s) == Linux ]]
-for executable in bash curl git ninja python3.12 nvidia-smi sha256sum tar timeout; do
+for executable in bash curl git python3.12 nvidia-smi sha256sum tar timeout; do
   command -v "$executable" >/dev/null || {{
     echo "missing required host executable: $executable" >&2
     exit 1
