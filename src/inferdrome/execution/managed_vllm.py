@@ -76,11 +76,18 @@ class _GpuProcessNotReady(AdapterError):
 
 
 def managed_process_environment(
+    *,
+    executable_path: str,
     source: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
-    """Scrub ambient vLLM controls and force local, telemetry-free execution."""
+    """Build the sealed vLLM environment, including its sibling tools."""
 
     inherited = os.environ if source is None else source
+    executable = Path(executable_path)
+    if not executable.is_absolute() or any(
+        ord(character) < 32 for character in executable_path
+    ):
+        raise AdapterError("managed vLLM executable path is unsafe")
     override_names = {
         item.partition("=")[0] for item in MANAGED_PROCESS_ENVIRONMENT_OVERRIDES
     }
@@ -94,6 +101,17 @@ def managed_process_environment(
         if not name or separator != "=" or not value:
             raise AssertionError("invalid managed process environment policy")
         environment[name] = value
+    executable_directory = str(executable.parent)
+    inherited_path = environment.get("PATH", "")
+    path_entries = (
+        inherited_path.split(os.pathsep) if inherited_path else []
+    )
+    environment["PATH"] = os.pathsep.join(
+        (
+            executable_directory,
+            *(entry for entry in path_entries if entry != executable_directory),
+        )
+    )
     return MappingProxyType(environment)
 
 
@@ -651,7 +669,6 @@ class ManagedVllmServer:
         self._process_runner = process_runner
         self._preflight_probe = preflight_probe
         self._server_cancellation = CancellationToken()
-        self._process_environment = managed_process_environment()
         self._started = threading.Event()
         self._finished = threading.Event()
         self._lock = threading.Lock()
@@ -704,6 +721,9 @@ class ManagedVllmServer:
                 revision=tokenizer_revision,
             )
         self._distribution = collect_vllm_distribution_identity()
+        self._process_environment = managed_process_environment(
+            executable_path=self._distribution.executable_path,
+        )
         self._nvidia_smi_path, self._nvidia_smi_sha256 = _resolve_nvidia_smi()
         self._gpus, self._gpu_query_argv, self._gpu_query_stdout = (
             _collect_gpu_inventory(

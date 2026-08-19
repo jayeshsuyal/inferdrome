@@ -315,9 +315,12 @@ The managed server, version probe, and benchmark also share one process
 environment policy. Inferdrome removes every inherited `VLLM_*` override and
 forces `VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`,
 `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_OFFLINE=1`, and
-`TRANSFORMERS_OFFLINE=1`. The policy identifier and exact overrides are sealed
-with the server proof so ambient vLLM configuration cannot silently alter the
-demonstration or enable producer telemetry.
+`TRANSFORMERS_OFFLINE=1`. It also places the directory containing the verified
+vLLM executable first on `PATH`, so child tools such as `ninja` resolve from the
+same prepared Python environment before any ambient host tool. The policy
+identifier and exact overrides are sealed with the server proof so ambient
+vLLM configuration cannot silently alter the demonstration or enable producer
+telemetry.
 
 ## Run the proof and rejection demonstrations
 

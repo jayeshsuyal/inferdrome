@@ -34,9 +34,10 @@ WHEEL_SHA256 = (
 )
 
 
-def test_managed_process_environment_scrubs_overrides_and_disables_network() -> None:
+def test_managed_environment_exposes_sibling_tools_and_scrubs_controls() -> None:
     environment = managed_vllm.managed_process_environment(
-        {
+        executable_path="/opt/inferdrome-gpu/bin/vllm",
+        source={
             "PATH": "/usr/bin",
             "VLLM_CONFIG_ROOT": "/untrusted/config",
             "VLLM_NO_USAGE_STATS": "0",
@@ -45,13 +46,27 @@ def test_managed_process_environment_scrubs_overrides_and_disables_network() -> 
         }
     )
 
-    assert environment["PATH"] == "/usr/bin"
+    assert environment["PATH"] == "/opt/inferdrome-gpu/bin:/usr/bin"
     assert environment["INFERDROME_FIXTURE"] == "retained"
     assert environment["VLLM_NO_USAGE_STATS"] == "1"
     assert environment["HF_HUB_OFFLINE"] == "1"
     assert environment["TRANSFORMERS_OFFLINE"] == "1"
     assert environment["DO_NOT_TRACK"] == "1"
     assert "VLLM_CONFIG_ROOT" not in environment
+
+
+def test_managed_process_environment_deduplicates_executable_directory() -> None:
+    environment = managed_vllm.managed_process_environment(
+        executable_path="/opt/inferdrome-gpu/bin/vllm",
+        source={
+            "PATH": (
+                "/usr/bin:/opt/inferdrome-gpu/bin:"
+                "/bin:/opt/inferdrome-gpu/bin"
+            )
+        },
+    )
+
+    assert environment["PATH"] == "/opt/inferdrome-gpu/bin:/usr/bin:/bin"
 
 
 def test_distribution_source_wheel_requires_exact_direct_url_pin(
@@ -233,6 +248,9 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
         observer = kwargs["on_start"]
         cancellation = kwargs["cancellation"]
         environment = kwargs["environment"]
+        assert environment["PATH"].split(os.pathsep)[0] == (
+            "/opt/inferdrome-gpu/bin"
+        )
         assert environment["VLLM_NO_USAGE_STATS"] == "1"
         assert environment["HF_HUB_OFFLINE"] == "1"
         observer(7001, started_at)
