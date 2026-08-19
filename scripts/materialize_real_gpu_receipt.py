@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import json
 import os
 import re
@@ -29,6 +31,9 @@ _SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 _RUN_ID_PATTERN = re.compile(r"run-[0-9a-f]{32}\Z")
 _RECOVERY_SCHEMA = "inferdrome.recovered-real-gpu-receipt.v1"
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+_RENAME_EXCL = 0x00000004
 
 
 class MaterializeError(RuntimeError):
@@ -77,6 +82,70 @@ def _remove_staging(root: Path) -> None:
         shutil.rmtree(root)
 
 
+def _raise_rename_error() -> None:
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(error_number, os.strerror(error_number))
+    raise OSError(error_number, os.strerror(error_number))
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    """Atomically publish one directory without replacing any destination."""
+
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        try:
+            rename = library.renameat2
+        except AttributeError:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace rename is unavailable",
+            ) from None
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        if (
+            rename(
+                _AT_FDCWD,
+                source_bytes,
+                _AT_FDCWD,
+                destination_bytes,
+                _RENAME_NOREPLACE,
+            )
+            != 0
+        ):
+            _raise_rename_error()
+        return
+    if sys.platform == "darwin":
+        try:
+            rename = library.renamex_np
+        except AttributeError:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace rename is unavailable",
+            ) from None
+        rename.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        if rename(source_bytes, destination_bytes, _RENAME_EXCL) != 0:
+            _raise_rename_error()
+        return
+    raise OSError(
+        errno.ENOTSUP,
+        "atomic no-replace rename is unsupported on this platform",
+    )
+
+
 def _single_bundle(
     capture_root: Path,
     *,
@@ -91,14 +160,26 @@ def _single_bundle(
         ) from None
     if len(demo_roots) > 32:
         raise MaterializeError("capture contains too many single-run workspaces")
-    candidates = [
-        demo_root / "runs" / expected_run_id / "bundle"
-        for demo_root in demo_roots
-        if (demo_root / "runs" / expected_run_id / "bundle").is_dir()
-    ]
+    candidates: list[Path] = []
+    for demo_root in demo_roots:
+        try:
+            run_roots = sorted((demo_root / "runs").iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            raise MaterializeError(
+                "capture single-run workspace cannot be inspected"
+            ) from None
+        candidates.extend(
+            run_root / "bundle"
+            for run_root in run_roots
+            if (run_root / "bundle").is_dir()
+        )
     if len(candidates) != 1:
-        raise MaterializeError("capture does not contain exactly one expected bundle")
+        raise MaterializeError("capture does not contain exactly one run bundle")
     bundle = candidates[0]
+    if bundle.parent.name != expected_run_id:
+        raise MaterializeError("capture does not contain the expected run bundle")
     runs_root = bundle.parent.parent
     try:
         bundle.resolve(strict=True).relative_to(capture_root.resolve(strict=True))
@@ -210,7 +291,7 @@ def materialize(
         }
         _write_receipt(staging / "recovered-real-gpu-receipt.json", receipt)
         try:
-            os.replace(staging, destination)
+            _rename_no_replace(staging, destination)
         except OSError:
             raise MaterializeError("verified recovery could not be published") from None
         published = True

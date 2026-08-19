@@ -24,6 +24,8 @@ _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 _RUN_ID_PATTERN = re.compile(r"run-[0-9a-f]{32}\Z")
 _MAX_JSON_BYTES = 8_388_608
 _MAX_CAPTURE_FILES = 20_000
+_MAX_CAPTURE_MEMBERS = 40_000
+_MAX_CAPTURE_DIRECTORIES = 20_000
 _MAX_CAPTURE_BYTES = 2_147_483_648
 _MAX_ARCHIVE_BYTES = 2_147_483_648
 
@@ -173,11 +175,18 @@ def _validate_capture_tree(root: Path) -> None:
         raise CaptureError("capture root is unavailable") from None
     if not stat.S_ISDIR(root_metadata.st_mode) or root.is_symlink():
         raise CaptureError("capture root must be a real directory")
+    member_count = 1
+    directory_count = 1
     file_count = 0
     total_bytes = 0
+    if (
+        member_count > _MAX_CAPTURE_MEMBERS
+        or directory_count > _MAX_CAPTURE_DIRECTORIES
+    ):
+        raise CaptureError("capture tree exceeds its safety limits")
     for directory, directory_names, filenames in os.walk(root, followlinks=False):
         current = Path(directory)
-        for name in [*directory_names, *filenames]:
+        for name in directory_names:
             path = current / name
             try:
                 metadata = os.lstat(path)
@@ -185,18 +194,34 @@ def _validate_capture_tree(root: Path) -> None:
                 raise CaptureError("capture tree changed during inspection") from None
             if stat.S_ISLNK(metadata.st_mode):
                 raise CaptureError("capture tree contains a symbolic link")
-            if name in filenames:
-                if not stat.S_ISREG(metadata.st_mode):
-                    raise CaptureError("capture tree contains a special file")
-                file_count += 1
-                total_bytes += metadata.st_size
-                if (
-                    file_count > _MAX_CAPTURE_FILES
-                    or total_bytes > _MAX_CAPTURE_BYTES
-                ):
-                    raise CaptureError("capture tree exceeds its safety limits")
-            elif not stat.S_ISDIR(metadata.st_mode):
+            if not stat.S_ISDIR(metadata.st_mode):
                 raise CaptureError("capture tree contains a special directory entry")
+            member_count += 1
+            directory_count += 1
+            if (
+                member_count > _MAX_CAPTURE_MEMBERS
+                or directory_count > _MAX_CAPTURE_DIRECTORIES
+            ):
+                raise CaptureError("capture tree exceeds its safety limits")
+        for name in filenames:
+            path = current / name
+            try:
+                metadata = os.lstat(path)
+            except OSError:
+                raise CaptureError("capture tree changed during inspection") from None
+            if stat.S_ISLNK(metadata.st_mode):
+                raise CaptureError("capture tree contains a symbolic link")
+            if not stat.S_ISREG(metadata.st_mode):
+                raise CaptureError("capture tree contains a special file")
+            member_count += 1
+            file_count += 1
+            total_bytes += metadata.st_size
+            if (
+                member_count > _MAX_CAPTURE_MEMBERS
+                or file_count > _MAX_CAPTURE_FILES
+                or total_bytes > _MAX_CAPTURE_BYTES
+            ):
+                raise CaptureError("capture tree exceeds its safety limits")
 
 
 def _one_receipt(root: Path, pattern: str, *, label: str) -> Path:
@@ -1030,13 +1055,16 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
     ):
         raise CaptureError("capture extraction destination must be a real directory")
     seen: set[str] = set()
+    seen_directories: set[str] = set()
+    member_count = 0
+    directory_count = 0
     total_bytes = 0
     file_count = 0
+    members: list[tarfile.TarInfo] = []
     retained_modes: list[tuple[PurePosixPath, int, bool]] = []
     try:
         with tarfile.open(archive, mode="r:gz") as retained:
-            members = retained.getmembers()
-            for member in members:
+            for member in retained:
                 path = PurePosixPath(member.name)
                 canonical_name = path.as_posix()
                 mode = stat.S_IMODE(member.mode)
@@ -1055,18 +1083,30 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
                 ):
                     raise CaptureError("capture archive contains an unsafe member")
                 seen.add(canonical_name)
+                members.append(member)
+                member_count += 1
+                directory_depth = (
+                    len(path.parts) if member.isdir() else len(path.parts) - 1
+                )
+                for depth in range(1, directory_depth + 1):
+                    directory = PurePosixPath(*path.parts[:depth]).as_posix()
+                    if directory not in seen_directories:
+                        seen_directories.add(directory)
+                        directory_count += 1
                 retained_modes.append((path, mode, member.isdir()))
                 if member.isfile():
                     file_count += 1
                     total_bytes += member.size
-                    if (
-                        file_count > _MAX_CAPTURE_FILES
-                        or total_bytes > _MAX_CAPTURE_BYTES
-                    ):
-                        raise CaptureError("capture archive exceeds its safety limits")
+                if (
+                    member_count > _MAX_CAPTURE_MEMBERS
+                    or directory_count > _MAX_CAPTURE_DIRECTORIES
+                    or file_count > _MAX_CAPTURE_FILES
+                    or total_bytes > _MAX_CAPTURE_BYTES
+                ):
+                    raise CaptureError("capture archive exceeds its safety limits")
             if not any(PurePosixPath(name).parts == ("capture",) for name in seen):
                 raise CaptureError("capture archive omits its top-level directory")
-            retained.extractall(destination_parent, filter="data")
+            retained.extractall(destination_parent, members=members, filter="data")
         ordered_modes = sorted(
             retained_modes,
             key=lambda item: (item[2], -len(item[0].parts)),

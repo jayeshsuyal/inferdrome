@@ -17,7 +17,11 @@ RUN_ID = "run-" + "b" * 32
 BUNDLE_DIGEST = "sha256:" + "c" * 64
 
 
-def _retained_failure_archive(tmp_path: Path) -> tuple[Path, Path]:
+def _retained_failure_archive(
+    tmp_path: Path,
+    *,
+    extra_run_id: str | None = None,
+) -> tuple[Path, Path]:
     source = tmp_path / "source"
     capture_root = source / "capture"
     capture.write_failure_receipt(
@@ -32,6 +36,20 @@ def _retained_failure_archive(tmp_path: Path) -> tuple[Path, Path]:
     descriptor.write_text("{}\n", encoding="utf-8")
     descriptor.chmod(0o400)
     bundle.chmod(0o500)
+    if extra_run_id is not None:
+        extra_bundle = (
+            capture_root
+            / "single"
+            / "real-gpu-test"
+            / "runs"
+            / extra_run_id
+            / "bundle"
+        )
+        extra_bundle.mkdir(parents=True)
+        extra_descriptor = extra_bundle / "bundle.json"
+        extra_descriptor.write_text("{}\n", encoding="utf-8")
+        extra_descriptor.chmod(0o400)
+        extra_bundle.chmod(0o500)
     archive = tmp_path / "capture.tar.gz"
     with tarfile.open(archive, mode="w:gz") as retained:
         retained.add(capture_root, arcname="capture", recursive=True)
@@ -109,6 +127,62 @@ def test_materialize_rejects_non_customer_evidence_and_cleans_staging(
                 expected_repository_commit=COMMIT,
                 expected_run_id=RUN_ID,
             )
+        assert not destination.exists()
+        assert not list(tmp_path.glob(".recovered.staging-*"))
+    finally:
+        recovery._make_tree_writable(source)
+
+
+def test_materialize_fails_closed_if_destination_appears_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, source = _retained_failure_archive(tmp_path)
+    destination = tmp_path / "recovered"
+
+    def verify(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        destination.mkdir()
+        return _report(EvidenceEligibility.CUSTOMER_ELIGIBLE)
+
+    monkeypatch.setattr(recovery, "verify_bundle", verify)
+    try:
+        with pytest.raises(recovery.MaterializeError, match="could not be published"):
+            recovery.materialize(
+                archive,
+                destination,
+                expected_archive_sha256=capture.archive_sha256(archive),
+                expected_bundle_digest=BUNDLE_DIGEST,
+                expected_repository_commit=COMMIT,
+                expected_run_id=RUN_ID,
+            )
+
+        assert destination.is_dir()
+        assert not list(destination.iterdir())
+        assert not list(tmp_path.glob(".recovered.staging-*"))
+    finally:
+        recovery._make_tree_writable(source)
+
+
+def test_materialize_rejects_an_additional_run_bundle(
+    tmp_path: Path,
+) -> None:
+    archive, source = _retained_failure_archive(
+        tmp_path,
+        extra_run_id="run-" + "d" * 32,
+    )
+    destination = tmp_path / "recovered"
+
+    try:
+        with pytest.raises(recovery.MaterializeError, match="exactly one run bundle"):
+            recovery.materialize(
+                archive,
+                destination,
+                expected_archive_sha256=capture.archive_sha256(archive),
+                expected_bundle_digest=BUNDLE_DIGEST,
+                expected_repository_commit=COMMIT,
+                expected_run_id=RUN_ID,
+            )
+
         assert not destination.exists()
         assert not list(tmp_path.glob(".recovered.staging-*"))
     finally:

@@ -341,6 +341,55 @@ def test_capture_archive_preserves_sealed_bundle_modes(tmp_path: Path) -> None:
     assert stat.S_IMODE((bundle / "bundle.json").stat().st_mode) == 0o400
 
 
+def test_capture_archive_rejects_too_many_members_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "directory-tarbomb.tar.gz"
+    with tarfile.open(archive, mode="w:gz") as retained:
+        for name in ("capture", "capture/one", "capture/two"):
+            member = tarfile.TarInfo(name)
+            member.type = tarfile.DIRTYPE
+            member.mode = 0o700
+            retained.addfile(member)
+    monkeypatch.setattr(capture, "_MAX_CAPTURE_MEMBERS", 2)
+    destination = tmp_path / "retrieved"
+
+    with pytest.raises(capture.CaptureError, match="safety limits"):
+        capture.extract_capture_archive(archive, destination)
+
+    assert not (destination / "capture").exists()
+
+
+def test_capture_archive_bounds_implicit_directories_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "implicit-directory-tarbomb.tar.gz"
+    member = tarfile.TarInfo("capture/one/two/value.json")
+    member.mode = 0o400
+    _archive_with_member(archive, member, b"{}\n")
+    monkeypatch.setattr(capture, "_MAX_CAPTURE_DIRECTORIES", 2)
+    destination = tmp_path / "retrieved"
+
+    with pytest.raises(capture.CaptureError, match="safety limits"):
+        capture.extract_capture_archive(archive, destination)
+
+    assert not (destination / "capture").exists()
+
+
+def test_capture_tree_rejects_too_many_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    (root / "one" / "two").mkdir(parents=True)
+    monkeypatch.setattr(capture, "_MAX_CAPTURE_DIRECTORIES", 2)
+
+    with pytest.raises(capture.CaptureError, match="safety limits"):
+        capture._validate_capture_tree(root)
+
+
 @pytest.mark.parametrize("kind", ["traversal", "symlink"])
 def test_capture_archive_rejects_unsafe_members(tmp_path: Path, kind: str) -> None:
     archive = tmp_path / f"{kind}.tar.gz"
