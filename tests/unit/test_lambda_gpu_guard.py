@@ -104,6 +104,53 @@ def test_instance_list_discards_provider_secrets() -> None:
     assert transport.calls[0][:3] == ("GET", "/instances", None)
 
 
+def test_urllib_transport_sends_explicit_user_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"data": []}'
+
+    class FakeOpener:
+        def open(self, request: Any, *, timeout: float) -> FakeResponse:
+            captured["headers"] = {
+                key.lower(): value
+                for key, value in request.header_items()
+            }
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        guard.urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    response = guard._urllib_transport(
+        "GET",
+        "/instances",
+        None,
+        API_KEY,
+        20,
+    )
+
+    assert response == {"data": []}
+    assert captured["timeout"] == 20
+    assert captured["headers"] == {
+        "accept": "application/json",
+        "authorization": f"Bearer {API_KEY}",
+        "user-agent": guard._API_USER_AGENT,
+    }
+
+
 def test_cost_window_uses_exact_decimal_flooring_and_safety_margin() -> None:
     window = guard.compute_cost_window(
         billing_started_at=NOW,
