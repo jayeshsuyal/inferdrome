@@ -259,10 +259,12 @@ failed and the controlled comparison never started; the materialized receipt
 is correspondingly limited to `SINGLE_BUNDLE_ONLY`.
 
 Lifecycle hardening on 2026-08-19 adds an opt-in Lambda API cost guard. It
-checks the selected instance and displayed hourly rate, arms an independent
-absolute spend deadline, calls provider termination on every controller exit
-path, and polls until termination is confirmed. It cannot launch an instance,
-and its API key remains environment-only.
+requires the actual billing origin, fails closed on missing rate or endpoint
+identity, subtracts a fixed termination safety margin, waits for a detached
+watchdog readiness handshake, calls provider termination on every controller
+exit path, and polls until termination is confirmed. It cannot launch an
+instance, and its API key remains environment-only. It is a local circuit
+breaker rather than an exact provider-billing guarantee.
 
 Still required to close PR 7: complete and review the fresh four-run GPU capture,
 decide whether to promote the recovered single bundle as a committed example,

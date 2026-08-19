@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import errno
+import ipaddress
 import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
@@ -36,6 +41,9 @@ _MAX_RESPONSE_BYTES = 1_048_576
 _DEFAULT_POLL_SECONDS = 2
 _DEFAULT_TERMINATION_TIMEOUT_SECONDS = 300
 _DEFAULT_RETRY_WINDOW_SECONDS = 86_400
+_DEFAULT_READINESS_TIMEOUT_SECONDS = 10
+_MAX_FUTURE_CLOCK_SKEW_SECONDS = 30
+_TERMINATION_SAFETY_MARGIN_SECONDS = 60
 
 
 class LambdaGuardError(RuntimeError):
@@ -74,7 +82,9 @@ class LambdaInstance:
 class CostWindow:
     billing_started_at: datetime
     deadline: datetime
+    cost_limit_deadline: datetime
     allowed_seconds: int
+    termination_safety_margin_seconds: int
     hourly_rate_usd: Decimal
     max_cost_usd: Decimal
 
@@ -82,9 +92,13 @@ class CostWindow:
         return {
             "allowed_seconds": self.allowed_seconds,
             "billing_started_at": _timestamp(self.billing_started_at),
+            "cost_limit_deadline": _timestamp(self.cost_limit_deadline),
             "deadline": _timestamp(self.deadline),
             "hourly_rate_usd": _decimal_text(self.hourly_rate_usd),
             "max_cost_usd": _decimal_text(self.max_cost_usd),
+            "termination_safety_margin_seconds": (
+                self.termination_safety_margin_seconds
+            ),
         }
 
 
@@ -104,12 +118,21 @@ class TerminationResult:
         }
 
 
+class LambdaGuardFinalizationError(LambdaGuardError):
+    """Provider termination succeeded, but local guard cleanup did not."""
+
+    def __init__(self, message: str, *, result: TerminationResult) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 @dataclass(frozen=True)
 class WatchdogHandle:
     instance: LambdaInstance
     cost_window: CostWindow
     process: subprocess.Popen[bytes]
     receipt_path: Path
+    ready_path: Path
     state_directory: Path
     client: LambdaCloudClient
 
@@ -258,7 +281,6 @@ class LambdaCloudClient:
                 confirmed_at=self._now(),
             )
 
-        self._sleep(max(1, poll_seconds))
         request_error: LambdaCloudApiError | None = None
         try:
             self._request_termination(instance_id)
@@ -452,14 +474,37 @@ def _retry_window(value: str) -> int:
     )
 
 
+def _same_endpoint(expected: str, observed: str | None) -> bool:
+    if observed is None:
+        return False
+    try:
+        return ipaddress.ip_address(expected) == ipaddress.ip_address(observed)
+    except ValueError:
+        return expected.rstrip(".").casefold() == observed.rstrip(".").casefold()
+
+
 def compute_cost_window(
     *,
     billing_started_at: datetime,
     hourly_rate_usd: Decimal,
     max_cost_usd: Decimal,
+    now: datetime | None = None,
 ) -> CostWindow:
     if billing_started_at.tzinfo is None or billing_started_at.utcoffset() is None:
         raise LambdaGuardError("billing start must be timezone-aware")
+    selected_now = now or datetime.now(UTC)
+    if selected_now.tzinfo is None or selected_now.utcoffset() is None:
+        raise LambdaGuardError("current time must be timezone-aware")
+    if hourly_rate_usd <= 0 or max_cost_usd <= 0:
+        raise LambdaGuardError("Lambda cost inputs must be greater than zero")
+    selected_now = selected_now.astimezone(UTC)
+    started_at = billing_started_at.astimezone(UTC)
+    if started_at > selected_now + timedelta(
+        seconds=_MAX_FUTURE_CLOCK_SKEW_SECONDS
+    ):
+        raise LambdaGuardError("billing start cannot be in the future")
+    if started_at > selected_now:
+        started_at = selected_now
     allowed_seconds = int(
         (max_cost_usd / hourly_rate_usd * Decimal(3_600)).to_integral_value(
             rounding=ROUND_FLOOR
@@ -467,11 +512,18 @@ def compute_cost_window(
     )
     if allowed_seconds < 1:
         raise LambdaGuardError("Lambda cost cap permits less than one second")
-    started_at = billing_started_at.astimezone(UTC)
+    safety_margin_seconds = min(
+        _TERMINATION_SAFETY_MARGIN_SECONDS,
+        allowed_seconds,
+    )
+    cost_limit_deadline = started_at + timedelta(seconds=allowed_seconds)
     return CostWindow(
         billing_started_at=started_at,
-        deadline=started_at + timedelta(seconds=allowed_seconds),
+        deadline=cost_limit_deadline
+        - timedelta(seconds=safety_margin_seconds),
+        cost_limit_deadline=cost_limit_deadline,
         allowed_seconds=allowed_seconds,
+        termination_safety_margin_seconds=safety_margin_seconds,
         hourly_rate_usd=hourly_rate_usd,
         max_cost_usd=max_cost_usd,
     )
@@ -491,23 +543,26 @@ def arm_watchdog(
     retry_window_seconds: int = _DEFAULT_RETRY_WINDOW_SECONDS,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     now: Callable[[], datetime] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    readiness_timeout_seconds: int = _DEFAULT_READINESS_TIMEOUT_SECONDS,
 ) -> WatchdogHandle:
     """Validate one paid instance and launch a detached termination watchdog."""
 
     selected_client = client or LambdaCloudClient.from_environment()
     selected_now = now or (lambda: datetime.now(UTC))
+    current_time = selected_now()
     instance = selected_client.resolve_instance(instance_reference)
-    if expected_endpoint is not None and expected_endpoint not in {
-        instance.ip,
-        instance.hostname,
-    }:
+    if expected_endpoint is not None and not (
+        _same_endpoint(expected_endpoint, instance.ip)
+        or _same_endpoint(expected_endpoint, instance.hostname)
+    ):
         raise LambdaGuardError(
             "Lambda instance endpoint does not match the SSH destination"
         )
-    if (
-        instance.hourly_rate_usd is not None
-        and instance.hourly_rate_usd != hourly_rate_usd
-    ):
+    if instance.hourly_rate_usd is None:
+        raise LambdaGuardError("Lambda API did not report an hourly rate")
+    if instance.hourly_rate_usd != hourly_rate_usd:
         raise LambdaGuardError(
             "Lambda API hourly rate does not match --lambda-hourly-rate-usd"
         )
@@ -515,15 +570,20 @@ def arm_watchdog(
         billing_started_at=billing_started_at,
         hourly_rate_usd=hourly_rate_usd,
         max_cost_usd=max_cost_usd,
+        now=current_time,
     )
-    if cost_window.deadline <= selected_now().astimezone(UTC):
+    current_time = current_time.astimezone(UTC)
+    if cost_window.deadline <= current_time + timedelta(
+        seconds=readiness_timeout_seconds
+    ):
         result = selected_client.terminate_and_wait(
             instance.instance_id,
             poll_seconds=poll_seconds,
             timeout_seconds=termination_timeout_seconds,
         )
         raise LambdaGuardError(
-            "Lambda cost deadline was already exhausted; termination confirmed "
+            "Lambda termination deadline is exhausted or too close to arm safely; "
+            "termination confirmed "
             f"with status {result.final_status}"
         )
 
@@ -537,17 +597,10 @@ def arm_watchdog(
     )
     state_directory.chmod(0o700)
     receipt_path = state_directory / "termination-receipt.json"
+    ready_path = state_directory / "watchdog-ready.json"
     log_path = state_directory / "watchdog.log"
     armed_path = state_directory / "guard-armed.json"
-    _write_json_exclusive(
-        armed_path,
-        {
-            "cost_window": cost_window.public_record(),
-            "instance": instance.public_record(),
-            "record_kind": "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION",
-            "schema_version": "inferdrome.lambda-guard-armed.v1",
-        },
-    )
+    readiness_token = secrets.token_hex(16)
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -568,10 +621,15 @@ def arm_watchdog(
         str(retry_window_seconds),
         "--receipt-path",
         str(receipt_path),
+        "--ready-path",
+        str(ready_path),
+        "--readiness-token",
+        readiness_token,
     ]
     caffeinate = shutil.which("caffeinate") if platform.system() == "Darwin" else None
     if caffeinate is not None:
         command = [caffeinate, "-i", *command]
+    process: subprocess.Popen[bytes] | None = None
     try:
         descriptor = os.open(
             log_path,
@@ -588,13 +646,50 @@ def arm_watchdog(
                 start_new_session=True,
                 close_fds=True,
             )
-    except OSError:
+        _wait_for_watchdog_ready(
+            process,
+            ready_path=ready_path,
+            readiness_token=readiness_token,
+            instance_id=instance.instance_id,
+            timeout_seconds=readiness_timeout_seconds,
+            sleeper=sleeper,
+            monotonic=monotonic,
+        )
+        _write_json_exclusive(
+            armed_path,
+            {
+                "cost_window": cost_window.public_record(),
+                "instance": instance.public_record(),
+                "record_kind": "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION",
+                "schema_version": "inferdrome.lambda-guard-armed.v2",
+                "watchdog_ready": True,
+            },
+        )
+    except (LambdaGuardError, OSError) as error:
+        stop_error: LambdaGuardError | None = None
+        if process is not None:
+            try:
+                _stop_watchdog(process)
+            except LambdaGuardError as cleanup_error:
+                stop_error = cleanup_error
+        if stop_error is not None:
+            raise LambdaGuardError(
+                "Lambda watchdog startup failed and its process could not be stopped; "
+                f"state remains at {state_directory}: {stop_error}"
+            ) from error
+        _remove_state_directory(state_directory)
+        if isinstance(error, LambdaGuardError):
+            raise
         raise LambdaGuardError("Lambda termination watchdog could not start") from None
+    if process is None:
+        _remove_state_directory(state_directory)
+        raise LambdaGuardError("Lambda termination watchdog could not start")
     return WatchdogHandle(
         instance=instance,
         cost_window=cost_window,
         process=process,
         receipt_path=receipt_path,
+        ready_path=ready_path,
         state_directory=state_directory,
         client=selected_client,
     )
@@ -608,13 +703,26 @@ def terminate_guarded_instance(
     """Terminate now, confirm provider state, then disarm the fallback watchdog."""
 
     result = handle.client.terminate_and_wait(handle.instance.instance_id)
-    _write_termination_receipt(
-        handle.receipt_path,
-        result=result,
-        trigger=trigger,
-        cost_window=handle.cost_window,
-    )
-    _stop_watchdog(handle.process)
+    finalization_errors: list[str] = []
+    try:
+        _write_termination_receipt(
+            handle.receipt_path,
+            result=result,
+            trigger=trigger,
+            cost_window=handle.cost_window,
+        )
+    except LambdaGuardError as error:
+        finalization_errors.append(str(error))
+    try:
+        _stop_watchdog(handle.process)
+    except LambdaGuardError as error:
+        finalization_errors.append(str(error))
+    if finalization_errors:
+        raise LambdaGuardFinalizationError(
+            "Lambda termination was confirmed, but local guard finalization failed: "
+            + "; ".join(finalization_errors),
+            result=result,
+        )
     return result
 
 
@@ -627,12 +735,31 @@ def watch_until_deadline(
     poll_seconds: int,
     termination_timeout_seconds: int,
     retry_window_seconds: int,
+    ready_path: Path | None = None,
+    readiness_token: str | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> TerminationResult:
     """Wait independently for the spend deadline, then retry API termination."""
 
+    if (ready_path is None) != (readiness_token is None):
+        raise LambdaGuardError("Lambda watchdog readiness inputs are incomplete")
+    if ready_path is not None and readiness_token is not None:
+        selected_ready_path = ready_path.expanduser().absolute()
+        selected_receipt_path = receipt_path.expanduser().absolute()
+        if (
+            selected_ready_path.parent != selected_receipt_path.parent
+            or selected_ready_path.name != "watchdog-ready.json"
+            or selected_receipt_path.name != "termination-receipt.json"
+            or re.fullmatch(r"[0-9a-f]{32}", readiness_token) is None
+        ):
+            raise LambdaGuardError("Lambda watchdog readiness inputs are invalid")
+        _write_watchdog_ready(
+            selected_ready_path,
+            instance_id=instance_id,
+            readiness_token=readiness_token,
+        )
     selected_now = now or (lambda: datetime.now(UTC))
     while True:
         remaining = (
@@ -673,15 +800,40 @@ def _stop_watchdog(process: subprocess.Popen[bytes]) -> None:
         return
     try:
         os.killpg(process.pid, signal.SIGTERM)
+    except OSError as error:
+        if error.errno == errno.ESRCH or process.poll() is not None:
+            return
+        raise LambdaGuardError(
+            "Lambda instance is terminated, but the local watchdog could not be "
+            "signaled"
+        ) from None
+    try:
+        process.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except OSError:
+        if process.poll() is not None:
+            return
+        raise LambdaGuardError(
+            "Lambda instance is terminated, but the local watchdog could not be reaped"
+        ) from None
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError as error:
+        if error.errno == errno.ESRCH or process.poll() is not None:
+            return
+        raise LambdaGuardError(
+            "Lambda instance is terminated, but the local watchdog could not be killed"
+        ) from None
+    try:
         process.wait(timeout=5)
     except (OSError, subprocess.TimeoutExpired):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            raise LambdaGuardError(
-                "Lambda instance is terminated, but the local watchdog did not stop"
-            ) from None
+        if process.poll() is not None:
+            return
+        raise LambdaGuardError(
+            "Lambda instance is terminated, but the local watchdog did not stop"
+        ) from None
 
 
 def _instance_from_api(value: object) -> LambdaInstance:
@@ -732,17 +884,165 @@ def _require_state_root(path: Path) -> None:
     path.chmod(metadata.st_mode & 0o700)
 
 
-def _write_json_exclusive(path: Path, value: dict[str, object]) -> None:
-    content = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_json_exclusive(
+    path: Path,
+    value: dict[str, object],
+    *,
+    allow_existing: bool = False,
+) -> bool:
+    content = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    temporary_path = path.with_name(
+        f".{path.name}.{secrets.token_hex(16)}.temporary"
+    )
+    published = False
+    try:
+        descriptor = os.open(
+            temporary_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        path.chmod(0o444)
+        temporary_path.chmod(0o444)
+        try:
+            os.link(temporary_path, path, follow_symlinks=False)
+        except OSError as error:
+            if error.errno == errno.EEXIST and allow_existing:
+                return False
+            raise
+        published = True
+        _fsync_directory(path.parent)
     except OSError:
         raise LambdaGuardError("Lambda guard record could not be published") from None
+    finally:
+        with suppress(OSError):
+            temporary_path.unlink(missing_ok=True)
+        if published:
+            with suppress(OSError):
+                _fsync_directory(path.parent)
+    return True
+
+
+def _read_json_record(
+    path: Path,
+    *,
+    label: str,
+    missing_ok: bool = False,
+) -> dict[str, object] | None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise LambdaGuardError(f"{label} is unavailable") from None
+    except OSError:
+        raise LambdaGuardError(f"{label} is unavailable") from None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or path.is_symlink()
+        or metadata.st_size < 2
+        or metadata.st_size > 65_536
+    ):
+        raise LambdaGuardError(f"{label} is invalid")
+    try:
+        content = path.read_bytes()
+        value = json.loads(content)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise LambdaGuardError(f"{label} is invalid") from None
+    if not isinstance(value, dict):
+        raise LambdaGuardError(f"{label} is invalid")
+    return value
+
+
+def _remove_state_directory(path: Path) -> None:
+    with suppress(OSError):
+        path.chmod(0o700)
+    with suppress(OSError):
+        shutil.rmtree(path)
+
+
+def _write_watchdog_ready(
+    path: Path,
+    *,
+    instance_id: str,
+    readiness_token: str,
+) -> None:
+    _write_json_exclusive(
+        path,
+        {
+            "instance_id": instance_id,
+            "pid": os.getpid(),
+            "readiness_token": readiness_token,
+            "record_kind": "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION",
+            "schema_version": "inferdrome.lambda-watchdog-ready.v1",
+        },
+    )
+
+
+def _wait_for_watchdog_ready(
+    process: subprocess.Popen[bytes],
+    *,
+    ready_path: Path,
+    readiness_token: str,
+    instance_id: str,
+    timeout_seconds: int,
+    sleeper: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> None:
+    deadline = monotonic() + timeout_seconds
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise LambdaGuardError(
+                "Lambda termination watchdog exited before readiness "
+                f"with status {exit_code}"
+            )
+        ready = _read_json_record(
+            ready_path,
+            label="Lambda watchdog readiness record",
+            missing_ok=True,
+        )
+        if ready is not None:
+            if (
+                set(ready)
+                != {
+                    "instance_id",
+                    "pid",
+                    "readiness_token",
+                    "record_kind",
+                    "schema_version",
+                }
+                or ready.get("instance_id") != instance_id
+                or ready.get("readiness_token") != readiness_token
+                or ready.get("record_kind")
+                != "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION"
+                or ready.get("schema_version")
+                != "inferdrome.lambda-watchdog-ready.v1"
+                or isinstance(ready.get("pid"), bool)
+                or not isinstance(ready.get("pid"), int)
+                or int(ready["pid"]) <= 0
+                or process.poll() is not None
+            ):
+                raise LambdaGuardError(
+                    "Lambda watchdog readiness record is invalid"
+                )
+            return
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise LambdaGuardError(
+                "Lambda termination watchdog did not become ready"
+            )
+        sleeper(min(0.05, remaining))
 
 
 def _write_termination_receipt(
@@ -752,18 +1052,35 @@ def _write_termination_receipt(
     trigger: str,
     cost_window: CostWindow,
 ) -> None:
-    if path.exists():
-        return
-    _write_json_exclusive(
+    published = _write_json_exclusive(
         path,
         {
             "cost_window": cost_window.public_record(),
             "record_kind": "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION",
-            "schema_version": "inferdrome.lambda-termination-receipt.v1",
+            "schema_version": "inferdrome.lambda-termination-receipt.v2",
             "termination": result.public_record(),
             "trigger": trigger,
         },
+        allow_existing=True,
     )
+    if published:
+        return
+    existing = _read_json_record(
+        path,
+        label="Lambda termination receipt",
+    )
+    termination = existing.get("termination") if existing is not None else None
+    if (
+        existing is None
+        or existing.get("record_kind")
+        != "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION"
+        or existing.get("schema_version")
+        != "inferdrome.lambda-termination-receipt.v2"
+        or not isinstance(termination, dict)
+        or termination.get("instance_id") != result.instance_id
+        or termination.get("final_status") not in {*_TERMINAL_STATUSES, "absent"}
+    ):
+        raise LambdaGuardError("Lambda termination receipt is invalid")
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -786,7 +1103,8 @@ def _add_cost_window(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--billing-started-at",
         type=parse_utc_timestamp,
-        help="billing start in ISO 8601; defaults to the moment this guard starts",
+        required=True,
+        help="actual provider billing start in ISO 8601",
     )
 
 
@@ -842,6 +1160,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_RETRY_WINDOW_SECONDS,
     )
     watch.add_argument("--receipt-path", required=True)
+    watch.add_argument("--ready-path", required=True)
+    watch.add_argument("--readiness-token", required=True)
     return parser
 
 
@@ -865,12 +1185,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.termination_timeout_seconds,
             ).public_record()
         elif args.command == "arm":
-            started_at = args.billing_started_at or datetime.now(UTC)
             handle = arm_watchdog(
                 _reference(args),
                 hourly_rate_usd=args.hourly_rate_usd,
                 max_cost_usd=args.max_cost_usd,
-                billing_started_at=started_at,
+                billing_started_at=args.billing_started_at,
                 state_root=Path(args.state_root),
                 client=client,
                 poll_seconds=args.poll_seconds,
@@ -882,12 +1201,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "cost_window": handle.cost_window.public_record(),
                 "instance": handle.instance.public_record(),
                 "pid": handle.process.pid,
+                "ready_path": str(handle.ready_path),
                 "state_directory": str(handle.state_directory),
             }
         else:
-            started_at = args.billing_started_at or datetime.now(UTC)
             cost_window = compute_cost_window(
-                billing_started_at=started_at,
+                billing_started_at=args.billing_started_at,
                 hourly_rate_usd=args.hourly_rate_usd,
                 max_cost_usd=args.max_cost_usd,
             )
@@ -899,6 +1218,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 poll_seconds=args.poll_seconds,
                 termination_timeout_seconds=args.termination_timeout_seconds,
                 retry_window_seconds=args.retry_window_seconds,
+                ready_path=Path(args.ready_path),
+                readiness_token=args.readiness_token,
             ).public_record()
     except LambdaGuardError as error:
         print(f"lambda-gpu-guard: {error}", file=sys.stderr)

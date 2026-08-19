@@ -114,8 +114,9 @@ command-line argument, commit it, or paste it into a receipt. The guard projects
 only instance ID, endpoint, status, and hourly rate from the API response; it
 discards fields such as Jupyter tokens.
 
-Record the UTC launch time as a conservative billing start. Then run the
-controller with the exact displayed hourly rate and maximum spend:
+Record the provider's UTC launch time before leaving the console. The guarded
+controller requires that billing origin, the exact displayed hourly rate, and
+an operator spend budget:
 
 ```bash
 read -r -s -p "Lambda API key: " LAMBDA_CLOUD_API_KEY
@@ -131,27 +132,34 @@ export LAMBDA_CLOUD_API_KEY
   --lambda-billing-started-at 2026-08-19T00:00:00Z
 ```
 
-At `$1.29/hour`, a `$2.58` cap yields an exact 7,200-second deadline. Replace
-both values with the console values for the selected instance. The controller
-resolves the SSH public IP to exactly one running Lambda instance and verifies
-the API-reported hourly rate. Pass `--lambda-instance-id <32-hex-id>` as an
-additional explicit identity when available.
+At `$1.29/hour`, a `$2.58` budget yields a 7,200-second cost-limit boundary. The
+watchdog deliberately requests termination 60 seconds earlier, at 7,140
+seconds, to leave bounded room for network and provider latency. Replace both
+values with the console values for the selected instance. The controller
+rejects a missing or different API-reported hourly rate, rejects a materially
+future billing start, and requires the selected instance endpoint to match the
+SSH destination. Pass `--lambda-instance-id <32-hex-id>` as an additional
+explicit identity when available.
 
-The controller fails before SSH if the guard cannot be armed. A detached
-watchdog holds the absolute deadline and calls Lambda's termination API even if
-the capture controller fails. On macOS it runs beneath `caffeinate -i` so idle
-sleep does not silently suspend the timer. The controller also calls the same
-termination API in `finally` after success, failure, or interruption, polls
-until the instance is absent or terminal, and only then disarms the fallback.
-The API key remains in process environment, never in the watchdog argument
-vector or its operational receipts.
+The controller fails before SSH if the guard cannot be armed. It reports the
+detached watchdog as armed only after the child publishes a validated readiness
+record; startup failure removes false armed state. The watchdog holds the
+buffered termination deadline and calls Lambda's termination API even if the
+capture controller fails. On macOS it runs beneath `caffeinate -i` so idle sleep
+does not silently suspend the timer. The controller also calls the same
+termination API immediately in `finally` after success, failure, or
+interruption, polls until the instance is absent or terminal, and only then
+disarms the fallback. The API key remains in process environment, never in the
+watchdog argument vector or its operational receipts.
 
-This is a strong local circuit breaker, not an availability guarantee. The Mac
-must remain powered, connected to the internet, and able to reach Lambda. Keep
-the provider console available and confirm that no instance remains after each
-run. Lambda documents that billing begins after launch health checks and ends
-when the instance is terminated; guest `shutdown` or `poweroff` is not a
-substitute for provider termination. See Lambda's
+This is a strong local circuit breaker, not an exact billing cap or availability
+guarantee. Provider billing granularity, API latency, network loss, or laptop
+failure can still cross the nominal budget. The Mac must remain powered,
+connected to the internet, and able to reach Lambda. Keep a separate console
+deadline, keep the provider console available, and confirm that no instance
+remains after each run. Lambda documents that billing begins after launch health
+checks and ends when the instance is terminated; guest `shutdown` or `poweroff`
+is not a substitute for provider termination. See Lambda's
 [billing overview](https://docs.lambda.ai/public-cloud/billing/) and
 [Cloud API](https://docs.lambda.ai/api/cloud).
 
@@ -195,7 +203,8 @@ short:
 
 1. resolve billing and tax-address requirements;
 2. confirm the displayed rate, GPU type, Ubuntu image, and SSH key;
-3. record a hard termination deadline before clicking **Launch**;
+3. record the UTC launch time, spend budget, and a separate console hard-stop
+   deadline before clicking **Launch**;
 4. copy the provider's exact SSH destination into the controller command;
 5. terminate the instance after success, failure, or deadline—whichever comes
    first; and

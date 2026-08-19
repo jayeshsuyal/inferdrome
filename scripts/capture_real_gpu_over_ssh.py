@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -342,9 +341,14 @@ def _lambda_guard_requested(args: argparse.Namespace) -> bool:
     )
     if not any(value is not None for value in selected):
         return False
-    if args.lambda_hourly_rate_usd is None or args.max_cost_usd is None:
+    if (
+        args.lambda_hourly_rate_usd is None
+        or args.max_cost_usd is None
+        or args.lambda_billing_started_at is None
+    ):
         raise RemoteCaptureError(
-            "Lambda protection requires --lambda-hourly-rate-usd and --max-cost-usd"
+            "Lambda protection requires --lambda-hourly-rate-usd, --max-cost-usd, "
+            "and --lambda-billing-started-at"
         )
     return True
 
@@ -355,22 +359,15 @@ def _arm_lambda_watchdog(
     if not _lambda_guard_requested(args):
         return None
     host = _destination_host(args.destination)
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        expected_endpoint = None
-    else:
-        expected_endpoint = host
     reference = args.lambda_instance_id or host
-    started_at = args.lambda_billing_started_at or datetime.now(UTC)
     try:
         handle = lambda_gpu_guard.arm_watchdog(
             reference,
             hourly_rate_usd=args.lambda_hourly_rate_usd,
             max_cost_usd=args.max_cost_usd,
-            billing_started_at=started_at,
+            billing_started_at=args.lambda_billing_started_at,
             state_root=Path(args.lambda_guard_state_root),
-            expected_endpoint=expected_endpoint,
+            expected_endpoint=host,
         )
     except lambda_gpu_guard.LambdaGuardError as error:
         raise RemoteCaptureError(
@@ -398,10 +395,8 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
         "identity_file_configured": identity is not None,
         "lambda_cost_guard": (
             {
-                "billing_started_at": (
-                    lambda_gpu_guard._timestamp(args.lambda_billing_started_at)
-                    if args.lambda_billing_started_at is not None
-                    else "CONTROLLER_START"
+                "billing_started_at": lambda_gpu_guard._timestamp(
+                    args.lambda_billing_started_at
                 ),
                 "hourly_rate_usd": str(args.lambda_hourly_rate_usd),
                 "instance_reference": args.lambda_instance_id
@@ -663,6 +658,17 @@ def _capture(args: argparse.Namespace, commit: str, identity: Path | None) -> Pa
             capture_failed = sys.exc_info()[0] is not None
             try:
                 result = lambda_gpu_guard.terminate_guarded_instance(watchdog)
+            except lambda_gpu_guard.LambdaGuardFinalizationError as error:
+                print(
+                    "WARNING: local Lambda guard finalization failed after confirmed "
+                    f"termination: {error}",
+                    file=sys.stderr,
+                )
+                if not capture_failed:
+                    raise RemoteCaptureError(
+                        "capture completed and Lambda terminated, but local guard "
+                        "finalization failed"
+                    ) from None
             except lambda_gpu_guard.LambdaGuardError as error:
                 print(
                     "CRITICAL: immediate Lambda termination was not confirmed; "
@@ -731,12 +737,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-cost-usd",
         type=lambda_gpu_guard.parse_max_cost,
-        help="maximum spend from --lambda-billing-started-at or controller start",
+        help="operator spend budget used for the buffered termination deadline",
     )
     parser.add_argument(
         "--lambda-billing-started-at",
         type=lambda_gpu_guard.parse_utc_timestamp,
-        help="actual billing start in ISO 8601; defaults to controller start",
+        help="required actual provider billing start in ISO 8601",
     )
     parser.add_argument(
         "--lambda-guard-state-root",

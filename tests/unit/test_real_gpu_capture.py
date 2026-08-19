@@ -6,6 +6,8 @@ import io
 import json
 import stat
 import tarfile
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +120,51 @@ def test_remote_preflight_requires_build_tools_and_python_headers() -> None:
     assert "bash curl git ninja python3.12 nvidia-smi" in script
     assert "Python.h" in script
     assert "Python 3.12 development headers" in script
+
+
+def test_lambda_guard_requires_actual_billing_start() -> None:
+    args = SimpleNamespace(
+        lambda_billing_started_at=None,
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        max_cost_usd=Decimal("2.58"),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="billing-started-at"):
+        remote._lambda_guard_requested(args)
+
+
+def test_lambda_guard_binds_explicit_instance_to_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def arm(reference: str, **kwargs: object) -> SimpleNamespace:
+        observed["reference"] = reference
+        observed["expected_endpoint"] = kwargs["expected_endpoint"]
+        return SimpleNamespace(
+            cost_window=SimpleNamespace(
+                deadline=datetime(2026, 8, 18, 22, 0, tzinfo=UTC),
+            ),
+            state_directory=Path("/tmp/inferdrome-test-guard"),
+        )
+
+    monkeypatch.setattr(remote.lambda_gpu_guard, "arm_watchdog", arm)
+    args = SimpleNamespace(
+        destination="ubuntu@capture.example.test",
+        lambda_billing_started_at=datetime(2026, 8, 18, 20, 0, tzinfo=UTC),
+        lambda_guard_state_root="/tmp/inferdrome-test-guards",
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        max_cost_usd=Decimal("2.58"),
+    )
+
+    remote._arm_lambda_watchdog(args)
+
+    assert observed == {
+        "expected_endpoint": "capture.example.test",
+        "reference": "b" * 32,
+    }
 
 
 def test_capture_terminates_guarded_instance_even_after_capture_failure(
