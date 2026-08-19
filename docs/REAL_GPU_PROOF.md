@@ -48,6 +48,13 @@ The preparation script requires:
 - enough disk space for the roughly 300 MiB vLLM wheel, its dependencies, the
   model snapshot, and generated evidence.
 
+For Lambda Cloud, select **Lambda Stack 24.04**. Lambda documents Python 3.12
+for that image family, while Lambda Stack 22.04 provides Python 3.10 and cannot
+satisfy this repository's host contract. Do not run a full distribution upgrade
+as part of capture preparation; use the image's shipped toolchain and let the
+preflight fail closed if any required development header is absent. See
+[Lambda's base-image matrix](https://docs.lambda.ai/public-cloud/on-demand/#base-images).
+
 The script uses no `sudo`, refuses a dirty checkout, refuses to reuse an
 existing destination, verifies the exact vLLM wheel hash before installation,
 downloads the model at the exact revision, rejects snapshot symlinks, checks
