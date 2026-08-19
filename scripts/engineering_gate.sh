@@ -15,6 +15,8 @@ bash -n scripts/run_real_gpu_capture.sh
 bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/capture_real_gpu_over_ssh.py
+"$inferdrome_python" -m py_compile scripts/lambda_gpu_guard.py
+"$inferdrome_python" -m py_compile scripts/materialize_real_gpu_receipt.py
 "$inferdrome_python" -m py_compile scripts/run_local_demo.py
 "$inferdrome_python" -m py_compile scripts/verify_dashboard_install.py
 "$inferdrome_python" -m ruff check .

@@ -363,6 +363,77 @@ def write_failure_receipt(
     return destination
 
 
+def verify_failure_capture(
+    capture_root: Path,
+    *,
+    expected_repository_commit: str | None = None,
+) -> dict[str, Any]:
+    """Verify the bounded status receipt for an incomplete host capture."""
+
+    capture_root = capture_root.absolute()
+    _validate_capture_tree(capture_root)
+    receipt = _read_json(
+        capture_root / "capture-failure.json",
+        label="capture failure receipt",
+    )
+    _require_exact_fields(
+        receipt,
+        {
+            "failed_at",
+            "failed_step",
+            "process_exit_code",
+            "proof_status",
+            "repository_commit",
+            "schema_version",
+        },
+        label="capture failure receipt",
+    )
+    repository_commit = _require_commit(
+        _required_text(
+            receipt,
+            "repository_commit",
+            label="capture failure receipt",
+        ),
+        label="capture failure repository commit",
+    )
+    if (
+        expected_repository_commit is not None
+        and repository_commit
+        != _require_commit(
+            expected_repository_commit,
+            label="expected repository commit",
+        )
+    ):
+        raise CaptureError(
+            "capture failure repository commit is not the expected commit"
+        )
+    failed_step = _required_text(
+        receipt,
+        "failed_step",
+        label="capture failure receipt",
+    )
+    exit_code = receipt.get("process_exit_code")
+    if (
+        receipt.get("schema_version") != _FAILURE_SCHEMA
+        or receipt.get("proof_status") != "INCOMPLETE_NOT_EVIDENCE"
+        or len(failed_step) > 128
+        or any(ord(character) < 32 for character in failed_step)
+        or isinstance(exit_code, bool)
+        or not isinstance(exit_code, int)
+        or not 1 <= exit_code <= 255
+    ):
+        raise CaptureError("capture failure receipt is invalid")
+    _require_timestamp(
+        _required_text(
+            receipt,
+            "failed_at",
+            label="capture failure receipt",
+        ),
+        label="capture failure time",
+    )
+    return receipt
+
+
 def _manifest_entry(
     root: Path,
     value: Any,
@@ -948,27 +1019,43 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
     capture_destination = destination_parent / "capture"
     if capture_destination.exists() or capture_destination.is_symlink():
         raise CaptureError("capture extraction destination already exists")
-    destination_parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination_parent.mkdir(parents=True, exist_ok=True)
+        parent_metadata = os.lstat(destination_parent)
+    except OSError:
+        raise CaptureError("capture extraction destination is unavailable") from None
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or destination_parent.is_symlink()
+    ):
+        raise CaptureError("capture extraction destination must be a real directory")
     seen: set[str] = set()
     total_bytes = 0
     file_count = 0
+    retained_modes: list[tuple[PurePosixPath, int, bool]] = []
     try:
         with tarfile.open(archive, mode="r:gz") as retained:
             members = retained.getmembers()
             for member in members:
                 path = PurePosixPath(member.name)
+                canonical_name = path.as_posix()
+                mode = stat.S_IMODE(member.mode)
                 if (
                     path.is_absolute()
                     or not path.parts
                     or path.parts[0] != "capture"
                     or any(part in {"", ".", ".."} for part in path.parts)
-                    or member.name in seen
+                    or canonical_name in seen
                     or member.issym()
                     or member.islnk()
                     or not (member.isdir() or member.isfile())
+                    or member.mode & ~0o777
+                    or (member.isdir() and mode & 0o500 != 0o500)
+                    or (member.isfile() and mode & 0o400 != 0o400)
                 ):
                     raise CaptureError("capture archive contains an unsafe member")
-                seen.add(member.name)
+                seen.add(canonical_name)
+                retained_modes.append((path, mode, member.isdir()))
                 if member.isfile():
                     file_count += 1
                     total_bytes += member.size
@@ -980,6 +1067,18 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
             if not any(PurePosixPath(name).parts == ("capture",) for name in seen):
                 raise CaptureError("capture archive omits its top-level directory")
             retained.extractall(destination_parent, filter="data")
+        ordered_modes = sorted(
+            retained_modes,
+            key=lambda item: (item[2], -len(item[0].parts)),
+        )
+        for path, mode, is_directory in ordered_modes:
+            destination = destination_parent.joinpath(*path.parts)
+            metadata = os.lstat(destination)
+            if is_directory != stat.S_ISDIR(metadata.st_mode) or (
+                not is_directory and not stat.S_ISREG(metadata.st_mode)
+            ):
+                raise CaptureError("capture archive member changed during extraction")
+            os.chmod(destination, mode, follow_symlinks=False)
     except (OSError, tarfile.TarError):
         raise CaptureError("capture archive cannot be extracted") from None
     _validate_capture_tree(capture_destination)

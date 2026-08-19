@@ -139,7 +139,9 @@ that a second executor invocation reuses the exact completed schedule.
 For an operator-provided SSH GPU VM, the runbook also includes one bounded
 controller that transfers the exact clean Git commit, runs both proof modes,
 retrieves a checksumed archive, and independently verifies it on the local
-workstation. It deliberately does not create or terminate cloud instances.
+workstation. It never creates cloud instances. For Lambda, optional cost-guard
+flags arm an independent API termination deadline and confirm termination on
+every controller exit path; the generic SSH path remains provider-neutral.
 
 ## v0.1 principles
 

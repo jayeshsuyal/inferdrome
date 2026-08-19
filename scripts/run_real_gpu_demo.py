@@ -620,13 +620,32 @@ def _corrupt_bundle_copy(bundle: Path, demo_directory: Path) -> Path:
     destination = demo_directory / "corrupted-bundle-copy"
     shutil.copytree(bundle, destination, symlinks=True)
     native_result = destination / "native" / "benchmark-result.json"
+    original_mode: int | None = None
     try:
-        mode = os.lstat(native_result).st_mode
-        os.chmod(native_result, mode | stat.S_IWUSR, follow_symlinks=False)
-        with native_result.open("ab") as stream:
-            stream.write(b"\n")
+        original_mode = stat.S_IMODE(os.lstat(native_result).st_mode)
+        os.chmod(
+            native_result,
+            original_mode | stat.S_IWUSR,
+            follow_symlinks=False,
+        )
+        with native_result.open("r+b") as stream:
+            first_byte = stream.read(1)
+            if not first_byte:
+                raise DemoError("disposable corruption target is empty")
+            stream.seek(0)
+            stream.write(b"[" if first_byte != b"[" else b"{")
+            stream.flush()
+            os.fsync(stream.fileno())
     except OSError:
         raise DemoError("disposable bundle copy could not be corrupted") from None
+    finally:
+        if original_mode is not None:
+            try:
+                os.chmod(native_result, original_mode, follow_symlinks=False)
+            except OSError:
+                raise DemoError(
+                    "disposable corrupted bundle could not be resealed"
+                ) from None
     return destination
 
 

@@ -1,6 +1,6 @@
 # Managed real-GPU proof
 
-Status: **Harness implemented; compatible-host capture pending**
+Status: **One genuine A10 bundle captured; full comparison capture pending**
 
 Implementation date: **2026-08-06**
 
@@ -39,7 +39,8 @@ Use a clean checkout at the commit that will be recorded in release sign-off.
 The preparation script requires:
 
 - Linux `x86_64` or `aarch64`;
-- Python 3.12, Bash, Git, curl, and GNU `sha256sum`;
+- Python 3.12 plus its development headers (`Python.h`), Bash, Git, curl,
+  Ninja, and GNU `sha256sum`;
 - an NVIDIA GPU supported by the pinned vLLM wheel;
 - `nvidia-smi` and a driver compatible with the wheel's CUDA runtime; and
 - unset `CUDA_VISIBLE_DEVICES` and `NVIDIA_VISIBLE_DEVICES`, so recorded device
@@ -79,9 +80,11 @@ sealed bundle's own provenance.
 
 When the compatible GPU is an operator-provided SSH VM, the workstation can
 run the full single-proof and controlled-comparison pack without manually
-copying commands or evidence paths. The controller does not contain a cloud
-provider integration: it cannot create, resize, stop, or terminate an
-instance, and it never receives billing credentials.
+copying commands or evidence paths. The generic SSH path does not create,
+resize, stop, or terminate infrastructure. When the optional Lambda flags are
+present, the controller adds one deliberately narrow provider integration: it
+may list the selected instance and terminate it, but it still cannot launch or
+modify an instance.
 
 Before starting the paid host, make sure the intended Inferdrome commit is
 committed and the checkout is clean. After the provider reports an SSH
@@ -104,18 +107,69 @@ Then start the capture by removing `--dry-run`:
   --expected-commit "$(git rev-parse HEAD)"
 ```
 
+### Lambda cost guard
+
+For Lambda, put the API key only in `LAMBDA_CLOUD_API_KEY`. Do not pass it as a
+command-line argument, commit it, or paste it into a receipt. The guard projects
+only instance ID, endpoint, status, and hourly rate from the API response; it
+discards fields such as Jupyter tokens.
+
+Record the UTC launch time as a conservative billing start. Then run the
+controller with the exact displayed hourly rate and maximum spend:
+
+```bash
+read -r -s -p "Lambda API key: " LAMBDA_CLOUD_API_KEY
+echo
+export LAMBDA_CLOUD_API_KEY
+
+.venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  ubuntu@<public-ip> \
+  --identity-file <private-key-path> \
+  --expected-commit "$(git rev-parse HEAD)" \
+  --lambda-hourly-rate-usd 1.29 \
+  --max-cost-usd 2.58 \
+  --lambda-billing-started-at 2026-08-19T00:00:00Z
+```
+
+At `$1.29/hour`, a `$2.58` cap yields an exact 7,200-second deadline. Replace
+both values with the console values for the selected instance. The controller
+resolves the SSH public IP to exactly one running Lambda instance and verifies
+the API-reported hourly rate. Pass `--lambda-instance-id <32-hex-id>` as an
+additional explicit identity when available.
+
+The controller fails before SSH if the guard cannot be armed. A detached
+watchdog holds the absolute deadline and calls Lambda's termination API even if
+the capture controller fails. On macOS it runs beneath `caffeinate -i` so idle
+sleep does not silently suspend the timer. The controller also calls the same
+termination API in `finally` after success, failure, or interruption, polls
+until the instance is absent or terminal, and only then disarms the fallback.
+The API key remains in process environment, never in the watchdog argument
+vector or its operational receipts.
+
+This is a strong local circuit breaker, not an availability guarantee. The Mac
+must remain powered, connected to the internet, and able to reach Lambda. Keep
+the provider console available and confirm that no instance remains after each
+run. Lambda documents that billing begins after launch health checks and ends
+when the instance is terminated; guest `shutdown` or `poweroff` is not a
+substitute for provider termination. See Lambda's
+[billing overview](https://docs.lambda.ai/public-cloud/billing/) and
+[Cloud API](https://docs.lambda.ai/api/cloud).
+
 The controller:
 
 1. refuses a dirty checkout or an unexpected commit;
 2. creates and locally verifies a Git bundle for exact `HEAD`;
-3. checks Linux, Python 3.12, NVIDIA visibility, and required host tools;
+3. checks Linux, Python 3.12 headers, Ninja, NVIDIA visibility, and required
+   host tools;
 4. uploads the bundle and clones it into a private temporary directory;
 5. gives the host workload a default 9,900-second outer timeout;
 6. prepares the pinned environment and runs both proof modes;
 7. retrieves `capture.tar.gz` plus its host SHA-256;
 8. rejects unsafe archive members before extraction; and
 9. independently verifies the single bundle, all four comparison bundles,
-   both Trial Sets, the frozen plan, and the comparison result locally.
+   both Trial Sets, the frozen plan, and the comparison result locally; and
+10. when Lambda protection is configured, confirms provider termination on
+    every controller exit path.
 
 The first SSH connection uses `StrictHostKeyChecking=accept-new` with a
 capture-specific `known_hosts` file. Its digest is retained in the local
@@ -130,10 +184,11 @@ Successful captures are retained beneath the ignored
 `INCOMPLETE_NOT_EVIDENCE`; when its archive is available, the controller keeps
 the diagnostic logs without upgrading them into proof.
 
-The timeout bounds the proof process, not provider billing. Immediately after
-the controller prints `CAPTURE VERIFIED`, terminate the instance in the cloud
-console. Also terminate it at the operator's predeclared spend deadline even
-if preparation, capture, retrieval, or verification has not completed.
+The host timeout bounds the proof process, not provider billing. Without the
+optional Lambda guard, immediately terminate the instance in the cloud console
+after success or failure and at the predeclared deadline. With the guard, still
+verify the final provider state in the console after the controller confirms
+termination.
 
 For a manually launched Lambda VM, the operator checklist is deliberately
 short:
@@ -145,6 +200,42 @@ short:
 5. terminate the instance after success, failure, or deadline—whichever comes
    first; and
 6. confirm the console reports no running instances.
+
+## Recovered A10 single-run receipt
+
+The 2026-08-18 Lambda A10 attempt completed one genuine measurement and sealed
+its single-run bundle before a post-run tamper-rejection assertion failed. The
+controlled comparison never started. The outer capture is therefore correctly
+labeled `INCOMPLETE_NOT_EVIDENCE`; it is not a complete proof pack and cannot
+support a comparison claim. Its already sealed single bundle is independently
+valid and `CUSTOMER_ELIGIBLE`, so it can be materialized as a strictly scoped
+dashboard receipt without changing or resealing the bundle.
+
+Recorded anchors:
+
+- repository commit: `209f0bb9f629a3f9577bb702f4d4e867e9a136fb`;
+- source archive: `sha256:43f46a88965e2cc47ace6eb0ce0f7b4d013a613344f48f419ca460f41739f510`;
+- run ID: `run-1d008f70f18574f215bd6fc213e50348`; and
+- bundle digest: `sha256:4ead525398ea65cce04123d824abeac622e8e35eef9c6d1c2e3becb2af54d0ed`.
+
+Materialize it outside a source checkout so filesystem tooling does not relax
+the sealed bundle's read-only modes:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/materialize_real_gpu_receipt.py \
+  gpu-proof-retrieved/20260818T202058Z-209f0bb9f629-9d5d748a-FAILED/capture.tar.gz \
+  ~/.inferdrome/real-gpu/recovered-a10-20260818 \
+  --expected-archive-sha256 sha256:43f46a88965e2cc47ace6eb0ce0f7b4d013a613344f48f419ca460f41739f510 \
+  --expected-bundle-digest sha256:4ead525398ea65cce04123d824abeac622e8e35eef9c6d1c2e3becb2af54d0ed \
+  --expected-commit 209f0bb9f629a3f9577bb702f4d4e867e9a136fb \
+  --expected-run-id run-1d008f70f18574f215bd6fc213e50348
+```
+
+The command verifies the archive hash, explicit failure receipt, commit, sealed
+bundle digest, and customer eligibility before atomic publication. Its printed
+`runs_root` can be passed directly to `inferdrome dashboard --runs-root`. The
+generated recovery receipt says `SINGLE_BUNDLE_ONLY`; it never upgrades the
+failed outer capture or fabricates the missing four-run comparison.
 
 ## Exact managed server launch
 

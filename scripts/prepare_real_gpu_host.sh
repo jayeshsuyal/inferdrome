@@ -16,8 +16,14 @@ fail() {
 command -v "$host_python" >/dev/null || fail "python3.12 is required"
 command -v curl >/dev/null || fail "curl is required"
 command -v git >/dev/null || fail "git is required"
+command -v ninja >/dev/null || fail "ninja is required (install ninja-build)"
 command -v nvidia-smi >/dev/null || fail "nvidia-smi is required"
 command -v sha256sum >/dev/null || fail "sha256sum is required"
+python_include=$(
+  "$host_python" -c 'import sysconfig; print(sysconfig.get_path("include") or "")'
+)
+[[ -n "$python_include" && -f "$python_include/Python.h" ]] || \
+  fail "Python 3.12 development headers are required (install python3.12-dev)"
 [[ -z ${CUDA_VISIBLE_DEVICES+x} ]] || \
   fail "CUDA_VISIBLE_DEVICES must be unset for physical GPU identity"
 [[ -z ${NVIDIA_VISIBLE_DEVICES+x} ]] || \
