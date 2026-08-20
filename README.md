@@ -21,10 +21,12 @@ recalculation, and the chartered command-line workflow.
 The opt-in managed local-vLLM path now launches a pinned server on Linux,
 captures locally verified GPU, CUDA, driver, model-snapshot, producer, and
 launch evidence, and permits customer eligibility only when offline
-cross-verification succeeds. The compatible-NVIDIA-host capture and reviewed
-example bundle are still pending, so the PR 7 gate is not yet complete.
-Independent acceptance remains a separate consumer boundary; it is not
-implemented inside this repository.
+cross-verification succeeds. One genuine A10 single-run and four-run comparison
+archive is independently verified and pinned by a standalone capability profile,
+an `EXTERNAL_ONLY` publication review, and a deterministic handoff manifest.
+The raw archive remains local pending owner license/privacy approval. Independent
+acceptance remains a separate consumer boundary; it is not implemented inside
+this repository.
 
 The repository also includes an accepted post-v0.1 local evidence dashboard.
 It presents Runs, Run detail, Compare, and Evidence views over the same bounded

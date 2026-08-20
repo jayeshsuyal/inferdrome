@@ -1,6 +1,6 @@
 # Pinned vLLM 0.26.0 adapter
 
-Status: **PR 5 implemented; managed PR 7 proof path implemented**
+Status: **Pinned adapter and managed GPU evidence profile implemented**
 
 Implementation date: **2026-08-05**
 
@@ -42,6 +42,17 @@ Only a valid managed proof may accompany `CUSTOMER_ELIGIBLE` vLLM evidence.
 The profile is execution evidence and integrity checking, not trusted hardware
 attestation or proof against a malicious host. See
 [REAL_GPU_PROOF.md](REAL_GPU_PROOF.md) for the exact reproduction procedure.
+
+Independent consumers do not need Inferdrome's Python implementation to parse
+this extension. The closed structural schema is published as
+[`local-gpu-proof.schema.json`](../profiles/v1/local-gpu-proof.schema.json), and
+the separately versioned
+[`managed-vllm-0.26-evidence-profile.json`](../profiles/v1/managed-vllm-0.26-evidence-profile.json)
+freezes the invocation field set, NVIDIA queries, wheel pins, snapshot and
+server policies, cross-artifact bindings, and native TTFT semantics. Positive
+and mutation vectors under `tests/fixtures/profiles/v1` distinguish structural
+schema validity from whole-profile validity. These capability documents do not
+expand or reinterpret the frozen public bundle schemas.
 
 ## Attached endpoint preflight
 

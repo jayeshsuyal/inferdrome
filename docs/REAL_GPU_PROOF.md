@@ -1,11 +1,13 @@
 # Managed real-GPU proof
 
-Status: **Genuine A10 single-run and four-run comparison archive verified;
-ExitSpec acceptance pending**
+Status: **Genuine A10 archive and producer handoff verified; raw archive
+EXTERNAL_ONLY and ExitSpec acceptance pending**
 
 Implementation date: **2026-08-06**
 
-This runbook is the Inferdrome-owned portion of the PR 7 real-GPU gate. It
+Producer handoff closure date: **2026-08-20**
+
+This runbook is the Inferdrome-owned portion of the real-GPU evidence gate. It
 prepares one pinned Linux environment, launches vLLM under Inferdrome's own
 supervisor, measures the public flagship workload, seals the evidence, verifies
 it offline, and demonstrates corrupted-artifact and synthetic-evidence
@@ -305,6 +307,60 @@ The capture remains `PENDING_EXTERNAL_EXITSPEC`. It proves the Inferdrome
 measurement, integrity, provenance, comparison, and rejection machinery; it
 does not manufacture `PASS`, `FAIL`, or `NOT_PROVEN` for the separately owned
 acceptance boundary.
+
+## Publication review and ExitSpec handoff
+
+The exact archive was reviewed without rewriting, redacting, resealing, or
+regenerating any captured byte. The committed producer-side records are:
+
+- local proof schema:
+  [`profiles/v1/local-gpu-proof.schema.json`](../profiles/v1/local-gpu-proof.schema.json),
+  canonical-document digest
+  `sha256:cf83bbdea2bba4c30b8f0e2c5f34f34a4077501207881fdbdab021571d665547`;
+- composite managed-vLLM profile:
+  [`profiles/v1/managed-vllm-0.26-evidence-profile.json`](../profiles/v1/managed-vllm-0.26-evidence-profile.json),
+  canonical-document digest
+  `sha256:9d03b5d0822ed829ddbfa4c87c75530885b9ad51ee2c0cb7c5e31a075996fe34`;
+- publication review:
+  [`evidence/gpu/2026-08-20-a10/publication-review.json`](../evidence/gpu/2026-08-20-a10/publication-review.json),
+  canonical-document digest
+  `sha256:7f1b3be53695e9e3a2009eb28ce008bb2486ae882e52364e26bece770a6d33ff`;
+  and
+- handoff manifest:
+  [`evidence/gpu/2026-08-20-a10/handoff-manifest.json`](../evidence/gpu/2026-08-20-a10/handoff-manifest.json),
+  canonical-document digest
+  `sha256:bc90ac7d0044b32556ce8e78181635f2a2d218e3de7a793062e5dc2b3d6cd4bd`.
+
+The review scanned all 310 regular files and 3,137,959 expanded bytes under
+stricter 16 MiB per-file and 256 MiB total review limits after the ordinary
+archive-safety and isolated integrity checks passed. It found no secret-shaped
+values, email addresses, or public network addresses. It did retain and
+disclose prompts, generated responses, stdout/stderr, package inventory,
+absolute paths, one private host-network address repeated across server logs,
+GPU UUIDs, and process identifiers.
+
+The result is `EXTERNAL_ONLY`, not `APPROVED_PUBLIC`: the repository has no
+selected license, the archive does not retain owner-approved license records
+for the model, workload, vLLM, and generated output, and the owner has not
+approved public delivery. Therefore `capture.tar.gz` remains ignored and was
+neither committed nor uploaded. The proposed future release-asset URL and exact
+required checksum are recorded in the handoff manifest; vendoring the same
+reviewed bytes in ExitSpec remains an alternative owner decision.
+
+Re-run the complete review and independently recalculate the 100/100 native
+TTFT population and nearest-rank p95 of `14,797,213 ns` with:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/review_gpu_evidence_publication.py --check
+```
+
+The handoff explicitly records a null producer-side ExitSpec contract digest
+and `RETROSPECTIVE` chronology. A future contract can be frozen before
+evaluation, but this capture does not prove that contract preceded measurement.
+The capture producer commit, later profile/publication commits, and eventual
+merge commit are separate identities; the eventual owner merge must preserve
+`c08b46d9fbd87477f45d130aa3c63615937c4dc3` as an ancestor rather than
+squashing it away.
 
 ## Exact managed server launch
 

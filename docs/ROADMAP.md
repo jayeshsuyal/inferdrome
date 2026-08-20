@@ -5,10 +5,14 @@ Status: **Canonical v0.1 sequence**
 The roadmap is gate-driven. A phase is complete when its invariants are proven,
 not when its planned files merely exist.
 
-Current checkpoint: **PR 0 through PR 5 gates passed on 2026-08-05. The
-Inferdrome-only CLI/orchestrator and managed real-GPU proof harness are
-implemented. PR 7 remains open pending a reviewed compatible-host bundle and
-the separate ExitSpec outcome demonstrations.**
+Current checkpoint: **The Inferdrome producer-side real-GPU gate is complete:
+one exact A10 archive, standalone capability profile, bounded publication
+review, and deterministic handoff are pinned. The archive is EXTERNAL_ONLY;
+ExitSpec outcomes, owner license/publication decisions, security sign-off, and
+release work remain open.**
+
+The numbered PR labels below are original build-sequence milestones, not GitHub
+pull-request numbers.
 
 PR 6 is an independent-consumer integration boundary. Its contract remains in
 this roadmap, but work on that consumer is outside the Inferdrome repository
@@ -215,7 +219,7 @@ Gate:
 ExitSpec never trusts an Inferdrome summary used in a verdict.
 ```
 
-## PR 7 — Real-GPU proof
+## Milestone 7 — Real-GPU proof
 
 Deliver:
 
@@ -274,9 +278,17 @@ verification is anchored to commit `c08b46d9fbd87477f45d130aa3c63615937c4dc3`
 and runs in an isolated temporary directory so source-workspace permission
 rewrites cannot weaken or spuriously invalidate the sealed bundles.
 
-Still required to close the external acceptance boundary: decide whether to
-promote a reviewed receipt as a committed example and run the separately owned
-ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations. Ordinary attached
+Producer publication closure on 2026-08-20 adds a standalone closed
+`inferdrome.local-gpu-proof.v1` schema, composite managed-vLLM profile,
+conformance mutations, exact-archive review, and deterministic handoff. The
+review finds no secret, email, or public-IP detector matches and classifies the
+unchanged archive `EXTERNAL_ONLY` because owner approval and multiple license
+records remain unresolved. Raw bytes were not committed or uploaded.
+
+Still required to close the external acceptance boundary: run the separately
+owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations against the exact
+handoff and retain its receipt. The owner must separately choose a repository
+license and approve or reject public archive delivery. Ordinary attached
 endpoint runs deliberately remain `INELIGIBLE`.
 
 ## PR 8 — v0.1 hardening and release
@@ -296,9 +308,10 @@ In progress: the chartered `validate`, `resolve`, `run`, `inspect`, `bundle
 verify`, `reduce`, and `summarize` commands now share the same fail-closed
 library boundaries used by tests. The release shield runs the engineering and
 populated-dashboard gates in GitHub Actions and maps remaining evidence in
-`V0_1_RELEASE_CHECKLIST.md`. Genuine GPU and ExitSpec demonstrations, human
-security sign-off, license selection, and the release tag remain open. Remaining
-polish is tracked by the release gate rather than by adding new product scope.
+`V0_1_RELEASE_CHECKLIST.md`. The genuine GPU producer evidence is complete;
+ExitSpec demonstrations, human security sign-off, license selection, owner
+archive-publication decision, and the release tag remain open. Remaining polish
+is tracked by the release gate rather than by adding new product scope.
 
 Gate:
 

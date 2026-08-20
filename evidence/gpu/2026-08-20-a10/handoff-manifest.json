@@ -47,7 +47,7 @@
     "capture_producer_commit": "c08b46d9fbd87477f45d130aa3c63615937c4dc3",
     "eventual_merge_commit": null,
     "merge_requirement": "Use a merge commit that preserves capture_producer_commit ancestry; do not squash or rebase away the producer commit.",
-    "publication_review_commit": null
+    "publication_review_commit": "79b62e6b13d40604a569e80cea9b6cecb1cb6310"
   },
   "publication_review": {
     "owner_publication_approval_required": true,
