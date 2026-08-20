@@ -1,0 +1,135 @@
+[
+  {
+    "fixture": "valid/local-gpu-proof.json",
+    "kind": "local_gpu_proof",
+    "name": "valid-local-gpu-proof",
+    "profile_valid": true,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/local-gpu-proof.json",
+    "kind": "local_gpu_proof",
+    "mutation": {
+      "operation": "add",
+      "path": "/unexpected",
+      "value": true
+    },
+    "name": "local-proof-rejects-unknown-root-field",
+    "profile_valid": false,
+    "schema_valid": false
+  },
+  {
+    "fixture": "valid/local-gpu-proof.json",
+    "kind": "local_gpu_proof",
+    "mutation": {
+      "operation": "replace",
+      "path": "/gpus/0/uuid",
+      "value": "not-a-gpu-uuid"
+    },
+    "name": "local-proof-rejects-malformed-gpu-uuid",
+    "profile_valid": false,
+    "schema_valid": false
+  },
+  {
+    "fixture": "valid/local-gpu-proof.json",
+    "kind": "local_gpu_proof",
+    "mutation": {
+      "operation": "replace",
+      "path": "/selected_gpu_indices/0",
+      "value": 1
+    },
+    "name": "local-proof-rejects-selected-index-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/local-gpu-proof.json",
+    "kind": "local_gpu_proof",
+    "mutation": {
+      "operation": "replace",
+      "path": "/producer_distribution/source_wheel_sha256",
+      "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "name": "local-proof-rejects-wheel-pin-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/local-gpu-proof.json",
+    "kind": "local_gpu_proof",
+    "mutation": {
+      "operation": "replace",
+      "path": "/server/compute_query_stdout",
+      "value": "1211, GPU-01234567-89ab-cdef-0123-456789abcdef\n"
+    },
+    "name": "local-proof-rejects-process-query-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/managed-vllm-invocation.json",
+    "kind": "producer_invocation",
+    "name": "valid-managed-vllm-invocation",
+    "profile_valid": true,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/managed-vllm-invocation.json",
+    "kind": "producer_invocation",
+    "mutation": {
+      "operation": "remove",
+      "path": "/local_gpu_proof"
+    },
+    "name": "managed-invocation-requires-local-proof",
+    "profile_valid": false,
+    "schema_valid": false
+  },
+  {
+    "fixture": "valid/managed-vllm-invocation.json",
+    "kind": "producer_invocation",
+    "mutation": {
+      "operation": "add",
+      "path": "/unexpected",
+      "value": true
+    },
+    "name": "managed-invocation-rejects-unknown-root-field",
+    "profile_valid": false,
+    "schema_valid": false
+  },
+  {
+    "fixture": "valid/managed-vllm-invocation.json",
+    "kind": "producer_invocation",
+    "mutation": {
+      "operation": "replace",
+      "path": "/metadata/inferdrome_run_id",
+      "value": "run-fedcba9876543210fedcba9876543210"
+    },
+    "name": "managed-invocation-rejects-run-id-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/managed-vllm-invocation.json",
+    "kind": "producer_invocation",
+    "mutation": {
+      "operation": "replace",
+      "path": "/metadata/inferdrome_producer_version",
+      "value": "0.27.0"
+    },
+    "name": "managed-invocation-rejects-producer-version-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/managed-vllm-invocation.json",
+    "kind": "producer_invocation",
+    "mutation": {
+      "operation": "replace",
+      "path": "/argv/0",
+      "value": "/opt/inferdrome/venv/bin/other-vllm"
+    },
+    "name": "managed-invocation-rejects-executable-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  }
+]
