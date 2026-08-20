@@ -136,6 +136,9 @@ The same pinned host can produce a four-run controlled-comparison proof pack:
 That mode retains the plan digest before execution, verifies every
 customer-eligible bundle and both Trial Sets, reverifies the result, and proves
 that a second executor invocation reuses the exact completed schedule.
+The 2026-08-20 Lambda A10 capture completed and independently verified that
+entire pack; its exact hashes and remaining ExitSpec boundary are recorded in
+the runbook.
 For an operator-provided SSH GPU VM, the runbook also includes one bounded
 controller that transfers the exact clean Git commit, runs both proof modes,
 retrieves a checksumed archive, and independently verifies it on the local

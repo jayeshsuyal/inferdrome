@@ -266,11 +266,18 @@ exit path, and polls until termination is confirmed. It cannot launch an
 instance, and its API key remains environment-only. It is a local circuit
 breaker rather than an exact provider-billing guarantee.
 
-Still required to close PR 7: complete and review the fresh four-run GPU capture,
-decide whether to promote the recovered single bundle as a committed example,
-and run the separately owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN`
-demonstrations. Ordinary attached endpoint runs deliberately remain
-`INELIGIBLE`.
+Capture completion on 2026-08-20: one Lambda Stack 24.04 A10 archive contains a
+verified single-run proof and a verified four-run controlled comparison. Every
+comparison bundle is customer-eligible with complete observed environment
+evidence, all controls are satisfied, and the result is `COMPARABLE`. Archive
+verification is anchored to commit `c08b46d9fbd87477f45d130aa3c63615937c4dc3`
+and runs in an isolated temporary directory so source-workspace permission
+rewrites cannot weaken or spuriously invalidate the sealed bundles.
+
+Still required to close the external acceptance boundary: decide whether to
+promote a reviewed receipt as a committed example and run the separately owned
+ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations. Ordinary attached
+endpoint runs deliberately remain `INELIGIBLE`.
 
 ## PR 8 — v0.1 hardening and release
 
@@ -443,8 +450,9 @@ treatment.
 
 The managed real-GPU proof runner now has an opt-in four-run comparison mode
 that verifies every customer-eligible bundle, both Trial Sets, the result, and
-an all-reused second executor invocation. One genuine A10 single-run receipt is
-retained; the four-run comparison remains pending. Linux/NVIDIA receipts remain
+an all-reused second executor invocation. A genuine A10 single-run and full
+four-run comparison archive is retained and independently valid. ExitSpec
+acceptance remains separate and pending. Linux/NVIDIA receipts remain
 host-executed evidence and are not claimed by the static engineering gate.
 
 ### v0.2 — Telemetry

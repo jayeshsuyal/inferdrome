@@ -389,6 +389,64 @@ def test_capture_archive_preserves_sealed_bundle_modes(tmp_path: Path) -> None:
     assert stat.S_IMODE((bundle / "bundle.json").stat().st_mode) == 0o400
 
 
+def test_capture_archive_verification_uses_isolated_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "capture.tar.gz"
+    member = tarfile.TarInfo("capture/capture-manifest.json")
+    member.mode = 0o444
+    _archive_with_member(archive, member, b"{}\n")
+    expected_archive_sha256 = capture.archive_sha256(archive)
+    observed: dict[str, Path] = {}
+
+    def verify(
+        root: Path,
+        *,
+        expected_repository_commit: str | None = None,
+    ) -> dict[str, object]:
+        observed["root"] = root
+        assert expected_repository_commit == COMMIT
+        assert root.parent.name.startswith(
+            "inferdrome-capture-verification-"
+        )
+        return {"valid": True}
+
+    monkeypatch.setattr(capture, "verify_capture", verify)
+
+    result = capture.verify_capture_archive(
+        archive,
+        expected_archive_sha256=expected_archive_sha256,
+        expected_repository_commit=COMMIT,
+    )
+
+    assert result == {
+        "archive_sha256": expected_archive_sha256,
+        "capture_manifest_sha256": (
+            "sha256:ca3d163bab055381827226140568f3be"
+            "f7eaac187cebd76878e0b63e9e442356"
+        ),
+        "verification": {"valid": True},
+    }
+    assert not observed["root"].exists()
+
+
+def test_capture_archive_verification_rejects_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "capture.tar.gz"
+    member = tarfile.TarInfo("capture/capture-manifest.json")
+    member.mode = 0o444
+    _archive_with_member(archive, member, b"{}\n")
+
+    with pytest.raises(capture.CaptureError, match="SHA-256 verification"):
+        capture.verify_capture_archive(
+            archive,
+            expected_archive_sha256=f"sha256:{'0' * 64}",
+            expected_repository_commit=COMMIT,
+        )
+
+
 def test_capture_archive_rejects_too_many_members_before_extraction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

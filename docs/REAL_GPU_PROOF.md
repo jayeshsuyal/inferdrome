@@ -1,6 +1,7 @@
 # Managed real-GPU proof
 
-Status: **One genuine A10 bundle captured; full comparison capture pending**
+Status: **Genuine A10 single-run and four-run comparison archive verified;
+ExitSpec acceptance pending**
 
 Implementation date: **2026-08-06**
 
@@ -183,8 +184,9 @@ The controller:
 6. prepares the pinned environment and runs both proof modes;
 7. retrieves `capture.tar.gz` plus its host SHA-256;
 8. rejects unsafe archive members before extraction; and
-9. independently verifies the single bundle, all four comparison bundles,
-   both Trial Sets, the frozen plan, and the comparison result locally; and
+9. independently extracts and verifies the archive in an isolated system
+   temporary directory, including the single bundle, all four comparison
+   bundles, both Trial Sets, the frozen plan, and the comparison result; and
 10. when Lambda protection is configured, confirms provider termination on
     every controller exit path.
 
@@ -254,6 +256,55 @@ bundle digest, and customer eligibility before atomic publication. Its printed
 `runs_root` can be passed directly to `inferdrome dashboard --runs-root`. The
 generated recovery receipt says `SINGLE_BUNDLE_ONLY`; it never upgrades the
 failed outer capture or fabricates the missing four-run comparison.
+
+## Verified 2026-08-20 A10 comparison capture
+
+The 2026-08-20 Lambda Stack 24.04 run completed the entire Inferdrome-owned
+proof pack on one NVIDIA A10. The host prepared the pinned environment, the
+single-run demonstration passed, and the predeclared four-run schedule
+completed in `BASELINE`, `CANDIDATE`, `CANDIDATE`, `BASELINE` order. Offline
+archive verification reports `valid: true`; all four comparison bundles are
+`CUSTOMER_ELIGIBLE` with `COMPLETE` observed environments, the result is
+`COMPARABLE`, and every control is satisfied.
+
+Recorded anchors:
+
+- repository commit: `c08b46d9fbd87477f45d130aa3c63615937c4dc3`;
+- source archive: `sha256:f2408fd0649a7c79f5962872003781ebb9c878b802db27d633cf246f13b6f424`;
+- capture manifest: `sha256:1d4ea1e251c5a84a104333ab8579d580838701a70cc38b64b68c88f66266e0cb`;
+- single run: `run-533c9f5f783958fb6077069a6c577144`, bundle
+  `sha256:bae216f2165eb06ae2e0f14d3cd852f8e0ebb381bf1f68c71072769b3c0c1675`;
+- comparison plan: `comparison-plan-5f4abd9b24ab717e910b166c5b793038`,
+  digest `sha256:25dd7f87d02572b6c3f992014944241595e8240d7301a58cba55da11eae1c60e`;
+  and
+- comparison result: `comparison-result-5f4abd9b24ab717e910b166c5b793038`,
+  digest `sha256:6943eb577b368f036b4536626076d7b7a4f23caf8df7f839e5a1248dbaae774a`.
+
+The primary point estimate is a candidate-minus-baseline increase of
+`17.258428 requests/s` in attempted measured-request throughput. The two
+baseline run values are `17.532296` and `17.553803 requests/s`; the two
+candidate values are `34.794865` and `34.808091 requests/s`. This is a
+`POINT_ESTIMATE_ONLY` result with two repetitions per arm, not an uncertainty
+claim or an ExitSpec acceptance outcome.
+
+The first convenience extraction beneath the source workspace was correctly
+withheld after workspace tooling relaxed its sealed directory modes. The
+SHA-anchored archive itself subsequently passed complete verification in an
+isolated system temporary directory. The controller now always performs its
+authoritative archive verification in that isolated location before publishing
+a retrieval receipt. Reproduce the offline verdict with:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/real_gpu_capture.py verify-archive \
+  <capture.tar.gz> \
+  --expected-sha256 sha256:f2408fd0649a7c79f5962872003781ebb9c878b802db27d633cf246f13b6f424 \
+  --expected-commit c08b46d9fbd87477f45d130aa3c63615937c4dc3
+```
+
+The capture remains `PENDING_EXTERNAL_EXITSPEC`. It proves the Inferdrome
+measurement, integrity, provenance, comparison, and rejection machinery; it
+does not manufacture `PASS`, `FAIL`, or `NOT_PROVEN` for the separately owned
+acceptance boundary.
 
 ## Exact managed server launch
 
