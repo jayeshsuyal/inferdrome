@@ -16,6 +16,7 @@ bash -n scripts/run_real_gpu_capture.sh
 bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/generate_capability_profiles.py
+"$inferdrome_python" -m py_compile scripts/review_gpu_evidence_publication.py
 "$inferdrome_python" -m py_compile scripts/capture_real_gpu_over_ssh.py
 "$inferdrome_python" -m py_compile scripts/lambda_gpu_guard.py
 "$inferdrome_python" -m py_compile scripts/materialize_real_gpu_receipt.py
