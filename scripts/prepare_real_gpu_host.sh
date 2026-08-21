@@ -16,7 +16,6 @@ fail() {
 command -v "$host_python" >/dev/null || fail "python3.12 is required"
 command -v curl >/dev/null || fail "curl is required"
 command -v git >/dev/null || fail "git is required"
-command -v ninja >/dev/null || fail "ninja is required (install ninja-build)"
 command -v nvidia-smi >/dev/null || fail "nvidia-smi is required"
 command -v sha256sum >/dev/null || fail "sha256sum is required"
 python_include=$(
@@ -202,6 +201,8 @@ environment_python="$virtual_environment/bin/python"
 "$environment_python" -m pip install \
   "pandas==$pandas_version" "$repository_root[dashboard]"
 "$environment_python" -m pip check
+[[ -x "$virtual_environment/bin/ninja" ]] || \
+  fail "the pinned vLLM environment does not provide ninja"
 
 installed_vllm_version=$(
   "$environment_python" -c \

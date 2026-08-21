@@ -1,0 +1,272 @@
+{
+  "archive": {
+    "compressed_size_bytes": 689272,
+    "sha256": "sha256:f2408fd0649a7c79f5962872003781ebb9c878b802db27d633cf246f13b6f424"
+  },
+  "archive_integrity_and_safety": {
+    "archive_member_rules": [
+      "top-level capture directory required",
+      "absolute and traversal paths rejected",
+      "duplicate members rejected",
+      "links, devices, and special files rejected",
+      "member, directory, file, expanded-byte, and compressed-byte limits"
+    ],
+    "capture_manifest_sha256": "sha256:1d4ea1e251c5a84a104333ab8579d580838701a70cc38b64b68c88f66266e0cb",
+    "directory_count": 92,
+    "expanded_bytes": 3137959,
+    "file_count": 310,
+    "isolated_verification": true,
+    "status": "PASS"
+  },
+  "content_review": {
+    "environment_and_package_inventory": {
+      "file_count": 22,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/bundle/environment.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/bundle/native/producer-version.txt",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/native-capture/producer-version.txt",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/bundle/environment.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/bundle/native/producer-version.txt",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/native-capture/producer-version.txt",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/bundle/environment.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/bundle/native/producer-version.txt"
+      ],
+      "status": "PRESENT_REVIEWED"
+    },
+    "generated_responses": {
+      "artifact_file_count": 12,
+      "intentionally_corrupted_artifact_file_count": 1,
+      "record_count_including_retained_duplicates": 1002,
+      "status": "PRESENT_REVIEWED"
+    },
+    "prompts": {
+      "artifact_file_count": 6,
+      "record_count_including_separate_runs": 502,
+      "status": "PRESENT_REVIEWED"
+    },
+    "stdout_and_stderr": {
+      "file_count": 88,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/01-validate-baseline.stderr",
+        "capture/comparison/real-gpu-comparison-98izo3fm/01-validate-baseline.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/02-validate-candidate.stderr",
+        "capture/comparison/real-gpu-comparison-98izo3fm/02-validate-candidate.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/03-create-plan.stderr",
+        "capture/comparison/real-gpu-comparison-98izo3fm/03-create-plan.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/04-verify-plan.stderr",
+        "capture/comparison/real-gpu-comparison-98izo3fm/04-verify-plan.stdout"
+      ],
+      "status": "PRESENT_REVIEWED"
+    }
+  },
+  "decision_reasons": [
+    "GENERATED_OUTPUT_LICENSE_REVIEW_REQUIRED",
+    "MODEL_LICENSE_RECORD_NOT_RETAINED",
+    "OWNER_PUBLICATION_APPROVAL_REQUIRED",
+    "REPOSITORY_LICENSE_UNSELECTED",
+    "VLLM_LICENSE_RECORD_NOT_RETAINED",
+    "WORKLOAD_PUBLICATION_LICENSE_UNRESOLVED"
+  ],
+  "detector_results": {
+    "absolute_paths": {
+      "match_count": 313,
+      "path_count": 61,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/03-create-plan.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/05-execute-comparison.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/06-inspect-run-1.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/08-inspect-run-2.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/10-inspect-run-3.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/12-inspect-run-4.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/16-verify-comparison-result.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/17-resume-reverification.stdout"
+      ]
+    },
+    "binary_or_non_utf8": {
+      "path_count": 0,
+      "path_examples": []
+    },
+    "gpu_uuids": {
+      "match_count": 45,
+      "path_count": 12,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/native-capture/invocation.json"
+      ]
+    },
+    "personal_or_customer_data": {
+      "email_path_count": 0,
+      "email_path_examples": [],
+      "public_network_address_path_count": 0,
+      "public_network_address_path_examples": [],
+      "status": "NO_DETECTOR_MATCHES"
+    },
+    "private_network_addresses": {
+      "path_count": 5,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/native-capture/server-stdout.log",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/native-capture/server-stdout.log",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/native-capture/server-stdout.log",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/native-capture/server-stdout.log",
+        "capture/single/real-gpu-5osfyjjl/runs/run-533c9f5f783958fb6077069a6c577144/native-capture/server-stdout.log"
+      ],
+      "status": "PRESENT_DISCLOSE"
+    },
+    "process_identifiers": {
+      "json_field_count": 44,
+      "path_count": 11,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/native-capture/invocation.json"
+      ]
+    },
+    "secret_shaped_values": {
+      "matches": [],
+      "status": "NO_DETECTOR_MATCHES"
+    },
+    "unreviewed_oversized_files": {
+      "path_count": 0,
+      "path_examples": []
+    },
+    "version_like_dotted_quad_candidates": {
+      "adjudication": "PACKAGE_VERSION_CONTEXT",
+      "path_count": 2,
+      "path_examples": [
+        "capture/logs/01-prepare-host.log",
+        "capture/support/python-packages.txt"
+      ]
+    }
+  },
+  "findings": [
+    {
+      "code": "ABSOLUTE_PATHS_PRESENT",
+      "disposition": "DISCLOSE",
+      "path_count": 61,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/03-create-plan.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/05-execute-comparison.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/06-inspect-run-1.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/08-inspect-run-2.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/10-inspect-run-3.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/12-inspect-run-4.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/16-verify-comparison-result.stdout",
+        "capture/comparison/real-gpu-comparison-98izo3fm/17-resume-reverification.stdout"
+      ],
+      "summary": "Host-local absolute paths are evidence and were not rewritten."
+    },
+    {
+      "code": "GENERATED_OUTPUT_LICENSE_REVIEW_REQUIRED",
+      "disposition": "BLOCKS_PUBLICATION",
+      "summary": "No owner-approved, archive-bound license decision resolves this scope."
+    },
+    {
+      "code": "GENERATED_RESPONSES_PRESENT",
+      "disposition": "SENSITIVE_CONTENT",
+      "path_count": 12,
+      "summary": "Untouched native vLLM results contain generated response text."
+    },
+    {
+      "code": "GPU_UUIDS_PRESENT",
+      "disposition": "DISCLOSE",
+      "path_count": 12,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/native-capture/invocation.json"
+      ],
+      "summary": "GPU UUIDs are required provenance and were not rewritten."
+    },
+    {
+      "code": "MODEL_LICENSE_RECORD_NOT_RETAINED",
+      "disposition": "BLOCKS_PUBLICATION",
+      "summary": "No owner-approved, archive-bound license decision resolves this scope."
+    },
+    {
+      "code": "PRIVATE_NETWORK_ADDRESS_PRESENT",
+      "disposition": "DISCLOSE",
+      "path_count": 5,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/native-capture/server-stdout.log",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/native-capture/server-stdout.log",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/native-capture/server-stdout.log",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/native-capture/server-stdout.log",
+        "capture/single/real-gpu-5osfyjjl/runs/run-533c9f5f783958fb6077069a6c577144/native-capture/server-stdout.log"
+      ],
+      "summary": "Retained server diagnostics contain a private host-network address."
+    },
+    {
+      "code": "PROCESS_IDENTIFIERS_PRESENT",
+      "disposition": "DISCLOSE",
+      "path_count": 11,
+      "path_examples": [
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-52bb161f1252b8cb0d6109d690ac11d4/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-b28c1721147dbb657a5ae9f28dd11732/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-c2e87b46db4e4088f8da54c3a4531998/native-capture/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/bundle/native/invocation.json",
+        "capture/comparison/real-gpu-comparison-98izo3fm/runs/run-fee0008ecbd369cc402007067bfbeddd/native-capture/invocation.json"
+      ],
+      "summary": "Ephemeral host process identifiers are retained as execution evidence."
+    },
+    {
+      "code": "PROMPTS_PRESENT",
+      "disposition": "SENSITIVE_CONTENT",
+      "path_count": 6,
+      "summary": "Source workload files contain the exact measured prompt text."
+    },
+    {
+      "code": "REPOSITORY_LICENSE_UNSELECTED",
+      "disposition": "BLOCKS_PUBLICATION",
+      "summary": "No owner-approved, archive-bound license decision resolves this scope."
+    },
+    {
+      "code": "VLLM_LICENSE_RECORD_NOT_RETAINED",
+      "disposition": "BLOCKS_PUBLICATION",
+      "summary": "No owner-approved, archive-bound license decision resolves this scope."
+    },
+    {
+      "code": "WORKLOAD_PUBLICATION_LICENSE_UNRESOLVED",
+      "disposition": "BLOCKS_PUBLICATION",
+      "summary": "No owner-approved, archive-bound license decision resolves this scope."
+    }
+  ],
+  "license_review": {
+    "archive_license_file_count": 0,
+    "archive_license_path_examples": [],
+    "generated_output_license_resolved": false,
+    "model_license_resolved": false,
+    "repository_license_present": false,
+    "vllm_license_resolved": false,
+    "workload_publication_license_resolved": false
+  },
+  "owner_publication_approval_required": true,
+  "publication_status": "EXTERNAL_ONLY",
+  "raw_archive_modified": false,
+  "review_limits": {
+    "max_file_bytes": 16777216,
+    "max_total_scanned_bytes": 268435456,
+    "scanned_bytes": 3137959
+  },
+  "review_method": "isolated full-archive verification plus bounded full-member UTF-8, structured-content, secret-shape, personal-data, identity, path, and license-presence scan",
+  "schema_version": "inferdrome.gpu-evidence-publication-review.v1",
+  "scope": "exact_archive_bytes"
+}

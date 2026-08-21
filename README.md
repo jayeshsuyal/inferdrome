@@ -21,10 +21,12 @@ recalculation, and the chartered command-line workflow.
 The opt-in managed local-vLLM path now launches a pinned server on Linux,
 captures locally verified GPU, CUDA, driver, model-snapshot, producer, and
 launch evidence, and permits customer eligibility only when offline
-cross-verification succeeds. The compatible-NVIDIA-host capture and reviewed
-example bundle are still pending, so the PR 7 gate is not yet complete.
-Independent acceptance remains a separate consumer boundary; it is not
-implemented inside this repository.
+cross-verification succeeds. One genuine A10 single-run and four-run comparison
+archive is independently verified and pinned by a standalone capability profile,
+an `EXTERNAL_ONLY` publication review, and a deterministic handoff manifest.
+The raw archive remains local pending owner license/privacy approval. Independent
+acceptance remains a separate consumer boundary; it is not implemented inside
+this repository.
 
 The repository also includes an accepted post-v0.1 local evidence dashboard.
 It presents Runs, Run detail, Compare, and Evidence views over the same bounded
@@ -136,6 +138,9 @@ The same pinned host can produce a four-run controlled-comparison proof pack:
 That mode retains the plan digest before execution, verifies every
 customer-eligible bundle and both Trial Sets, reverifies the result, and proves
 that a second executor invocation reuses the exact completed schedule.
+The 2026-08-20 Lambda A10 capture completed and independently verified that
+entire pack; its exact hashes and remaining ExitSpec boundary are recorded in
+the runbook.
 For an operator-provided SSH GPU VM, the runbook also includes one bounded
 controller that transfers the exact clean Git commit, runs both proof modes,
 retrieves a checksumed archive, and independently verifies it on the local

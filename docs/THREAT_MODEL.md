@@ -1,6 +1,7 @@
 # Inferdrome v0.1 threat model
 
-Status: **Frozen baseline for v0.1; controlled-comparison supplement accepted**
+Status: **Frozen baseline for v0.1; comparison and GPU-publication supplements
+accepted**
 
 Threat-model date: **2026-08-05**
 
@@ -21,6 +22,7 @@ It is not a trusted execution system.
 - metric definitions and derived measurements;
 - environment and execution metadata;
 - artifact inventories and digests;
+- retrieved GPU capture archives, publication reviews, and handoff manifests;
 - evidence-eligibility labels; and
 - ExitSpec ingestion receipts.
 
@@ -60,6 +62,14 @@ prove that any particular request executed on that GPU.
 
 Bundles may be corrupted or modified after execution. Exact-byte hashing and an
 external receipt detect changes relative to the digest that ExitSpec accepted.
+
+Retrieved GPU capture archives are a larger transport boundary than one bundle:
+they also contain private workspaces, logs, package inventories, comparison
+artifacts, deliberate corruption vectors, and synthetic fixtures. Before any
+public delivery, the exact compressed bytes require checksum verification,
+path-safe isolated extraction, bounded full-member content review, an explicit
+three-state publication decision, and separate owner approval. Review metadata
+never authorizes rewriting a sealed archive.
 
 ### ExitSpec importer
 
@@ -186,6 +196,24 @@ unless the run's sensitivity policy explicitly permits it.
 Redaction failures make the bundle ineligible rather than silently deleting a
 sealed native artifact.
 
+### Exact A10 archive publication review
+
+The 2026-08-20 A10 review is recorded at
+[`evidence/gpu/2026-08-20-a10/publication-review.json`](../evidence/gpu/2026-08-20-a10/publication-review.json).
+Archive path, duplicate-member, link, special-file, member-count, expanded-size,
+and compressed-size checks passed, followed by a bounded scan of every regular
+file. No secret-shaped values, email addresses, or public network addresses
+were detected. Prompts, generated responses, diagnostics, package inventory,
+absolute paths, a private host-network address, GPU UUIDs, and process
+identifiers remain present because the archive was not rewritten.
+
+The classification is `EXTERNAL_ONLY`. Missing owner-approved repository,
+model, workload, vLLM, and generated-output license decisions block
+`APPROVED_PUBLIC`, as does the absence of explicit owner publication approval.
+The raw archive therefore remains ignored and local. This technical result is
+not legal advice and does not replace the final human security and privacy
+review.
+
 ## Availability controls
 
 Every run configures:
@@ -210,6 +238,7 @@ v0.1 performs no automatic retry.
 7. Secrets are never intentionally written to the evidence bundle.
 8. Content sensitivity is determined by all artifacts, including native output.
 9. Digest verification is never described as execution attestation.
+10. Publication review never mutates evidence or substitutes for owner approval.
 
 ## Post-v0.1 controlled-comparison supplement
 

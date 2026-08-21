@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 import tarfile
+import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -1145,6 +1146,66 @@ def archive_sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _make_directories_writable_for_cleanup(root: Path) -> None:
+    """Restore private directory write bits after isolated verification."""
+
+    if not root.exists() or root.is_symlink():
+        return
+    for directory, directory_names, _filenames in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+    ):
+        current = Path(directory)
+        current.chmod(0o700, follow_symlinks=False)
+        for name in directory_names:
+            child = current / name
+            if child.is_symlink():
+                raise OSError("temporary capture tree contains a symbolic link")
+
+
+def verify_capture_archive(
+    archive: Path,
+    *,
+    expected_archive_sha256: str,
+    expected_repository_commit: str | None = None,
+) -> dict[str, Any]:
+    """Verify one archive in an isolated extraction directory."""
+
+    if _SHA256_PATTERN.fullmatch(expected_archive_sha256) is None:
+        raise CaptureError("expected archive SHA-256 has an invalid shape")
+    actual_archive_sha256 = archive_sha256(archive)
+    if actual_archive_sha256 != expected_archive_sha256:
+        raise CaptureError("retrieved archive failed SHA-256 verification")
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="inferdrome-capture-verification-"
+        ) as temporary:
+            temporary_root = Path(temporary)
+            capture_root: Path | None = None
+            try:
+                capture_root = extract_capture_archive(archive, temporary_root)
+                capture_manifest_sha256 = archive_sha256(
+                    capture_root / "capture-manifest.json"
+                )
+                verification = verify_capture(
+                    capture_root,
+                    expected_repository_commit=expected_repository_commit,
+                )
+            finally:
+                if capture_root is not None:
+                    _make_directories_writable_for_cleanup(capture_root)
+    except OSError:
+        raise CaptureError(
+            "isolated capture verification directory is unavailable"
+        ) from None
+    return {
+        "archive_sha256": actual_archive_sha256,
+        "capture_manifest_sha256": capture_manifest_sha256,
+        "verification": verification,
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create or independently verify a real-GPU capture pack"
@@ -1164,6 +1225,13 @@ def _build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify", help="verify one retrieved capture")
     verify.add_argument("capture_root")
     verify.add_argument("--expected-commit")
+    verify_archive = subparsers.add_parser(
+        "verify-archive",
+        help="extract and verify one retrieved capture archive in isolation",
+    )
+    verify_archive.add_argument("archive")
+    verify_archive.add_argument("--expected-sha256", required=True)
+    verify_archive.add_argument("--expected-commit")
     return parser
 
 
@@ -1184,9 +1252,16 @@ def main() -> int:
                 exit_code=args.exit_code,
             )
             print(f"capture_failure_path={path}")
-        else:
+        elif args.command == "verify":
             result = verify_capture(
                 Path(args.capture_root),
+                expected_repository_commit=args.expected_commit,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            result = verify_capture_archive(
+                Path(args.archive),
+                expected_archive_sha256=args.expected_sha256,
                 expected_repository_commit=args.expected_commit,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

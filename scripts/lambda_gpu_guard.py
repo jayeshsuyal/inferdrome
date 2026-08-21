@@ -31,6 +31,7 @@ from typing import Any
 
 API_BASE_URL = "https://cloud.lambda.ai/api/v1"
 API_KEY_ENVIRONMENT_VARIABLE = "LAMBDA_CLOUD_API_KEY"
+_API_USER_AGENT = "Inferdrome-Lambda-Guard/1.0"
 _INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _DECIMAL_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?\Z")
 _TERMINAL_STATUSES = frozenset({"terminated", "preempted"})
@@ -166,6 +167,7 @@ def _urllib_transport(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
+        "User-Agent": _API_USER_AGENT,
     }
     if payload is not None:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")

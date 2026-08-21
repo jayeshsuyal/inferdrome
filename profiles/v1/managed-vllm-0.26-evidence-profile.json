@@ -1,0 +1,352 @@
+{
+  "canonicalization": {
+    "document_digest": "sha256_of_rfc8785_canonical_json_bytes",
+    "producer_invocation": "rfc8785"
+  },
+  "claims_boundary": {
+    "acceptance_verdict": "NONE",
+    "hardware_attestation": false,
+    "statement": "The profile supports integrity, provenance, and locally observed execution evidence. It does not prove trusted execution or assign PASS, FAIL, or NOT_PROVEN."
+  },
+  "cross_artifact_bindings": [
+    {
+      "id": "run-id-equality",
+      "paths": [
+        "invocation.metadata.inferdrome_run_id",
+        "invocation.local_gpu_proof.run_id",
+        "request_plan.run_id",
+        "request_records[*].run_id",
+        "measurements.run_id",
+        "execution.run_id",
+        "bundle.run_id"
+      ],
+      "rule": "Every listed run identifier MUST be byte-identical."
+    },
+    {
+      "id": "workload-digest-equality",
+      "paths": [
+        "invocation.metadata.inferdrome_workload_sha256",
+        "resolved_experiment.workload.sha256",
+        "sha256(exact workload.source.jsonl bytes)"
+      ],
+      "rule": "Every listed workload digest MUST be byte-identical."
+    },
+    {
+      "id": "execution-fingerprint-equality",
+      "paths": [
+        "invocation.metadata.inferdrome_execution_fingerprint",
+        "bundle.digests.execution_fingerprint"
+      ],
+      "rule": "Invocation metadata MUST equal the bundle execution fingerprint."
+    },
+    {
+      "id": "source-spec-digest-equality",
+      "paths": [
+        "request_plan.source_spec_digest",
+        "bundle.digests.source_spec_digest"
+      ],
+      "rule": "The request plan and bundle MUST bind the same resolved source spec."
+    },
+    {
+      "id": "model-tokenizer-revisions",
+      "paths": [
+        "invocation.local_gpu_proof.model_snapshot.revision",
+        "invocation.local_gpu_proof.tokenizer_snapshot.revision",
+        "resolved_experiment.target.model_revision",
+        "resolved_experiment.target.tokenizer_revision"
+      ],
+      "rule": "Snapshot revisions MUST equal the exact resolved target revisions."
+    },
+    {
+      "id": "native-result-binding",
+      "paths": [
+        "bundle.artifacts",
+        "integrity/artifact-hashes.json"
+      ],
+      "rule": "Native bytes, canonical records, execution, definitions, and measurements MUST be revalidated through the bundle hash inventory."
+    },
+    {
+      "id": "producer-commit-outer-binding",
+      "paths": [
+        "capture_manifest.repository_commit",
+        "single_receipt.repository_commit",
+        "comparison_receipt.repository_commit",
+        "host_preparation.repository_commit",
+        "handoff_manifest.provenance.capture_producer_commit"
+      ],
+      "rule": "The repository commit is not a local_gpu_proof field. It MUST be equal across the outer capture manifest, capture receipts, host preparation receipt, and handoff manifest."
+    }
+  ],
+  "local_gpu_proof": {
+    "schema_id": "urn:inferdrome:local-gpu-proof:v1",
+    "schema_path": "local-gpu-proof.schema.json",
+    "semantic_constraints": [
+      {
+        "id": "one-selected-gpu",
+        "paths": [
+          "selected_gpu_indices",
+          "gpus[*].index"
+        ],
+        "rule": "Exactly one ordered, unique index MUST be selected and it MUST equal the sole parsed inventory index."
+      },
+      {
+        "id": "cuda-index-visible",
+        "paths": [
+          "torch_cuda_device_count",
+          "selected_gpu_indices[0]"
+        ],
+        "rule": "torch_cuda_device_count MUST be greater than the selected index."
+      },
+      {
+        "id": "inventory-replay",
+        "paths": [
+          "gpu_query_argv",
+          "gpu_query_stdout",
+          "gpus"
+        ],
+        "rule": "gpu_query_stdout MUST parse as strict four-column CSV and equal gpus exactly, including index, model, UUID, and driver."
+      },
+      {
+        "id": "compute-process-replay",
+        "paths": [
+          "server.compute_query_argv",
+          "server.compute_query_stdout",
+          "server.gpu_processes"
+        ],
+        "rule": "compute_query_stdout MUST parse as strict two-column CSV and equal server.gpu_processes by PID and GPU UUID."
+      },
+      {
+        "id": "gpu-process-coverage",
+        "paths": [
+          "gpus[*].uuid",
+          "server.gpu_processes[*].gpu_uuid",
+          "server.gpu_processes[*].process_group_id",
+          "server.process_group_id"
+        ],
+        "rule": "Observed compute-process GPU UUIDs MUST equal selected inventory GPU UUIDs; every process MUST belong to the server process group."
+      },
+      {
+        "id": "server-process-group",
+        "paths": [
+          "server.pid",
+          "server.process_group_id",
+          "server.gpu_processes"
+        ],
+        "rule": "server.pid MUST equal server.process_group_id and process identities MUST be unique."
+      },
+      {
+        "id": "capture-order",
+        "paths": [
+          "server.started_at",
+          "server.ready_at",
+          "captured_at"
+        ],
+        "rule": "started_at <= ready_at <= captured_at."
+      },
+      {
+        "id": "snapshot-kinds",
+        "paths": [
+          "model_snapshot.kind",
+          "tokenizer_snapshot.kind"
+        ],
+        "rule": "model_snapshot.kind MUST be model and tokenizer_snapshot.kind MUST be tokenizer."
+      },
+      {
+        "id": "source-wheel-pin",
+        "paths": [
+          "client_arch",
+          "producer_distribution.source_wheel_filename",
+          "producer_distribution.source_wheel_sha256"
+        ],
+        "rule": "The architecture MUST select exactly the declared wheel filename and exact-byte SHA-256."
+      },
+      {
+        "id": "server-invocation-replay",
+        "paths": [
+          "server.argv",
+          "server_argv_template"
+        ],
+        "rule": "server.argv MUST equal server_argv_template after substitution from the resolved experiment and local proof; no shell is involved."
+      }
+    ]
+  },
+  "native_ttft": {
+    "aggregation": "p95",
+    "definition_id": "vllm_first_choices_event_v0_26",
+    "metric": "ttft_ns",
+    "population": "successful_measured_requests_with_observed_ttft",
+    "quantile_method": "nearest_rank_v1",
+    "required_observation": "request.timing.ttft_ns",
+    "source_semantics": "first non-empty choices event reported by vLLM 0.26.0",
+    "unit": "ns"
+  },
+  "nvidia_queries": {
+    "compute_processes": {
+      "argv_template": [
+        "{nvidia_smi_path}",
+        "--query-compute-apps=pid,gpu_uuid",
+        "--format=csv,noheader,nounits",
+        "--id={selected_gpu_index}"
+      ],
+      "csv_columns": [
+        "pid",
+        "gpu_uuid"
+      ],
+      "empty_rows_ignored": true
+    },
+    "inventory": {
+      "argv_template": [
+        "{nvidia_smi_path}",
+        "--query-gpu=index,name,uuid,driver_version",
+        "--format=csv,noheader,nounits",
+        "--id={selected_gpu_index}"
+      ],
+      "csv_columns": [
+        "index",
+        "name",
+        "uuid",
+        "driver_version"
+      ],
+      "empty_rows_ignored": true
+    }
+  },
+  "producer": {
+    "adapter_name": "vllm_bench_serve",
+    "adapter_version": "1.0.0",
+    "native_schema_fingerprint": "sha256:3a4fdee6fe9b45ce5b42c41fd3bfc6614245a36ecfe6f94de92b59717a136abb",
+    "producer_name": "vllm",
+    "producer_version": "0.26.0"
+  },
+  "producer_invocation": {
+    "additional_root_fields": false,
+    "argv_contract": {
+      "execution_form": "ordered_argv_without_shell",
+      "max_argument_characters": 8192,
+      "max_arguments": 2048,
+      "profile": "vllm_bench_serve_0_26_exact_replay_v1",
+      "traffic_variants": [
+        "bounded_concurrent_traffic_v1",
+        "bounded_request_rate_traffic_v1"
+      ]
+    },
+    "canonical_json": "rfc8785",
+    "endpoint_preflight": {
+      "additional_fields": false,
+      "fields": [
+        "response_base64",
+        "result"
+      ],
+      "method": "GET",
+      "redirects": "forbidden",
+      "response_limit_bytes": 1048576,
+      "result_constraints": {
+        "api": "openai_chat_completions",
+        "schema_version": "inferdrome.endpoint-preflight.v1",
+        "status": 200,
+        "target_model_must_be_listed": true
+      },
+      "url_suffix": "/v1/models"
+    },
+    "metadata": {
+      "additional_fields": false,
+      "required_fields": [
+        "inferdrome_adapter_version",
+        "inferdrome_execution_fingerprint",
+        "inferdrome_producer_version",
+        "inferdrome_run_id",
+        "inferdrome_workload_sha256"
+      ]
+    },
+    "required_root_fields": [
+      "argv",
+      "endpoint_preflight",
+      "local_gpu_proof",
+      "metadata",
+      "schema_version"
+    ],
+    "schema_version": "inferdrome.producer-invocation.v1"
+  },
+  "profile_id": "inferdrome.managed-vllm-0.26-evidence-profile.v1",
+  "schema_version": "inferdrome.managed-vllm-0.26-evidence-profile.v1",
+  "server_argv_template": [
+    "{producer_distribution.executable_path}",
+    "serve",
+    "{model_snapshot.root}",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "{resolved_target_port}",
+    "--served-model-name",
+    "{resolved_target_model}",
+    "--tokenizer",
+    "{tokenizer_snapshot.root}",
+    "--tokenizer-mode",
+    "auto",
+    "--dtype",
+    "auto",
+    "--seed",
+    "{resolved_workload_seed}",
+    "--load-format",
+    "safetensors",
+    "--generation-config",
+    "vllm",
+    "--model-impl",
+    "vllm",
+    "--max-model-len",
+    "1024",
+    "--gpu-memory-utilization",
+    "0.80",
+    "--tensor-parallel-size",
+    "1",
+    "--device-ids",
+    "{selected_gpu_index}",
+    "--no-enable-log-requests",
+    "--disable-uvicorn-access-log",
+    "--uvicorn-log-level",
+    "warning"
+  ],
+  "server_boundary": {
+    "endpoint": "http://127.0.0.1:{port}",
+    "environment_overrides": [
+      "DO_NOT_TRACK=1",
+      "HF_HUB_DISABLE_TELEMETRY=1",
+      "HF_HUB_OFFLINE=1",
+      "TRANSFORMERS_OFFLINE=1",
+      "VLLM_NO_USAGE_STATS=1"
+    ],
+    "environment_policy": "vllm-scrubbed-offline-v1",
+    "inherited_vllm_environment": "removed",
+    "network_scope": "loopback_only",
+    "one_selected_gpu": true
+  },
+  "snapshot_and_distribution_policies": {
+    "executable": {
+      "must_equal_server_and_benchmark_argv_0": true,
+      "path": "safe_absolute_regular_file",
+      "sha256": "exact_bytes"
+    },
+    "installed_distribution": {
+      "hash_policy": "installed-wheel-files-v1",
+      "max_files": 100000,
+      "max_total_bytes": 17179869184,
+      "name": "vllm",
+      "version": "0.26.0"
+    },
+    "snapshots": {
+      "hash_policy": "regular-files-excluding-dot-cache-v1",
+      "max_files": 100000,
+      "max_total_bytes": 137438953472,
+      "stable_no_symlink_walk": true
+    },
+    "source_wheels": {
+      "aarch64": {
+        "filename": "vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+        "sha256": "sha256:52a4c3e55c2c80cc8793e52ccc244457ceade25b0ad7caa1c15e5002a95a1b2c"
+      },
+      "x86_64": {
+        "filename": "vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+        "sha256": "sha256:adb1e4c9b46d0dfdb094121ae5aad670a42412dd813ed4e5db069ed6a15006de"
+      }
+    }
+  }
+}

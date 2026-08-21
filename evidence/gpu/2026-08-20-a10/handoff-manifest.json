@@ -1,0 +1,105 @@
+{
+  "acceptance_boundary": {
+    "current_status": "PENDING_EXTERNAL_EXITSPEC",
+    "inferdrome_acceptance_verdict": null,
+    "statement": "Inferdrome measures and verifies evidence; it assigns no PASS, FAIL, or NOT_PROVEN acceptance verdict."
+  },
+  "archive": {
+    "bundle_member_path": "capture/single/real-gpu-5osfyjjl/runs/run-533c9f5f783958fb6077069a6c577144/bundle",
+    "capture_manifest_sha256": "sha256:1d4ea1e251c5a84a104333ab8579d580838701a70cc38b64b68c88f66266e0cb",
+    "compressed_size_bytes": 689272,
+    "sha256": "sha256:f2408fd0649a7c79f5962872003781ebb9c878b802db27d633cf246f13b6f424"
+  },
+  "capability_profile": {
+    "commit": "53a5c55bdb146f29804c5490ce1a020d70f26bb4",
+    "local_gpu_proof_schema": {
+      "identity": "inferdrome.local-gpu-proof.v1",
+      "path": "profiles/v1/local-gpu-proof.schema.json",
+      "sha256": "sha256:cf83bbdea2bba4c30b8f0e2c5f34f34a4077501207881fdbdab021571d665547"
+    },
+    "managed_profile": {
+      "identity": "inferdrome.managed-vllm-0.26-evidence-profile.v1",
+      "path": "profiles/v1/managed-vllm-0.26-evidence-profile.json",
+      "sha256": "sha256:9d03b5d0822ed829ddbfa4c87c75530885b9ad51ee2c0cb7c5e31a075996fe34"
+    }
+  },
+  "comparison_context": {
+    "comparison_plan_digest": "sha256:25dd7f87d02572b6c3f992014944241595e8240d7301a58cba55da11eae1c60e",
+    "comparison_plan_id": "comparison-plan-5f4abd9b24ab717e910b166c5b793038",
+    "comparison_result_digest": "sha256:6943eb577b368f036b4536626076d7b7a4f23caf8df7f839e5a1248dbaae774a",
+    "comparison_result_id": "comparison-result-5f4abd9b24ab717e910b166c5b793038",
+    "status": "COMPARABLE"
+  },
+  "contract_binding": {
+    "chronology": "RETROSPECTIVE",
+    "chronology_disclosure": "A future ExitSpec contract may be frozen before evaluation, but this capture does not prove that contract preceded measurement.",
+    "producer_exitspec_contract_digest": null,
+    "required_consumer_mode": "EXTERNAL_RECEIPT_BINDING"
+  },
+  "fixture_delivery": {
+    "proposed_checksum_pinned_location": "https://github.com/jayeshsuyal/inferdrome/releases/download/gpu-evidence-2026-08-20/inferdrome-a10-capture-f2408fd0.tar.gz",
+    "publication_state": "BLOCKED_PENDING_OWNER_APPROVAL",
+    "required_sha256": "sha256:f2408fd0649a7c79f5962872003781ebb9c878b802db27d633cf246f13b6f424",
+    "statement": "The proposed release asset would be detectably replaceable through this checksum, not intrinsically immutable. Vendoring these exact reviewed bytes remains an alternative owner and ExitSpec decision."
+  },
+  "history_provenance": {
+    "capability_profile_commit": "53a5c55bdb146f29804c5490ce1a020d70f26bb4",
+    "capture_producer_commit": "c08b46d9fbd87477f45d130aa3c63615937c4dc3",
+    "eventual_merge_commit": null,
+    "merge_requirement": "Use a merge commit that preserves capture_producer_commit ancestry; do not squash or rebase away the producer commit.",
+    "publication_review_commit": "79b62e6b13d40604a569e80cea9b6cecb1cb6310"
+  },
+  "publication_review": {
+    "owner_publication_approval_required": true,
+    "path": "evidence/gpu/2026-08-20-a10/publication-review.json",
+    "publication_status": "EXTERNAL_ONLY",
+    "sha256": "sha256:7f1b3be53695e9e3a2009eb28ce008bb2486ae882e52364e26bece770a6d33ff"
+  },
+  "rejection_facts": {
+    "corrupted": {
+      "archive_member_path": "capture/single/real-gpu-5osfyjjl/corrupted-bundle-copy",
+      "independently_replayed": true,
+      "rejected": true,
+      "rejection_class": "INTEGRITY_MISMATCH"
+    },
+    "synthetic": {
+      "archive_member_path": "capture/single/real-gpu-5osfyjjl/synthetic-runs/run-5f8d7617421b9f4d0484f5807baa7849/bundle",
+      "independently_replayed": true,
+      "rejected_from_customer_evidence": true,
+      "rejection_class": "EVIDENCE_INELIGIBLE",
+      "run_id": "run-5f8d7617421b9f4d0484f5807baa7849",
+      "verified_eligibility": "SYNTHETIC_ONLY"
+    }
+  },
+  "run": {
+    "bundle_digest": "sha256:bae216f2165eb06ae2e0f14d3cd852f8e0ebb381bf1f68c71072769b3c0c1675",
+    "execution_fingerprint": "sha256:76d984ea57a0e7cb00520255a6e362f22885d713a875195a7397771937060edd",
+    "metric_definitions_digest": "sha256:e237ff8613c6eec52a6053b3f6b47563ffc758c957ee298e57fe3c482a389131",
+    "model": {
+      "id": "Qwen/Qwen2.5-0.5B-Instruct",
+      "revision": "7ae557604adf67be50417f59c2c2f167def9a775"
+    },
+    "request_plan_digest": "sha256:0fb852366933598da4139114f416b441c52d2c83cae07b7d8938bd482a12fc8e",
+    "request_population": {
+      "measured_requests": 100,
+      "successful_requests": 100,
+      "ttft_samples": 100
+    },
+    "run_id": "run-533c9f5f783958fb6077069a6c577144",
+    "source_spec_digest": "sha256:4b43fc218cb4d4a260dc70b92ff3a263fbbec2e8224f6f11cb748128931dce97",
+    "tokenizer": {
+      "id": "Qwen/Qwen2.5-0.5B-Instruct",
+      "revision": "7ae557604adf67be50417f59c2c2f167def9a775"
+    },
+    "ttft": {
+      "aggregation": "p95",
+      "definition_id": "vllm_first_choices_event_v0_26",
+      "independently_expected_value": 14797213,
+      "population": "successful_measured_requests_with_observed_ttft",
+      "quantile_method": "nearest_rank_v1",
+      "unit": "ns"
+    },
+    "workload_sha256": "sha256:22bf3389cc29ee946ae567870d7f8d7b458594224542a796e8990c15b1cfcd63"
+  },
+  "schema_version": "inferdrome.gpu-evidence-handoff.v1"
+}

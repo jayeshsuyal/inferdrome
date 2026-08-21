@@ -1,0 +1,465 @@
+{
+  "$defs": {
+    "GpuComputeProcessEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "gpu_uuid": {
+          "maxLength": 128,
+          "minLength": 12,
+          "pattern": "^GPU-[0-9A-Za-z-]{8,120}$",
+          "title": "Gpu Uuid",
+          "type": "string"
+        },
+        "pid": {
+          "maximum": 2147483647,
+          "minimum": 2,
+          "title": "Pid",
+          "type": "integer"
+        },
+        "process_group_id": {
+          "maximum": 2147483647,
+          "minimum": 2,
+          "title": "Process Group Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pid",
+        "process_group_id",
+        "gpu_uuid"
+      ],
+      "title": "GpuComputeProcessEvidence",
+      "type": "object"
+    },
+    "GpuDeviceEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "driver_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$",
+          "title": "Driver Version",
+          "type": "string"
+        },
+        "index": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Index",
+          "type": "integer"
+        },
+        "model": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "uuid": {
+          "maxLength": 128,
+          "minLength": 12,
+          "pattern": "^GPU-[0-9A-Za-z-]{8,120}$",
+          "title": "Uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "model",
+        "uuid",
+        "driver_version"
+      ],
+      "title": "GpuDeviceEvidence",
+      "type": "object"
+    },
+    "ManagedServerEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "compute_query_argv": {
+          "items": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Compute Query Argv",
+          "type": "array"
+        },
+        "compute_query_stdout": {
+          "maxLength": 262144,
+          "title": "Compute Query Stdout",
+          "type": "string"
+        },
+        "endpoint": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}$",
+          "title": "Endpoint",
+          "type": "string"
+        },
+        "environment_overrides": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 3,
+            "type": "string"
+          },
+          "maxItems": 5,
+          "minItems": 5,
+          "title": "Environment Overrides",
+          "type": "array"
+        },
+        "environment_policy": {
+          "const": "vllm-scrubbed-offline-v1",
+          "title": "Environment Policy",
+          "type": "string"
+        },
+        "gpu_processes": {
+          "items": {
+            "$ref": "#/$defs/GpuComputeProcessEvidence"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Gpu Processes",
+          "type": "array"
+        },
+        "pid": {
+          "maximum": 2147483647,
+          "minimum": 2,
+          "title": "Pid",
+          "type": "integer"
+        },
+        "process_group_id": {
+          "maximum": 2147483647,
+          "minimum": 2,
+          "title": "Process Group Id",
+          "type": "integer"
+        },
+        "ready_at": {
+          "format": "date-time",
+          "title": "Ready At",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "argv",
+        "endpoint",
+        "environment_policy",
+        "environment_overrides",
+        "pid",
+        "process_group_id",
+        "started_at",
+        "ready_at",
+        "compute_query_argv",
+        "compute_query_stdout",
+        "gpu_processes"
+      ],
+      "title": "ManagedServerEvidence",
+      "type": "object"
+    },
+    "SnapshotIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "file_count": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "File Count",
+          "type": "integer"
+        },
+        "hash_policy": {
+          "const": "regular-files-excluding-dot-cache-v1",
+          "title": "Hash Policy",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "model",
+            "tokenizer"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Revision",
+          "type": "string"
+        },
+        "root": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^/(?:[^\\u0000-\\u001f/]*/)*[^\\u0000-\\u001f/]*$",
+          "title": "Root",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "total_bytes": {
+          "maximum": 137438953472,
+          "minimum": 1,
+          "title": "Total Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "root",
+        "revision",
+        "sha256",
+        "file_count",
+        "total_bytes",
+        "hash_policy"
+      ],
+      "title": "SnapshotIdentity",
+      "type": "object"
+    },
+    "VllmDistributionIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "executable_path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^/(?:[^\\u0000-\\u001f/]*/)*[^\\u0000-\\u001f/]*$",
+          "title": "Executable Path",
+          "type": "string"
+        },
+        "executable_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Executable Sha256",
+          "type": "string"
+        },
+        "file_count": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "File Count",
+          "type": "integer"
+        },
+        "hash_policy": {
+          "const": "installed-wheel-files-v1",
+          "title": "Hash Policy",
+          "type": "string"
+        },
+        "name": {
+          "const": "vllm",
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source_wheel_filename": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Wheel Filename",
+          "type": "string"
+        },
+        "source_wheel_path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^/(?:[^\\u0000-\\u001f/]*/)*[^\\u0000-\\u001f/]*$",
+          "title": "Source Wheel Path",
+          "type": "string"
+        },
+        "source_wheel_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Source Wheel Sha256",
+          "type": "string"
+        },
+        "total_bytes": {
+          "maximum": 17179869184,
+          "minimum": 1,
+          "title": "Total Bytes",
+          "type": "integer"
+        },
+        "version": {
+          "const": "0.26.0",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "sha256",
+        "file_count",
+        "total_bytes",
+        "hash_policy",
+        "executable_path",
+        "executable_sha256",
+        "source_wheel_filename",
+        "source_wheel_path",
+        "source_wheel_sha256"
+      ],
+      "title": "VllmDistributionIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:local-gpu-proof:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Self-contained, allowlisted evidence from one managed Linux host.",
+  "properties": {
+    "capture_mode": {
+      "const": "managed_local_vllm",
+      "title": "Capture Mode",
+      "type": "string"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "title": "Captured At",
+      "type": "string"
+    },
+    "client_arch": {
+      "enum": [
+        "x86_64",
+        "aarch64"
+      ],
+      "title": "Client Arch",
+      "type": "string"
+    },
+    "client_os": {
+      "const": "Linux",
+      "title": "Client Os",
+      "type": "string"
+    },
+    "client_python_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$",
+      "title": "Client Python Version",
+      "type": "string"
+    },
+    "cuda_runtime_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$",
+      "title": "Cuda Runtime Version",
+      "type": "string"
+    },
+    "gpu_query_argv": {
+      "items": {
+        "maxLength": 8192,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Gpu Query Argv",
+      "type": "array"
+    },
+    "gpu_query_stdout": {
+      "maxLength": 262144,
+      "title": "Gpu Query Stdout",
+      "type": "string"
+    },
+    "gpus": {
+      "items": {
+        "$ref": "#/$defs/GpuDeviceEvidence"
+      },
+      "maxItems": 1,
+      "minItems": 1,
+      "title": "Gpus",
+      "type": "array"
+    },
+    "model_snapshot": {
+      "$ref": "#/$defs/SnapshotIdentity"
+    },
+    "nvidia_smi_path": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^/(?:[^\\u0000-\\u001f/]*/)*[^\\u0000-\\u001f/]*$",
+      "title": "Nvidia Smi Path",
+      "type": "string"
+    },
+    "nvidia_smi_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Nvidia Smi Sha256",
+      "type": "string"
+    },
+    "producer_distribution": {
+      "$ref": "#/$defs/VllmDistributionIdentity"
+    },
+    "run_id": {
+      "pattern": "^run-[0-9a-f]{32}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.local-gpu-proof.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "selected_gpu_indices": {
+      "items": {
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "maxItems": 1,
+      "minItems": 1,
+      "title": "Selected Gpu Indices",
+      "type": "array"
+    },
+    "server": {
+      "$ref": "#/$defs/ManagedServerEvidence"
+    },
+    "tokenizer_snapshot": {
+      "$ref": "#/$defs/SnapshotIdentity"
+    },
+    "torch_cuda_device_count": {
+      "maximum": 256,
+      "minimum": 1,
+      "title": "Torch Cuda Device Count",
+      "type": "integer"
+    },
+    "torch_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$",
+      "title": "Torch Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "capture_mode",
+    "captured_at",
+    "client_os",
+    "client_arch",
+    "client_python_version",
+    "torch_version",
+    "cuda_runtime_version",
+    "torch_cuda_device_count",
+    "nvidia_smi_path",
+    "nvidia_smi_sha256",
+    "gpu_query_argv",
+    "gpu_query_stdout",
+    "selected_gpu_indices",
+    "gpus",
+    "producer_distribution",
+    "model_snapshot",
+    "tokenizer_snapshot",
+    "server"
+  ],
+  "title": "Inferdrome local GPU proof v1",
+  "type": "object"
+}

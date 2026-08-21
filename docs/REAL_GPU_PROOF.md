@@ -1,10 +1,13 @@
 # Managed real-GPU proof
 
-Status: **One genuine A10 bundle captured; full comparison capture pending**
+Status: **Genuine A10 archive and producer handoff verified; raw archive
+EXTERNAL_ONLY and ExitSpec acceptance pending**
 
 Implementation date: **2026-08-06**
 
-This runbook is the Inferdrome-owned portion of the PR 7 real-GPU gate. It
+Producer handoff closure date: **2026-08-20**
+
+This runbook is the Inferdrome-owned portion of the real-GPU evidence gate. It
 prepares one pinned Linux environment, launches vLLM under Inferdrome's own
 supervisor, measures the public flagship workload, seals the evidence, verifies
 it offline, and demonstrates corrupted-artifact and synthetic-evidence
@@ -39,8 +42,8 @@ Use a clean checkout at the commit that will be recorded in release sign-off.
 The preparation script requires:
 
 - Linux `x86_64` or `aarch64`;
-- Python 3.12 plus its development headers (`Python.h`), Bash, Git, curl,
-  Ninja, and GNU `sha256sum`;
+- Python 3.12 plus its development headers (`Python.h`), Bash, Git, curl, and
+  GNU `sha256sum`;
 - an NVIDIA GPU supported by the pinned vLLM wheel;
 - `nvidia-smi` and a driver compatible with the wheel's CUDA runtime; and
 - unset `CUDA_VISIBLE_DEVICES` and `NVIDIA_VISIBLE_DEVICES`, so recorded device
@@ -48,15 +51,24 @@ The preparation script requires:
 - enough disk space for the roughly 300 MiB vLLM wheel, its dependencies, the
   model snapshot, and generated evidence.
 
+For Lambda Cloud, select **Lambda Stack 24.04**. Lambda documents Python 3.12
+for that image family, while Lambda Stack 22.04 provides Python 3.10 and cannot
+satisfy this repository's host contract. Do not run a full distribution upgrade
+as part of capture preparation; use the image's shipped toolchain and let the
+preflight fail closed if any required development header is absent. See
+[Lambda's base-image matrix](https://docs.lambda.ai/public-cloud/on-demand/#base-images).
+
 The script uses no `sudo`, refuses a dirty checkout, refuses to reuse an
 existing destination, verifies the exact vLLM wheel hash before installation,
 downloads the model at the exact revision, rejects snapshot symlinks, checks
 CUDA through the installed Torch runtime, and records the checkout commit and
-resolved Python package inventory. It installs Inferdrome with its dashboard
-extra so the documented post-run inspection command does not depend on
-transitive vLLM packages. Immediately before measurement, the demo
-regenerates that inventory byte-for-byte and reruns `pip check`; package drift
-or a newly inconsistent environment fails before proof output is reserved.
+resolved Python package inventory. It requires the installed vLLM environment
+to provide its own Ninja executable rather than depending on an unrecorded
+system copy. It installs Inferdrome with its dashboard extra so the documented
+post-run inspection command does not depend on transitive vLLM packages.
+Immediately before measurement, the demo regenerates that inventory
+byte-for-byte and reruns `pip check`; package drift or a newly inconsistent
+environment fails before proof output is reserved.
 
 From the repository root:
 
@@ -167,15 +179,16 @@ The controller:
 
 1. refuses a dirty checkout or an unexpected commit;
 2. creates and locally verifies a Git bundle for exact `HEAD`;
-3. checks Linux, Python 3.12 headers, Ninja, NVIDIA visibility, and required
-   host tools;
+3. checks Linux, Python 3.12 headers, NVIDIA visibility, and required host
+   tools;
 4. uploads the bundle and clones it into a private temporary directory;
 5. gives the host workload a default 9,900-second outer timeout;
 6. prepares the pinned environment and runs both proof modes;
 7. retrieves `capture.tar.gz` plus its host SHA-256;
 8. rejects unsafe archive members before extraction; and
-9. independently verifies the single bundle, all four comparison bundles,
-   both Trial Sets, the frozen plan, and the comparison result locally; and
+9. independently extracts and verifies the archive in an isolated system
+   temporary directory, including the single bundle, all four comparison
+   bundles, both Trial Sets, the frozen plan, and the comparison result; and
 10. when Lambda protection is configured, confirms provider termination on
     every controller exit path.
 
@@ -246,6 +259,109 @@ bundle digest, and customer eligibility before atomic publication. Its printed
 generated recovery receipt says `SINGLE_BUNDLE_ONLY`; it never upgrades the
 failed outer capture or fabricates the missing four-run comparison.
 
+## Verified 2026-08-20 A10 comparison capture
+
+The 2026-08-20 Lambda Stack 24.04 run completed the entire Inferdrome-owned
+proof pack on one NVIDIA A10. The host prepared the pinned environment, the
+single-run demonstration passed, and the predeclared four-run schedule
+completed in `BASELINE`, `CANDIDATE`, `CANDIDATE`, `BASELINE` order. Offline
+archive verification reports `valid: true`; all four comparison bundles are
+`CUSTOMER_ELIGIBLE` with `COMPLETE` observed environments, the result is
+`COMPARABLE`, and every control is satisfied.
+
+Recorded anchors:
+
+- repository commit: `c08b46d9fbd87477f45d130aa3c63615937c4dc3`;
+- source archive: `sha256:f2408fd0649a7c79f5962872003781ebb9c878b802db27d633cf246f13b6f424`;
+- capture manifest: `sha256:1d4ea1e251c5a84a104333ab8579d580838701a70cc38b64b68c88f66266e0cb`;
+- single run: `run-533c9f5f783958fb6077069a6c577144`, bundle
+  `sha256:bae216f2165eb06ae2e0f14d3cd852f8e0ebb381bf1f68c71072769b3c0c1675`;
+- comparison plan: `comparison-plan-5f4abd9b24ab717e910b166c5b793038`,
+  digest `sha256:25dd7f87d02572b6c3f992014944241595e8240d7301a58cba55da11eae1c60e`;
+  and
+- comparison result: `comparison-result-5f4abd9b24ab717e910b166c5b793038`,
+  digest `sha256:6943eb577b368f036b4536626076d7b7a4f23caf8df7f839e5a1248dbaae774a`.
+
+The primary point estimate is a candidate-minus-baseline increase of
+`17.258428 requests/s` in attempted measured-request throughput. The two
+baseline run values are `17.532296` and `17.553803 requests/s`; the two
+candidate values are `34.794865` and `34.808091 requests/s`. This is a
+`POINT_ESTIMATE_ONLY` result with two repetitions per arm, not an uncertainty
+claim or an ExitSpec acceptance outcome.
+
+The first convenience extraction beneath the source workspace was correctly
+withheld after workspace tooling relaxed its sealed directory modes. The
+SHA-anchored archive itself subsequently passed complete verification in an
+isolated system temporary directory. The controller now always performs its
+authoritative archive verification in that isolated location before publishing
+a retrieval receipt. Reproduce the offline verdict with:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/real_gpu_capture.py verify-archive \
+  <capture.tar.gz> \
+  --expected-sha256 sha256:f2408fd0649a7c79f5962872003781ebb9c878b802db27d633cf246f13b6f424 \
+  --expected-commit c08b46d9fbd87477f45d130aa3c63615937c4dc3
+```
+
+The capture remains `PENDING_EXTERNAL_EXITSPEC`. It proves the Inferdrome
+measurement, integrity, provenance, comparison, and rejection machinery; it
+does not manufacture `PASS`, `FAIL`, or `NOT_PROVEN` for the separately owned
+acceptance boundary.
+
+## Publication review and ExitSpec handoff
+
+The exact archive was reviewed without rewriting, redacting, resealing, or
+regenerating any captured byte. The committed producer-side records are:
+
+- local proof schema:
+  [`profiles/v1/local-gpu-proof.schema.json`](../profiles/v1/local-gpu-proof.schema.json),
+  canonical-document digest
+  `sha256:cf83bbdea2bba4c30b8f0e2c5f34f34a4077501207881fdbdab021571d665547`;
+- composite managed-vLLM profile:
+  [`profiles/v1/managed-vllm-0.26-evidence-profile.json`](../profiles/v1/managed-vllm-0.26-evidence-profile.json),
+  canonical-document digest
+  `sha256:9d03b5d0822ed829ddbfa4c87c75530885b9ad51ee2c0cb7c5e31a075996fe34`;
+- publication review:
+  [`evidence/gpu/2026-08-20-a10/publication-review.json`](../evidence/gpu/2026-08-20-a10/publication-review.json),
+  canonical-document digest
+  `sha256:7f1b3be53695e9e3a2009eb28ce008bb2486ae882e52364e26bece770a6d33ff`;
+  and
+- handoff manifest:
+  [`evidence/gpu/2026-08-20-a10/handoff-manifest.json`](../evidence/gpu/2026-08-20-a10/handoff-manifest.json),
+  canonical-document digest
+  `sha256:bc90ac7d0044b32556ce8e78181635f2a2d218e3de7a793062e5dc2b3d6cd4bd`.
+
+The review scanned all 310 regular files and 3,137,959 expanded bytes under
+stricter 16 MiB per-file and 256 MiB total review limits after the ordinary
+archive-safety and isolated integrity checks passed. It found no secret-shaped
+values, email addresses, or public network addresses. It did retain and
+disclose prompts, generated responses, stdout/stderr, package inventory,
+absolute paths, one private host-network address repeated across server logs,
+GPU UUIDs, and process identifiers.
+
+The result is `EXTERNAL_ONLY`, not `APPROVED_PUBLIC`: the repository has no
+selected license, the archive does not retain owner-approved license records
+for the model, workload, vLLM, and generated output, and the owner has not
+approved public delivery. Therefore `capture.tar.gz` remains ignored and was
+neither committed nor uploaded. The proposed future release-asset URL and exact
+required checksum are recorded in the handoff manifest; vendoring the same
+reviewed bytes in ExitSpec remains an alternative owner decision.
+
+Re-run the complete review and independently recalculate the 100/100 native
+TTFT population and nearest-rank p95 of `14,797,213 ns` with:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/review_gpu_evidence_publication.py --check
+```
+
+The handoff explicitly records a null producer-side ExitSpec contract digest
+and `RETROSPECTIVE` chronology. A future contract can be frozen before
+evaluation, but this capture does not prove that contract preceded measurement.
+The capture producer commit, later profile/publication commits, and eventual
+merge commit are separate identities; the eventual owner merge must preserve
+`c08b46d9fbd87477f45d130aa3c63615937c4dc3` as an ancestor rather than
+squashing it away.
+
 ## Exact managed server launch
 
 The demo never asks the operator to start an unobserved server. During
@@ -306,9 +422,12 @@ The managed server, version probe, and benchmark also share one process
 environment policy. Inferdrome removes every inherited `VLLM_*` override and
 forces `VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`,
 `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_OFFLINE=1`, and
-`TRANSFORMERS_OFFLINE=1`. The policy identifier and exact overrides are sealed
-with the server proof so ambient vLLM configuration cannot silently alter the
-demonstration or enable producer telemetry.
+`TRANSFORMERS_OFFLINE=1`. It also places the directory containing the verified
+vLLM executable first on `PATH`, so child tools such as `ninja` resolve from the
+same prepared Python environment before any ambient host tool. The policy
+identifier and exact overrides are sealed with the server proof so ambient
+vLLM configuration cannot silently alter the demonstration or enable producer
+telemetry.
 
 ## Run the proof and rejection demonstrations
 

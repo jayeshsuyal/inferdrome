@@ -225,7 +225,7 @@ def _remote_preflight_script(remote_root: str) -> str:
     return f"""set -euo pipefail
 umask 077
 [[ $(uname -s) == Linux ]]
-for executable in bash curl git ninja python3.12 nvidia-smi sha256sum tar timeout; do
+for executable in bash curl git python3.12 nvidia-smi sha256sum tar timeout; do
   command -v "$executable" >/dev/null || {{
     echo "missing required host executable: $executable" >&2
     exit 1
@@ -570,7 +570,7 @@ def _capture_over_ssh(
                 raise RemoteCaptureError(
                     "retrieved archive failed SHA-256 verification"
                 )
-            capture_root = real_gpu_capture.extract_capture_archive(
+            real_gpu_capture.extract_capture_archive(
                 archive,
                 staging_path,
             )
@@ -584,8 +584,9 @@ def _capture_over_ssh(
                 f"{failure_path} (remote workspace {remote_root})"
             )
         try:
-            verification = real_gpu_capture.verify_capture(
-                capture_root,
+            archive_verification = real_gpu_capture.verify_capture_archive(
+                archive,
+                expected_archive_sha256=expected_archive_sha256,
                 expected_repository_commit=commit,
             )
         except real_gpu_capture.CaptureError as error:
@@ -596,16 +597,16 @@ def _capture_over_ssh(
                 f"retained at {failure_path}"
             ) from None
         retrieval = {
-            "archive_sha256": actual_archive_sha256,
+            "archive_sha256": archive_verification["archive_sha256"],
             "billing_action_required": "TERMINATE_THE_GPU_INSTANCE",
-            "capture_manifest_sha256": real_gpu_capture.archive_sha256(
-                capture_root / "capture-manifest.json"
-            ),
+            "capture_manifest_sha256": archive_verification[
+                "capture_manifest_sha256"
+            ],
             "repository_commit": commit,
             "schema_version": "inferdrome.real-gpu-retrieval.v1",
             "ssh_host_identity_sha256": observed_host_identity_sha256,
             "verified_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "verification": verification,
+            "verification": archive_verification["verification"],
         }
         _write_json(staging_path / "retrieval-receipt.json", retrieval)
         os.replace(staging_path, final_path)

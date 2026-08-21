@@ -1,0 +1,129 @@
+{
+  "capture_mode": "managed_local_vllm",
+  "captured_at": "2026-08-20T00:02:00Z",
+  "client_arch": "x86_64",
+  "client_os": "Linux",
+  "client_python_version": "3.12.3",
+  "cuda_runtime_version": "13.0",
+  "gpu_query_argv": [
+    "/usr/bin/nvidia-smi",
+    "--query-gpu=index,name,uuid,driver_version",
+    "--format=csv,noheader,nounits",
+    "--id=0"
+  ],
+  "gpu_query_stdout": "0, NVIDIA A10, GPU-01234567-89ab-cdef-0123-456789abcdef, 580.105.08\n",
+  "gpus": [
+    {
+      "driver_version": "580.105.08",
+      "index": 0,
+      "model": "NVIDIA A10",
+      "uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef"
+    }
+  ],
+  "model_snapshot": {
+    "file_count": 10,
+    "hash_policy": "regular-files-excluding-dot-cache-v1",
+    "kind": "model",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "root": "/opt/inferdrome/models/Qwen2.5-0.5B-Instruct-0123456789abcdef0123456789abcdef01234567",
+    "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "total_bytes": 999604126
+  },
+  "nvidia_smi_path": "/usr/bin/nvidia-smi",
+  "nvidia_smi_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "producer_distribution": {
+    "executable_path": "/opt/inferdrome/venv/bin/vllm",
+    "executable_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "file_count": 6863,
+    "hash_policy": "installed-wheel-files-v1",
+    "name": "vllm",
+    "sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "source_wheel_filename": "vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "source_wheel_path": "/opt/inferdrome/downloads/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "source_wheel_sha256": "sha256:adb1e4c9b46d0dfdb094121ae5aad670a42412dd813ed4e5db069ed6a15006de",
+    "total_bytes": 767641627,
+    "version": "0.26.0"
+  },
+  "run_id": "run-0123456789abcdef0123456789abcdef",
+  "schema_version": "inferdrome.local-gpu-proof.v1",
+  "selected_gpu_indices": [
+    0
+  ],
+  "server": {
+    "argv": [
+      "/opt/inferdrome/venv/bin/vllm",
+      "serve",
+      "/opt/inferdrome/models/Qwen2.5-0.5B-Instruct-0123456789abcdef0123456789abcdef01234567",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "18080",
+      "--served-model-name",
+      "Qwen/Qwen2.5-0.5B-Instruct",
+      "--tokenizer",
+      "/opt/inferdrome/models/Qwen2.5-0.5B-Instruct-0123456789abcdef0123456789abcdef01234567",
+      "--tokenizer-mode",
+      "auto",
+      "--dtype",
+      "auto",
+      "--seed",
+      "42",
+      "--load-format",
+      "safetensors",
+      "--generation-config",
+      "vllm",
+      "--model-impl",
+      "vllm",
+      "--max-model-len",
+      "1024",
+      "--gpu-memory-utilization",
+      "0.80",
+      "--tensor-parallel-size",
+      "1",
+      "--device-ids",
+      "0",
+      "--no-enable-log-requests",
+      "--disable-uvicorn-access-log",
+      "--uvicorn-log-level",
+      "warning"
+    ],
+    "compute_query_argv": [
+      "/usr/bin/nvidia-smi",
+      "--query-compute-apps=pid,gpu_uuid",
+      "--format=csv,noheader,nounits",
+      "--id=0"
+    ],
+    "compute_query_stdout": "1210, GPU-01234567-89ab-cdef-0123-456789abcdef\n",
+    "endpoint": "http://127.0.0.1:18080",
+    "environment_overrides": [
+      "DO_NOT_TRACK=1",
+      "HF_HUB_DISABLE_TELEMETRY=1",
+      "HF_HUB_OFFLINE=1",
+      "TRANSFORMERS_OFFLINE=1",
+      "VLLM_NO_USAGE_STATS=1"
+    ],
+    "environment_policy": "vllm-scrubbed-offline-v1",
+    "gpu_processes": [
+      {
+        "gpu_uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+        "pid": 1210,
+        "process_group_id": 1200
+      }
+    ],
+    "pid": 1200,
+    "process_group_id": 1200,
+    "ready_at": "2026-08-20T00:01:00Z",
+    "started_at": "2026-08-20T00:00:00Z"
+  },
+  "tokenizer_snapshot": {
+    "file_count": 10,
+    "hash_policy": "regular-files-excluding-dot-cache-v1",
+    "kind": "tokenizer",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "root": "/opt/inferdrome/models/Qwen2.5-0.5B-Instruct-0123456789abcdef0123456789abcdef01234567",
+    "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "total_bytes": 999604126
+  },
+  "torch_cuda_device_count": 1,
+  "torch_version": "2.11.0+cu130"
+}
