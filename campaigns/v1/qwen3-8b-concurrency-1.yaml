@@ -1,0 +1,36 @@
+schema_version: inferdrome.source-experiment.v1
+
+experiment:
+  id: qwen3-8b-campaign-v1
+  title: Pinned Qwen3-8B campaign execution profile
+  hypothesis: The frozen Qwen3-8B workload can produce one verified run.
+
+execution:
+  mode: attached_endpoint
+  max_runtime_seconds: 1800
+  max_measured_requests: 96
+
+target:
+  engine: vllm
+  endpoint: http://127.0.0.1:18080
+  model: Qwen/Qwen3-8B
+  model_revision: b968826d9c46dd6066d109eabc6255188de91218
+  tokenizer_revision: b968826d9c46dd6066d109eabc6255188de91218
+  engine_version: 0.26.0
+
+workload:
+  path: workloads/qwen-text-mixed-length-v1.jsonl
+  sha256: sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f
+  prompt_content_policy: include
+  requested_output_tokens: 128
+  temperature: "0.7"
+  seed: 42
+
+traffic:
+  kind: concurrent
+  concurrency: 1
+  warmup_requests: 12
+  measured_requests: 96
+
+evidence:
+  canonical_response_content: omit

@@ -17,6 +17,11 @@ from inferdrome.domain.experiment import AttachedVllmTarget, ExperimentSpec
 from inferdrome.domain.ids import RunId, Sha256Digest
 from inferdrome.errors import AdapterError
 from inferdrome.normalization.vllm_0_26 import VLLM_VERSION
+from inferdrome.qwen3_campaign import (
+    QWEN3_8B_PROFILE_ID,
+    require_qwen3_campaign_profile,
+    validate_qwen3_campaign_spec,
+)
 
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _GPU_UUID = re.compile(r"^GPU-[0-9A-Za-z-]{8,120}$")
@@ -61,6 +66,7 @@ class ManagedVllmConfig:
     model_path: Path
     gpu_indices: tuple[int, ...] = (0,)
     startup_timeout_seconds: float = 900.0
+    capability_profile_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.model_path.is_absolute():
@@ -80,6 +86,8 @@ class ManagedVllmConfig:
             or not 1 <= timeout <= 3600
         ):
             raise AdapterError("managed vLLM startup timeout is outside limits")
+        if self.capability_profile_id not in {None, QWEN3_8B_PROFILE_ID}:
+            raise AdapterError("managed vLLM capability profile is unsupported")
 
 
 class GpuDeviceEvidence(FrozenModel):
@@ -474,8 +482,14 @@ def build_managed_server_argv(
     model_path: str,
     tokenizer_path: str,
     gpu_indices: tuple[int, ...],
+    capability_profile_id: str | None = None,
 ) -> tuple[str, ...]:
     target = validate_managed_vllm_target(spec)
+    require_qwen3_campaign_profile(spec, capability_profile_id)
+    if capability_profile_id is not None:
+        if capability_profile_id != QWEN3_8B_PROFILE_ID:
+            raise AdapterError("managed vLLM capability profile is unsupported")
+        validate_qwen3_campaign_spec(spec)
     endpoint, port = _managed_endpoint(target)
     del endpoint
     if not _is_safe_absolute_path(executable_path):
@@ -491,6 +505,11 @@ def build_managed_server_argv(
     ):
         raise AdapterError("managed vLLM server requires exactly one GPU index")
     selected_devices = ",".join(str(index) for index in gpu_indices)
+    dtype = "bfloat16" if capability_profile_id is not None else "auto"
+    max_model_len = "2048" if capability_profile_id is not None else "1024"
+    gpu_memory_utilization = (
+        "0.90" if capability_profile_id is not None else "0.80"
+    )
     return (
         executable_path,
         "serve",
@@ -506,7 +525,7 @@ def build_managed_server_argv(
         "--tokenizer-mode",
         "auto",
         "--dtype",
-        "auto",
+        dtype,
         "--seed",
         str(spec.workload.seed),
         "--load-format",
@@ -516,9 +535,9 @@ def build_managed_server_argv(
         "--model-impl",
         "vllm",
         "--max-model-len",
-        "1024",
+        max_model_len,
         "--gpu-memory-utilization",
-        "0.80",
+        gpu_memory_utilization,
         "--tensor-parallel-size",
         str(len(gpu_indices)),
         "--device-ids",
@@ -535,6 +554,7 @@ def validate_local_gpu_proof(
     proof: LocalGpuProof,
     *,
     run_id: str,
+    capability_profile_id: str | None = None,
 ) -> LocalGpuProof:
     target = validate_managed_vllm_target(spec)
     endpoint, _ = _managed_endpoint(target)
@@ -560,6 +580,7 @@ def validate_local_gpu_proof(
         model_path=proof.model_snapshot.root,
         tokenizer_path=proof.tokenizer_snapshot.root,
         gpu_indices=proof.selected_gpu_indices,
+        capability_profile_id=capability_profile_id,
     )
     if proof.server.argv != expected_server_argv:
         raise AdapterError("local GPU proof server invocation disagrees")

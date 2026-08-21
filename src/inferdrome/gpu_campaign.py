@@ -149,7 +149,6 @@ class CapabilityLadderTrack(FrozenModel):
 class PromptBucket(FrozenModel):
     target_input_tokens_under_control_tokenizer: Literal[128, 512, 1024]
     measured_requests: Literal[32]
-    warmup_requests: Literal[4]
 
 
 class SamplingDesign(FrozenModel):
@@ -176,6 +175,14 @@ class CampaignWorkload(FrozenModel):
     ]
     measured_requests_per_run: Literal[96]
     warmup_requests_per_run: Literal[12]
+    warmup_strategy: Literal["vllm_first_measured_request_repeated_v0_26"]
+    warmup_prompt_sequence_index: Literal[0]
+    warmup_population: Literal["EXCLUDED_FROM_MEASUREMENTS"]
+    readiness_probe_policy: Literal[
+        "vllm_first_measured_request_until_success_bounded_v0_26"
+    ]
+    readiness_probe_population: Literal["EXCLUDED_FROM_MEASUREMENTS"]
+    readiness_probe_timeout_seconds: Literal[5]
     concurrency_levels: tuple[Literal[1, 4, 16], Literal[1, 4, 16], Literal[1, 4, 16]]
     repetitions_per_condition: Literal[3]
     request_order: Literal["FIXED"]
@@ -195,11 +202,6 @@ class CampaignWorkload(FrozenModel):
         )
         if measured_total != int(self.measured_requests_per_run):
             raise ValueError("prompt buckets must cover every measured request")
-        warmup_total: int = sum(
-            int(bucket.warmup_requests) for bucket in self.prompt_buckets
-        )
-        if warmup_total != int(self.warmup_requests_per_run):
-            raise ValueError("prompt buckets must cover every warmup request")
         if self.concurrency_levels != (1, 4, 16):
             raise ValueError("campaign concurrency levels must be ordered 1, 4, 16")
         return self
@@ -627,20 +629,22 @@ def canonical_qwen_gpu_campaign() -> GpuCampaignPlan:
                 {
                     "measured_requests": 32,
                     "target_input_tokens_under_control_tokenizer": 128,
-                    "warmup_requests": 4,
                 },
                 {
                     "measured_requests": 32,
                     "target_input_tokens_under_control_tokenizer": 512,
-                    "warmup_requests": 4,
                 },
                 {
                     "measured_requests": 32,
                     "target_input_tokens_under_control_tokenizer": 1024,
-                    "warmup_requests": 4,
                 },
             ],
             "prompt_content_class": "PUBLIC_SYNTHETIC_NON_SENSITIVE",
+            "readiness_probe_policy": (
+                "vllm_first_measured_request_until_success_bounded_v0_26"
+            ),
+            "readiness_probe_population": "EXCLUDED_FROM_MEASUREMENTS",
+            "readiness_probe_timeout_seconds": 5,
             "repetitions_per_condition": 3,
             "request_order": "FIXED",
             "sampling": {
@@ -654,7 +658,10 @@ def canonical_qwen_gpu_campaign() -> GpuCampaignPlan:
                 "top_p": "0.8",
             },
             "sizing_reference_model_key": "qwen3-8b",
+            "warmup_population": "EXCLUDED_FROM_MEASUREMENTS",
+            "warmup_prompt_sequence_index": 0,
             "warmup_requests_per_run": 12,
+            "warmup_strategy": "vllm_first_measured_request_repeated_v0_26",
             "workload_id": "inferdrome.qwen-text-mixed-length.v1",
         },
     }

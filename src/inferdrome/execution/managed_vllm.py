@@ -59,6 +59,7 @@ from inferdrome.gpu_proof import (
     validate_local_gpu_proof,
     validate_managed_vllm_target,
 )
+from inferdrome.qwen3_tokenizer import verify_qwen3_tokenizer_files
 
 _MAX_CAPTURE_BYTES = 67_108_864
 _MAX_QUERY_BYTES = 262_144
@@ -695,6 +696,9 @@ class ManagedVllmServer:
             raise AdapterError("managed vLLM host architecture is unsupported")
         self._client_arch = cast(Literal["aarch64", "x86_64"], client_arch)
 
+        if config.capability_profile_id is not None:
+            verify_qwen3_tokenizer_files(self._tokenizer_path)
+
         model_revision = self._target.model_revision
         tokenizer_revision = self._target.tokenizer_revision
         if model_revision is None or tokenizer_revision is None:
@@ -746,6 +750,7 @@ class ManagedVllmServer:
             model_path=self._model_snapshot.root,
             tokenizer_path=self._tokenizer_snapshot.root,
             gpu_indices=config.gpu_indices,
+            capability_profile_id=config.capability_profile_id,
         )
         self._thread = threading.Thread(
             target=self._run_server,
@@ -976,6 +981,7 @@ class ManagedVllmServer:
                 self._spec,
                 proof,
                 run_id=self._run_id,
+                capability_profile_id=self._config.capability_profile_id,
             )
 
     def assert_inputs_unchanged(self) -> None:

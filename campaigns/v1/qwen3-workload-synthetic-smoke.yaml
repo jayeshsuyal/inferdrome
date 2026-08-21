@@ -1,0 +1,30 @@
+schema_version: inferdrome.source-experiment.v1
+
+experiment:
+  id: qwen3-campaign-workload-synthetic-smoke
+  title: Synthetic wiring test for the frozen Qwen3 campaign workload
+
+execution:
+  mode: synthetic_fixture
+  max_runtime_seconds: 300
+
+target:
+  engine: fake
+  model: inferdrome/qwen3-campaign-workload-fixture
+
+workload:
+  path: workloads/qwen-text-mixed-length-v1.jsonl
+  sha256: sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f
+  prompt_content_policy: include
+  requested_output_tokens: 128
+  temperature: "0.7"
+  seed: 42
+
+traffic:
+  kind: concurrent
+  concurrency: 1
+  warmup_requests: 12
+  measured_requests: 96
+
+evidence:
+  canonical_response_content: omit

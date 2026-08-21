@@ -1,0 +1,72 @@
+{
+  "benchmark_invocation": {
+    "ordered_profile_arguments": [
+      "--top-p",
+      "0.8",
+      "--top-k",
+      "20",
+      "--min-p",
+      "0",
+      "--ignore-eos",
+      "--extra-body",
+      "{\"chat_template_kwargs\":{\"enable_thinking\":false},\"seed\":42}"
+    ],
+    "readiness_probe_policy": "vllm_first_measured_request_until_success_bounded_v0_26",
+    "readiness_probe_population": "EXCLUDED_FROM_MEASUREMENTS",
+    "ready_check_timeout_seconds": 5,
+    "request_extra_body": "{\"chat_template_kwargs\":{\"enable_thinking\":false},\"seed\":42}",
+    "requested_output_tokens": 128,
+    "sampling": {
+      "ignore_eos": true,
+      "min_p": "0",
+      "seed": 42,
+      "temperature": "0.7",
+      "top_k": 20,
+      "top_p": "0.8"
+    }
+  },
+  "campaign_id": "qwen-gpu-capability-campaign-v1",
+  "claims_boundary": {
+    "acceptance_verdict": "NONE",
+    "hardware_attestation": false,
+    "runtime_compatibility": "UNPROVEN_REQUIRES_BOUNDED_SPIKE"
+  },
+  "digest_policy": {
+    "profile_sha256": "sha256_of_rfc8785_canonical_json_bytes",
+    "workload_manifest_sha256": "sha256_of_rfc8785_canonical_json_bytes",
+    "workload_sha256": "sha256_of_exact_utf8_jsonl_bytes"
+  },
+  "implementation_state": "LOCALLY_CONFORMANT_RUNTIME_UNPROVEN",
+  "model": {
+    "activation_dtype": "bfloat16",
+    "checkpoint_precision": "BF16",
+    "model_id": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218"
+  },
+  "producer": {
+    "adapter_name": "vllm_bench_serve",
+    "adapter_version": "1.0.0",
+    "name": "vllm",
+    "version": "0.26.0"
+  },
+  "profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+  "schema_version": "inferdrome.campaign-managed-vllm-profile.v1",
+  "server_invocation": {
+    "device_ids": "selected_single_physical_gpu",
+    "dtype": "bfloat16",
+    "generation_config": "vllm",
+    "gpu_memory_utilization": "0.90",
+    "load_format": "safetensors",
+    "max_model_len": 2048,
+    "model_impl": "vllm",
+    "tensor_parallel_size": 1
+  },
+  "workload_binding": {
+    "manifest_sha256": "sha256:297cd52871a00c62914a61f6a4417fe6f97c813b0421e02c6097897af0ed792b",
+    "measured_requests": 96,
+    "warmup_requests": 12,
+    "workload_id": "inferdrome.qwen-text-mixed-length.v1",
+    "workload_sha256": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f"
+  }
+}

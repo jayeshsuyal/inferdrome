@@ -33,6 +33,7 @@ from inferdrome.execution.cancellation import (
 )
 from inferdrome.execution.orchestrator import run_experiment
 from inferdrome.gpu_proof import ManagedVllmConfig
+from inferdrome.qwen3_campaign import QWEN3_8B_PROFILE_ID
 from inferdrome.resolution import resolve_experiment
 from inferdrome.workspace import RunWorkspace
 
@@ -102,11 +103,16 @@ def _managed_vllm_config(
     model_path = _optional_path(namespace, "managed_model_path")
     gpu_index = cast(int | None, namespace.managed_gpu_index)
     startup_timeout = cast(float | None, namespace.managed_startup_timeout_seconds)
+    capability_profile_id = _optional_text(
+        namespace,
+        "managed_capability_profile",
+    )
     if not enabled:
         if (
             model_path is not None
             or gpu_index is not None
             or startup_timeout is not None
+            or capability_profile_id is not None
         ):
             raise AdapterError("managed vLLM options require --managed-local-vllm")
         return None
@@ -118,6 +124,7 @@ def _managed_vllm_config(
         startup_timeout_seconds=(
             startup_timeout if startup_timeout is not None else 900.0
         ),
+        capability_profile_id=capability_profile_id,
     )
 
 
@@ -717,6 +724,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="bounded model-load and server-readiness timeout (default: 900)",
     )
+    run.add_argument(
+        "--managed-capability-profile",
+        choices=(QWEN3_8B_PROFILE_ID,),
+        help="opt into one exact operational model/workload profile",
+    )
     run.set_defaults(handler=_command_run)
 
     inspect = commands.add_parser("inspect", help="inspect one run workspace")
@@ -921,6 +933,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--managed-startup-timeout-seconds",
         type=float,
         help="bounded model-load and server-readiness timeout (default: 900)",
+    )
+    comparison_plan_execute.add_argument(
+        "--managed-capability-profile",
+        choices=(QWEN3_8B_PROFILE_ID,),
+        help="opt into one exact operational model/workload profile",
     )
     comparison_plan_execute.set_defaults(
         handler=_command_comparison_plan_execute

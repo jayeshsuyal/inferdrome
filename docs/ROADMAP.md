@@ -15,7 +15,9 @@ Next campaign checkpoint: **ADR 0010 and the generated operational campaign
 plan freeze a two-track Qwen GPU methodology before profile implementation or
 paid execution. Every new model/runtime/GPU assignment remains
 `UNPROVEN_REQUIRES_SPIKE`; the document grants no launch authority and changes
-no public evidence schema.**
+no public evidence schema. ADR 0011 aligns warmups with exact vLLM 0.26.0
+behavior. The Qwen3-8B profile and 96-prompt workload are locally conformant;
+runtime compatibility and A10 fit remain unproven until the bounded spike.**
 
 The numbered PR labels below are original build-sequence milestones, not GitHub
 pull-request numbers.

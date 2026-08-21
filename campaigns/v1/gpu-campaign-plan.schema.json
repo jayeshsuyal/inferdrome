@@ -113,6 +113,21 @@
           "title": "Prompt Content Class",
           "type": "string"
         },
+        "readiness_probe_policy": {
+          "const": "vllm_first_measured_request_until_success_bounded_v0_26",
+          "title": "Readiness Probe Policy",
+          "type": "string"
+        },
+        "readiness_probe_population": {
+          "const": "EXCLUDED_FROM_MEASUREMENTS",
+          "title": "Readiness Probe Population",
+          "type": "string"
+        },
+        "readiness_probe_timeout_seconds": {
+          "const": 5,
+          "title": "Readiness Probe Timeout Seconds",
+          "type": "integer"
+        },
         "repetitions_per_condition": {
           "const": 3,
           "title": "Repetitions Per Condition",
@@ -131,10 +146,25 @@
           "title": "Sizing Reference Model Key",
           "type": "string"
         },
+        "warmup_population": {
+          "const": "EXCLUDED_FROM_MEASUREMENTS",
+          "title": "Warmup Population",
+          "type": "string"
+        },
+        "warmup_prompt_sequence_index": {
+          "const": 0,
+          "title": "Warmup Prompt Sequence Index",
+          "type": "integer"
+        },
         "warmup_requests_per_run": {
           "const": 12,
           "title": "Warmup Requests Per Run",
           "type": "integer"
+        },
+        "warmup_strategy": {
+          "const": "vllm_first_measured_request_repeated_v0_26",
+          "title": "Warmup Strategy",
+          "type": "string"
         },
         "workload_id": {
           "const": "inferdrome.qwen-text-mixed-length.v1",
@@ -151,6 +181,12 @@
         "prompt_buckets",
         "measured_requests_per_run",
         "warmup_requests_per_run",
+        "warmup_strategy",
+        "warmup_prompt_sequence_index",
+        "warmup_population",
+        "readiness_probe_policy",
+        "readiness_probe_population",
+        "readiness_probe_timeout_seconds",
         "concurrency_levels",
         "repetitions_per_condition",
         "request_order",
@@ -628,17 +664,11 @@
           ],
           "title": "Target Input Tokens Under Control Tokenizer",
           "type": "integer"
-        },
-        "warmup_requests": {
-          "const": 4,
-          "title": "Warmup Requests",
-          "type": "integer"
         }
       },
       "required": [
         "target_input_tokens_under_control_tokenizer",
-        "measured_requests",
-        "warmup_requests"
+        "measured_requests"
       ],
       "title": "PromptBucket",
       "type": "object"
