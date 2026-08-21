@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import stat
 import subprocess
 import sys
@@ -20,6 +21,13 @@ import scripts.real_gpu_capture as capture
 
 COMMIT = "a" * 40
 SOURCE_ARCHIVE_SHA256 = "sha256:" + "f" * 64
+
+
+def _assert_embedded_python_compiles(script: str) -> None:
+    blocks = re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", script, flags=re.DOTALL)
+    assert blocks
+    for index, block in enumerate(blocks):
+        compile(block, f"<generated-remote-python-{index}>", "exec")
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -266,6 +274,7 @@ def test_remote_command_pins_commit_and_bounds_workload() -> None:
         ).returncode
         == 0
     )
+    _assert_embedded_python_compiles(script)
 
 
 def test_qwen3_remote_command_requires_explicit_profile() -> None:
@@ -299,6 +308,7 @@ def test_qwen3_remote_command_requires_explicit_profile() -> None:
         ).returncode
         == 0
     )
+    _assert_embedded_python_compiles(script)
     assert (
         subprocess.run(
             ["bash", "-n"],
