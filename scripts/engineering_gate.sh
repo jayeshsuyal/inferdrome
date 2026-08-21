@@ -17,6 +17,7 @@ bash -n scripts/prepare_real_gpu_host.sh
 bash -n scripts/run_real_gpu_capture.sh
 bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
+"$inferdrome_python" -m py_compile scripts/qwen3_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/generate_capability_profiles.py
 "$inferdrome_python" -m py_compile scripts/generate_gpu_campaign.py
 "$inferdrome_python" -m py_compile scripts/generate_qwen3_launch_profile.py

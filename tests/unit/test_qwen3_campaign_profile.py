@@ -36,7 +36,10 @@ from inferdrome.qwen3_campaign import (
     QWEN3_8B_REVISION,
     QWEN3_REQUEST_EXTRA_BODY,
     QWEN3_TARGET_INPUT_TOKENS,
+    qwen3_expected_snapshot_sha256,
+    qwen3_host_dependencies_sha256,
     qwen3_launch_documents,
+    qwen3_model_manifest_sha256,
     qwen3_profile_document,
     qwen3_profile_sha256,
     qwen3_workload_manifest,
@@ -189,7 +192,27 @@ def test_generated_workload_and_profile_are_exact_and_current() -> None:
     )
     assert profile["benchmark_invocation"]["ready_check_timeout_seconds"] == 5
     assert profile["implementation_state"] == ("LOCALLY_CONFORMANT_RUNTIME_UNPROVEN")
+    assert profile["model"]["snapshot_identity_sha256"] == (
+        qwen3_expected_snapshot_sha256()
+    )
+    assert profile["model"]["snapshot_manifest_sha256"] == (
+        qwen3_model_manifest_sha256()
+    )
+    assert profile["producer"]["host_dependencies_sha256"] == (
+        qwen3_host_dependencies_sha256()
+    )
     assert qwen3_profile_sha256().startswith("sha256:")
+
+
+def test_linux_host_preparation_embeds_current_qwen3_manifest_pins() -> None:
+    preparation = (REPOSITORY_ROOT / "scripts/prepare_real_gpu_host.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert qwen3_expected_snapshot_sha256() in preparation
+    assert qwen3_model_manifest_sha256() in preparation
+    assert qwen3_host_dependencies_sha256() in preparation
+    assert "git-archive-exact-head-tree-v1" in preparation
 
 
 @pytest.mark.parametrize("concurrency", [1, 4, 16])
@@ -260,6 +283,21 @@ def test_profile_selects_exact_server_controls_without_changing_legacy() -> None
     with pytest.raises(AdapterError, match="requires its explicit"):
         build_managed_server_argv(
             resolution.resolved_spec,
+            executable_path="/opt/inferdrome/venv/bin/vllm",
+            model_path="/opt/inferdrome/models/qwen3",
+            tokenizer_path="/opt/inferdrome/models/qwen3",
+            gpu_indices=(0,),
+        )
+    renamed = resolution.resolved_spec.model_copy(
+        update={
+            "experiment": resolution.resolved_spec.experiment.model_copy(
+                update={"id": "renamed-qwen-source"}
+            )
+        }
+    )
+    with pytest.raises(AdapterError, match="requires its explicit"):
+        build_managed_server_argv(
+            renamed,
             executable_path="/opt/inferdrome/venv/bin/vllm",
             model_path="/opt/inferdrome/models/qwen3",
             tokenizer_path="/opt/inferdrome/models/qwen3",

@@ -128,6 +128,16 @@
           "title": "Model Revision",
           "type": "string"
         },
+        "snapshot_identity_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Snapshot Identity Sha256",
+          "type": "string"
+        },
+        "snapshot_manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Snapshot Manifest Sha256",
+          "type": "string"
+        },
         "tokenizer_revision": {
           "const": "b968826d9c46dd6066d109eabc6255188de91218",
           "title": "Tokenizer Revision",
@@ -139,6 +149,8 @@
         "checkpoint_precision",
         "model_id",
         "model_revision",
+        "snapshot_identity_sha256",
+        "snapshot_manifest_sha256",
         "tokenizer_revision"
       ],
       "title": "Qwen3ProfileModelPin",
@@ -157,6 +169,11 @@
           "title": "Adapter Version",
           "type": "string"
         },
+        "host_dependencies_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Host Dependencies Sha256",
+          "type": "string"
+        },
         "name": {
           "const": "vllm",
           "title": "Name",
@@ -171,6 +188,7 @@
       "required": [
         "adapter_name",
         "adapter_version",
+        "host_dependencies_sha256",
         "name",
         "version"
       ],

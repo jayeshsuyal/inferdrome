@@ -1,0 +1,23 @@
+{
+  "distributions": [
+    {
+      "architecture": "aarch64",
+      "filename": "tokenizers-0.22.1-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+      "name": "tokenizers",
+      "sha256": "sha256:19d2962dd28bc67c1f205ab180578a78eef89ac60ca7ef7cbe9635a46a56422a",
+      "size_bytes": 3256994,
+      "url": "https://files.pythonhosted.org/packages/1e/3b/55e64befa1e7bfea963cf4b787b2cea1011362c4193f5477047532ce127e/tokenizers-0.22.1-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+      "version": "0.22.1"
+    },
+    {
+      "architecture": "x86_64",
+      "filename": "tokenizers-0.22.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "name": "tokenizers",
+      "sha256": "sha256:e2ef6063d7a84994129732b47e7915e8710f27f99f3a3260b8a38fc7ccd083f4",
+      "size_bytes": 3250221,
+      "url": "https://files.pythonhosted.org/packages/d0/c6/dc3a0db5a6766416c32c034286d7c2d406da1f498e4de04ab1b8959edd00/tokenizers-0.22.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "version": "0.22.1"
+    }
+  ],
+  "schema_version": "inferdrome.qwen3-host-dependencies.v1"
+}

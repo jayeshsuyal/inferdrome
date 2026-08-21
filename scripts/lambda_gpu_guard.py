@@ -64,6 +64,7 @@ class LambdaInstance:
     hostname: str | None
     status: str
     hourly_rate_usd: Decimal | None
+    instance_type_name: str | None
 
     def public_record(self) -> dict[str, str | None]:
         return {
@@ -74,6 +75,7 @@ class LambdaInstance:
                 else None
             ),
             "instance_id": self.instance_id,
+            "instance_type_name": self.instance_type_name,
             "ip": self.ip,
             "status": self.status,
         }
@@ -467,6 +469,15 @@ def _termination_timeout(value: str) -> int:
     )
 
 
+def _termination_safety_margin(value: str) -> int:
+    return _bounded_integer(
+        value,
+        label="termination safety margin",
+        minimum=1,
+        maximum=3_600,
+    )
+
+
 def _retry_window(value: str) -> int:
     return _bounded_integer(
         value,
@@ -490,6 +501,7 @@ def compute_cost_window(
     billing_started_at: datetime,
     hourly_rate_usd: Decimal,
     max_cost_usd: Decimal,
+    termination_safety_margin_seconds: int = _TERMINATION_SAFETY_MARGIN_SECONDS,
     now: datetime | None = None,
 ) -> CostWindow:
     if billing_started_at.tzinfo is None or billing_started_at.utcoffset() is None:
@@ -499,11 +511,15 @@ def compute_cost_window(
         raise LambdaGuardError("current time must be timezone-aware")
     if hourly_rate_usd <= 0 or max_cost_usd <= 0:
         raise LambdaGuardError("Lambda cost inputs must be greater than zero")
+    if (
+        isinstance(termination_safety_margin_seconds, bool)
+        or not isinstance(termination_safety_margin_seconds, int)
+        or not 1 <= termination_safety_margin_seconds <= 3_600
+    ):
+        raise LambdaGuardError("termination safety margin is outside limits")
     selected_now = selected_now.astimezone(UTC)
     started_at = billing_started_at.astimezone(UTC)
-    if started_at > selected_now + timedelta(
-        seconds=_MAX_FUTURE_CLOCK_SKEW_SECONDS
-    ):
+    if started_at > selected_now + timedelta(seconds=_MAX_FUTURE_CLOCK_SKEW_SECONDS):
         raise LambdaGuardError("billing start cannot be in the future")
     if started_at > selected_now:
         started_at = selected_now
@@ -515,14 +531,13 @@ def compute_cost_window(
     if allowed_seconds < 1:
         raise LambdaGuardError("Lambda cost cap permits less than one second")
     safety_margin_seconds = min(
-        _TERMINATION_SAFETY_MARGIN_SECONDS,
+        termination_safety_margin_seconds,
         allowed_seconds,
     )
     cost_limit_deadline = started_at + timedelta(seconds=allowed_seconds)
     return CostWindow(
         billing_started_at=started_at,
-        deadline=cost_limit_deadline
-        - timedelta(seconds=safety_margin_seconds),
+        deadline=cost_limit_deadline - timedelta(seconds=safety_margin_seconds),
         cost_limit_deadline=cost_limit_deadline,
         allowed_seconds=allowed_seconds,
         termination_safety_margin_seconds=safety_margin_seconds,
@@ -542,6 +557,7 @@ def arm_watchdog(
     client: LambdaCloudClient | None = None,
     poll_seconds: int = _DEFAULT_POLL_SECONDS,
     termination_timeout_seconds: int = _DEFAULT_TERMINATION_TIMEOUT_SECONDS,
+    termination_safety_margin_seconds: int = _TERMINATION_SAFETY_MARGIN_SECONDS,
     retry_window_seconds: int = _DEFAULT_RETRY_WINDOW_SECONDS,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     now: Callable[[], datetime] | None = None,
@@ -572,6 +588,7 @@ def arm_watchdog(
         billing_started_at=billing_started_at,
         hourly_rate_usd=hourly_rate_usd,
         max_cost_usd=max_cost_usd,
+        termination_safety_margin_seconds=termination_safety_margin_seconds,
         now=current_time,
     )
     current_time = current_time.astimezone(UTC)
@@ -615,6 +632,8 @@ def arm_watchdog(
         _decimal_text(max_cost_usd),
         "--billing-started-at",
         _timestamp(cost_window.billing_started_at),
+        "--termination-safety-margin-seconds",
+        str(cost_window.termination_safety_margin_seconds),
         "--poll-seconds",
         str(poll_seconds),
         "--termination-timeout-seconds",
@@ -763,10 +782,17 @@ def watch_until_deadline(
             readiness_token=readiness_token,
         )
     selected_now = now or (lambda: datetime.now(UTC))
+    initial_remaining = max(
+        0.0,
+        (cost_window.deadline - selected_now().astimezone(UTC)).total_seconds(),
+    )
+    monotonic_deadline = monotonic() + initial_remaining
     while True:
-        remaining = (
+        wall_remaining = (
             cost_window.deadline - selected_now().astimezone(UTC)
         ).total_seconds()
+        monotonic_remaining = monotonic_deadline - monotonic()
+        remaining = min(wall_remaining, monotonic_remaining)
         if remaining <= 0:
             break
         sleeper(min(30, remaining))
@@ -859,8 +885,17 @@ def _instance_from_api(value: object) -> LambdaInstance:
     if hostname is not None and not isinstance(hostname, str):
         raise LambdaCloudApiError("Lambda Cloud instance hostname is invalid")
     hourly_rate: Decimal | None = None
+    instance_type_name: str | None = None
     instance_type = value.get("instance_type")
     if isinstance(instance_type, dict):
+        raw_name = instance_type.get("name")
+        if raw_name is not None:
+            if (
+                not isinstance(raw_name, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9_]{0,127}", raw_name) is None
+            ):
+                raise LambdaCloudApiError("Lambda Cloud instance type name is invalid")
+            instance_type_name = raw_name
         price_cents = instance_type.get("price_cents_per_hour")
         if isinstance(price_cents, int) and not isinstance(price_cents, bool):
             if price_cents <= 0:
@@ -872,6 +907,7 @@ def _instance_from_api(value: object) -> LambdaInstance:
         hostname=hostname,
         status=status,
         hourly_rate_usd=hourly_rate,
+        instance_type_name=instance_type_name,
     )
 
 
@@ -901,9 +937,7 @@ def _write_json_exclusive(
     allow_existing: bool = False,
 ) -> bool:
     content = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    temporary_path = path.with_name(
-        f".{path.name}.{secrets.token_hex(16)}.temporary"
-    )
+    temporary_path = path.with_name(f".{path.name}.{secrets.token_hex(16)}.temporary")
     published = False
     try:
         descriptor = os.open(
@@ -1028,22 +1062,17 @@ def _wait_for_watchdog_ready(
                 or ready.get("readiness_token") != readiness_token
                 or ready.get("record_kind")
                 != "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION"
-                or ready.get("schema_version")
-                != "inferdrome.lambda-watchdog-ready.v1"
+                or ready.get("schema_version") != "inferdrome.lambda-watchdog-ready.v1"
                 or isinstance(ready.get("pid"), bool)
                 or not isinstance(ready.get("pid"), int)
                 or int(ready["pid"]) <= 0
                 or process.poll() is not None
             ):
-                raise LambdaGuardError(
-                    "Lambda watchdog readiness record is invalid"
-                )
+                raise LambdaGuardError("Lambda watchdog readiness record is invalid")
             return
         remaining = deadline - monotonic()
         if remaining <= 0:
-            raise LambdaGuardError(
-                "Lambda termination watchdog did not become ready"
-            )
+            raise LambdaGuardError("Lambda termination watchdog did not become ready")
         sleeper(min(0.05, remaining))
 
 
@@ -1074,10 +1103,8 @@ def _write_termination_receipt(
     termination = existing.get("termination") if existing is not None else None
     if (
         existing is None
-        or existing.get("record_kind")
-        != "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION"
-        or existing.get("schema_version")
-        != "inferdrome.lambda-termination-receipt.v2"
+        or existing.get("record_kind") != "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION"
+        or existing.get("schema_version") != "inferdrome.lambda-termination-receipt.v2"
         or not isinstance(termination, dict)
         or termination.get("instance_id") != result.instance_id
         or termination.get("final_status") not in {*_TERMINAL_STATUSES, "absent"}
@@ -1107,6 +1134,11 @@ def _add_cost_window(parser: argparse.ArgumentParser) -> None:
         type=parse_utc_timestamp,
         required=True,
         help="actual provider billing start in ISO 8601",
+    )
+    parser.add_argument(
+        "--termination-safety-margin-seconds",
+        type=_termination_safety_margin,
+        default=_TERMINATION_SAFETY_MARGIN_SECONDS,
     )
 
 
@@ -1192,6 +1224,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hourly_rate_usd=args.hourly_rate_usd,
                 max_cost_usd=args.max_cost_usd,
                 billing_started_at=args.billing_started_at,
+                termination_safety_margin_seconds=(
+                    args.termination_safety_margin_seconds
+                ),
                 state_root=Path(args.state_root),
                 client=client,
                 poll_seconds=args.poll_seconds,
@@ -1211,6 +1246,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 billing_started_at=args.billing_started_at,
                 hourly_rate_usd=args.hourly_rate_usd,
                 max_cost_usd=args.max_cost_usd,
+                termination_safety_margin_seconds=(
+                    args.termination_safety_margin_seconds
+                ),
             )
             result = watch_until_deadline(
                 args.instance_id,
