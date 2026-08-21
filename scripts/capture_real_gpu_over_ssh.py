@@ -536,7 +536,7 @@ with tarfile.open(archive, mode="r:") as retained:
             path.is_absolute()
             or not path.parts
             or any(part in {{"", ".", ".."}} for part in path.parts)
-            or "\\" in member.name
+            or "\\\\" in member.name
             or any(ord(character) < 32 for character in member.name)
             or member.name in seen
             or not (member.isdir() or member.isfile())
@@ -555,7 +555,7 @@ marker = {{
     "transport": "git-archive-exact-head-tree-v1",
 }}
 (destination / ".inferdrome-source-export.json").write_text(
-    json.dumps(marker, indent=2, sort_keys=True) + "\n",
+    json.dumps(marker, indent=2, sort_keys=True) + "\\n",
     encoding="utf-8",
 )
 PY
