@@ -1,0 +1,309 @@
+{
+  "acceptance_authority": "EXTERNAL_CONSUMER_ONLY",
+  "budget": {
+    "currency": "USD",
+    "max_compute_cost_usd": "9.50",
+    "price_verification": "lambda_api_exact_match_before_capture_v1",
+    "rate_snapshot_date": "2026-08-20",
+    "sessions": [
+      {
+        "gpu_tier_id": "a10-24gb-pcie",
+        "hourly_rate_snapshot_usd": "1.29",
+        "max_session_cost_usd": "0.75"
+      },
+      {
+        "gpu_tier_id": "a100-40gb-pcie",
+        "hourly_rate_snapshot_usd": "1.99",
+        "max_session_cost_usd": "1.25"
+      },
+      {
+        "gpu_tier_id": "h100-80gb-pcie",
+        "hourly_rate_snapshot_usd": "3.29",
+        "max_session_cost_usd": "2.25"
+      },
+      {
+        "gpu_tier_id": "b200-180gb-sxm6",
+        "hourly_rate_snapshot_usd": "6.99",
+        "max_session_cost_usd": "5.25"
+      }
+    ],
+    "storage_cost": "SEPARATE_OPERATOR_APPROVAL_REQUIRED"
+  },
+  "campaign_id": "qwen-gpu-capability-campaign-v1",
+  "capability_ladder": {
+    "assignments": [
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "a10-24gb-pcie",
+        "model_key": "qwen3-8b",
+        "planned_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      },
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "a100-40gb-pcie",
+        "model_key": "qwen3-14b",
+        "planned_profile_id": "managed-vllm-0.26-qwen3-14b-bf16-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      },
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "h100-80gb-pcie",
+        "model_key": "qwen3-32b",
+        "planned_profile_id": "managed-vllm-0.26-qwen3-32b-bf16-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      },
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "b200-180gb-sxm6",
+        "model_key": "qwen3.5-122b-a10b-fp8",
+        "planned_profile_id": "managed-vllm-0.26-qwen3.5-122b-a10b-fp8-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      }
+    ],
+    "causal_claim": "NONE",
+    "cross_profile_speed_ranking": "PROHIBITED",
+    "current_comparison_contract": "NONE_DIFFERENT_MODEL_PROFILES",
+    "purpose": "demonstrate_distinct_model_capacity_per_gpu_tier",
+    "track_id": "qwen-capability-ladder",
+    "track_kind": "CAPABILITY_LADDER"
+  },
+  "execution_safety": {
+    "api_rate_match_required": true,
+    "local_archive_checksum_before_immediate_termination": true,
+    "offline_semantic_verification_after_termination": true,
+    "one_paid_instance_at_a_time": true,
+    "operator_confirmation_per_launch": true,
+    "provider_termination_confirmation_required": true,
+    "shell_shutdown_is_termination": false,
+    "terminate_in_controller_finally": true,
+    "watchdog_ready_before_remote_setup": true
+  },
+  "frozen_on": "2026-08-20",
+  "gpu_targets": [
+    {
+      "gpu_count": 1,
+      "gpu_model": "NVIDIA A10",
+      "gpu_tier_id": "a10-24gb-pcie",
+      "interconnect": "PCIE",
+      "provider": "lambda_cloud",
+      "provider_instance_type_policy": "api_resolved_exact_gpu_tier_v1",
+      "vram_gib": 24
+    },
+    {
+      "gpu_count": 1,
+      "gpu_model": "NVIDIA A100",
+      "gpu_tier_id": "a100-40gb-pcie",
+      "interconnect": "PCIE",
+      "provider": "lambda_cloud",
+      "provider_instance_type_policy": "api_resolved_exact_gpu_tier_v1",
+      "vram_gib": 40
+    },
+    {
+      "gpu_count": 1,
+      "gpu_model": "NVIDIA H100",
+      "gpu_tier_id": "h100-80gb-pcie",
+      "interconnect": "PCIE",
+      "provider": "lambda_cloud",
+      "provider_instance_type_policy": "api_resolved_exact_gpu_tier_v1",
+      "vram_gib": 80
+    },
+    {
+      "gpu_count": 1,
+      "gpu_model": "NVIDIA B200",
+      "gpu_tier_id": "b200-180gb-sxm6",
+      "interconnect": "SXM6",
+      "provider": "lambda_cloud",
+      "provider_instance_type_policy": "api_resolved_exact_gpu_tier_v1",
+      "vram_gib": 180
+    }
+  ],
+  "hardware_attestation": false,
+  "hardware_control": {
+    "assignments": [
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "a10-24gb-pcie",
+        "model_key": "qwen3-8b",
+        "planned_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      },
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "a100-40gb-pcie",
+        "model_key": "qwen3-8b",
+        "planned_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      },
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "h100-80gb-pcie",
+        "model_key": "qwen3-8b",
+        "planned_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      },
+      {
+        "capability_state": "UNPROVEN_REQUIRES_SPIKE",
+        "gpu_tier_id": "b200-180gb-sxm6",
+        "model_key": "qwen3-8b",
+        "planned_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+        "producer_name": "vllm",
+        "producer_version_candidate": "0.26.0",
+        "tensor_parallel_size": 1
+      }
+    ],
+    "causal_claim": "NONE",
+    "cross_hardware_ratio_publication": "WITHHELD_PENDING_REVIEWED_HARDWARE_CONTRACT",
+    "current_comparison_contract": "NONE_CONTROLLED_COMPARISON_V1_DOES_NOT_SUPPORT_HARDWARE",
+    "purpose": "hold_model_runtime_and_workload_constant_across_gpu_tiers",
+    "track_id": "qwen3-8b-hardware-control",
+    "track_kind": "HARDWARE_CONTROL"
+  },
+  "historical_canary": {
+    "bundle_digest": "sha256:bae216f2165eb06ae2e0f14d3cd852f8e0ebb381bf1f68c71072769b3c0c1675",
+    "campaign_execution": false,
+    "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+    "model_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "mutation_policy": "PRESERVE_EXISTING_EVIDENCE_BYTES",
+    "producer_version": "0.26.0",
+    "profile_id": "inferdrome.managed-vllm-0.26-evidence-profile.v1",
+    "role": "HISTORICAL_CANARY_ONLY",
+    "run_id": "run-533c9f5f783958fb6077069a6c577144"
+  },
+  "model_pins": [
+    {
+      "activation_dtype": "bfloat16",
+      "benchmark_modality": "TEXT_ONLY",
+      "checkpoint_precision": "BF16",
+      "kv_cache_dtype": "bfloat16",
+      "license": "apache-2.0",
+      "model_id": "Qwen/Qwen3-8B",
+      "model_key": "qwen3-8b",
+      "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "quantization_policy": "NONE",
+      "server_model_mode": "TEXT_GENERATION",
+      "thinking_mode": "DISABLED",
+      "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "total_parameters": 8190735360,
+      "weight_format": "safetensors"
+    },
+    {
+      "activation_dtype": "bfloat16",
+      "benchmark_modality": "TEXT_ONLY",
+      "checkpoint_precision": "BF16",
+      "kv_cache_dtype": "bfloat16",
+      "license": "apache-2.0",
+      "model_id": "Qwen/Qwen3-14B",
+      "model_key": "qwen3-14b",
+      "model_revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+      "quantization_policy": "NONE",
+      "server_model_mode": "TEXT_GENERATION",
+      "thinking_mode": "DISABLED",
+      "tokenizer_revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+      "total_parameters": 14768307200,
+      "weight_format": "safetensors"
+    },
+    {
+      "activation_dtype": "bfloat16",
+      "benchmark_modality": "TEXT_ONLY",
+      "checkpoint_precision": "BF16",
+      "kv_cache_dtype": "bfloat16",
+      "license": "apache-2.0",
+      "model_id": "Qwen/Qwen3-32B",
+      "model_key": "qwen3-32b",
+      "model_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+      "quantization_policy": "NONE",
+      "server_model_mode": "TEXT_GENERATION",
+      "thinking_mode": "DISABLED",
+      "tokenizer_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+      "total_parameters": 32762123264,
+      "weight_format": "safetensors"
+    },
+    {
+      "activation_dtype": "bfloat16",
+      "benchmark_modality": "TEXT_ONLY",
+      "checkpoint_precision": "OFFICIAL_FP8_E4M3",
+      "kv_cache_dtype": "bfloat16",
+      "license": "apache-2.0",
+      "model_id": "Qwen/Qwen3.5-122B-A10B-FP8",
+      "model_key": "qwen3.5-122b-a10b-fp8",
+      "model_revision": "a099dee70ccfcd8d5dda56aaa0b60cb8ecadabc9",
+      "quantization_policy": "CHECKPOINT_DEFINED_FP8",
+      "server_model_mode": "LANGUAGE_MODEL_ONLY",
+      "thinking_mode": "DISABLED",
+      "tokenizer_revision": "a099dee70ccfcd8d5dda56aaa0b60cb8ecadabc9",
+      "total_parameters": 125094006512,
+      "weight_format": "safetensors"
+    }
+  ],
+  "paid_launch_authorization": "NOT_GRANTED_BY_THIS_DOCUMENT",
+  "plan_status": "DESIGN_FROZEN_EXECUTION_BLOCKED",
+  "profile_implementation_gate": "EVERY_PLANNED_PROFILE_MUST_PASS_LOCAL_CONFORMANCE_BEFORE_PAID_LAUNCH",
+  "publication": {
+    "capability_ladder_speed_ranking": "PROHIBITED",
+    "generated_metrics_only": true,
+    "hardware_control_ratios": "WITHHELD_PENDING_REVIEWED_HARDWARE_CONTRACT",
+    "inferdrome_acceptance_verdict": null,
+    "synthetic_campaign_results": "EXCLUDED",
+    "verified_real_bundles_only": true
+  },
+  "runtime_compatibility_gate": "EVERY_MODEL_RUNTIME_GPU_TUPLE_REQUIRES_A_BOUNDED_CAPABILITY_SPIKE",
+  "schema_version": "inferdrome.gpu-campaign-plan.v1",
+  "workload": {
+    "concurrency_levels": [
+      1,
+      4,
+      16
+    ],
+    "measured_requests_per_run": 96,
+    "non_reference_token_counts": "OBSERVED_NOT_CONFIGURED",
+    "ordered_prompt_bytes_policy": "same_ordered_utf8_prompt_bytes_across_tracks_v1",
+    "prompt_buckets": [
+      {
+        "measured_requests": 32,
+        "target_input_tokens_under_control_tokenizer": 128,
+        "warmup_requests": 4
+      },
+      {
+        "measured_requests": 32,
+        "target_input_tokens_under_control_tokenizer": 512,
+        "warmup_requests": 4
+      },
+      {
+        "measured_requests": 32,
+        "target_input_tokens_under_control_tokenizer": 1024,
+        "warmup_requests": 4
+      }
+    ],
+    "prompt_content_class": "PUBLIC_SYNTHETIC_NON_SENSITIVE",
+    "repetitions_per_condition": 3,
+    "request_order": "FIXED",
+    "sampling": {
+      "ignore_eos": true,
+      "min_p": "0",
+      "requested_output_tokens": 128,
+      "seed": 42,
+      "temperature": "0.7",
+      "thinking_mode": "DISABLED",
+      "top_k": 20,
+      "top_p": "0.8"
+    },
+    "sizing_reference_model_key": "qwen3-8b",
+    "warmup_requests_per_run": 12,
+    "workload_id": "inferdrome.qwen-text-mixed-length.v1"
+  }
+}

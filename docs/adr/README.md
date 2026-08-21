@@ -27,3 +27,4 @@ a new ADR that supersedes the old one.
 - [ADR 0007: Add immutable descriptive Trial Sets](0007-add-immutable-descriptive-trial-sets.md)
 - [ADR 0008: Add operator-attested controlled comparisons](0008-add-operator-attested-controlled-comparisons.md)
 - [ADR 0009: Add fail-closed controlled-comparison execution](0009-add-fail-closed-comparison-execution.md)
+- [ADR 0010: Freeze a two-track cross-GPU capability campaign](0010-freeze-cross-gpu-capability-campaign.md)
