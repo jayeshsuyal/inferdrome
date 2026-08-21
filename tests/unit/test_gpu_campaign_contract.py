@@ -48,6 +48,18 @@ def test_canonical_campaign_separates_control_ladder_and_canary() -> None:
     assert plan.historical_canary.bundle_digest == (
         "sha256:bae216f2165eb06ae2e0f14d3cd852f8e0ebb381bf1f68c71072769b3c0c1675"
     )
+    assert plan.workload.warmup_strategy == (
+        "vllm_first_measured_request_repeated_v0_26"
+    )
+    assert plan.workload.warmup_prompt_sequence_index == 0
+    assert plan.workload.warmup_population == "EXCLUDED_FROM_MEASUREMENTS"
+    assert plan.workload.readiness_probe_policy == (
+        "vllm_first_measured_request_until_success_bounded_v0_26"
+    )
+    assert plan.workload.readiness_probe_population == (
+        "EXCLUDED_FROM_MEASUREMENTS"
+    )
+    assert plan.workload.readiness_probe_timeout_seconds == 5
 
 
 def test_campaign_rejects_reordered_gpu_targets() -> None:

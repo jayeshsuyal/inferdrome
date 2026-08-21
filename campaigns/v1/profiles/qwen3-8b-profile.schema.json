@@ -1,0 +1,383 @@
+{
+  "$defs": {
+    "Qwen3BenchmarkInvocation": {
+      "additionalProperties": false,
+      "properties": {
+        "ordered_profile_arguments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ordered Profile Arguments",
+          "type": "array"
+        },
+        "readiness_probe_policy": {
+          "const": "vllm_first_measured_request_until_success_bounded_v0_26",
+          "title": "Readiness Probe Policy",
+          "type": "string"
+        },
+        "readiness_probe_population": {
+          "const": "EXCLUDED_FROM_MEASUREMENTS",
+          "title": "Readiness Probe Population",
+          "type": "string"
+        },
+        "ready_check_timeout_seconds": {
+          "const": 5,
+          "title": "Ready Check Timeout Seconds",
+          "type": "integer"
+        },
+        "request_extra_body": {
+          "const": "{\"chat_template_kwargs\":{\"enable_thinking\":false},\"seed\":42}",
+          "title": "Request Extra Body",
+          "type": "string"
+        },
+        "requested_output_tokens": {
+          "const": 128,
+          "title": "Requested Output Tokens",
+          "type": "integer"
+        },
+        "sampling": {
+          "$ref": "#/$defs/Qwen3ProfileSampling"
+        }
+      },
+      "required": [
+        "request_extra_body",
+        "ordered_profile_arguments",
+        "readiness_probe_policy",
+        "readiness_probe_population",
+        "ready_check_timeout_seconds",
+        "requested_output_tokens",
+        "sampling"
+      ],
+      "title": "Qwen3BenchmarkInvocation",
+      "type": "object"
+    },
+    "Qwen3ProfileClaimsBoundary": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_verdict": {
+          "const": "NONE",
+          "title": "Acceptance Verdict",
+          "type": "string"
+        },
+        "hardware_attestation": {
+          "const": false,
+          "title": "Hardware Attestation",
+          "type": "boolean"
+        },
+        "runtime_compatibility": {
+          "const": "UNPROVEN_REQUIRES_BOUNDED_SPIKE",
+          "title": "Runtime Compatibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "acceptance_verdict",
+        "hardware_attestation",
+        "runtime_compatibility"
+      ],
+      "title": "Qwen3ProfileClaimsBoundary",
+      "type": "object"
+    },
+    "Qwen3ProfileDigestPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "profile_sha256": {
+          "const": "sha256_of_rfc8785_canonical_json_bytes",
+          "title": "Profile Sha256",
+          "type": "string"
+        },
+        "workload_manifest_sha256": {
+          "const": "sha256_of_rfc8785_canonical_json_bytes",
+          "title": "Workload Manifest Sha256",
+          "type": "string"
+        },
+        "workload_sha256": {
+          "const": "sha256_of_exact_utf8_jsonl_bytes",
+          "title": "Workload Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_sha256",
+        "workload_manifest_sha256",
+        "workload_sha256"
+      ],
+      "title": "Qwen3ProfileDigestPolicy",
+      "type": "object"
+    },
+    "Qwen3ProfileModelPin": {
+      "additionalProperties": false,
+      "properties": {
+        "activation_dtype": {
+          "const": "bfloat16",
+          "title": "Activation Dtype",
+          "type": "string"
+        },
+        "checkpoint_precision": {
+          "const": "BF16",
+          "title": "Checkpoint Precision",
+          "type": "string"
+        },
+        "model_id": {
+          "const": "Qwen/Qwen3-8B",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "activation_dtype",
+        "checkpoint_precision",
+        "model_id",
+        "model_revision",
+        "tokenizer_revision"
+      ],
+      "title": "Qwen3ProfileModelPin",
+      "type": "object"
+    },
+    "Qwen3ProfileProducerPin": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_name": {
+          "const": "vllm_bench_serve",
+          "title": "Adapter Name",
+          "type": "string"
+        },
+        "adapter_version": {
+          "const": "1.0.0",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "name": {
+          "const": "vllm",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "const": "0.26.0",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapter_name",
+        "adapter_version",
+        "name",
+        "version"
+      ],
+      "title": "Qwen3ProfileProducerPin",
+      "type": "object"
+    },
+    "Qwen3ProfileSampling": {
+      "additionalProperties": false,
+      "properties": {
+        "ignore_eos": {
+          "const": true,
+          "title": "Ignore Eos",
+          "type": "boolean"
+        },
+        "min_p": {
+          "const": "0",
+          "title": "Min P",
+          "type": "string"
+        },
+        "seed": {
+          "const": 42,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "temperature": {
+          "const": "0.7",
+          "title": "Temperature",
+          "type": "string"
+        },
+        "top_k": {
+          "const": 20,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "top_p": {
+          "const": "0.8",
+          "title": "Top P",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ignore_eos",
+        "min_p",
+        "seed",
+        "temperature",
+        "top_k",
+        "top_p"
+      ],
+      "title": "Qwen3ProfileSampling",
+      "type": "object"
+    },
+    "Qwen3ProfileWorkloadBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "measured_requests": {
+          "const": 96,
+          "title": "Measured Requests",
+          "type": "integer"
+        },
+        "warmup_requests": {
+          "const": 12,
+          "title": "Warmup Requests",
+          "type": "integer"
+        },
+        "workload_id": {
+          "const": "inferdrome.qwen-text-mixed-length.v1",
+          "title": "Workload Id",
+          "type": "string"
+        },
+        "workload_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Workload Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_sha256",
+        "measured_requests",
+        "warmup_requests",
+        "workload_id",
+        "workload_sha256"
+      ],
+      "title": "Qwen3ProfileWorkloadBinding",
+      "type": "object"
+    },
+    "Qwen3ServerInvocation": {
+      "additionalProperties": false,
+      "properties": {
+        "device_ids": {
+          "const": "selected_single_physical_gpu",
+          "title": "Device Ids",
+          "type": "string"
+        },
+        "dtype": {
+          "const": "bfloat16",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "generation_config": {
+          "const": "vllm",
+          "title": "Generation Config",
+          "type": "string"
+        },
+        "gpu_memory_utilization": {
+          "const": "0.90",
+          "title": "Gpu Memory Utilization",
+          "type": "string"
+        },
+        "load_format": {
+          "const": "safetensors",
+          "title": "Load Format",
+          "type": "string"
+        },
+        "max_model_len": {
+          "const": 2048,
+          "title": "Max Model Len",
+          "type": "integer"
+        },
+        "model_impl": {
+          "const": "vllm",
+          "title": "Model Impl",
+          "type": "string"
+        },
+        "tensor_parallel_size": {
+          "const": 1,
+          "title": "Tensor Parallel Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device_ids",
+        "dtype",
+        "generation_config",
+        "gpu_memory_utilization",
+        "load_format",
+        "max_model_len",
+        "model_impl",
+        "tensor_parallel_size"
+      ],
+      "title": "Qwen3ServerInvocation",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:qwen3-8b-campaign-profile:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "benchmark_invocation": {
+      "$ref": "#/$defs/Qwen3BenchmarkInvocation"
+    },
+    "campaign_id": {
+      "const": "qwen-gpu-capability-campaign-v1",
+      "title": "Campaign Id",
+      "type": "string"
+    },
+    "claims_boundary": {
+      "$ref": "#/$defs/Qwen3ProfileClaimsBoundary"
+    },
+    "digest_policy": {
+      "$ref": "#/$defs/Qwen3ProfileDigestPolicy"
+    },
+    "implementation_state": {
+      "const": "LOCALLY_CONFORMANT_RUNTIME_UNPROVEN",
+      "title": "Implementation State",
+      "type": "string"
+    },
+    "model": {
+      "$ref": "#/$defs/Qwen3ProfileModelPin"
+    },
+    "producer": {
+      "$ref": "#/$defs/Qwen3ProfileProducerPin"
+    },
+    "profile_id": {
+      "const": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+      "title": "Profile Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.campaign-managed-vllm-profile.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "server_invocation": {
+      "$ref": "#/$defs/Qwen3ServerInvocation"
+    },
+    "workload_binding": {
+      "$ref": "#/$defs/Qwen3ProfileWorkloadBinding"
+    }
+  },
+  "required": [
+    "benchmark_invocation",
+    "campaign_id",
+    "claims_boundary",
+    "digest_policy",
+    "implementation_state",
+    "model",
+    "producer",
+    "profile_id",
+    "schema_version",
+    "server_invocation",
+    "workload_binding"
+  ],
+  "title": "Inferdrome Qwen3-8B campaign managed-vLLM profile v1",
+  "type": "object"
+}

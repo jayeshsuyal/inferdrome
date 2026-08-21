@@ -41,6 +41,16 @@ from inferdrome.normalization.vllm_0_26 import (
     VLLM_ADAPTER_VERSION,
     VLLM_VERSION,
 )
+from inferdrome.qwen3_campaign import (
+    QWEN3_8B_PROFILE_ID,
+    Qwen3CampaignProfileBinding,
+    qwen3_benchmark_profile_arguments,
+    qwen3_campaign_profile_binding,
+    require_qwen3_campaign_profile,
+    validate_qwen3_campaign_profile_binding,
+    validate_qwen3_campaign_spec,
+)
+from inferdrome.qwen3_tokenizer import verify_qwen3_tokenizer_files
 from inferdrome.resolution.workload import parse_custom_workload
 
 _MAX_PREFLIGHT_RESPONSE_BYTES = 1_048_576
@@ -450,9 +460,11 @@ def _build_argv(
     metadata: Mapping[str, str],
     *,
     executable: str,
+    capability_profile_id: str | None = None,
 ) -> tuple[str, ...]:
     if not isinstance(spec.target, AttachedVllmTarget):
         raise AdapterError("vLLM invocation requires an attached target")
+    require_qwen3_campaign_profile(spec, capability_profile_id)
     endpoint = str(spec.target.endpoint).rstrip("/")
     argv = [
         executable,
@@ -511,6 +523,15 @@ def _build_argv(
             "5",
             "--temperature",
             spec.workload.temperature,
+        ]
+    )
+    if capability_profile_id is not None:
+        if capability_profile_id != QWEN3_8B_PROFILE_ID:
+            raise AdapterError("vLLM capability profile is unsupported")
+        validate_qwen3_campaign_spec(spec)
+        argv.extend(qwen3_benchmark_profile_arguments())
+    argv.extend(
+        [
             "--seed",
             str(spec.workload.seed),
             "--request-id-prefix",
@@ -537,6 +558,7 @@ def _canonical_invocation_bytes(
     metadata: Mapping[str, str],
     preflight: EndpointPreflightCapture,
     local_gpu_proof: LocalGpuProof | None,
+    campaign_profile: Qwen3CampaignProfileBinding | None,
 ) -> bytes:
     value = {
         "argv": argv,
@@ -559,6 +581,12 @@ def _canonical_invocation_bytes(
             by_alias=True,
             exclude_none=False,
         )
+    if campaign_profile is not None:
+        value["campaign_profile"] = campaign_profile.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_none=False,
+        )
     return canonical_json_bytes(value)
 
 
@@ -570,6 +598,7 @@ def build_vllm_invocation(
     execution_fingerprint: str,
     preflight: EndpointPreflightCapture,
     local_gpu_proof: LocalGpuProof | None = None,
+    capability_profile_id: str | None = None,
 ) -> VllmInvocation:
     """Build a secret-free argument vector for exactly vLLM 0.26.0."""
 
@@ -586,12 +615,24 @@ def build_vllm_invocation(
     _require_directory_no_follow(paths.result_directory, label="vLLM result directory")
     metadata = _invocation_metadata(spec, plan, validated_fingerprint)
     validated_gpu_proof: LocalGpuProof | None = None
+    campaign_profile: Qwen3CampaignProfileBinding | None = None
     executable = "vllm"
+    if capability_profile_id is not None:
+        if capability_profile_id != QWEN3_8B_PROFILE_ID:
+            raise AdapterError("vLLM capability profile is unsupported")
+        if local_gpu_proof is None:
+            raise AdapterError("campaign capability profile requires local GPU proof")
+        validate_qwen3_campaign_spec(spec)
+        campaign_profile = qwen3_campaign_profile_binding(
+            spec,
+            verify_qwen3_tokenizer_files(paths.tokenizer_path),
+        )
     if local_gpu_proof is not None:
         validated_gpu_proof = validate_local_gpu_proof(
             spec,
             local_gpu_proof,
             run_id=plan.run_id,
+            capability_profile_id=capability_profile_id,
         )
         if str(paths.tokenizer_path) != validated_gpu_proof.tokenizer_snapshot.root:
             raise AdapterError("local GPU proof tokenizer path disagrees")
@@ -602,12 +643,14 @@ def build_vllm_invocation(
         paths,
         metadata,
         executable=executable,
+        capability_profile_id=capability_profile_id,
     )
     evidence = _canonical_invocation_bytes(
         argv,
         metadata,
         validated_preflight,
         validated_gpu_proof,
+        campaign_profile,
     )
     return VllmInvocation(
         argv=argv,
@@ -690,6 +733,9 @@ def validate_vllm_invocation_evidence(
     accepted_field_sets = {
         frozenset(base_fields),
         frozenset(base_fields | {"local_gpu_proof"}),
+        frozenset(
+            base_fields | {"campaign_profile", "local_gpu_proof"}
+        ),
     }
     if set(value) not in accepted_field_sets:
         raise AdapterError("vLLM invocation evidence has an unknown field set")
@@ -699,6 +745,7 @@ def validate_vllm_invocation_evidence(
     raw_preflight = value["endpoint_preflight"]
     raw_metadata = value["metadata"]
     raw_gpu_proof = value.get("local_gpu_proof")
+    raw_campaign_profile = value.get("campaign_profile")
     if (
         not isinstance(raw_argv, list)
         or not raw_argv
@@ -752,6 +799,14 @@ def validate_vllm_invocation_evidence(
         raise AdapterError("vLLM invocation preflight result is inconsistent")
 
     local_gpu_proof: LocalGpuProof | None = None
+    campaign_profile: Qwen3CampaignProfileBinding | None = None
+    capability_profile_id: str | None = None
+    if raw_campaign_profile is not None:
+        campaign_profile = validate_qwen3_campaign_profile_binding(
+            raw_campaign_profile,
+            spec,
+        )
+        capability_profile_id = campaign_profile.profile_id
     executable = "vllm"
     if raw_gpu_proof is not None:
         try:
@@ -764,6 +819,7 @@ def validate_vllm_invocation_evidence(
             spec,
             parsed_gpu_proof,
             run_id=plan.run_id,
+            capability_profile_id=capability_profile_id,
         )
         executable = local_gpu_proof.producer_distribution.executable_path
 
@@ -787,6 +843,7 @@ def validate_vllm_invocation_evidence(
         paths,
         expected_metadata,
         executable=executable,
+        capability_profile_id=capability_profile_id,
     )
     if argv != expected_argv:
         raise AdapterError("vLLM invocation arguments differ from frozen inputs")
@@ -795,6 +852,7 @@ def validate_vllm_invocation_evidence(
         expected_metadata,
         preflight,
         local_gpu_proof,
+        campaign_profile,
     )
     if content != expected_bytes:
         raise AdapterError("vLLM invocation evidence is not canonical JSON")

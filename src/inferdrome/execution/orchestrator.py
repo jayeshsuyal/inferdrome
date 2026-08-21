@@ -318,6 +318,11 @@ def _run_vllm(
             execution_fingerprint=resolution.execution_fingerprint,
             preflight=preflight,
             local_gpu_proof=local_gpu_proof,
+            capability_profile_id=(
+                managed_config.capability_profile_id
+                if managed_config is not None
+                else None
+            ),
         )
         _write_capture_file(
             capture_directory / "invocation.json",

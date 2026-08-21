@@ -275,21 +275,21 @@
     "prompt_buckets": [
       {
         "measured_requests": 32,
-        "target_input_tokens_under_control_tokenizer": 128,
-        "warmup_requests": 4
+        "target_input_tokens_under_control_tokenizer": 128
       },
       {
         "measured_requests": 32,
-        "target_input_tokens_under_control_tokenizer": 512,
-        "warmup_requests": 4
+        "target_input_tokens_under_control_tokenizer": 512
       },
       {
         "measured_requests": 32,
-        "target_input_tokens_under_control_tokenizer": 1024,
-        "warmup_requests": 4
+        "target_input_tokens_under_control_tokenizer": 1024
       }
     ],
     "prompt_content_class": "PUBLIC_SYNTHETIC_NON_SENSITIVE",
+    "readiness_probe_policy": "vllm_first_measured_request_until_success_bounded_v0_26",
+    "readiness_probe_population": "EXCLUDED_FROM_MEASUREMENTS",
+    "readiness_probe_timeout_seconds": 5,
     "repetitions_per_condition": 3,
     "request_order": "FIXED",
     "sampling": {
@@ -303,7 +303,10 @@
       "top_p": "0.8"
     },
     "sizing_reference_model_key": "qwen3-8b",
+    "warmup_population": "EXCLUDED_FROM_MEASUREMENTS",
+    "warmup_prompt_sequence_index": 0,
     "warmup_requests_per_run": 12,
+    "warmup_strategy": "vllm_first_measured_request_repeated_v0_26",
     "workload_id": "inferdrome.qwen-text-mixed-length.v1"
   }
 }

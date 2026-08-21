@@ -1,0 +1,57 @@
+[
+  {
+    "name": "valid-qwen3-profile",
+    "profile_valid": true,
+    "schema_valid": true
+  },
+  {
+    "mutation": {
+      "operation": "add",
+      "path": "/winner",
+      "value": "A10"
+    },
+    "name": "rejects-unknown-authoritative-field",
+    "profile_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/implementation_state",
+      "value": "RUNTIME_PROVEN"
+    },
+    "name": "rejects-unearned-runtime-claim",
+    "profile_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/workload_binding/manifest_sha256",
+      "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "name": "rejects-workload-manifest-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/benchmark_invocation/ordered_profile_arguments/1",
+      "value": "0.9"
+    },
+    "name": "rejects-benchmark-argument-drift",
+    "profile_valid": false,
+    "schema_valid": true
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/benchmark_invocation/request_extra_body",
+      "value": "{\"seed\":42}"
+    },
+    "name": "rejects-thinking-mode-drift",
+    "profile_valid": false,
+    "schema_valid": false
+  }
+]
