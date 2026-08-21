@@ -47,9 +47,187 @@ QWEN3_TEMPLATE_OVERHEAD_TOKENS: Final = 12
 QWEN3_TARGET_INPUT_TOKENS: Final = (128, 512, 1024)
 QWEN3_CONCURRENCY_LEVELS: Final = (1, 4, 16)
 
+_QWEN3_MODEL_FILES: Final = (
+    (
+        ".gitattributes",
+        1_570,
+        "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+    ),
+    (
+        "LICENSE",
+        11_343,
+        "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+    ),
+    (
+        "README.md",
+        16_660,
+        "0f36caaff9c2516411a7738db384606263ba653c1e63e61d72f511606164d5a6",
+    ),
+    (
+        "config.json",
+        728,
+        "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30",
+    ),
+    (
+        "generation_config.json",
+        239,
+        "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+    ),
+    (
+        "merges.txt",
+        1_671_853,
+        "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    ),
+    (
+        "model-00001-of-00005.safetensors",
+        3_996_250_744,
+        "31d6a825ae35f11fb85b195b4c42c146c051e446433125a215336abdf95cbf5f",
+    ),
+    (
+        "model-00002-of-00005.safetensors",
+        3_993_160_032,
+        "5991236cea6fe21f3d43cab0f0e84448734fbbe0789816202989f2ddc9d18282",
+    ),
+    (
+        "model-00003-of-00005.safetensors",
+        3_959_604_768,
+        "c5185c4794be2d8a9784d5753c9922db38df478ce11f9ed0b415b7304d896836",
+    ),
+    (
+        "model-00004-of-00005.safetensors",
+        3_187_841_392,
+        "b5ee7de71fbf17db3d5704e0c8f2bc7d005ca9e1d7ca2aeb19827b0cfcaa917a",
+    ),
+    (
+        "model-00005-of-00005.safetensors",
+        1_244_659_840,
+        "20c2d6366ab85c90786ccdd829cd2b9e7d30ef3b2ebbb998280e7e4014b542ff",
+    ),
+    (
+        "model.safetensors.index.json",
+        32_878,
+        "f9fdbcb91c23971c13ec5d5f2573d2349e8f61f2f049371ec699281748fdb1bc",
+    ),
+    (
+        "tokenizer.json",
+        11_422_654,
+        "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    ),
+    (
+        "tokenizer_config.json",
+        9_732,
+        "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+    ),
+    (
+        "vocab.json",
+        2_776_833,
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+)
+
+_QWEN3_TOKENIZERS_WHEELS: Final = {
+    "aarch64": {
+        "filename": (
+            "tokenizers-0.22.1-cp39-abi3-manylinux_2_17_aarch64."
+            "manylinux2014_aarch64.whl"
+        ),
+        "sha256": (
+            "sha256:19d2962dd28bc67c1f205ab180578a78eef89ac60ca7ef7cbe9635a46a56422a"
+        ),
+        "size_bytes": 3_256_994,
+        "url": (
+            "https://files.pythonhosted.org/packages/1e/3b/"
+            "55e64befa1e7bfea963cf4b787b2cea1011362c4193f5477047532ce127e/"
+            "tokenizers-0.22.1-cp39-abi3-manylinux_2_17_aarch64."
+            "manylinux2014_aarch64.whl"
+        ),
+    },
+    "x86_64": {
+        "filename": (
+            "tokenizers-0.22.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+        ),
+        "sha256": (
+            "sha256:e2ef6063d7a84994129732b47e7915e8710f27f99f3a3260b8a38fc7ccd083f4"
+        ),
+        "size_bytes": 3_250_221,
+        "url": (
+            "https://files.pythonhosted.org/packages/d0/c6/"
+            "dc3a0db5a6766416c32c034286d7c2d406da1f498e4de04ab1b8959edd00/"
+            "tokenizers-0.22.1-cp39-abi3-manylinux_2_17_x86_64."
+            "manylinux2014_x86_64.whl"
+        ),
+    },
+}
+
 
 def _sha256(content: bytes) -> str:
     return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def qwen3_model_manifest() -> dict[str, Any]:
+    """Return the complete checksum manifest for the frozen Hub revision."""
+
+    return {
+        "file_count": len(_QWEN3_MODEL_FILES),
+        "files": [
+            {
+                "path": path,
+                "sha256": f"sha256:{digest}",
+                "size_bytes": size,
+            }
+            for path, size, digest in _QWEN3_MODEL_FILES
+        ],
+        "hash_policy": "all-regular-files-excluding-dot-cache-sha256-v1",
+        "model_id": QWEN3_8B_MODEL_ID,
+        "model_revision": QWEN3_8B_REVISION,
+        "schema_version": "inferdrome.qwen3-model-file-manifest.v1",
+        "source": (
+            "https://huggingface.co/api/models/Qwen/Qwen3-8B/revision/"
+            f"{QWEN3_8B_REVISION}?blobs=true"
+        ),
+        "total_bytes": sum(size for _, size, _ in _QWEN3_MODEL_FILES),
+    }
+
+
+def qwen3_model_manifest_sha256() -> str:
+    return _sha256(canonical_json_bytes(qwen3_model_manifest()))
+
+
+def qwen3_expected_snapshot_sha256() -> str:
+    """Return the digest produced by managed-vLLM's snapshot hash policy."""
+
+    return _sha256(
+        canonical_json_bytes(
+            {
+                "files": qwen3_model_manifest()["files"],
+                "hash_policy": "regular-files-excluding-dot-cache-v1",
+            }
+        )
+    )
+
+
+def qwen3_host_dependencies() -> dict[str, Any]:
+    """Return checksum-pinned host distributions not covered by the vLLM pin."""
+
+    return {
+        "distributions": [
+            {
+                "architecture": architecture,
+                "filename": wheel["filename"],
+                "name": "tokenizers",
+                "sha256": wheel["sha256"],
+                "size_bytes": wheel["size_bytes"],
+                "url": wheel["url"],
+                "version": QWEN3_TOKENIZERS_VERSION,
+            }
+            for architecture, wheel in sorted(_QWEN3_TOKENIZERS_WHEELS.items())
+        ],
+        "schema_version": "inferdrome.qwen3-host-dependencies.v1",
+    }
+
+
+def qwen3_host_dependencies_sha256() -> str:
+    return _sha256(canonical_json_bytes(qwen3_host_dependencies()))
 
 
 def _prompt(sequence_index: int, target_input_tokens: int) -> str:
@@ -225,14 +403,31 @@ class Qwen3ProfileModelPin(FrozenModel):
     checkpoint_precision: Literal["BF16"]
     model_id: Literal["Qwen/Qwen3-8B"]
     model_revision: Literal["b968826d9c46dd6066d109eabc6255188de91218"]
+    snapshot_identity_sha256: Sha256Digest
+    snapshot_manifest_sha256: Sha256Digest
     tokenizer_revision: Literal["b968826d9c46dd6066d109eabc6255188de91218"]
+
+    @model_validator(mode="after")
+    def exact_snapshot_must_be_bound(self) -> Qwen3ProfileModelPin:
+        if self.snapshot_identity_sha256 != qwen3_expected_snapshot_sha256():
+            raise ValueError("Qwen3 model snapshot identity drifted")
+        if self.snapshot_manifest_sha256 != qwen3_model_manifest_sha256():
+            raise ValueError("Qwen3 model file manifest drifted")
+        return self
 
 
 class Qwen3ProfileProducerPin(FrozenModel):
     adapter_name: Literal["vllm_bench_serve"]
     adapter_version: Literal["1.0.0"]
+    host_dependencies_sha256: Sha256Digest
     name: Literal["vllm"]
     version: Literal["0.26.0"]
+
+    @model_validator(mode="after")
+    def exact_host_dependencies_must_be_bound(self) -> Qwen3ProfileProducerPin:
+        if self.host_dependencies_sha256 != qwen3_host_dependencies_sha256():
+            raise ValueError("Qwen3 host dependency manifest drifted")
+        return self
 
 
 class Qwen3ServerInvocation(FrozenModel):
@@ -319,11 +514,14 @@ def qwen3_profile_document() -> dict[str, Any]:
             "checkpoint_precision": "BF16",
             "model_id": QWEN3_8B_MODEL_ID,
             "model_revision": QWEN3_8B_REVISION,
+            "snapshot_identity_sha256": qwen3_expected_snapshot_sha256(),
+            "snapshot_manifest_sha256": qwen3_model_manifest_sha256(),
             "tokenizer_revision": QWEN3_8B_REVISION,
         },
         "producer": {
             "adapter_name": "vllm_bench_serve",
             "adapter_version": "1.0.0",
+            "host_dependencies_sha256": qwen3_host_dependencies_sha256(),
             "name": "vllm",
             "version": "0.26.0",
         },
@@ -464,12 +662,24 @@ def require_qwen3_campaign_profile(
     spec: ExperimentSpec,
     capability_profile_id: str | None,
 ) -> None:
-    """Prevent the named campaign source from falling back to legacy controls."""
+    """Prevent a named or tuple-equivalent Qwen3 source from legacy fallback."""
 
+    target = spec.target
+    execution = spec.execution
+    tuple_equivalent = (
+        isinstance(target, AttachedVllmTarget)
+        and isinstance(execution, VllmExecution)
+        and target.model == QWEN3_8B_MODEL_ID
+        and target.model_revision == QWEN3_8B_REVISION
+        and target.tokenizer_revision == QWEN3_8B_REVISION
+        and target.engine_version == "0.26.0"
+        and execution.producer_version == "0.26.0"
+        and str(spec.workload.path) == QWEN3_WORKLOAD_PATH
+        and spec.workload.sha256 == qwen3_workload_sha256()
+    )
     if (
-        str(spec.experiment.id) == "qwen3-8b-campaign-v1"
-        and capability_profile_id != QWEN3_8B_PROFILE_ID
-    ):
+        str(spec.experiment.id) == "qwen3-8b-campaign-v1" or tuple_equivalent
+    ) and capability_profile_id != QWEN3_8B_PROFILE_ID:
         raise AdapterError(
             "Qwen3 campaign requires its explicit managed capability profile"
         )
@@ -682,6 +892,12 @@ def qwen3_launch_documents() -> dict[str, bytes]:
         ),
         "campaigns/v1/profiles/managed-vllm-0.26-qwen3-8b-bf16-v1.json": (
             pretty_json(qwen3_profile_document())
+        ),
+        "campaigns/v1/profiles/qwen3-8b-host-dependencies.json": pretty_json(
+            qwen3_host_dependencies()
+        ),
+        "campaigns/v1/profiles/qwen3-8b-model-files.json": pretty_json(
+            qwen3_model_manifest()
         ),
         "campaigns/v1/workloads/qwen-text-mixed-length-v1.jsonl": (
             qwen3_workload_bytes()

@@ -23,6 +23,7 @@ def _instance(
     *,
     status: str = "active",
     price_cents_per_hour: int | None = 129,
+    instance_type_name: str = "gpu_1x_a10",
 ) -> dict[str, object]:
     value: dict[str, object] = {
         "hostname": "gpu-a10.example.test",
@@ -34,7 +35,8 @@ def _instance(
     }
     if price_cents_per_hour is not None:
         value["instance_type"] = {
-            "price_cents_per_hour": price_cents_per_hour
+            "name": instance_type_name,
+            "price_cents_per_hour": price_cents_per_hour,
         }
     return value
 
@@ -100,6 +102,7 @@ def test_instance_list_discards_provider_secrets() -> None:
 
     assert len(instances) == 1
     assert instances[0].hourly_rate_usd == Decimal("1.29")
+    assert instances[0].instance_type_name == "gpu_1x_a10"
     assert "must-never-escape" not in rendered
     assert transport.calls[0][:3] == ("GET", "/instances", None)
 
@@ -122,8 +125,7 @@ def test_urllib_transport_sends_explicit_user_agent(
     class FakeOpener:
         def open(self, request: Any, *, timeout: float) -> FakeResponse:
             captured["headers"] = {
-                key.lower(): value
-                for key, value in request.header_items()
+                key.lower(): value for key, value in request.header_items()
             }
             captured["timeout"] = timeout
             return FakeResponse()
@@ -160,11 +162,23 @@ def test_cost_window_uses_exact_decimal_flooring_and_safety_margin() -> None:
     )
 
     assert window.allowed_seconds == 7_200
-    assert window.cost_limit_deadline == datetime(
-        2026, 8, 18, 22, 0, tzinfo=UTC
-    )
+    assert window.cost_limit_deadline == datetime(2026, 8, 18, 22, 0, tzinfo=UTC)
     assert window.deadline == datetime(2026, 8, 18, 21, 59, tzinfo=UTC)
     assert window.termination_safety_margin_seconds == 60
+
+
+def test_cost_window_supports_qwen3_termination_confirmation_reserve() -> None:
+    window = guard.compute_cost_window(
+        billing_started_at=NOW,
+        hourly_rate_usd=Decimal("1.29"),
+        max_cost_usd=Decimal("0.75"),
+        termination_safety_margin_seconds=300,
+        now=NOW,
+    )
+
+    assert window.allowed_seconds == 2_093
+    assert window.termination_safety_margin_seconds == 300
+    assert window.cost_limit_deadline - window.deadline == timedelta(seconds=300)
 
 
 def test_cost_window_rejects_materially_future_billing_start() -> None:
@@ -300,9 +314,7 @@ def test_detached_watchdog_keeps_api_key_out_of_command_and_records(
 def test_watchdog_rejects_missing_provider_rate_before_spawning(
     tmp_path: Path,
 ) -> None:
-    transport = FakeTransport(
-        [{"data": [_instance(price_cents_per_hour=None)]}]
-    )
+    transport = FakeTransport([{"data": [_instance(price_cents_per_hour=None)]}])
     client = guard.LambdaCloudClient(API_KEY, transport=transport)
 
     with pytest.raises(guard.LambdaGuardError, match="did not report"):
@@ -504,6 +516,62 @@ def test_deadline_watch_writes_operational_termination_receipt(
     ready_value = json.loads(ready.read_text(encoding="utf-8"))
     assert ready_value["instance_id"] == INSTANCE_ID
     assert ready_value["readiness_token"] == "b" * 32
+
+
+def test_deadline_watch_wall_clock_rollback_cannot_extend_deadline(
+    tmp_path: Path,
+) -> None:
+    window = guard.CostWindow(
+        billing_started_at=NOW,
+        deadline=NOW + timedelta(seconds=5),
+        cost_limit_deadline=NOW + timedelta(seconds=65),
+        allowed_seconds=65,
+        termination_safety_margin_seconds=60,
+        hourly_rate_usd=Decimal("1.29"),
+        max_cost_usd=Decimal("0.03"),
+    )
+    elapsed = 0.0
+    sleeps: list[float] = []
+    wall_calls = 0
+
+    def wall_now() -> datetime:
+        nonlocal wall_calls
+        wall_calls += 1
+        return NOW if wall_calls == 1 else NOW - timedelta(hours=1)
+
+    def monotonic() -> float:
+        return elapsed
+
+    def sleeper(seconds: float) -> None:
+        nonlocal elapsed
+        sleeps.append(seconds)
+        elapsed += seconds
+
+    result = guard.TerminationResult(
+        instance_id=INSTANCE_ID,
+        final_status="absent",
+        request_sent=True,
+        confirmed_at=NOW + timedelta(seconds=5),
+    )
+    client = SimpleNamespace(
+        terminate_and_wait=lambda *_args, **_kwargs: result,
+    )
+
+    observed = guard.watch_until_deadline(
+        INSTANCE_ID,
+        cost_window=window,
+        receipt_path=tmp_path / "termination-receipt.json",
+        client=client,
+        poll_seconds=2,
+        termination_timeout_seconds=300,
+        retry_window_seconds=1_800,
+        sleeper=sleeper,
+        now=wall_now,
+        monotonic=monotonic,
+    )
+
+    assert observed == result
+    assert sleeps == [5.0]
 
 
 def test_concurrent_termination_receipt_first_writer_wins(tmp_path: Path) -> None:

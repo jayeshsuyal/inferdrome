@@ -42,11 +42,14 @@
     "checkpoint_precision": "BF16",
     "model_id": "Qwen/Qwen3-8B",
     "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "snapshot_identity_sha256": "sha256:588d19e9e489cccdad793718d8c5efbad0738be717369f9eacb94ce514992d2c",
+    "snapshot_manifest_sha256": "sha256:ef291a8dd0f21604c8da3025f5112bd6641e891a3401c8550584725eaabe55cc",
     "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218"
   },
   "producer": {
     "adapter_name": "vllm_bench_serve",
     "adapter_version": "1.0.0",
+    "host_dependencies_sha256": "sha256:4ae954afc7b7fec4db21c62d50c9f5262ad1e261270ce433840586c8410239a5",
     "name": "vllm",
     "version": "0.26.0"
   },

@@ -98,6 +98,12 @@ present, the controller adds one deliberately narrow provider integration: it
 may list the selected instance and terminate it, but it still cannot launch or
 modify an instance.
 
+The historical commands in this document continue to run the preserved
+Qwen2.5 proof pack. The separate, explicit Qwen3/A10 capability-spike mode is
+documented in
+[`QWEN3_CAMPAIGN_PROFILE.md`](QWEN3_CAMPAIGN_PROFILE.md#bounded-a10-remote-capture-controller);
+it cannot silently replace this legacy path.
+
 Before starting the paid host, make sure the intended Inferdrome commit is
 committed and the checkout is clean. After the provider reports an SSH
 destination, inspect the exact workflow without making a network connection:
