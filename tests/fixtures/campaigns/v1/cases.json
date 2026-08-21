@@ -1,0 +1,85 @@
+[
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "name": "valid-canonical-campaign",
+    "plan_valid": true,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "mutation": {
+      "operation": "add",
+      "path": "/acceptance_verdict",
+      "value": "PASS"
+    },
+    "name": "rejects-unknown-acceptance-field",
+    "plan_valid": false,
+    "schema_valid": false
+  },
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "mutation": {
+      "operation": "replace",
+      "path": "/hardware_control/assignments/1/model_key",
+      "value": "qwen3-14b"
+    },
+    "name": "rejects-control-model-drift",
+    "plan_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "mutation": {
+      "operation": "replace",
+      "path": "/capability_ladder/assignments/3/model_key",
+      "value": "qwen3-32b"
+    },
+    "name": "rejects-capability-ladder-collapse",
+    "plan_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "mutation": {
+      "operation": "replace",
+      "path": "/model_pins/0/thinking_mode",
+      "value": "ENABLED"
+    },
+    "name": "rejects-thinking-mode-drift",
+    "plan_valid": false,
+    "schema_valid": false
+  },
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "mutation": {
+      "operation": "replace",
+      "path": "/model_pins/1/model_revision",
+      "value": "main"
+    },
+    "name": "rejects-floating-model-revision",
+    "plan_valid": false,
+    "schema_valid": false
+  },
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "mutation": {
+      "operation": "replace",
+      "path": "/budget/sessions/3/max_session_cost_usd",
+      "value": "5.24"
+    },
+    "name": "rejects-budget-total-drift",
+    "plan_valid": false,
+    "schema_valid": true
+  },
+  {
+    "fixture": "valid/qwen-gpu-capability-campaign.json",
+    "mutation": {
+      "operation": "replace",
+      "path": "/capability_ladder/cross_profile_speed_ranking",
+      "value": "ALLOWED"
+    },
+    "name": "rejects-ladder-speed-ranking",
+    "plan_valid": false,
+    "schema_valid": false
+  }
+]

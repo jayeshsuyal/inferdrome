@@ -11,6 +11,12 @@ review, and deterministic handoff are pinned. The archive is EXTERNAL_ONLY;
 ExitSpec outcomes, owner license/publication decisions, security sign-off, and
 release work remain open.**
 
+Next campaign checkpoint: **ADR 0010 and the generated operational campaign
+plan freeze a two-track Qwen GPU methodology before profile implementation or
+paid execution. Every new model/runtime/GPU assignment remains
+`UNPROVEN_REQUIRES_SPIKE`; the document grants no launch authority and changes
+no public evidence schema.**
+
 The numbered PR labels below are original build-sequence milestones, not GitHub
 pull-request numbers.
 

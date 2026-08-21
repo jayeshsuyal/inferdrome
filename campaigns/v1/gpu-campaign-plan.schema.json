@@ -1,0 +1,909 @@
+{
+  "$defs": {
+    "CampaignBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "max_compute_cost_usd": {
+          "const": "9.50",
+          "title": "Max Compute Cost Usd",
+          "type": "string"
+        },
+        "price_verification": {
+          "const": "lambda_api_exact_match_before_capture_v1",
+          "title": "Price Verification",
+          "type": "string"
+        },
+        "rate_snapshot_date": {
+          "const": "2026-08-20",
+          "title": "Rate Snapshot Date",
+          "type": "string"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionBudget"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Sessions",
+          "type": "array"
+        },
+        "storage_cost": {
+          "const": "SEPARATE_OPERATOR_APPROVAL_REQUIRED",
+          "title": "Storage Cost",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rate_snapshot_date",
+        "currency",
+        "sessions",
+        "max_compute_cost_usd",
+        "price_verification",
+        "storage_cost"
+      ],
+      "title": "CampaignBudget",
+      "type": "object"
+    },
+    "CampaignWorkload": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrency_levels": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "enum": [
+                1,
+                4,
+                16
+              ],
+              "type": "integer"
+            },
+            {
+              "enum": [
+                1,
+                4,
+                16
+              ],
+              "type": "integer"
+            },
+            {
+              "enum": [
+                1,
+                4,
+                16
+              ],
+              "type": "integer"
+            }
+          ],
+          "title": "Concurrency Levels",
+          "type": "array"
+        },
+        "measured_requests_per_run": {
+          "const": 96,
+          "title": "Measured Requests Per Run",
+          "type": "integer"
+        },
+        "non_reference_token_counts": {
+          "const": "OBSERVED_NOT_CONFIGURED",
+          "title": "Non Reference Token Counts",
+          "type": "string"
+        },
+        "ordered_prompt_bytes_policy": {
+          "const": "same_ordered_utf8_prompt_bytes_across_tracks_v1",
+          "title": "Ordered Prompt Bytes Policy",
+          "type": "string"
+        },
+        "prompt_buckets": {
+          "items": {
+            "$ref": "#/$defs/PromptBucket"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Prompt Buckets",
+          "type": "array"
+        },
+        "prompt_content_class": {
+          "const": "PUBLIC_SYNTHETIC_NON_SENSITIVE",
+          "title": "Prompt Content Class",
+          "type": "string"
+        },
+        "repetitions_per_condition": {
+          "const": 3,
+          "title": "Repetitions Per Condition",
+          "type": "integer"
+        },
+        "request_order": {
+          "const": "FIXED",
+          "title": "Request Order",
+          "type": "string"
+        },
+        "sampling": {
+          "$ref": "#/$defs/SamplingDesign"
+        },
+        "sizing_reference_model_key": {
+          "const": "qwen3-8b",
+          "title": "Sizing Reference Model Key",
+          "type": "string"
+        },
+        "warmup_requests_per_run": {
+          "const": 12,
+          "title": "Warmup Requests Per Run",
+          "type": "integer"
+        },
+        "workload_id": {
+          "const": "inferdrome.qwen-text-mixed-length.v1",
+          "title": "Workload Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workload_id",
+        "prompt_content_class",
+        "ordered_prompt_bytes_policy",
+        "sizing_reference_model_key",
+        "non_reference_token_counts",
+        "prompt_buckets",
+        "measured_requests_per_run",
+        "warmup_requests_per_run",
+        "concurrency_levels",
+        "repetitions_per_condition",
+        "request_order",
+        "sampling"
+      ],
+      "title": "CampaignWorkload",
+      "type": "object"
+    },
+    "CapabilityLadderTrack": {
+      "additionalProperties": false,
+      "properties": {
+        "assignments": {
+          "items": {
+            "$ref": "#/$defs/PlannedProfileAssignment"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Assignments",
+          "type": "array"
+        },
+        "causal_claim": {
+          "const": "NONE",
+          "title": "Causal Claim",
+          "type": "string"
+        },
+        "cross_profile_speed_ranking": {
+          "const": "PROHIBITED",
+          "title": "Cross Profile Speed Ranking",
+          "type": "string"
+        },
+        "current_comparison_contract": {
+          "const": "NONE_DIFFERENT_MODEL_PROFILES",
+          "title": "Current Comparison Contract",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "demonstrate_distinct_model_capacity_per_gpu_tier",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "track_id": {
+          "const": "qwen-capability-ladder",
+          "title": "Track Id",
+          "type": "string"
+        },
+        "track_kind": {
+          "const": "CAPABILITY_LADDER",
+          "title": "Track Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "track_id",
+        "track_kind",
+        "purpose",
+        "assignments",
+        "current_comparison_contract",
+        "cross_profile_speed_ranking",
+        "causal_claim"
+      ],
+      "title": "CapabilityLadderTrack",
+      "type": "object"
+    },
+    "CheckpointPrecision": {
+      "enum": [
+        "BF16",
+        "OFFICIAL_FP8_E4M3"
+      ],
+      "title": "CheckpointPrecision",
+      "type": "string"
+    },
+    "ExecutionSafetyPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "api_rate_match_required": {
+          "const": true,
+          "title": "Api Rate Match Required",
+          "type": "boolean"
+        },
+        "local_archive_checksum_before_immediate_termination": {
+          "const": true,
+          "title": "Local Archive Checksum Before Immediate Termination",
+          "type": "boolean"
+        },
+        "offline_semantic_verification_after_termination": {
+          "const": true,
+          "title": "Offline Semantic Verification After Termination",
+          "type": "boolean"
+        },
+        "one_paid_instance_at_a_time": {
+          "const": true,
+          "title": "One Paid Instance At A Time",
+          "type": "boolean"
+        },
+        "operator_confirmation_per_launch": {
+          "const": true,
+          "title": "Operator Confirmation Per Launch",
+          "type": "boolean"
+        },
+        "provider_termination_confirmation_required": {
+          "const": true,
+          "title": "Provider Termination Confirmation Required",
+          "type": "boolean"
+        },
+        "shell_shutdown_is_termination": {
+          "const": false,
+          "title": "Shell Shutdown Is Termination",
+          "type": "boolean"
+        },
+        "terminate_in_controller_finally": {
+          "const": true,
+          "title": "Terminate In Controller Finally",
+          "type": "boolean"
+        },
+        "watchdog_ready_before_remote_setup": {
+          "const": true,
+          "title": "Watchdog Ready Before Remote Setup",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "one_paid_instance_at_a_time",
+        "operator_confirmation_per_launch",
+        "api_rate_match_required",
+        "watchdog_ready_before_remote_setup",
+        "terminate_in_controller_finally",
+        "provider_termination_confirmation_required",
+        "shell_shutdown_is_termination",
+        "local_archive_checksum_before_immediate_termination",
+        "offline_semantic_verification_after_termination"
+      ],
+      "title": "ExecutionSafetyPolicy",
+      "type": "object"
+    },
+    "GpuInterconnect": {
+      "enum": [
+        "PCIE",
+        "SXM6"
+      ],
+      "title": "GpuInterconnect",
+      "type": "string"
+    },
+    "GpuTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "gpu_count": {
+          "const": 1,
+          "title": "Gpu Count",
+          "type": "integer"
+        },
+        "gpu_model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Gpu Model",
+          "type": "string"
+        },
+        "gpu_tier_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Gpu Tier Id",
+          "type": "string"
+        },
+        "interconnect": {
+          "$ref": "#/$defs/GpuInterconnect"
+        },
+        "provider": {
+          "const": "lambda_cloud",
+          "title": "Provider",
+          "type": "string"
+        },
+        "provider_instance_type_policy": {
+          "const": "api_resolved_exact_gpu_tier_v1",
+          "title": "Provider Instance Type Policy",
+          "type": "string"
+        },
+        "vram_gib": {
+          "maximum": 1024,
+          "minimum": 1,
+          "title": "Vram Gib",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "gpu_tier_id",
+        "provider",
+        "gpu_model",
+        "vram_gib",
+        "interconnect",
+        "gpu_count",
+        "provider_instance_type_policy"
+      ],
+      "title": "GpuTarget",
+      "type": "object"
+    },
+    "HardwareControlTrack": {
+      "additionalProperties": false,
+      "properties": {
+        "assignments": {
+          "items": {
+            "$ref": "#/$defs/PlannedProfileAssignment"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Assignments",
+          "type": "array"
+        },
+        "causal_claim": {
+          "const": "NONE",
+          "title": "Causal Claim",
+          "type": "string"
+        },
+        "cross_hardware_ratio_publication": {
+          "const": "WITHHELD_PENDING_REVIEWED_HARDWARE_CONTRACT",
+          "title": "Cross Hardware Ratio Publication",
+          "type": "string"
+        },
+        "current_comparison_contract": {
+          "const": "NONE_CONTROLLED_COMPARISON_V1_DOES_NOT_SUPPORT_HARDWARE",
+          "title": "Current Comparison Contract",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "hold_model_runtime_and_workload_constant_across_gpu_tiers",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "track_id": {
+          "const": "qwen3-8b-hardware-control",
+          "title": "Track Id",
+          "type": "string"
+        },
+        "track_kind": {
+          "const": "HARDWARE_CONTROL",
+          "title": "Track Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "track_id",
+        "track_kind",
+        "purpose",
+        "assignments",
+        "current_comparison_contract",
+        "cross_hardware_ratio_publication",
+        "causal_claim"
+      ],
+      "title": "HardwareControlTrack",
+      "type": "object"
+    },
+    "HistoricalCanary": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Bundle Digest",
+          "type": "string"
+        },
+        "campaign_execution": {
+          "const": false,
+          "title": "Campaign Execution",
+          "type": "boolean"
+        },
+        "model_id": {
+          "const": "Qwen/Qwen2.5-0.5B-Instruct",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "const": "7ae557604adf67be50417f59c2c2f167def9a775",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "mutation_policy": {
+          "const": "PRESERVE_EXISTING_EVIDENCE_BYTES",
+          "title": "Mutation Policy",
+          "type": "string"
+        },
+        "producer_version": {
+          "const": "0.26.0",
+          "title": "Producer Version",
+          "type": "string"
+        },
+        "profile_id": {
+          "const": "inferdrome.managed-vllm-0.26-evidence-profile.v1",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "HISTORICAL_CANARY_ONLY",
+          "title": "Role",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^run-[0-9a-f]{32}$",
+          "title": "Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "campaign_execution",
+        "model_id",
+        "model_revision",
+        "producer_version",
+        "profile_id",
+        "run_id",
+        "bundle_digest",
+        "mutation_policy"
+      ],
+      "title": "HistoricalCanary",
+      "type": "object"
+    },
+    "ModelPin": {
+      "additionalProperties": false,
+      "properties": {
+        "activation_dtype": {
+          "const": "bfloat16",
+          "title": "Activation Dtype",
+          "type": "string"
+        },
+        "benchmark_modality": {
+          "const": "TEXT_ONLY",
+          "title": "Benchmark Modality",
+          "type": "string"
+        },
+        "checkpoint_precision": {
+          "$ref": "#/$defs/CheckpointPrecision"
+        },
+        "kv_cache_dtype": {
+          "const": "bfloat16",
+          "title": "Kv Cache Dtype",
+          "type": "string"
+        },
+        "license": {
+          "const": "apache-2.0",
+          "title": "License",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Model Key",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "quantization_policy": {
+          "$ref": "#/$defs/QuantizationPolicy"
+        },
+        "server_model_mode": {
+          "$ref": "#/$defs/ServerModelMode"
+        },
+        "thinking_mode": {
+          "const": "DISABLED",
+          "title": "Thinking Mode",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        },
+        "total_parameters": {
+          "minimum": 1,
+          "title": "Total Parameters",
+          "type": "integer"
+        },
+        "weight_format": {
+          "const": "safetensors",
+          "title": "Weight Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_key",
+        "model_id",
+        "model_revision",
+        "tokenizer_revision",
+        "license",
+        "total_parameters",
+        "checkpoint_precision",
+        "activation_dtype",
+        "kv_cache_dtype",
+        "quantization_policy",
+        "weight_format",
+        "benchmark_modality",
+        "server_model_mode",
+        "thinking_mode"
+      ],
+      "title": "ModelPin",
+      "type": "object"
+    },
+    "PlannedProfileAssignment": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_state": {
+          "const": "UNPROVEN_REQUIRES_SPIKE",
+          "title": "Capability State",
+          "type": "string"
+        },
+        "gpu_tier_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Gpu Tier Id",
+          "type": "string"
+        },
+        "model_key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Model Key",
+          "type": "string"
+        },
+        "planned_profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Planned Profile Id",
+          "type": "string"
+        },
+        "producer_name": {
+          "const": "vllm",
+          "title": "Producer Name",
+          "type": "string"
+        },
+        "producer_version_candidate": {
+          "const": "0.26.0",
+          "title": "Producer Version Candidate",
+          "type": "string"
+        },
+        "tensor_parallel_size": {
+          "const": 1,
+          "title": "Tensor Parallel Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "gpu_tier_id",
+        "model_key",
+        "planned_profile_id",
+        "producer_name",
+        "producer_version_candidate",
+        "capability_state",
+        "tensor_parallel_size"
+      ],
+      "title": "PlannedProfileAssignment",
+      "type": "object"
+    },
+    "PromptBucket": {
+      "additionalProperties": false,
+      "properties": {
+        "measured_requests": {
+          "const": 32,
+          "title": "Measured Requests",
+          "type": "integer"
+        },
+        "target_input_tokens_under_control_tokenizer": {
+          "enum": [
+            128,
+            512,
+            1024
+          ],
+          "title": "Target Input Tokens Under Control Tokenizer",
+          "type": "integer"
+        },
+        "warmup_requests": {
+          "const": 4,
+          "title": "Warmup Requests",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_input_tokens_under_control_tokenizer",
+        "measured_requests",
+        "warmup_requests"
+      ],
+      "title": "PromptBucket",
+      "type": "object"
+    },
+    "PublicationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_ladder_speed_ranking": {
+          "const": "PROHIBITED",
+          "title": "Capability Ladder Speed Ranking",
+          "type": "string"
+        },
+        "generated_metrics_only": {
+          "const": true,
+          "title": "Generated Metrics Only",
+          "type": "boolean"
+        },
+        "hardware_control_ratios": {
+          "const": "WITHHELD_PENDING_REVIEWED_HARDWARE_CONTRACT",
+          "title": "Hardware Control Ratios",
+          "type": "string"
+        },
+        "inferdrome_acceptance_verdict": {
+          "title": "Inferdrome Acceptance Verdict",
+          "type": "null"
+        },
+        "synthetic_campaign_results": {
+          "const": "EXCLUDED",
+          "title": "Synthetic Campaign Results",
+          "type": "string"
+        },
+        "verified_real_bundles_only": {
+          "const": true,
+          "title": "Verified Real Bundles Only",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "verified_real_bundles_only",
+        "generated_metrics_only",
+        "synthetic_campaign_results",
+        "hardware_control_ratios",
+        "capability_ladder_speed_ranking",
+        "inferdrome_acceptance_verdict"
+      ],
+      "title": "PublicationPolicy",
+      "type": "object"
+    },
+    "QuantizationPolicy": {
+      "enum": [
+        "NONE",
+        "CHECKPOINT_DEFINED_FP8"
+      ],
+      "title": "QuantizationPolicy",
+      "type": "string"
+    },
+    "SamplingDesign": {
+      "additionalProperties": false,
+      "properties": {
+        "ignore_eos": {
+          "const": true,
+          "title": "Ignore Eos",
+          "type": "boolean"
+        },
+        "min_p": {
+          "const": "0",
+          "title": "Min P",
+          "type": "string"
+        },
+        "requested_output_tokens": {
+          "const": 128,
+          "title": "Requested Output Tokens",
+          "type": "integer"
+        },
+        "seed": {
+          "const": 42,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "temperature": {
+          "const": "0.7",
+          "title": "Temperature",
+          "type": "string"
+        },
+        "thinking_mode": {
+          "const": "DISABLED",
+          "title": "Thinking Mode",
+          "type": "string"
+        },
+        "top_k": {
+          "const": 20,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "top_p": {
+          "const": "0.8",
+          "title": "Top P",
+          "type": "string"
+        }
+      },
+      "required": [
+        "thinking_mode",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "seed",
+        "ignore_eos",
+        "requested_output_tokens"
+      ],
+      "title": "SamplingDesign",
+      "type": "object"
+    },
+    "ServerModelMode": {
+      "enum": [
+        "TEXT_GENERATION",
+        "LANGUAGE_MODEL_ONLY"
+      ],
+      "title": "ServerModelMode",
+      "type": "string"
+    },
+    "SessionBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "gpu_tier_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Gpu Tier Id",
+          "type": "string"
+        },
+        "hourly_rate_snapshot_usd": {
+          "maxLength": 16,
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,2})?$",
+          "title": "Hourly Rate Snapshot Usd",
+          "type": "string"
+        },
+        "max_session_cost_usd": {
+          "maxLength": 16,
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,2})?$",
+          "title": "Max Session Cost Usd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gpu_tier_id",
+        "hourly_rate_snapshot_usd",
+        "max_session_cost_usd"
+      ],
+      "title": "SessionBudget",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gpu-campaign-plan:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Design-only plan that cannot itself authorize or attest execution.",
+  "properties": {
+    "acceptance_authority": {
+      "const": "EXTERNAL_CONSUMER_ONLY",
+      "title": "Acceptance Authority",
+      "type": "string"
+    },
+    "budget": {
+      "$ref": "#/$defs/CampaignBudget"
+    },
+    "campaign_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+      "title": "Campaign Id",
+      "type": "string"
+    },
+    "capability_ladder": {
+      "$ref": "#/$defs/CapabilityLadderTrack"
+    },
+    "execution_safety": {
+      "$ref": "#/$defs/ExecutionSafetyPolicy"
+    },
+    "frozen_on": {
+      "const": "2026-08-20",
+      "title": "Frozen On",
+      "type": "string"
+    },
+    "gpu_targets": {
+      "items": {
+        "$ref": "#/$defs/GpuTarget"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "title": "Gpu Targets",
+      "type": "array"
+    },
+    "hardware_attestation": {
+      "const": false,
+      "title": "Hardware Attestation",
+      "type": "boolean"
+    },
+    "hardware_control": {
+      "$ref": "#/$defs/HardwareControlTrack"
+    },
+    "historical_canary": {
+      "$ref": "#/$defs/HistoricalCanary"
+    },
+    "model_pins": {
+      "items": {
+        "$ref": "#/$defs/ModelPin"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "title": "Model Pins",
+      "type": "array"
+    },
+    "paid_launch_authorization": {
+      "const": "NOT_GRANTED_BY_THIS_DOCUMENT",
+      "title": "Paid Launch Authorization",
+      "type": "string"
+    },
+    "plan_status": {
+      "const": "DESIGN_FROZEN_EXECUTION_BLOCKED",
+      "title": "Plan Status",
+      "type": "string"
+    },
+    "profile_implementation_gate": {
+      "const": "EVERY_PLANNED_PROFILE_MUST_PASS_LOCAL_CONFORMANCE_BEFORE_PAID_LAUNCH",
+      "title": "Profile Implementation Gate",
+      "type": "string"
+    },
+    "publication": {
+      "$ref": "#/$defs/PublicationPolicy"
+    },
+    "runtime_compatibility_gate": {
+      "const": "EVERY_MODEL_RUNTIME_GPU_TUPLE_REQUIRES_A_BOUNDED_CAPABILITY_SPIKE",
+      "title": "Runtime Compatibility Gate",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gpu-campaign-plan.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "workload": {
+      "$ref": "#/$defs/CampaignWorkload"
+    }
+  },
+  "required": [
+    "schema_version",
+    "campaign_id",
+    "plan_status",
+    "frozen_on",
+    "historical_canary",
+    "model_pins",
+    "gpu_targets",
+    "hardware_control",
+    "capability_ladder",
+    "workload",
+    "budget",
+    "execution_safety",
+    "publication",
+    "profile_implementation_gate",
+    "runtime_compatibility_gate",
+    "paid_launch_authorization",
+    "hardware_attestation",
+    "acceptance_authority"
+  ],
+  "title": "Inferdrome operational GPU campaign plan v1",
+  "type": "object"
+}
