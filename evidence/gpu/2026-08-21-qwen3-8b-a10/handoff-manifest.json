@@ -49,7 +49,7 @@
     "capture_producer_commit": "058482df47377aaae6303015746f9a8e05d7e0f7",
     "eventual_merge_commit": null,
     "merge_requirement": "Use a merge commit that preserves capture_producer_commit ancestry; do not squash or rebase away the producer commit.",
-    "publication_review_commit": null
+    "publication_review_commit": "68854817da3ddd5a0b667f703960744cd6669e25"
   },
   "operational_completion": {
     "path": "evidence/gpu/2026-08-21-qwen3-8b-a10/operational-summary.json",

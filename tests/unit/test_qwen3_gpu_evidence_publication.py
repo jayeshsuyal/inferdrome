@@ -40,6 +40,9 @@ def test_committed_qwen3_publication_records_cross_bind() -> None:
     assert canonical_document_sha256(operational) == (
         publication.OPERATIONAL_SUMMARY_SHA256
     )
+    assert canonical_document_sha256(handoff) == (
+        publication.HANDOFF_MANIFEST_SHA256
+    )
     assert handoff["publication_review"]["sha256"] == (
         canonical_document_sha256(review)
     )
