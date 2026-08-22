@@ -28,6 +28,15 @@ The raw archive remains local pending owner license/privacy approval. Independen
 acceptance remains a separate consumer boundary; it is not implemented inside
 this repository.
 
+The frozen Qwen3-8B BF16 profile has now also completed one genuine bounded A10
+capability spike: 96/96 measured requests succeeded, the independently
+recalculated native-TTFT p95 is `242,426,174 ns`, and the output-token rate is
+`28.870215 tokens/s`. The exact archive and post-termination receipts bind to
+producer commit `058482df47377aaae6303015746f9a8e05d7e0f7`. Its deterministic
+[publication records](evidence/gpu/2026-08-21-qwen3-8b-a10/README.md) remain
+`EXTERNAL_ONLY`; this is one runtime observation, not hardware attestation, a
+cross-GPU comparison, or an acceptance verdict.
+
 The repository also includes an accepted post-v0.1 local evidence dashboard.
 It presents Runs, Run detail, Compare, and Evidence views over the same bounded
 verification and deterministic recalculation path. It remains read-only,
@@ -122,6 +131,20 @@ workflow without claiming genuine GPU performance. See the
 [local product demo runbook](docs/LOCAL_DEMO.md) for the recording route and
 approved claim boundary.
 
+When the reviewed Qwen3 capture is present locally, one command independently
+reverifies the exact archive and post-termination receipts before opening that
+genuine run through the same read-only dashboard:
+
+```bash
+PYTHONPATH=src .venv/bin/python \
+  scripts/run_qwen3_evidence_dashboard.py --open
+```
+
+This path never substitutes committed summary metadata for the evidence bundle.
+Public CI validates the committed handoff cross-digests; full archive
+reverification remains local until the owner approves delivery of the exact
+`EXTERNAL_ONLY` bytes.
+
 The fake path is always marked `SYNTHETIC_ONLY`. An attached-vLLM run requires
 an explicit local tokenizer directory and remains `INELIGIBLE` until the
 real-GPU provenance gate is satisfied; the CLI never upgrades configured or
@@ -141,6 +164,10 @@ that a second executor invocation reuses the exact completed schedule.
 The 2026-08-20 Lambda A10 capture completed and independently verified that
 entire pack; its exact hashes and remaining ExitSpec boundary are recorded in
 the runbook.
+The separate 2026-08-21 Qwen3-8B A10 spike closes runtime compatibility and fit
+for that exact profile only. Other GPUs and cross-GPU conclusions remain
+unproven until the frozen campaign is executed without changing the model or
+workload.
 For an operator-provided SSH GPU VM, the runbook also includes one bounded
 controller that transfers the exact clean Git commit, runs both proof modes,
 retrieves a checksumed archive, and independently verifies it on the local

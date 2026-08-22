@@ -5,19 +5,19 @@ Status: **Canonical v0.1 sequence**
 The roadmap is gate-driven. A phase is complete when its invariants are proven,
 not when its planned files merely exist.
 
-Current checkpoint: **The Inferdrome producer-side real-GPU gate is complete:
-one exact A10 archive, standalone capability profile, bounded publication
-review, and deterministic handoff are pinned. The archive is EXTERNAL_ONLY;
-ExitSpec outcomes, owner license/publication decisions, security sign-off, and
-release work remain open.**
+Current checkpoint: **The original Qwen2.5 producer-side real-GPU gate and the
+separate Qwen3-8B A10 capability spike are complete. The Qwen3 run contains
+96/96 successes, a valid customer-eligible bundle, independent post-termination
+verification, a bounded publication review, and deterministic handoff anchors.
+Both raw archives remain EXTERNAL_ONLY; owner license/publication decisions,
+security sign-off, ExitSpec outcomes, and release work remain open.**
 
-Next campaign checkpoint: **ADR 0010 and the generated operational campaign
-plan freeze a two-track Qwen GPU methodology before profile implementation or
-paid execution. Every new model/runtime/GPU assignment remains
-`UNPROVEN_REQUIRES_SPIKE`; the document grants no launch authority and changes
-no public evidence schema. ADR 0011 aligns warmups with exact vLLM 0.26.0
-behavior. The Qwen3-8B profile and 96-prompt workload are locally conformant;
-runtime compatibility and A10 fit remain unproven until the bounded spike.**
+Next campaign checkpoint: **Preserve the exact Qwen3-8B model, workload,
+sampling, producer, and reducer identities while collecting separately reviewed
+receipts on the next selected GPU classes. No cross-GPU conclusion exists until
+those runs complete. Every unexecuted model/runtime/GPU assignment remains
+`UNPROVEN_REQUIRES_SPIKE`; ADR 0010 grants no launch authority, and ADR 0011
+keeps warmups aligned with exact vLLM 0.26.0 behavior.**
 
 The numbered PR labels below are original build-sequence milestones, not GitHub
 pull-request numbers.
