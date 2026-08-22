@@ -1,11 +1,13 @@
 # Managed real-GPU proof
 
-Status: **Genuine A10 archive and producer handoff verified; raw archive
-EXTERNAL_ONLY and ExitSpec acceptance pending**
+Status: **Historical Qwen2.5 proof and Qwen3-8B A10 capability archive verified;
+both raw archives EXTERNAL_ONLY and ExitSpec acceptance pending**
 
 Implementation date: **2026-08-06**
 
 Producer handoff closure date: **2026-08-20**
+
+Qwen3-8B A10 capability closure date: **2026-08-21**
 
 This runbook is the Inferdrome-owned portion of the real-GPU evidence gate. It
 prepares one pinned Linux environment, launches vLLM under Inferdrome's own
@@ -367,6 +369,52 @@ The capture producer commit, later profile/publication commits, and eventual
 merge commit are separate identities; the eventual owner merge must preserve
 `c08b46d9fbd87477f45d130aa3c63615937c4dc3` as an ancestor rather than
 squashing it away.
+
+## Qwen3-8B A10 reviewed capability spike
+
+The separate frozen Qwen3-8B profile completed one bounded genuine A10 run on
+2026-08-21. It produced 96/96 successful measured requests, zero failures, 96
+native TTFT samples, nearest-rank p50/p95/p99 TTFT values of `127,123,958`,
+`242,426,174`, and `244,030,050 ns`, and `28.870215` output tokens/s.
+
+The canonical anchors are:
+
+- producer commit
+  `058482df47377aaae6303015746f9a8e05d7e0f7`;
+- archive digest
+  `sha256:27cdcc0192c5d6f05b5350e380b53caa158c249de28ed6880fe3d7971032172f`;
+- bundle digest
+  `sha256:48514166f6c284613052fedb0264ed83e2212156233d9f6103cb8946c0211ad6`;
+- [publication review](../evidence/gpu/2026-08-21-qwen3-8b-a10/publication-review.json);
+- [privacy-safe operational summary](../evidence/gpu/2026-08-21-qwen3-8b-a10/operational-summary.json); and
+- [handoff manifest](../evidence/gpu/2026-08-21-qwen3-8b-a10/handoff-manifest.json).
+
+The controller retrieved the checksum-verified archive, confirmed the Lambda
+instance absent, and only then published `VALID_AFTER_PROVIDER_TERMINATION`.
+That termination record is operational evidence, not provider attestation. The
+capture itself records one locally verified CUDA device reporting `NVIDIA A10`;
+`hardware_attestation` remains false.
+
+Recalculate the exact local archive and receipts without rewriting them:
+
+```bash
+PYTHONPATH=src .venv/bin/python \
+  scripts/review_qwen3_gpu_evidence_publication.py --check
+```
+
+Open that same verified bundle in the loopback-only dashboard:
+
+```bash
+PYTHONPATH=src .venv/bin/python \
+  scripts/run_qwen3_evidence_dashboard.py --open
+```
+
+The archive remains `EXTERNAL_ONLY` because owner publication approval and
+archive-bound repository, model, workload, vLLM, and generated-output license
+decisions are unresolved. Public CI validates the committed record shapes and
+cross-digests; it does not claim to possess or reverify ignored local bytes.
+This spike closes A10 runtime compatibility for the exact profile only. It is
+not a cross-GPU result or an Inferdrome acceptance verdict.
 
 ## Exact managed server launch
 

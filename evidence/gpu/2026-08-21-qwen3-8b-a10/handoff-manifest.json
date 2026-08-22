@@ -1,0 +1,113 @@
+{
+  "acceptance_boundary": {
+    "capture_kind": "BOUNDED_RUNTIME_CAPABILITY_SPIKE",
+    "inferdrome_acceptance_verdict": null,
+    "publication_state": "OBSERVATION_ONLY_PENDING_REVIEW",
+    "statement": "This capture proves one bounded runtime observation. It does not assign PASS, FAIL, or NOT_PROVEN and is not a cross-GPU result."
+  },
+  "archive": {
+    "bundle_member_path": "capture/runs/run-fcbd9a0a4031826ea601c5f14637e8dc/bundle",
+    "capture_manifest_sha256": "sha256:da24b867be15285ebd41a7187b3d96cfd5f18ffe373a0b7b883f2de5bd5b0869",
+    "compressed_size_bytes": 321010,
+    "sha256": "sha256:27cdcc0192c5d6f05b5350e380b53caa158c249de28ed6880fe3d7971032172f"
+  },
+  "capability_profile": {
+    "campaign_id": "qwen-gpu-capability-campaign-v1",
+    "commit": "6cb774d210940073347f9045bb15611aa9e9cf27",
+    "managed_profile": {
+      "identity": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+      "path": "campaigns/v1/profiles/managed-vllm-0.26-qwen3-8b-bf16-v1.json",
+      "sha256": "sha256:858382b5ea2e86253f55ed914d11e4ab7e8b13aa6331e8699fb4d364a9ee9369"
+    },
+    "model_snapshot": {
+      "file_count": 15,
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "sha256": "sha256:588d19e9e489cccdad793718d8c5efbad0738be717369f9eacb94ce514992d2c",
+      "total_bytes": 16397461266
+    },
+    "workload": {
+      "id": "inferdrome.qwen-text-mixed-length.v1",
+      "path": "campaigns/v1/workloads/qwen-text-mixed-length-v1.jsonl",
+      "prompt_count": 96,
+      "sha256": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f"
+    }
+  },
+  "contract_binding": {
+    "chronology": "RETROSPECTIVE",
+    "chronology_disclosure": "No producer-side ExitSpec contract digest was frozen before this measurement. A later consumer must use an explicit external receipt binding without rewriting chronology.",
+    "producer_exitspec_contract_digest": null,
+    "required_consumer_mode": "EXTERNAL_RECEIPT_BINDING"
+  },
+  "fixture_delivery": {
+    "proposed_checksum_pinned_location": "https://github.com/jayeshsuyal/inferdrome/releases/download/gpu-evidence-2026-08-21/inferdrome-qwen3-8b-a10-27cdcc01.tar.gz",
+    "publication_state": "BLOCKED_PENDING_OWNER_APPROVAL",
+    "required_sha256": "sha256:27cdcc0192c5d6f05b5350e380b53caa158c249de28ed6880fe3d7971032172f",
+    "statement": "The raw archive remains ignored. Public CI can validate committed anchors, but byte-level archive reverification requires these exact reviewed bytes until owner license and publication approval exists."
+  },
+  "history_provenance": {
+    "capability_profile_commit": "6cb774d210940073347f9045bb15611aa9e9cf27",
+    "capture_producer_commit": "058482df47377aaae6303015746f9a8e05d7e0f7",
+    "eventual_merge_commit": null,
+    "merge_requirement": "Use a merge commit that preserves capture_producer_commit ancestry; do not squash or rebase away the producer commit.",
+    "publication_review_commit": "68854817da3ddd5a0b667f703960744cd6669e25"
+  },
+  "operational_completion": {
+    "path": "evidence/gpu/2026-08-21-qwen3-8b-a10/operational-summary.json",
+    "semantic_verification": "VALID_AFTER_PROVIDER_TERMINATION",
+    "sha256": "sha256:e0a46bd9c6cb623a9f6203e177408a61fcf67acb01faf8167892b9f3cc0b1860",
+    "termination_final_status": "absent"
+  },
+  "publication_review": {
+    "owner_publication_approval_required": true,
+    "path": "evidence/gpu/2026-08-21-qwen3-8b-a10/publication-review.json",
+    "publication_status": "EXTERNAL_ONLY",
+    "sha256": "sha256:1e0e1834777f6451ddeb2ecc299fe1aaf1d3a246536dbae3bc1d595ca06e477a"
+  },
+  "run": {
+    "bundle_digest": "sha256:48514166f6c284613052fedb0264ed83e2212156233d9f6103cb8946c0211ad6",
+    "execution_fingerprint": "sha256:256f096f93a14260857d4caba59165459335af9c9c3b57d56eaa9bd369e405c3",
+    "metric_definitions_digest": "sha256:e237ff8613c6eec52a6053b3f6b47563ffc758c957ee298e57fe3c482a389131",
+    "model": {
+      "id": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218"
+    },
+    "request_plan_digest": "sha256:e4f7002626bbbe23ecd4e3658f53fcba6a365a177c6d0ca3acb62955c0a5f7f7",
+    "request_population": {
+      "failed_requests": 0,
+      "measured_requests": 96,
+      "successful_requests": 96,
+      "ttft_samples": 96
+    },
+    "run_id": "run-fcbd9a0a4031826ea601c5f14637e8dc",
+    "source_spec_digest": "sha256:1218bbafcded589a5b6fff13f533df8bd4e2a8e176a3995833967cc85334fd3f",
+    "summary_measurements": {
+      "last_choices_event_span_ns": {
+        "p50": 4421866794,
+        "p95": 4554172554
+      },
+      "output_token_throughput_per_s": "28.870215",
+      "ttft_ns": {
+        "definition_id": "vllm_first_choices_event_v0_26",
+        "p50": 127123958,
+        "p95": 242426174,
+        "p99": 244030050,
+        "population": "successful_measured_requests_with_observed_ttft",
+        "quantile_method": "nearest_rank_v1"
+      }
+    },
+    "tokenizer": {
+      "id": "Qwen/Qwen3-8B",
+      "revision": "b968826d9c46dd6066d109eabc6255188de91218"
+    },
+    "workload_sha256": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f"
+  },
+  "runtime_capability": {
+    "expected_gpu_model": "NVIDIA A10",
+    "hardware_attestation": false,
+    "hardware_observation": "SELECTED_GPU_REPORTED_NVIDIA_A10_SINGLE_CUDA_DEVICE",
+    "profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+    "spike_outcome": "SPIKE_SUCCEEDED",
+    "torch_cuda_device_count": 1
+  },
+  "schema_version": "inferdrome.qwen3-gpu-evidence-handoff.v1"
+}

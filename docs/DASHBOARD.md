@@ -479,6 +479,28 @@ The initial dashboard contract is satisfied only when:
 20. Progress remains GET-only local observation and never becomes execution
     attestation, trusted chronology, or a substitute for a result artifact.
 
+## Reviewed genuine-GPU dashboard
+
+The 2026-08-21 Qwen3-8B A10 capture satisfies criterion 10 through the ordinary
+bundle path. No dashboard-only fixture, imported summary, or browser-side
+measurement is involved. When the exact `EXTERNAL_ONLY` archive and its local
+post-termination receipts are available, run:
+
+```bash
+PYTHONPATH=src .venv/bin/python \
+  scripts/run_qwen3_evidence_dashboard.py --open
+```
+
+The launcher first performs isolated archive verification, deterministic bundle
+recalculation, publication-record cross-digest checks, and post-termination
+receipt verification. It then extracts the archive into an isolated temporary
+directory and passes only its verified `runs` root to the normal loopback
+dashboard command. The temporary extraction is removed when the server stops.
+
+The displayed run remains a bounded A10 capability observation. UI labels do
+not upgrade it into provider hardware attestation, a cross-GPU comparison, or
+an ExitSpec acceptance verdict.
+
 ## Development gate
 
 Install the optional Python runtime and locked frontend dependencies, then run

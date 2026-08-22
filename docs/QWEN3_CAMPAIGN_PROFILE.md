@@ -1,8 +1,10 @@
 # Qwen3-8B campaign profile
 
-Inferdrome now has a locally conformant, runtime-unproven execution profile for
-the first Qwen GPU campaign model. It is separate from the historical Qwen2.5
-A10 proof and does not alter that profile or its evidence bytes.
+Inferdrome has a locally conformant execution profile for the first Qwen GPU
+campaign model and one reviewed genuine A10 runtime observation. It is separate
+from the historical Qwen2.5 A10 proof and does not alter that profile or its
+evidence bytes. Other GPU assignments and cross-GPU conclusions remain
+runtime-unproven.
 
 ## Frozen identity
 
@@ -12,8 +14,14 @@ model: Qwen/Qwen3-8B
 model revision: b968826d9c46dd6066d109eabc6255188de91218
 tokenizer revision: b968826d9c46dd6066d109eabc6255188de91218
 producer candidate: vLLM 0.26.0
-state: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
+profile implementation state: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
+reviewed external capability: A10_RUNTIME_OBSERVED
 ```
+
+The generated profile's implementation-state field remains frozen at its
+pre-execution value. Runtime truth is added through the separately hashed
+reviewed receipt; captured evidence never rewrites the input contract that
+preceded it.
 
 The generated
 [`qwen3-8b-model-files.json`](../campaigns/v1/profiles/qwen3-8b-model-files.json)
@@ -69,6 +77,27 @@ the workload digest is SHA-256 over the exact UTF-8 JSONL bytes. Those policies
 are embedded in the generated profile so independent consumers do not have to
 infer whitespace or serialization rules.
 
+## Reviewed A10 runtime observation
+
+On 2026-08-21, producer commit
+`058482df47377aaae6303015746f9a8e05d7e0f7` completed the bounded profile on one
+Lambda `gpu_1x_a10`. Run `run-fcbd9a0a4031826ea601c5f14637e8dc` contains 96
+measured requests, 96 successes, zero failures, and 96 native TTFT samples.
+Independent recalculation produced p50/p95/p99 TTFT values of `127,123,958`,
+`242,426,174`, and `244,030,050 ns`, plus `28.870215` output tokens/s.
+
+The archive digest is
+`sha256:27cdcc0192c5d6f05b5350e380b53caa158c249de28ed6880fe3d7971032172f`;
+the bundle digest is
+`sha256:48514166f6c284613052fedb0264ed83e2212156233d9f6103cb8946c0211ad6`.
+The controller confirmed provider termination before publishing the separate
+`VALID_AFTER_PROVIDER_TERMINATION` operational record. See the
+[reviewed handoff](../evidence/gpu/2026-08-21-qwen3-8b-a10/README.md).
+
+This closes only compatibility and fit for this exact A10/profile pair. It is
+not provider hardware attestation, an acceptance verdict, a cross-GPU result,
+or authority to silently change the frozen campaign.
+
 ## Zero-cost local checks
 
 ```bash
@@ -107,11 +136,11 @@ The named campaign source also rejects before server launch if the explicit
 `--managed-capability-profile` selection is omitted, preventing silent fallback
 to the historical Qwen2.5 server controls.
 
-This command is not launch authorization. The first real use must be a bounded
-A10 capability spike under the Lambda watchdog, exact live-rate check, explicit
-operator confirmation, and provider-confirmed termination. A successful spike
-may support a separate reviewed runtime-capability record; this document does
-not make that claim or mutate the frozen profile.
+This command is not launch authorization. The first real use completed under a
+bounded A10 capability spike, Lambda watchdog, exact live-rate check, explicit
+operator confirmation, and provider-confirmed termination. Any reproduction or
+new GPU assignment still requires a fresh bounded launch decision. The reviewed
+runtime-capability record does not mutate the frozen profile.
 
 ## Bounded A10 remote-capture controller
 
@@ -233,8 +262,8 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
 The replay is idempotent and refuses capture or cloud options. It cannot create
 missing termination evidence or turn an incomplete capture into evidence.
 
-This closes the local control-plane implementation only. It does not change
-`LOCALLY_CONFORMANT_RUNTIME_UNPROVEN`, authorize a paid launch, or claim that
-Qwen3-8B fits the A10. Only a later reviewed genuine receipt can change that
-external capability status; the frozen profile and the bytes captured by this
-commit must remain immutable.
+The reviewed receipt closes the A10 runtime-capability question for this exact
+profile and producer commit. It does not authorize another paid launch, prove a
+different GPU assignment, or establish a cross-GPU conclusion. The frozen
+profile and captured bytes remain immutable; future campaign receipts must be
+separate evidence.
