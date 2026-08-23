@@ -10,9 +10,12 @@ separate Qwen3-8B A10 capability spike are complete. The Qwen3 run contains
 96/96 successes, a valid customer-eligible bundle, independent post-termination
 verification, a bounded publication review, and deterministic handoff anchors.
 The zero-spend A100 execution pack is locally conformant but runtime-unproven;
-PR16 launched no cloud instance and produced no A100 receipt. Both reviewed raw
-archives remain EXTERNAL_ONLY; owner license/publication decisions, security
-sign-off, ExitSpec outcomes, and release work remain open.**
+PR16 launched no cloud instance and produced no A100 receipt. A separate
+GET-only exact-capacity watcher now validates the provider description, rate,
+capacity regions, and zero-active-instance boundary without granting launch
+authority. Both reviewed raw archives remain EXTERNAL_ONLY; owner
+license/publication decisions, security sign-off, ExitSpec outcomes, and
+release work remain open.**
 
 Next campaign checkpoint: **After a separate explicit operator launch decision,
 execute the exact Qwen3-8B same-model control on one A100 40 GB PCIe reported
@@ -305,6 +308,14 @@ session cap; and retains explicit operator confirmation as the only launch
 boundary. Its state is `LOCALLY_CONFORMANT_RUNTIME_UNPROVEN`, with no hardware
 attestation and no acceptance verdict. PR16 performed no cloud launch, and the
 reviewed A10 evidence and legacy verification path remain unchanged.
+
+A100 capacity-watcher closure adds a second zero-spend boundary between the
+execution pack and any paid action. The watcher can issue only the two fixed
+Lambda GET requests needed to validate the catalog and active-instance count.
+It rejects available SXM or multi-GPU substitutions, metadata and rate drift,
+ambiguous targets, and any active-instance conflict. Its strongest state is
+`READY_FOR_OPERATOR_CONFIRMATION`; it never emits launch authorization,
+hardware attestation, or a runtime receipt.
 
 Still required to close the external acceptance boundary: run the separately
 owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations against the exact
