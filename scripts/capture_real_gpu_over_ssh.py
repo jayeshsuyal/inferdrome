@@ -21,9 +21,23 @@ from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from inferdrome.qwen3_gpu_tiers import (
+    QWEN3_A10_GPU_TIER_ID,
+    QWEN3_ARCHIVE_TRANSFER_SECONDS,
+    QWEN3_IMPLEMENTED_GPU_TIERS,
+    QWEN3_MAX_ARCHIVE_BYTES,
+    QWEN3_METADATA_TRANSFER_SECONDS,
+    QWEN3_PHASE_BUDGET_SECONDS,
+    QWEN3_POST_REMOTE_BUDGET_SECONDS,
+    QWEN3_REMOTE_CAPTURE_SECONDS,
+    QWEN3_STARTUP_TIMEOUT_SECONDS,
+    QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS,
+    Qwen3GpuTierPolicy,
+    qwen3_gpu_tier_policy,
+)
 
 if __package__:
     from scripts import lambda_gpu_guard, qwen3_gpu_capture, real_gpu_capture
@@ -37,33 +51,27 @@ _DESTINATION_PATTERN = re.compile(
     r"(?:[A-Za-z_][A-Za-z0-9_.-]*@)?(?:[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:]+\])\Z"
 )
 _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+_INSTANCE_TYPE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _DEFAULT_REMOTE_TIMEOUT_SECONDS = 9_900
 _MINIMUM_PROFILE_REMOTE_SECONDS = 300
 _LEGACY_MINIMUM_REMOTE_SECONDS = 1_800
 _QWEN3_PROFILE_ID = "managed-vllm-0.26-qwen3-8b-bf16-v1"
-_QWEN3_A10_HOURLY_RATE_USD = Decimal("1.29")
-_QWEN3_A10_MAX_COST_USD = Decimal("0.75")
-_QWEN3_EXPECTED_GPU_MODEL = "NVIDIA A10"
+_QWEN3_A10_POLICY = qwen3_gpu_tier_policy(QWEN3_A10_GPU_TIER_ID)
+_QWEN3_A10_HOURLY_RATE_USD = _QWEN3_A10_POLICY.hourly_rate_usd
+_QWEN3_A10_MAX_COST_USD = _QWEN3_A10_POLICY.max_session_cost_usd
+_QWEN3_EXPECTED_GPU_MODEL = _QWEN3_A10_POLICY.expected_nvidia_smi_name
 _QWEN3_EXPECTED_INSTANCE_TYPE = "gpu_1x_a10"
-_QWEN3_STARTUP_TIMEOUT_SECONDS = 300
-_QWEN3_REMOTE_CAPTURE_SECONDS = 1_300
-_QWEN3_POST_REMOTE_BUDGET_SECONDS = 298
-_QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS = 300
-_QWEN3_METADATA_TRANSFER_SECONDS = 30
-_QWEN3_ARCHIVE_TRANSFER_SECONDS = 180
-_QWEN3_MAX_ARCHIVE_BYTES = 268_435_456
+_QWEN3_STARTUP_TIMEOUT_SECONDS = QWEN3_STARTUP_TIMEOUT_SECONDS
+_QWEN3_REMOTE_CAPTURE_SECONDS = QWEN3_REMOTE_CAPTURE_SECONDS
+_QWEN3_POST_REMOTE_BUDGET_SECONDS = QWEN3_POST_REMOTE_BUDGET_SECONDS
+_QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS = (
+    QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS
+)
+_QWEN3_METADATA_TRANSFER_SECONDS = QWEN3_METADATA_TRANSFER_SECONDS
+_QWEN3_ARCHIVE_TRANSFER_SECONDS = QWEN3_ARCHIVE_TRANSFER_SECONDS
+_QWEN3_MAX_ARCHIVE_BYTES = QWEN3_MAX_ARCHIVE_BYTES
 _MAX_SOURCE_ARCHIVE_BYTES = 134_217_728
-_QWEN3_PHASE_BUDGET_SECONDS = {
-    "remote_preflight": 90,
-    "source_upload": 90,
-    "remote_capture": _QWEN3_REMOTE_CAPTURE_SECONDS,
-    "remote_kill_grace": 60,
-    "ssh_close_grace": 5,
-    "metadata_transfer": _QWEN3_METADATA_TRANSFER_SECONDS,
-    "archive_transfer": _QWEN3_ARCHIVE_TRANSFER_SECONDS,
-    "controller_handoff": 23,
-    "termination_confirmation": _QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS,
-}
+_QWEN3_PHASE_BUDGET_SECONDS = dict(QWEN3_PHASE_BUDGET_SECONDS)
 
 
 class RemoteCaptureError(RuntimeError):
@@ -326,6 +334,15 @@ def _remote_timeout(value: str) -> int:
     )
 
 
+def _lambda_instance_type_name(value: str) -> str:
+    if _INSTANCE_TYPE_PATTERN.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            "Lambda instance type name must contain only letters, digits, '.', '_', "
+            "and '-'"
+        )
+    return value
+
+
 def _require_checkout(expected_commit: str | None) -> str:
     if shutil.which("git") is None:
         raise RemoteCaptureError("git is required")
@@ -491,11 +508,20 @@ def _remote_capture_script(
     startup_timeout_seconds: int,
     remote_timeout_seconds: int,
     managed_capability_profile: str | None = None,
+    qwen3_gpu_tier: str | None = None,
 ) -> str:
     if managed_capability_profile not in {None, _QWEN3_PROFILE_ID}:
         raise RemoteCaptureError("managed capability profile is unsupported")
     if re.fullmatch(r"sha256:[0-9a-f]{64}", source_archive_sha256) is None:
         raise RemoteCaptureError("source archive digest is invalid")
+    if managed_capability_profile is None:
+        if qwen3_gpu_tier is not None:
+            raise RemoteCaptureError("Qwen3 GPU tier requires the managed profile")
+    else:
+        try:
+            qwen3_gpu_tier_policy(str(qwen3_gpu_tier))
+        except ValueError as error:
+            raise RemoteCaptureError(str(error)) from None
     root = shlex.quote(remote_root)
     expected = shlex.quote(commit)
     expected_source_sha256 = shlex.quote(source_archive_sha256.removeprefix("sha256:"))
@@ -503,6 +529,9 @@ def _remote_capture_script(
     if managed_capability_profile is not None:
         profile_argument = " \\\n  --managed-capability-profile " + shlex.quote(
             managed_capability_profile
+        )
+        profile_argument += (
+            " \\\n  --qwen3-gpu-tier " + shlex.quote(str(qwen3_gpu_tier))
         )
     return f"""set -euo pipefail
 umask 077
@@ -902,10 +931,11 @@ def _destination_host(destination: str) -> str:
 
 def _lambda_guard_requested(args: argparse.Namespace) -> bool:
     selected = (
-        args.lambda_instance_id,
-        args.lambda_hourly_rate_usd,
-        args.max_cost_usd,
-        args.lambda_billing_started_at,
+        getattr(args, "lambda_instance_id", None),
+        getattr(args, "lambda_instance_type_name", None),
+        getattr(args, "lambda_hourly_rate_usd", None),
+        getattr(args, "max_cost_usd", None),
+        getattr(args, "lambda_billing_started_at", None),
     )
     if not any(value is not None for value in selected):
         return False
@@ -925,11 +955,30 @@ def _qwen3_profile_requested(args: argparse.Namespace) -> bool:
     return getattr(args, "managed_capability_profile", None) == _QWEN3_PROFILE_ID
 
 
+def _qwen3_tier_policy(args: argparse.Namespace) -> Qwen3GpuTierPolicy:
+    gpu_tier_id = getattr(args, "qwen3_gpu_tier", None)
+    if gpu_tier_id is None:
+        raise RemoteCaptureError(
+            "Qwen3 capability capture requires --qwen3-gpu-tier"
+        )
+    try:
+        return qwen3_gpu_tier_policy(gpu_tier_id)
+    except ValueError as error:
+        raise RemoteCaptureError(str(error)) from None
+
+
 def _validate_capture_mode(args: argparse.Namespace) -> None:
     """Keep the legacy workflow stable and make the campaign path fail closed."""
 
     profile = getattr(args, "managed_capability_profile", None)
     if profile is None:
+        if (
+            getattr(args, "qwen3_gpu_tier", None) is not None
+            or getattr(args, "lambda_instance_type_name", None) is not None
+        ):
+            raise RemoteCaptureError(
+                "Qwen3 GPU tier and Lambda instance type require the managed profile"
+            )
         if args.remote_timeout_seconds < _LEGACY_MINIMUM_REMOTE_SECONDS:
             raise RemoteCaptureError(
                 "legacy remote timeout must be at least 1800 seconds"
@@ -937,39 +986,43 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
         return
     if profile != _QWEN3_PROFILE_ID:
         raise RemoteCaptureError("managed capability profile is unsupported")
+    policy = _qwen3_tier_policy(args)
     if not _lambda_guard_requested(args):
         raise RemoteCaptureError(
-            "Qwen3 A10 capability capture requires the complete Lambda cost guard"
+            "Qwen3 capability capture requires the complete Lambda cost guard"
         )
     if args.lambda_instance_id is None:
         raise RemoteCaptureError(
-            "Qwen3 A10 capability capture requires --lambda-instance-id"
+            "Qwen3 capability capture requires --lambda-instance-id"
+        )
+    if getattr(args, "lambda_instance_type_name", None) is None:
+        raise RemoteCaptureError(
+            "Qwen3 capability capture requires --lambda-instance-type-name"
         )
     if args.identity_file is None:
         raise RemoteCaptureError(
-            "Qwen3 A10 capability capture requires an explicit SSH identity file"
+            "Qwen3 capability capture requires an explicit SSH identity file"
         )
     if args.startup_timeout_seconds != _QWEN3_STARTUP_TIMEOUT_SECONDS:
         raise RemoteCaptureError(
-            "Qwen3 A10 capability capture requires the frozen "
+            "Qwen3 capability capture requires the frozen "
             "300-second startup timeout"
         )
     if args.remote_timeout_seconds < _QWEN3_REMOTE_CAPTURE_SECONDS:
         raise RemoteCaptureError(
-            "Qwen3 A10 capability capture requires at least 1300 remote seconds"
+            "Qwen3 capability capture requires at least 1300 remote seconds"
         )
-    if args.lambda_hourly_rate_usd != _QWEN3_A10_HOURLY_RATE_USD:
+    if args.lambda_hourly_rate_usd != policy.hourly_rate_usd:
         raise RemoteCaptureError(
-            "Qwen3 A10 capability capture requires the frozen $1.29 hourly rate"
+            "Qwen3 capability capture requires the frozen "
+            f"${policy.hourly_rate_usd} hourly rate for {policy.gpu_tier_id}"
         )
-    if args.max_cost_usd != _QWEN3_A10_MAX_COST_USD:
+    if args.max_cost_usd != policy.max_session_cost_usd:
         raise RemoteCaptureError(
-            "Qwen3 A10 capability capture requires its exact $0.75 session cap"
+            "Qwen3 capability capture requires the exact "
+            f"${policy.max_session_cost_usd} session cap for {policy.gpu_tier_id}"
         )
-    allowed_seconds = int(
-        args.max_cost_usd / args.lambda_hourly_rate_usd * Decimal(3_600)
-    )
-    if sum(_QWEN3_PHASE_BUDGET_SECONDS.values()) > allowed_seconds:
+    if sum(_QWEN3_PHASE_BUDGET_SECONDS.values()) > policy.allowed_seconds:
         raise RemoteCaptureError("Qwen3 paid-session phase budget exceeds its cost cap")
 
 
@@ -1052,6 +1105,8 @@ def _arm_lambda_watchdog(
             f"Lambda cost guard could not be armed: {error}"
         ) from None
     if _qwen3_profile_requested(args):
+        policy = _qwen3_tier_policy(args)
+        expected_instance_type = args.lambda_instance_type_name
         try:
             active_ids = [
                 instance.instance_id
@@ -1061,10 +1116,11 @@ def _arm_lambda_watchdog(
             if (
                 handle.instance.status != "active"
                 or active_ids != [handle.instance.instance_id]
-                or handle.instance.instance_type_name != _QWEN3_EXPECTED_INSTANCE_TYPE
+                or handle.instance.instance_type_name != expected_instance_type
             ):
                 raise lambda_gpu_guard.LambdaGuardError(
-                    "Qwen3 campaign requires exactly one active gpu_1x_a10 target"
+                    "Qwen3 campaign requires exactly one active "
+                    f"{expected_instance_type} target for {policy.gpu_tier_id}"
                 )
         except lambda_gpu_guard.LambdaGuardError as error:
             try:
@@ -1092,6 +1148,7 @@ def _arm_lambda_watchdog(
 def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> None:
     remote_root = f"/tmp/inferdrome-gpu-{commit[:12]}-<random>"
     guarded = _lambda_guard_requested(args)
+    policy = _qwen3_tier_policy(args) if _qwen3_profile_requested(args) else None
     with tempfile.TemporaryDirectory(prefix="inferdrome-source-tree-") as temporary:
         source_archive_sha256, source_archive_bytes = _create_source_archive(
             Path(temporary) / "repo.tar",
@@ -1105,10 +1162,10 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
         ),
         "destination": args.destination,
         "expected_gpu_model": (
-            _QWEN3_EXPECTED_GPU_MODEL if _qwen3_profile_requested(args) else None
+            policy.expected_nvidia_smi_name if policy is not None else None
         ),
         "expected_lambda_instance_type": (
-            _QWEN3_EXPECTED_INSTANCE_TYPE if _qwen3_profile_requested(args) else None
+            args.lambda_instance_type_name if policy is not None else None
         ),
         "gpu_index": args.gpu_index,
         "identity_file_configured": identity is not None,
@@ -1129,6 +1186,7 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
         "source_archive_bytes": source_archive_bytes,
         "source_archive_sha256": source_archive_sha256,
         "managed_capability_profile": args.managed_capability_profile,
+        "qwen3_gpu_tier": policy.gpu_tier_id if policy is not None else None,
         "phase_budget_seconds": (
             _QWEN3_PHASE_BUDGET_SECONDS if _qwen3_profile_requested(args) else None
         ),
@@ -1144,8 +1202,9 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
             "upload and digest-check the exact source archive",
             "prepare the pinned vLLM/model environment",
             (
-                "run one Qwen3-8B concurrency-1 A10 capability spike"
-                if _qwen3_profile_requested(args)
+                "run one Qwen3-8B concurrency-1 capability spike on "
+                f"{policy.expected_nvidia_smi_name}"
+                if policy is not None
                 else "run the single proof and four-run controlled comparison"
             ),
             "retrieve bounded size/checksum metadata, then exactly those archive bytes",
@@ -1208,6 +1267,7 @@ def _capture_over_ssh(
         known_hosts=known_hosts,
         port=args.port,
     )
+    policy = _qwen3_tier_policy(args) if _qwen3_profile_requested(args) else None
     profile_deadline = termination_deadline if _qwen3_profile_requested(args) else None
     if _qwen3_profile_requested(args):
         _effective_remote_timeout(
@@ -1228,8 +1288,8 @@ def _capture_over_ssh(
                     remote_root,
                     gpu_index=args.gpu_index,
                     expected_gpu_model=(
-                        _QWEN3_EXPECTED_GPU_MODEL
-                        if _qwen3_profile_requested(args)
+                        policy.expected_nvidia_smi_name
+                        if policy is not None
                         else None
                     ),
                 )
@@ -1289,6 +1349,9 @@ def _capture_over_ssh(
                         startup_timeout_seconds=args.startup_timeout_seconds,
                         remote_timeout_seconds=effective_remote_timeout,
                         managed_capability_profile=args.managed_capability_profile,
+                        qwen3_gpu_tier=(
+                            policy.gpu_tier_id if policy is not None else None
+                        ),
                     )
                 ),
             ],
@@ -1401,12 +1464,16 @@ def _capture_over_ssh(
                 f"{failure_path} (remote workspace {remote_root})"
             )
         if _qwen3_profile_requested(args):
+            if policy is None:
+                raise AssertionError
             retrieval = {
                 "archive_sha256": actual_archive_sha256,
                 "billing_action_required": "PROVIDER_TERMINATION_PENDING",
+                "gpu_tier_id": policy.gpu_tier_id,
+                "lambda_instance_type_name": args.lambda_instance_type_name,
                 "managed_capability_profile": _QWEN3_PROFILE_ID,
                 "repository_commit": commit,
-                "schema_version": "inferdrome.qwen3-gpu-retrieval.v1",
+                "schema_version": "inferdrome.qwen3-gpu-retrieval.v2",
                 "source_archive_sha256": source_archive_sha256,
                 "semantic_verification": (
                     "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
@@ -1567,6 +1634,57 @@ class _TerminationEvidence:
     trigger: str
 
 
+@dataclass(frozen=True)
+class _Qwen3RetrievalIdentity:
+    gpu_tier_id: str
+    instance_type_name: str
+    legacy: bool
+    receipt: bytes
+    schema_version: str
+    value: dict[str, Any]
+
+
+def _qwen3_retrieval_identity(capture_path: Path) -> _Qwen3RetrievalIdentity:
+    receipt = _safe_record_bytes(
+        capture_path / "retrieval-receipt.json",
+        label="Qwen3 retrieval receipt",
+    )
+    value = _strict_json_bytes(receipt, label="Qwen3 retrieval receipt")
+    schema_version = value.get("schema_version")
+    if schema_version == "inferdrome.qwen3-gpu-retrieval.v1":
+        return _Qwen3RetrievalIdentity(
+            gpu_tier_id=QWEN3_A10_GPU_TIER_ID,
+            instance_type_name=_QWEN3_EXPECTED_INSTANCE_TYPE,
+            legacy=True,
+            receipt=receipt,
+            schema_version=schema_version,
+            value=value,
+        )
+    if schema_version != "inferdrome.qwen3-gpu-retrieval.v2":
+        raise RemoteCaptureError("Qwen3 retrieval receipt schema is unsupported")
+    gpu_tier_id = value.get("gpu_tier_id")
+    instance_type_name = value.get("lambda_instance_type_name")
+    if not isinstance(gpu_tier_id, str):
+        raise RemoteCaptureError("Qwen3 retrieval GPU tier is invalid")
+    try:
+        qwen3_gpu_tier_policy(gpu_tier_id)
+    except ValueError as error:
+        raise RemoteCaptureError(str(error)) from None
+    if (
+        not isinstance(instance_type_name, str)
+        or _INSTANCE_TYPE_PATTERN.fullmatch(instance_type_name) is None
+    ):
+        raise RemoteCaptureError("Qwen3 retrieval instance type is invalid")
+    return _Qwen3RetrievalIdentity(
+        gpu_tier_id=gpu_tier_id,
+        instance_type_name=instance_type_name,
+        legacy=False,
+        receipt=receipt,
+        schema_version=schema_version,
+        value=value,
+    )
+
+
 def _timestamp_value(value: object, *, label: str) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise RemoteCaptureError(f"{label} is invalid")
@@ -1584,7 +1702,9 @@ def _validate_termination_evidence(
     cost_window: object,
     instance: object,
     receipt_value: dict[str, Any],
+    identity: _Qwen3RetrievalIdentity,
 ) -> _TerminationEvidence:
+    policy = qwen3_gpu_tier_policy(identity.gpu_tier_id)
     if (
         not isinstance(cost_window, dict)
         or set(cost_window)
@@ -1597,9 +1717,9 @@ def _validate_termination_evidence(
             "max_cost_usd",
             "termination_safety_margin_seconds",
         }
-        or cost_window.get("allowed_seconds") != 2_093
-        or cost_window.get("hourly_rate_usd") != "1.29"
-        or cost_window.get("max_cost_usd") != "0.75"
+        or cost_window.get("allowed_seconds") != policy.allowed_seconds
+        or cost_window.get("hourly_rate_usd") != str(policy.hourly_rate_usd)
+        or cost_window.get("max_cost_usd") != str(policy.max_session_cost_usd)
         or cost_window.get("termination_safety_margin_seconds")
         != _QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS
     ):
@@ -1617,7 +1737,7 @@ def _validate_termination_evidence(
         label="Lambda cost-limit deadline",
     )
     if (
-        int((cost_limit - started).total_seconds()) != 2_093
+        int((cost_limit - started).total_seconds()) != policy.allowed_seconds
         or int((cost_limit - deadline).total_seconds())
         != _QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS
     ):
@@ -1634,8 +1754,8 @@ def _validate_termination_evidence(
             "status",
         }
         or re.fullmatch(r"[0-9a-f]{32}", str(instance.get("instance_id"))) is None
-        or instance.get("hourly_rate_usd") != "1.29"
-        or instance.get("instance_type_name") != _QWEN3_EXPECTED_INSTANCE_TYPE
+        or instance.get("hourly_rate_usd") != str(policy.hourly_rate_usd)
+        or instance.get("instance_type_name") != identity.instance_type_name
         or instance.get("status") != "active"
     ):
         raise RemoteCaptureError("Lambda Qwen3 instance record is invalid")
@@ -1682,6 +1802,7 @@ def _validate_termination_evidence(
 def _controller_termination_evidence(
     watchdog: lambda_gpu_guard.WatchdogHandle,
     termination: lambda_gpu_guard.TerminationResult,
+    identity: _Qwen3RetrievalIdentity,
 ) -> _TerminationEvidence:
     receipt = _safe_record_bytes(
         watchdog.receipt_path,
@@ -1695,6 +1816,7 @@ def _controller_termination_evidence(
         cost_window=watchdog.cost_window.public_record(),
         instance=watchdog.instance.public_record(),
         receipt_value=receipt_value,
+        identity=identity,
     )
     if evidence.termination != termination.public_record():
         raise RemoteCaptureError(
@@ -1709,7 +1831,10 @@ def _controller_termination_evidence(
     )
 
 
-def _retained_termination_evidence(state_directory: Path) -> _TerminationEvidence:
+def _retained_termination_evidence(
+    state_directory: Path,
+    identity: _Qwen3RetrievalIdentity,
+) -> _TerminationEvidence:
     selected = state_directory.expanduser().absolute()
     try:
         metadata = os.lstat(selected)
@@ -1753,6 +1878,7 @@ def _retained_termination_evidence(state_directory: Path) -> _TerminationEvidenc
         cost_window=armed.get("cost_window"),
         instance=armed.get("instance"),
         receipt_value=receipt_value,
+        identity=identity,
     )
     return _TerminationEvidence(
         cost_window=evidence.cost_window,
@@ -1777,6 +1903,17 @@ def _finalize_qwen3_capture_with_evidence(
         raise RemoteCaptureError("Qwen3 capture directory is unavailable") from None
     if capture_path.is_symlink() or not stat.S_ISDIR(capture_metadata.st_mode):
         raise RemoteCaptureError("Qwen3 capture directory is unsafe")
+    identity = _qwen3_retrieval_identity(capture_path)
+    policy = qwen3_gpu_tier_policy(identity.gpu_tier_id)
+    if (
+        evidence.instance.get("instance_type_name") != identity.instance_type_name
+        or evidence.instance.get("hourly_rate_usd") != str(policy.hourly_rate_usd)
+        or evidence.cost_window.get("max_cost_usd")
+        != str(policy.max_session_cost_usd)
+    ):
+        raise RemoteCaptureError(
+            "Lambda termination evidence disagrees with Qwen3 retrieval identity"
+        )
 
     archive = capture_path / "capture.tar.gz"
     checksum = capture_path / "capture.tar.gz.sha256"
@@ -1786,12 +1923,14 @@ def _finalize_qwen3_capture_with_evidence(
             archive,
             expected_archive_sha256=expected_archive_sha256,
             expected_repository_commit=commit,
+            expected_gpu_tier_id=identity.gpu_tier_id,
         )
         extracted = capture_path / "capture"
         if extracted.exists() or extracted.is_symlink():
             extracted_verification = qwen3_gpu_capture.verify_capture(
                 extracted,
                 expected_repository_commit=commit,
+                expected_gpu_tier_id=identity.gpu_tier_id,
             )
         else:
             with tempfile.TemporaryDirectory(
@@ -1805,6 +1944,7 @@ def _finalize_qwen3_capture_with_evidence(
                 staged_verification = qwen3_gpu_capture.verify_capture(
                     staged,
                     expected_repository_commit=commit,
+                    expected_gpu_tier_id=identity.gpu_tier_id,
                 )
                 os.replace(staged, extracted)
                 extracted_verification = staged_verification
@@ -1821,32 +1961,28 @@ def _finalize_qwen3_capture_with_evidence(
         raise RemoteCaptureError(
             "Qwen3 archive verification changed after retained extraction"
         )
-    retrieval_bytes = _safe_record_bytes(
-        capture_path / "retrieval-receipt.json",
-        label="Qwen3 retrieval receipt",
-    )
-    retrieval = _strict_json_bytes(
-        retrieval_bytes,
-        label="Qwen3 retrieval receipt",
-    )
+    retrieval_bytes = identity.receipt
+    retrieval = identity.value
+    retrieval_fields = {
+        "archive_sha256",
+        "billing_action_required",
+        "managed_capability_profile",
+        "repository_commit",
+        "schema_version",
+        "semantic_verification",
+        "source_archive_sha256",
+        "ssh_host_identity_sha256",
+        "verified_at",
+    }
+    if not identity.legacy:
+        retrieval_fields.update({"gpu_tier_id", "lambda_instance_type_name"})
     if (
-        set(retrieval)
-        != {
-            "archive_sha256",
-            "billing_action_required",
-            "managed_capability_profile",
-            "repository_commit",
-            "schema_version",
-            "semantic_verification",
-            "source_archive_sha256",
-            "ssh_host_identity_sha256",
-            "verified_at",
-        }
+        set(retrieval) != retrieval_fields
         or retrieval.get("archive_sha256") != archive_verification["archive_sha256"]
         or retrieval.get("billing_action_required") != "PROVIDER_TERMINATION_PENDING"
         or retrieval.get("managed_capability_profile") != _QWEN3_PROFILE_ID
         or retrieval.get("repository_commit") != commit
-        or retrieval.get("schema_version") != "inferdrome.qwen3-gpu-retrieval.v1"
+        or retrieval.get("schema_version") != identity.schema_version
         or retrieval.get("semantic_verification")
         != "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
         or retrieval.get("source_archive_sha256")
@@ -1856,6 +1992,14 @@ def _finalize_qwen3_capture_with_evidence(
             str(retrieval.get("ssh_host_identity_sha256")),
         )
         is None
+        or (
+            not identity.legacy
+            and (
+                retrieval.get("gpu_tier_id") != identity.gpu_tier_id
+                or retrieval.get("lambda_instance_type_name")
+                != identity.instance_type_name
+            )
+        )
     ):
         raise RemoteCaptureError("Qwen3 retrieval receipt disagrees with capture")
     _timestamp_value(
@@ -1868,7 +2012,7 @@ def _finalize_qwen3_capture_with_evidence(
     termination_receipt_sha256 = (
         "sha256:" + hashlib.sha256(evidence.receipt).hexdigest()
     )
-    semantic_core = {
+    semantic_core: dict[str, Any] = {
         "archive_sha256": archive_verification["archive_sha256"],
         "capture_manifest_sha256": archive_verification["capture_manifest_sha256"],
         "managed_capability_profile": _QWEN3_PROFILE_ID,
@@ -1879,11 +2023,23 @@ def _finalize_qwen3_capture_with_evidence(
         ),
         "repository_commit": commit,
         "run": extracted_verification["run"],
-        "schema_version": "inferdrome.qwen3-offline-verification.v1",
+        "schema_version": (
+            "inferdrome.qwen3-offline-verification.v1"
+            if identity.legacy
+            else "inferdrome.qwen3-offline-verification.v2"
+        ),
         "semantic_verification": "VALID_AFTER_PROVIDER_TERMINATION",
         "termination_receipt_sha256": termination_receipt_sha256,
         "termination_trigger": evidence.trigger,
     }
+    if not identity.legacy:
+        semantic_core.update(
+            {
+                "gpu_target": extracted_verification["gpu_target"],
+                "gpu_tier_id": identity.gpu_tier_id,
+                "lambda_instance_type_name": identity.instance_type_name,
+            }
+        )
     semantic_receipt = {
         **semantic_core,
         "verified_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -1929,7 +2085,8 @@ def _finalize_qwen3_capture(
     watchdog: lambda_gpu_guard.WatchdogHandle,
     termination: lambda_gpu_guard.TerminationResult,
 ) -> Path:
-    evidence = _controller_termination_evidence(watchdog, termination)
+    identity = _qwen3_retrieval_identity(capture_path)
+    evidence = _controller_termination_evidence(watchdog, termination, identity)
     return _finalize_qwen3_capture_with_evidence(
         capture_path,
         commit=commit,
@@ -1943,9 +2100,11 @@ def _resume_qwen3_finalization(
     commit: str,
     guard_state_directory: Path,
 ) -> Path:
-    evidence = _retained_termination_evidence(guard_state_directory)
+    selected_capture_path = capture_path.expanduser().absolute()
+    identity = _qwen3_retrieval_identity(selected_capture_path)
+    evidence = _retained_termination_evidence(guard_state_directory, identity)
     return _finalize_qwen3_capture_with_evidence(
-        capture_path.expanduser().absolute(),
+        selected_capture_path,
         commit=commit,
         evidence=evidence,
     )
@@ -2100,6 +2259,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit bounded campaign profile; omission preserves the legacy pack",
     )
     parser.add_argument(
+        "--qwen3-gpu-tier",
+        choices=QWEN3_IMPLEMENTED_GPU_TIERS,
+        help="exact implemented Qwen3 campaign GPU tier",
+    )
+    parser.add_argument(
         "--output-root",
         default=str(REPOSITORY_ROOT / "gpu-proof-retrieved"),
     )
@@ -2109,6 +2273,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "optional Lambda instance ID; otherwise resolve the SSH host "
             "through the API"
+        ),
+    )
+    parser.add_argument(
+        "--lambda-instance-type-name",
+        type=_lambda_instance_type_name,
+        help=(
+            "exact instance_type_name reported by the Lambda API; required for "
+            "Qwen3 campaign capture"
         ),
     )
     parser.add_argument(
@@ -2143,6 +2315,7 @@ def main() -> int:
                 or args.check
                 or args.dry_run
                 or args.managed_capability_profile is not None
+                or args.qwen3_gpu_tier is not None
                 or args.identity_file is not None
                 or args.host_key_sha256 is not None
                 or _lambda_guard_requested(args)
@@ -2176,6 +2349,8 @@ def main() -> int:
                 args.destination is not None
                 or args.dry_run
                 or args.managed_capability_profile is not None
+                or args.qwen3_gpu_tier is not None
+                or args.lambda_instance_type_name is not None
                 or _lambda_guard_requested(args)
             ):
                 raise RemoteCaptureError(

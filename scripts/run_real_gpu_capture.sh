@@ -8,6 +8,7 @@ gpu_index=0
 startup_timeout_seconds=900
 managed_capability_profile=""
 qwen3_profile_id=managed-vllm-0.26-qwen3-8b-bf16-v1
+qwen3_gpu_tier=""
 
 fail() {
   echo "run-real-gpu-capture: $*" >&2
@@ -24,6 +25,7 @@ Options:
   --gpu-index INDEX               Physical NVIDIA GPU index (default: 0)
   --startup-timeout-seconds N     Per-model-load timeout (default: 900)
   --managed-capability-profile ID Explicit Qwen3 capability-spike profile
+  --qwen3-gpu-tier ID            Exact implemented GPU tier for Qwen3 capture
   -h, --help                      Show this help
 EOF
 }
@@ -57,6 +59,12 @@ while [[ $# -gt 0 ]]; do
       managed_capability_profile=$2
       shift 2
       ;;
+    --qwen3-gpu-tier)
+      [[ $# -ge 2 ]] || fail "--qwen3-gpu-tier requires a value"
+      [[ -z $qwen3_gpu_tier ]] || fail "Qwen3 GPU tier cannot be supplied twice"
+      qwen3_gpu_tier=$2
+      shift 2
+      ;;
     -h | --help)
       usage
       exit 0
@@ -68,6 +76,15 @@ done
 if [[ -n $managed_capability_profile && \
       $managed_capability_profile != "$qwen3_profile_id" ]]; then
   fail "managed capability profile is unsupported"
+fi
+if [[ -n $managed_capability_profile ]]; then
+  case "$qwen3_gpu_tier" in
+    a10-24gb-pcie | a100-40gb-pcie) ;;
+    "") fail "managed capability profile requires --qwen3-gpu-tier" ;;
+    *) fail "Qwen3 GPU tier is unsupported" ;;
+  esac
+elif [[ -n $qwen3_gpu_tier ]]; then
+  fail "--qwen3-gpu-tier requires --managed-capability-profile"
 fi
 
 command -v python3.12 >/dev/null || fail "python3.12 is required"
@@ -294,8 +311,8 @@ PY
   model_root=${prepared_profile[0]}
   mkdir -p "$capture_root/runs"
 
-  current_step=qwen3-a10-capability-spike
-  run_logged 02-qwen3-a10-capability-spike \
+  current_step=qwen3-gpu-capability-spike
+  run_logged 02-qwen3-gpu-capability-spike \
     "$prepared_python" -m inferdrome run \
     "$repository_root/campaigns/v1/qwen3-8b-concurrency-1.yaml" \
     --runs-root "$capture_root/runs" \
@@ -310,7 +327,8 @@ PY
   run_logged 03-write-qwen3-capture-manifest \
     "$prepared_python" "$repository_root/scripts/qwen3_gpu_capture.py" write \
     --capture-root "$capture_root" \
-    --repository-commit "$repository_commit"
+    --repository-commit "$repository_commit" \
+    --gpu-tier "$qwen3_gpu_tier"
 else
   mkdir -p "$capture_root/single" "$capture_root/comparison"
   chmod a-w "$capture_root"/support/*
