@@ -278,6 +278,10 @@ PYTHONPATH=src .venv/bin/python scripts/watch_lambda_gpu_capacity.py \
   --gpu-tier h100-80gb-pcie
 ```
 
+The catalog validator accepts strictly shaped CPU-only offers with `gpus: 0`
+as non-target entries. They can never satisfy a GPU target; malformed, negative,
+boolean, or oversized GPU counts still fail closed.
+
 It emits `READY_FOR_OPERATOR_CONFIRMATION` only after exact metadata, rate,
 capacity, and zero-active-instance checks pass. It has no launch endpoint and
 cannot turn readiness into authorization. A real launch still requires a

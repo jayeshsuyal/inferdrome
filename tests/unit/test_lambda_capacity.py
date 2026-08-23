@@ -369,6 +369,54 @@ def test_out_of_capacity_never_queries_instances_or_selects_available_sxm() -> N
     assert [call[0] for call in transport.calls] == ["/instance-types"]
 
 
+def test_cpu_catalog_entry_does_not_block_h100_capacity_observation() -> None:
+    transport = FakeGetTransport(
+        [
+            _catalog(
+                _offer(
+                    name="cpu_4x_general",
+                    description="4x CPU General (16 GiB)",
+                    gpu_description="N/A",
+                    price_cents_per_hour=20,
+                    gpus=0,
+                    memory_gib=16,
+                    storage_gib=100,
+                    vcpus=4,
+                ),
+                _offer(
+                    name="gpu_1x_h100_pcie",
+                    description=LAMBDA_H100_PCIE_DESCRIPTION,
+                    gpu_description=LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+                    memory_gib=200,
+                    price_cents_per_hour=329,
+                    storage_gib=1_024,
+                    vcpus=26,
+                ),
+            )
+        ]
+    )
+    client = LambdaCapacityClient(API_KEY, transport=transport)
+
+    observation = observe_h100_pcie_capacity(client, now=lambda: NOW)
+
+    assert observation.status == "OUT_OF_CAPACITY"
+    assert observation.instance_type is not None
+    assert observation.instance_type.name == "gpu_1x_h100_pcie"
+    assert observation.launch_preflight_ready is False
+    assert [call[0] for call in transport.calls] == ["/instance-types"]
+
+
+@pytest.mark.parametrize("gpus", [-1, True, "0", 257])
+def test_invalid_catalog_gpu_counts_reject(gpus: Any) -> None:
+    client = LambdaCapacityClient(
+        API_KEY,
+        transport=FakeGetTransport([_catalog(_offer(gpus=gpus))]),
+    )
+
+    with pytest.raises(LambdaCapacityApiError, match="GPU count is invalid"):
+        client.list_instance_types()
+
+
 @pytest.mark.parametrize(
     ("offer", "expected_status"),
     [

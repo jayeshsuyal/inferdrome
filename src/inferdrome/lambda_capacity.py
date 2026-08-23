@@ -664,7 +664,9 @@ def _instance_type_from_api(key: object, value: object) -> LambdaInstanceTypeOff
         architecture=architecture,
         description=description,
         gpu_description=gpu_description,
-        gpus=_positive_integer(specs.get("gpus"), label="GPU count", maximum=256),
+        gpus=_nonnegative_integer(
+            specs.get("gpus"), label="GPU count", maximum=256
+        ),
         memory_gib=_positive_integer(
             specs.get("memory_gib"), label="memory GiB", maximum=1_000_000
         ),
@@ -714,6 +716,16 @@ def _positive_integer(value: object, *, label: str, maximum: int) -> int:
         isinstance(value, bool)
         or not isinstance(value, int)
         or not 1 <= value <= maximum
+    ):
+        raise LambdaCapacityApiError(f"Lambda {label} is invalid")
+    return value
+
+
+def _nonnegative_integer(value: object, *, label: str, maximum: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= maximum
     ):
         raise LambdaCapacityApiError(f"Lambda {label} is invalid")
     return value
