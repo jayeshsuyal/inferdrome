@@ -16,6 +16,7 @@ tokenizer revision: b968826d9c46dd6066d109eabc6255188de91218
 producer candidate: vLLM 0.26.0
 profile implementation state: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
 reviewed external capability: A10_RUNTIME_OBSERVED
+A100 execution pack: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
 ```
 
 The generated profile's implementation-state field remains frozen at its
@@ -98,6 +99,78 @@ This closes only compatibility and fit for this exact A10/profile pair. It is
 not provider hardware attestation, an acceptance verdict, a cross-GPU result,
 or authority to silently change the frozen campaign.
 
+## Zero-spend A100 execution pack
+
+PR16 makes the A100 same-model hardware-control assignment executable without
+claiming that it has executed. The generated
+[`qwen3-8b-a100.json`](../campaigns/v1/execution-packs/qwen3-8b-a100.json)
+reuses the exact Qwen3-8B model revision, profile, workload, sampling controls,
+vLLM 0.26.0 producer candidate, and concurrency-one capability spike used by
+the reviewed A10 observation. It does not introduce the separate Qwen3-14B
+capability-ladder profile.
+
+The target is exactly one A100 40 GB PCIe, reported by `nvidia-smi` as
+`NVIDIA A100-PCIE-40GB`. `NVIDIA A100-SXM4-80GB`,
+another A100 memory size or interconnect, and a generic `NVIDIA A100` runtime
+observation all fail closed. Lambda's provider instance-type name is not
+guessed or frozen as a static SKU: the operator must supply the exact
+`instance_type_name` returned by the Lambda API, and the controller must match
+that value exactly against the selected API instance before remote setup.
+The machine literal follows NVIDIA's
+[supported-GPU identifier table](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus),
+while Lambda's
+[instance table](https://docs.lambda.ai/public-cloud/on-demand/#instance-types)
+lists the one-GPU A100 PCIe 40 GB shape.
+
+The dated planning rate is exactly `$1.99/hour` and the session cap is exactly
+`$1.25`. Both values must match the runtime arguments and the Lambda API rate;
+the cap remains a client-side termination boundary rather than a provider
+billing guarantee. Exactly one non-terminal paid instance may exist, and the
+remote preflight must observe the exact A100 model above on the selected GPU.
+
+The execution pack deliberately records:
+
+```text
+capability_state: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
+launch_authorization: EXPLICIT_OPERATOR_CONFIRMATION_REQUIRED
+hardware_attestation: false
+acceptance_verdict: null
+```
+
+Generation, schema validation, mutation tests, and a controller dry run prove
+only code and local conformance. They do not prove model fit on A100, provider
+hardware, runtime behavior, benchmark success, customer eligibility, or an
+acceptance outcome. PR16 performed no cloud launch and produced no A100 runtime
+receipt. The reviewed A10 archive, its immutable evidence bytes, and its legacy
+verification path remain unchanged.
+
+The zero-cost A100 preview requires a clean committed checkout and uses
+placeholders for an instance that an operator might later choose. It builds and
+validates the exact source payload but does not contact Lambda or SSH:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  ubuntu@203.0.113.10 \
+  --dry-run \
+  --expected-commit 0123456789abcdef0123456789abcdef01234567 \
+  --identity-file /absolute/path/to/capture-only-id_ed25519 \
+  --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
+  --qwen3-gpu-tier a100-40gb-pcie \
+  --lambda-instance-type-name '<exact Lambda API instance_type_name>' \
+  --lambda-instance-id 0123456789abcdef0123456789abcdef \
+  --lambda-hourly-rate-usd 1.99 \
+  --max-cost-usd 1.25 \
+  --lambda-billing-started-at 2026-08-21T20:00:00Z \
+  --startup-timeout-seconds 300 \
+  --remote-timeout-seconds 1300
+```
+
+The quoted instance-type placeholder must be replaced with the exact Lambda
+API value before a real attempt. A successful preview is not launch
+authorization. Removing `--dry-run` is a separate paid action that still
+requires explicit operator confirmation and a fresh review of availability,
+rate, endpoint, billing origin, and termination readiness.
+
 ## Zero-cost local checks
 
 ```bash
@@ -142,16 +215,18 @@ operator confirmation, and provider-confirmed termination. Any reproduction or
 new GPU assignment still requires a fresh bounded launch decision. The reviewed
 runtime-capability record does not mutate the frozen profile.
 
-## Bounded A10 remote-capture controller
+## Bounded Qwen3 remote-capture controller
 
 The explicit Qwen3 profile is now wired into the existing SSH transport and
 Lambda termination guard. This code does not launch an instance. The operator
-must still launch exactly one Lambda Stack 24.04 A10, explicitly confirm that
-launch in Lambda, record the provider billing-start timestamp, and supply the
-exact instance ID, SSH destination, and capture-only private-key path.
+must still launch exactly one matching Lambda Stack 24.04 GPU instance,
+explicitly confirm that launch in Lambda, record the provider billing-start
+timestamp, and supply the exact instance ID, API instance-type name, SSH
+destination, GPU tier, and capture-only private-key path.
 
-The zero-cost controller preview requires a clean committed checkout, builds
-and validates the exact source archive, but does not contact SSH or Lambda:
+The reviewed A10 path can still be previewed at zero cost. It requires a clean
+committed checkout, builds and validates the exact source archive, but does not
+contact SSH or Lambda:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
@@ -160,6 +235,8 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   --expected-commit 0123456789abcdef0123456789abcdef01234567 \
   --identity-file /absolute/path/to/capture-only-id_ed25519 \
   --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
+  --qwen3-gpu-tier a10-24gb-pcie \
+  --lambda-instance-type-name gpu_1x_a10 \
   --lambda-instance-id 0123456789abcdef0123456789abcdef \
   --lambda-hourly-rate-usd 1.29 \
   --max-cost-usd 0.75 \
@@ -176,32 +253,36 @@ forwarding, local-command, and environment-forwarding settings. Qwen3 mode
 requires an explicit regular private-key file and sends only the exact committed
 source tree—never `.git` or repository history.
 
-The Qwen3 mode fails before remote setup unless all of these remain true:
+The tier-bound Qwen3 mode fails before remote setup unless all of these remain
+true:
 
-- the selected profile ID is exact;
-- the Lambda API reports the exact frozen A10 rate of `$1.29/hour`;
-- the session cap is exactly `$0.75`;
+- the selected profile ID and GPU tier are exact;
+- the Lambda API reports the selected tier's exact frozen rate: `$1.29/hour`
+  for A10 or `$1.99/hour` for A100;
+- the session cap is exactly `$0.75` for A10 or `$1.25` for A100;
 - the explicit instance ID resolves to the SSH endpoint;
-- exactly one non-terminal paid Lambda instance exists and its API type is
-  exactly `gpu_1x_a10`;
+- exactly one non-terminal paid Lambda instance exists and its API
+  `instance_type_name` exactly matches the operator's runtime argument;
 - the independent termination watchdog publishes readiness;
-- the remote preflight observes exactly `NVIDIA A10` at the selected physical
-  GPU index;
+- the remote preflight observes exactly `NVIDIA A10` for the A10 tier or
+  `NVIDIA A100-PCIE-40GB` for the A100 tier at the selected physical GPU index;
 - Python 3.12 development, `venv`/`ensurepip`, and at least 40 GiB free under
   `/tmp` are available before source upload;
 - the source tree contains only regular Git blobs and no rejected secret-key
   names, links, submodules, private-key markers, or Git export transformations.
 
-At the frozen rate, `$0.75` permits 2,093 billed seconds. The watchdog requests
-termination 300 seconds before that cost boundary, at 1,793 billed seconds. The
-frozen phase ledger allocates 2,078 seconds: 90 preflight, 90 source upload,
+At the frozen A10 rate, `$0.75` permits 2,093 billed seconds. The watchdog
+requests termination 300 seconds before that cost boundary, at 1,793 billed
+seconds. For A100, `$1.25` at `$1.99/hour` permits 2,261 billed seconds and the
+same 300-second margin requests termination by 1,961 billed seconds. The frozen
+phase ledger allocates 2,078 seconds: 90 preflight, 90 source upload,
 1,300 remote capture, 60 remote kill grace, 5 SSH-close grace, 30 metadata
 transfer, 180 archive transfer, 23 controller handoff, and 300 termination
-confirmation. That leaves 15 seconds of theoretical ledger slack. The remote
-work is capped at 1,300 seconds and shortened further against the live
-termination deadline. Billing time already elapsed before controller startup,
-watchdog setup, and the guarded source rebuild is subtracted from that live
-window.
+confirmation. That leaves 15 seconds of theoretical A10 ledger slack and 183
+seconds of theoretical A100 ledger slack. The remote work is capped at 1,300
+seconds and shortened further against the live termination deadline. Billing
+time already elapsed before controller startup, watchdog setup, and the guarded
+source rebuild is subtracted from that live window.
 
 This is a client-side fail-safe, not a provider-enforced spending limit or a
 guarantee about the final invoice. Provider timing, billing granularity, API
@@ -216,7 +297,7 @@ The lifecycle order is deliberate:
 2. for the live capture, arm the independent Lambda watchdog first, bind the
    exact instance/rate/endpoint, and reject any second active paid instance;
 3. rebuild the checked source archive under watchdog protection, preflight the
-   exact A10, upload the archive, verify its digest, and
+   exact selected GPU variant, upload the archive, verify its digest, and
    extract it through a traversal/link/device-safe reader;
 4. run host preparation under a minimal `env -i` environment, install the
    checksum-pinned vLLM and architecture-specific `tokenizers==0.22.1` wheels,
@@ -234,9 +315,10 @@ The lifecycle order is deliberate:
 Promotion succeeds only if the one bundle is customer-eligible and reports 96
 measured requests, 96 successes, zero failures, and 96 observed TTFT samples
 for each frozen TTFT reducer. It must also report one CUDA device, the selected
-`NVIDIA A10`, concurrency one, and model/tokenizer snapshot identities matching
-the host-preparation receipt. Even then, the output is an observation-only
-capability spike with no acceptance verdict and no hardware attestation claim.
+exact GPU model, concurrency one, and model/tokenizer snapshot identities
+matching the host-preparation receipt. Even then, the output is an
+observation-only capability spike with no acceptance verdict and no hardware
+attestation claim.
 
 The source archive is limited to 128 MiB. The returned compressed capture is
 limited to 256 MiB. Transfer metadata, file count, member type, member size,
@@ -265,5 +347,6 @@ missing termination evidence or turn an incomplete capture into evidence.
 The reviewed receipt closes the A10 runtime-capability question for this exact
 profile and producer commit. It does not authorize another paid launch, prove a
 different GPU assignment, or establish a cross-GPU conclusion. The frozen
-profile and captured bytes remain immutable; future campaign receipts must be
-separate evidence.
+profile and captured bytes remain immutable. The A100 execution pack remains
+runtime-unproven until a separately authorized, terminated, retrieved, and
+independently verified capture produces a separate receipt.

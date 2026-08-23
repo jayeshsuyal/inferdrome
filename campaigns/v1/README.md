@@ -9,6 +9,10 @@ cross-GPU methodology before producer-profile implementation or paid execution.
   locally conformant but runtime-unproven Qwen3-8B profile.
 - `profiles/qwen3-8b-profile.schema.json` closes that profile structurally;
   semantic mutation vectors live with the campaign fixtures.
+- `execution-packs/qwen3-8b-a100.json` binds the zero-spend, same-model A100
+  hardware-control execution boundary.
+- `execution-packs/qwen3-a100-execution-pack.schema.json` closes that pack
+  structurally and rejects unearned runtime, hardware, or launch claims.
 - `workloads/qwen-text-mixed-length-v1.jsonl` and its manifest bind the exact
   96-prompt measured population.
 - `qwen3-8b-concurrency-{1,4,16}.yaml` are the three exact attached sources.
@@ -21,9 +25,22 @@ capability ladder. The control track does not become a controlled-comparison v1
 result: hardware is not a supported v1 treatment and cross-host equality is not
 established. The ladder cannot rank GPU speed because its model profiles differ.
 
-Every assignment remains `UNPROVEN_REQUIRES_SPIKE`. This document does not
-authorize a Lambda launch, prove model fit, attest execution, modify the genuine
-Qwen2.5 canary, or assign an acceptance verdict.
+The canonical plan preserves every assignment's pre-execution
+`UNPROVEN_REQUIRES_SPIKE` state. A separate reviewed receipt records one genuine
+Qwen3-8B A10 observation without rewriting that plan. The A100 execution pack
+is separately `LOCALLY_CONFORMANT_RUNTIME_UNPROVEN`: it reuses the exact
+Qwen3-8B profile and workload for the hardware-control track, targets exactly
+one A100 40 GB PCIe reported by `nvidia-smi` as `NVIDIA A100-PCIE-40GB` rather
+than an SXM or 80 GB variant, and requires
+Lambda's exact API `instance_type_name` as a runtime argument.
+
+The A100 rate and cap are frozen at `$1.99/hour` and `$1.25`. The runtime API
+rate must match exactly, one paid instance is allowed, and an operator must
+explicitly confirm any future launch. The pack has no launch authorization,
+hardware attestation, runtime observation, or acceptance verdict. PR16
+performed no cloud launch. It does not modify the reviewed A10 evidence or its
+legacy verification path, the genuine Qwen2.5 canary, or any public evidence
+schema.
 
 Regenerate or verify the committed bytes with:
 
