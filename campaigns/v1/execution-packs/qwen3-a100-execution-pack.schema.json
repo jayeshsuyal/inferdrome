@@ -1,0 +1,373 @@
+{
+  "$defs": {
+    "A100CostBoundary": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_seconds": {
+          "const": 2261,
+          "title": "Allowed Seconds",
+          "type": "integer"
+        },
+        "api_rate_match_required": {
+          "const": true,
+          "title": "Api Rate Match Required",
+          "type": "boolean"
+        },
+        "hourly_rate_snapshot_usd": {
+          "const": "1.99",
+          "title": "Hourly Rate Snapshot Usd",
+          "type": "string"
+        },
+        "max_session_cost_usd": {
+          "const": "1.25",
+          "title": "Max Session Cost Usd",
+          "type": "string"
+        },
+        "rate_snapshot_date": {
+          "const": "2026-08-20",
+          "title": "Rate Snapshot Date",
+          "type": "string"
+        },
+        "termination_safety_margin_seconds": {
+          "const": 300,
+          "title": "Termination Safety Margin Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "allowed_seconds",
+        "api_rate_match_required",
+        "hourly_rate_snapshot_usd",
+        "max_session_cost_usd",
+        "rate_snapshot_date",
+        "termination_safety_margin_seconds"
+      ],
+      "title": "A100CostBoundary",
+      "type": "object"
+    },
+    "A100GpuTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "campaign_gpu_model": {
+          "const": "NVIDIA A100",
+          "title": "Campaign Gpu Model",
+          "type": "string"
+        },
+        "expected_nvidia_smi_name": {
+          "const": "NVIDIA A100-PCIE-40GB",
+          "title": "Expected Nvidia Smi Name",
+          "type": "string"
+        },
+        "gpu_count": {
+          "const": 1,
+          "title": "Gpu Count",
+          "type": "integer"
+        },
+        "gpu_tier_id": {
+          "const": "a100-40gb-pcie",
+          "title": "Gpu Tier Id",
+          "type": "string"
+        },
+        "interconnect": {
+          "const": "PCIE",
+          "title": "Interconnect",
+          "type": "string"
+        },
+        "provider": {
+          "const": "lambda_cloud",
+          "title": "Provider",
+          "type": "string"
+        },
+        "provider_instance_type_policy": {
+          "const": "api_resolved_exact_gpu_tier_v1",
+          "title": "Provider Instance Type Policy",
+          "type": "string"
+        },
+        "vram_gib": {
+          "const": 40,
+          "title": "Vram Gib",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "campaign_gpu_model",
+        "expected_nvidia_smi_name",
+        "gpu_count",
+        "gpu_tier_id",
+        "interconnect",
+        "provider",
+        "provider_instance_type_policy",
+        "vram_gib"
+      ],
+      "title": "A100GpuTarget",
+      "type": "object"
+    },
+    "A100ModelBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "const": "Qwen/Qwen3-8B",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "model_revision",
+        "tokenizer_revision"
+      ],
+      "title": "A100ModelBinding",
+      "type": "object"
+    },
+    "A100PhaseBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "archive_transfer": {
+          "const": 180,
+          "title": "Archive Transfer",
+          "type": "integer"
+        },
+        "controller_handoff": {
+          "const": 23,
+          "title": "Controller Handoff",
+          "type": "integer"
+        },
+        "metadata_transfer": {
+          "const": 30,
+          "title": "Metadata Transfer",
+          "type": "integer"
+        },
+        "remote_capture": {
+          "const": 1300,
+          "title": "Remote Capture",
+          "type": "integer"
+        },
+        "remote_kill_grace": {
+          "const": 60,
+          "title": "Remote Kill Grace",
+          "type": "integer"
+        },
+        "remote_preflight": {
+          "const": 90,
+          "title": "Remote Preflight",
+          "type": "integer"
+        },
+        "source_upload": {
+          "const": 90,
+          "title": "Source Upload",
+          "type": "integer"
+        },
+        "ssh_close_grace": {
+          "const": 5,
+          "title": "Ssh Close Grace",
+          "type": "integer"
+        },
+        "termination_confirmation": {
+          "const": 300,
+          "title": "Termination Confirmation",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "archive_transfer",
+        "controller_handoff",
+        "metadata_transfer",
+        "remote_capture",
+        "remote_kill_grace",
+        "remote_preflight",
+        "source_upload",
+        "ssh_close_grace",
+        "termination_confirmation"
+      ],
+      "title": "A100PhaseBudget",
+      "type": "object"
+    },
+    "A100ProfileBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "producer_name": {
+          "const": "vllm",
+          "title": "Producer Name",
+          "type": "string"
+        },
+        "producer_version": {
+          "const": "0.26.0",
+          "title": "Producer Version",
+          "type": "string"
+        },
+        "profile_id": {
+          "const": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "profile_sha256": {
+          "const": "sha256:858382b5ea2e86253f55ed914d11e4ab7e8b13aa6331e8699fb4d364a9ee9369",
+          "title": "Profile Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_id",
+        "profile_sha256",
+        "producer_name",
+        "producer_version"
+      ],
+      "title": "A100ProfileBinding",
+      "type": "object"
+    },
+    "A100ProviderBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "exact_instance_type_name": {
+          "const": "RUNTIME_ARGUMENT_REQUIRED",
+          "title": "Exact Instance Type Name",
+          "type": "string"
+        },
+        "one_active_instance_required": {
+          "const": true,
+          "title": "One Active Instance Required",
+          "type": "boolean"
+        },
+        "remote_gpu_observation_required": {
+          "const": true,
+          "title": "Remote Gpu Observation Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "exact_instance_type_name",
+        "one_active_instance_required",
+        "remote_gpu_observation_required"
+      ],
+      "title": "A100ProviderBinding",
+      "type": "object"
+    },
+    "A100WorkloadBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {
+          "const": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "measured_requests": {
+          "const": 96,
+          "title": "Measured Requests",
+          "type": "integer"
+        },
+        "warmup_requests": {
+          "const": 12,
+          "title": "Warmup Requests",
+          "type": "integer"
+        },
+        "workload_id": {
+          "const": "inferdrome.qwen-text-mixed-length.v1",
+          "title": "Workload Id",
+          "type": "string"
+        },
+        "workload_sha256": {
+          "const": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f",
+          "title": "Workload Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "concurrency",
+        "measured_requests",
+        "warmup_requests",
+        "workload_id",
+        "workload_sha256"
+      ],
+      "title": "A100WorkloadBinding",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:qwen3-a100-execution-pack:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "acceptance_verdict": {
+      "title": "Acceptance Verdict",
+      "type": "null"
+    },
+    "campaign_id": {
+      "const": "qwen-gpu-capability-campaign-v1",
+      "title": "Campaign Id",
+      "type": "string"
+    },
+    "capability_state": {
+      "const": "LOCALLY_CONFORMANT_RUNTIME_UNPROVEN",
+      "title": "Capability State",
+      "type": "string"
+    },
+    "cost_boundary": {
+      "$ref": "#/$defs/A100CostBoundary"
+    },
+    "gpu_target": {
+      "$ref": "#/$defs/A100GpuTarget"
+    },
+    "hardware_attestation": {
+      "const": false,
+      "title": "Hardware Attestation",
+      "type": "boolean"
+    },
+    "launch_authorization": {
+      "const": "EXPLICIT_OPERATOR_CONFIRMATION_REQUIRED",
+      "title": "Launch Authorization",
+      "type": "string"
+    },
+    "model_binding": {
+      "$ref": "#/$defs/A100ModelBinding"
+    },
+    "phase_budget_seconds": {
+      "$ref": "#/$defs/A100PhaseBudget"
+    },
+    "profile_binding": {
+      "$ref": "#/$defs/A100ProfileBinding"
+    },
+    "provider_binding": {
+      "$ref": "#/$defs/A100ProviderBinding"
+    },
+    "schema_version": {
+      "const": "inferdrome.qwen3-a100-execution-pack.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "track_id": {
+      "const": "qwen3-8b-hardware-control",
+      "title": "Track Id",
+      "type": "string"
+    },
+    "workload_binding": {
+      "$ref": "#/$defs/A100WorkloadBinding"
+    }
+  },
+  "required": [
+    "acceptance_verdict",
+    "campaign_id",
+    "capability_state",
+    "cost_boundary",
+    "gpu_target",
+    "hardware_attestation",
+    "launch_authorization",
+    "model_binding",
+    "phase_budget_seconds",
+    "profile_binding",
+    "provider_binding",
+    "schema_version",
+    "track_id",
+    "workload_binding"
+  ],
+  "title": "Inferdrome Qwen3-8B A100 execution pack v1",
+  "type": "object"
+}

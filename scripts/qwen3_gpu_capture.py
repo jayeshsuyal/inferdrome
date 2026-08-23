@@ -33,6 +33,12 @@ from inferdrome.qwen3_campaign import (
     qwen3_model_manifest_sha256,
     qwen3_profile_sha256,
 )
+from inferdrome.qwen3_gpu_tiers import (
+    QWEN3_A10_GPU_TIER_ID,
+    QWEN3_IMPLEMENTED_GPU_TIERS,
+    Qwen3GpuTierPolicy,
+    qwen3_gpu_tier_policy,
+)
 from inferdrome.qwen3_tokenizer import (
     expected_qwen3_tokenizer_file_verification,
 )
@@ -42,7 +48,9 @@ if __package__:
 else:
     import real_gpu_capture
 
-_CAPTURE_SCHEMA = "inferdrome.qwen3-a10-capability-capture.v1"
+_LEGACY_CAPTURE_SCHEMA = "inferdrome.qwen3-a10-capability-capture.v1"
+_TIER_BOUND_CAPTURE_SCHEMA = "inferdrome.qwen3-gpu-capability-capture.v2"
+_CAPTURE_SCHEMA = _LEGACY_CAPTURE_SCHEMA
 _HOST_PREPARATION_SCHEMA = "inferdrome.qwen3-host-preparation.v1"
 _SOURCE_RELATIVE = "campaigns/v1/qwen3-8b-concurrency-1.yaml"
 _PROFILE_RELATIVE = "campaigns/v1/profiles/managed-vllm-0.26-qwen3-8b-bf16-v1.json"
@@ -71,6 +79,13 @@ _SUPPORT_PATHS = {
 
 class Qwen3CaptureError(RuntimeError):
     """Expected, user-facing Qwen3 capture failure."""
+
+
+def _tier_policy(gpu_tier_id: str) -> Qwen3GpuTierPolicy:
+    try:
+        return qwen3_gpu_tier_policy(gpu_tier_id)
+    except ValueError as error:
+        raise Qwen3CaptureError(str(error)) from None
 
 
 def _raise_capture(error: real_gpu_capture.CaptureError) -> None:
@@ -324,7 +339,10 @@ def _verify_support(
     return source_provenance["source_archive_sha256"]
 
 
-def _run_record(capture_root: Path) -> dict[str, Any]:
+def _run_record(
+    capture_root: Path,
+    policy: Qwen3GpuTierPolicy,
+) -> dict[str, Any]:
     runs_root = _relative_directory(capture_root, "runs", label="capture runs root")
     try:
         entries = sorted(runs_root.iterdir(), key=lambda item: item.name)
@@ -411,11 +429,14 @@ def _run_record(capture_root: Path) -> dict[str, Any]:
         not isinstance(gpus, list)
         or len(gpus) != 1
         or not isinstance(gpus[0], dict)
-        or gpus[0].get("model") != _EXPECTED_GPU_MODEL
+        or gpus[0].get("model") != policy.expected_nvidia_smi_name
         or proof.get("torch_cuda_device_count") != 1
         or proof.get("selected_gpu_indices") != [gpus[0].get("index")]
     ):
-        raise Qwen3CaptureError("Qwen3 capability spike did not run on one NVIDIA A10")
+        raise Qwen3CaptureError(
+            "Qwen3 capability spike did not run on one "
+            f"{policy.expected_nvidia_smi_name}"
+        )
     host = _read_json(
         capture_root / _SUPPORT_PATHS["host_preparation"],
         label="Qwen3 host-preparation receipt",
@@ -454,7 +475,11 @@ def _run_record(capture_root: Path) -> dict[str, Any]:
     }
 
 
-def _manifest_value(capture_root: Path, repository_commit: str) -> dict[str, Any]:
+def _manifest_value(
+    capture_root: Path,
+    repository_commit: str,
+    policy: Qwen3GpuTierPolicy,
+) -> dict[str, Any]:
     support = {
         key: _support_entry(capture_root, relative)
         for key, relative in _SUPPORT_PATHS.items()
@@ -464,21 +489,21 @@ def _manifest_value(capture_root: Path, repository_commit: str) -> dict[str, Any
         support,
         repository_commit,
     )
-    run = _run_record(capture_root)
+    run = _run_record(capture_root, policy)
     return {
         "acceptance_verdict": None,
         "campaign_id": CANONICAL_CAMPAIGN_ID,
         "capture_kind": "BOUNDED_RUNTIME_CAPABILITY_SPIKE",
         "captured_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "expected_gpu_model": _EXPECTED_GPU_MODEL,
+        "gpu_target": policy.public_target(),
         "hardware_attestation": False,
-        "hardware_observation": _HARDWARE_OBSERVATION,
+        "hardware_observation": policy.hardware_observation,
         "profile_id": QWEN3_8B_PROFILE_ID,
         "profile_sha256": qwen3_profile_sha256(),
         "publication_state": "OBSERVATION_ONLY_PENDING_REVIEW",
         "repository_commit": repository_commit,
         "run": run,
-        "schema_version": _CAPTURE_SCHEMA,
+        "schema_version": _TIER_BOUND_CAPTURE_SCHEMA,
         "source_archive_sha256": source_archive_sha256,
         "support": support,
     }
@@ -507,10 +532,16 @@ def _write_json_exclusive(path: Path, value: dict[str, Any]) -> None:
         ) from None
 
 
-def write_capture_manifest(capture_root: Path, repository_commit: str) -> Path:
+def write_capture_manifest(
+    capture_root: Path,
+    repository_commit: str,
+    *,
+    gpu_tier_id: str,
+) -> Path:
     """Publish one immutable manifest after a locally reverified Qwen3 run."""
 
     _require_commit(repository_commit, label="repository commit")
+    policy = _tier_policy(gpu_tier_id)
     try:
         real_gpu_capture._validate_capture_tree(capture_root)
     except real_gpu_capture.CaptureError as error:
@@ -518,11 +549,12 @@ def write_capture_manifest(capture_root: Path, repository_commit: str) -> Path:
     path = capture_root / "qwen3-capability-capture.json"
     if path.exists() or path.is_symlink():
         raise Qwen3CaptureError("Qwen3 capture manifest already exists")
-    value = _manifest_value(capture_root, repository_commit)
+    value = _manifest_value(capture_root, repository_commit, policy)
     _write_json_exclusive(path, value)
     verified = verify_capture(
         capture_root,
         expected_repository_commit=repository_commit,
+        expected_gpu_tier_id=gpu_tier_id,
     )
     if verified["run"] != value["run"]:
         raise Qwen3CaptureError("published Qwen3 capture manifest changed")
@@ -533,6 +565,7 @@ def verify_capture(
     capture_root: Path,
     *,
     expected_repository_commit: str | None = None,
+    expected_gpu_tier_id: str | None = None,
 ) -> dict[str, Any]:
     """Recalculate the sealed bundle and verify all Qwen3 spike bindings."""
 
@@ -542,9 +575,9 @@ def verify_capture(
         _raise_capture(error)
     manifest_path = capture_root / "qwen3-capability-capture.json"
     manifest = _read_json(manifest_path, label="Qwen3 capture manifest")
-    _require_exact_fields(
-        manifest,
-        {
+    schema_version = manifest.get("schema_version")
+    if schema_version == _LEGACY_CAPTURE_SCHEMA:
+        expected_fields = {
             "acceptance_verdict",
             "campaign_id",
             "capture_kind",
@@ -560,21 +593,67 @@ def verify_capture(
             "schema_version",
             "source_archive_sha256",
             "support",
-        },
+        }
+        policy = _tier_policy(QWEN3_A10_GPU_TIER_ID)
+        static = {
+            "acceptance_verdict": None,
+            "campaign_id": CANONICAL_CAMPAIGN_ID,
+            "capture_kind": "BOUNDED_RUNTIME_CAPABILITY_SPIKE",
+            "expected_gpu_model": _EXPECTED_GPU_MODEL,
+            "hardware_attestation": False,
+            "hardware_observation": _HARDWARE_OBSERVATION,
+            "profile_id": QWEN3_8B_PROFILE_ID,
+            "profile_sha256": qwen3_profile_sha256(),
+            "publication_state": "OBSERVATION_ONLY_PENDING_REVIEW",
+            "schema_version": _LEGACY_CAPTURE_SCHEMA,
+        }
+    elif schema_version == _TIER_BOUND_CAPTURE_SCHEMA:
+        expected_fields = {
+            "acceptance_verdict",
+            "campaign_id",
+            "capture_kind",
+            "captured_at",
+            "gpu_target",
+            "hardware_attestation",
+            "hardware_observation",
+            "profile_id",
+            "profile_sha256",
+            "publication_state",
+            "repository_commit",
+            "run",
+            "schema_version",
+            "source_archive_sha256",
+            "support",
+        }
+        target = manifest.get("gpu_target")
+        if not isinstance(target, dict):
+            raise Qwen3CaptureError("Qwen3 capture GPU target is invalid")
+        gpu_tier_id = target.get("gpu_tier_id")
+        if not isinstance(gpu_tier_id, str):
+            raise Qwen3CaptureError("Qwen3 capture GPU tier is invalid")
+        policy = _tier_policy(gpu_tier_id)
+        if target != policy.public_target():
+            raise Qwen3CaptureError("Qwen3 capture GPU target drifted")
+        static = {
+            "acceptance_verdict": None,
+            "campaign_id": CANONICAL_CAMPAIGN_ID,
+            "capture_kind": "BOUNDED_RUNTIME_CAPABILITY_SPIKE",
+            "hardware_attestation": False,
+            "hardware_observation": policy.hardware_observation,
+            "profile_id": QWEN3_8B_PROFILE_ID,
+            "profile_sha256": qwen3_profile_sha256(),
+            "publication_state": "OBSERVATION_ONLY_PENDING_REVIEW",
+            "schema_version": _TIER_BOUND_CAPTURE_SCHEMA,
+        }
+    else:
+        raise Qwen3CaptureError("Qwen3 capture schema version is unsupported")
+    _require_exact_fields(
+        manifest,
+        expected_fields,
         label="Qwen3 capture manifest",
     )
-    static = {
-        "acceptance_verdict": None,
-        "campaign_id": CANONICAL_CAMPAIGN_ID,
-        "capture_kind": "BOUNDED_RUNTIME_CAPABILITY_SPIKE",
-        "expected_gpu_model": _EXPECTED_GPU_MODEL,
-        "hardware_attestation": False,
-        "hardware_observation": _HARDWARE_OBSERVATION,
-        "profile_id": QWEN3_8B_PROFILE_ID,
-        "profile_sha256": qwen3_profile_sha256(),
-        "publication_state": "OBSERVATION_ONLY_PENDING_REVIEW",
-        "schema_version": _CAPTURE_SCHEMA,
-    }
+    if expected_gpu_tier_id is not None and policy.gpu_tier_id != expected_gpu_tier_id:
+        raise Qwen3CaptureError("Qwen3 capture is not from the expected GPU tier")
     for key, expected in static.items():
         if manifest.get(key) != expected:
             raise Qwen3CaptureError(f"Qwen3 capture field drifted: {key}")
@@ -602,10 +681,10 @@ def verify_capture(
     )
     if manifest.get("source_archive_sha256") != source_archive_sha256:
         raise Qwen3CaptureError("Qwen3 capture source archive binding drifted")
-    run = _run_record(capture_root)
+    run = _run_record(capture_root, policy)
     if manifest.get("run") != run:
         raise Qwen3CaptureError("Qwen3 capture run binding drifted")
-    return {
+    verification = {
         "capture_manifest_sha256": _sha256_file(
             manifest_path,
             label="Qwen3 capture manifest",
@@ -616,6 +695,10 @@ def verify_capture(
         "source_archive_sha256": source_archive_sha256,
         "valid": True,
     }
+    if schema_version == _TIER_BOUND_CAPTURE_SCHEMA:
+        verification["gpu_target"] = policy.public_target()
+        verification["gpu_tier_id"] = policy.gpu_tier_id
+    return verification
 
 
 def verify_capture_archive(
@@ -623,6 +706,7 @@ def verify_capture_archive(
     *,
     expected_archive_sha256: str,
     expected_repository_commit: str | None = None,
+    expected_gpu_tier_id: str | None = None,
 ) -> dict[str, Any]:
     """Verify archive bytes, safe extraction, and the full semantic run offline."""
 
@@ -645,6 +729,7 @@ def verify_capture_archive(
         verification = verify_capture(
             root,
             expected_repository_commit=expected_repository_commit,
+            expected_gpu_tier_id=expected_gpu_tier_id,
         )
     return {
         "archive_sha256": actual,
@@ -655,19 +740,25 @@ def verify_capture_archive(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create or verify one Qwen3 A10 capability-spike capture"
+        description="Create or verify one tier-bound Qwen3 capability-spike capture"
     )
     commands = parser.add_subparsers(dest="command", required=True)
     write = commands.add_parser("write")
     write.add_argument("--capture-root", required=True)
     write.add_argument("--repository-commit", required=True)
+    write.add_argument("--gpu-tier", choices=QWEN3_IMPLEMENTED_GPU_TIERS, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("capture_root")
     verify.add_argument("--expected-commit")
+    verify.add_argument("--expected-gpu-tier", choices=QWEN3_IMPLEMENTED_GPU_TIERS)
     verify_archive = commands.add_parser("verify-archive")
     verify_archive.add_argument("archive")
     verify_archive.add_argument("--expected-sha256", required=True)
     verify_archive.add_argument("--expected-commit")
+    verify_archive.add_argument(
+        "--expected-gpu-tier",
+        choices=QWEN3_IMPLEMENTED_GPU_TIERS,
+    )
     return parser
 
 
@@ -678,6 +769,7 @@ def main() -> int:
             path = write_capture_manifest(
                 Path(args.capture_root),
                 args.repository_commit,
+                gpu_tier_id=args.gpu_tier,
             )
             print(path)
         elif args.command == "verify":
@@ -686,6 +778,7 @@ def main() -> int:
                     verify_capture(
                         Path(args.capture_root),
                         expected_repository_commit=args.expected_commit,
+                        expected_gpu_tier_id=args.expected_gpu_tier,
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -699,6 +792,7 @@ def main() -> int:
                         Path(args.archive),
                         expected_archive_sha256=args.expected_sha256,
                         expected_repository_commit=args.expected_commit,
+                        expected_gpu_tier_id=args.expected_gpu_tier,
                     ),
                     ensure_ascii=False,
                     indent=2,

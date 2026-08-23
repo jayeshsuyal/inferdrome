@@ -30,6 +30,10 @@ from inferdrome.qwen3_campaign import (
     qwen3_model_manifest_sha256,
     qwen3_profile_sha256,
 )
+from inferdrome.qwen3_gpu_tiers import (
+    QWEN3_A10_GPU_TIER_ID,
+    QWEN3_A100_GPU_TIER_ID,
+)
 from inferdrome.qwen3_tokenizer import (
     expected_qwen3_tokenizer_file_verification,
 )
@@ -38,6 +42,18 @@ COMMIT = "a" * 40
 RUN_ID = "run-" + "b" * 32
 BUNDLE_DIGEST = "sha256:" + "c" * 64
 SOURCE_ARCHIVE_SHA256 = "sha256:" + "d" * 64
+
+
+def _write_manifest(
+    root: Path,
+    *,
+    gpu_tier_id: str = QWEN3_A10_GPU_TIER_ID,
+) -> Path:
+    return capture.write_capture_manifest(
+        root,
+        COMMIT,
+        gpu_tier_id=gpu_tier_id,
+    )
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -226,7 +242,7 @@ def test_qwen3_capture_writes_and_reverifies_archive(
     _fake_capture(root)
     monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
 
-    manifest_path = capture.write_capture_manifest(root, COMMIT)
+    manifest_path = _write_manifest(root)
     verification = capture.verify_capture(
         root,
         expected_repository_commit=COMMIT,
@@ -259,6 +275,92 @@ def test_qwen3_capture_writes_and_reverifies_archive(
     assert archive_verification["verification"] == verification
 
 
+def test_qwen3_a100_capture_binds_exact_pcie_tier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root, gpu_model="NVIDIA A100-PCIE-40GB")
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+
+    manifest_path = _write_manifest(
+        root,
+        gpu_tier_id=QWEN3_A100_GPU_TIER_ID,
+    )
+    verification = capture.verify_capture(
+        root,
+        expected_repository_commit=COMMIT,
+        expected_gpu_tier_id=QWEN3_A100_GPU_TIER_ID,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert verification["gpu_tier_id"] == QWEN3_A100_GPU_TIER_ID
+    assert verification["gpu_target"]["expected_nvidia_smi_name"] == (
+        "NVIDIA A100-PCIE-40GB"
+    )
+    assert manifest["schema_version"] == (
+        "inferdrome.qwen3-gpu-capability-capture.v2"
+    )
+    assert manifest["gpu_target"] == verification["gpu_target"]
+
+
+def test_qwen3_a100_capture_rejects_sxm_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root, gpu_model="NVIDIA A100-SXM4-40GB")
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+
+    with pytest.raises(
+        capture.Qwen3CaptureError,
+        match="one NVIDIA A100-PCIE-40GB",
+    ):
+        _write_manifest(root, gpu_tier_id=QWEN3_A100_GPU_TIER_ID)
+
+
+def test_qwen3_capture_rejects_expected_tier_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root, gpu_model="NVIDIA A100-PCIE-40GB")
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+    _write_manifest(root, gpu_tier_id=QWEN3_A100_GPU_TIER_ID)
+
+    with pytest.raises(capture.Qwen3CaptureError, match="expected GPU tier"):
+        capture.verify_capture(
+            root,
+            expected_gpu_tier_id=QWEN3_A10_GPU_TIER_ID,
+        )
+
+
+def test_qwen3_legacy_a10_manifest_still_verifies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root)
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+    manifest_path = _write_manifest(root)
+    manifest_path.chmod(0o644)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["expected_gpu_model"] = "NVIDIA A10"
+    manifest.pop("gpu_target")
+    manifest["schema_version"] = "inferdrome.qwen3-a10-capability-capture.v1"
+    _write_json(manifest_path, manifest)
+
+    verification = capture.verify_capture(
+        root,
+        expected_repository_commit=COMMIT,
+        expected_gpu_tier_id=QWEN3_A10_GPU_TIER_ID,
+    )
+
+    assert verification["valid"] is True
+    assert "gpu_tier_id" not in verification
+    assert "gpu_target" not in verification
+
+
 def test_qwen3_capture_rejects_non_a10_gpu(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -268,7 +370,7 @@ def test_qwen3_capture_rejects_non_a10_gpu(
     monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
 
     with pytest.raises(capture.Qwen3CaptureError, match="one NVIDIA A10"):
-        capture.write_capture_manifest(root, COMMIT)
+        _write_manifest(root)
 
 
 def test_qwen3_capture_rejects_one_failed_measured_request(
@@ -284,7 +386,7 @@ def test_qwen3_capture_rejects_one_failed_measured_request(
     )
 
     with pytest.raises(capture.Qwen3CaptureError, match="96 of 96"):
-        capture.write_capture_manifest(root, COMMIT)
+        _write_manifest(root)
 
 
 def test_qwen3_capture_rejects_missing_ttft_sample(
@@ -300,7 +402,7 @@ def test_qwen3_capture_rejects_missing_ttft_sample(
     )
 
     with pytest.raises(capture.Qwen3CaptureError, match="96 observed TTFT"):
-        capture.write_capture_manifest(root, COMMIT)
+        _write_manifest(root)
 
 
 def test_qwen3_capture_rejects_multi_device_runtime(
@@ -312,7 +414,7 @@ def test_qwen3_capture_rejects_multi_device_runtime(
     monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
 
     with pytest.raises(capture.Qwen3CaptureError, match="one NVIDIA A10"):
-        capture.write_capture_manifest(root, COMMIT)
+        _write_manifest(root)
 
 
 def test_qwen3_capture_rejects_spliced_model_snapshot(
@@ -324,7 +426,7 @@ def test_qwen3_capture_rejects_spliced_model_snapshot(
     monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
 
     with pytest.raises(capture.Qwen3CaptureError, match="snapshots disagree"):
-        capture.write_capture_manifest(root, COMMIT)
+        _write_manifest(root)
 
 
 @pytest.mark.parametrize(
@@ -350,7 +452,7 @@ def test_qwen3_capture_rejects_generated_support_byte_drift(
         capture.Qwen3CaptureError,
         match=f"support bytes drifted: {support_key}",
     ):
-        capture.write_capture_manifest(root, COMMIT)
+        _write_manifest(root)
 
 
 def test_qwen3_capture_rejects_tokenizers_wheel_pin_drift(
@@ -369,7 +471,7 @@ def test_qwen3_capture_rejects_tokenizers_wheel_pin_drift(
         capture.Qwen3CaptureError,
         match="host-preparation field drifted: tokenizers_wheel_sha256",
     ):
-        capture.write_capture_manifest(root, COMMIT)
+        _write_manifest(root)
 
 
 def test_qwen3_capture_rejects_support_mutation_after_publication(
@@ -379,7 +481,7 @@ def test_qwen3_capture_rejects_support_mutation_after_publication(
     root = tmp_path / "capture"
     _fake_capture(root)
     monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
-    capture.write_capture_manifest(root, COMMIT)
+    _write_manifest(root)
     profile = root / "support" / "campaign-profile.json"
     profile.chmod(0o644)
     profile.write_bytes(profile.read_bytes() + b" ")
@@ -395,7 +497,7 @@ def test_qwen3_capture_rejects_manifest_run_digest_mutation(
     root = tmp_path / "capture"
     _fake_capture(root)
     monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
-    manifest_path = capture.write_capture_manifest(root, COMMIT)
+    manifest_path = _write_manifest(root)
     manifest_path.chmod(0o644)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["run"]["bundle_digest"] = "sha256:" + "d" * 64

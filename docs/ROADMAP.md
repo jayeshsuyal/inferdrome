@@ -9,13 +9,17 @@ Current checkpoint: **The original Qwen2.5 producer-side real-GPU gate and the
 separate Qwen3-8B A10 capability spike are complete. The Qwen3 run contains
 96/96 successes, a valid customer-eligible bundle, independent post-termination
 verification, a bounded publication review, and deterministic handoff anchors.
-Both raw archives remain EXTERNAL_ONLY; owner license/publication decisions,
-security sign-off, ExitSpec outcomes, and release work remain open.**
+The zero-spend A100 execution pack is locally conformant but runtime-unproven;
+PR16 launched no cloud instance and produced no A100 receipt. Both reviewed raw
+archives remain EXTERNAL_ONLY; owner license/publication decisions, security
+sign-off, ExitSpec outcomes, and release work remain open.**
 
-Next campaign checkpoint: **Preserve the exact Qwen3-8B model, workload,
-sampling, producer, and reducer identities while collecting separately reviewed
-receipts on the next selected GPU classes. No cross-GPU conclusion exists until
-those runs complete. Every unexecuted model/runtime/GPU assignment remains
+Next campaign checkpoint: **After a separate explicit operator launch decision,
+execute the exact Qwen3-8B same-model control on one A100 40 GB PCIe reported
+by `nvidia-smi` as `NVIDIA A100-PCIE-40GB`,
+terminate it within the frozen `$1.99/hour` and `$1.25` boundary, and retain a
+separately reviewed receipt. No cross-GPU conclusion exists until real runs
+complete. Every unexecuted model/runtime/GPU assignment remains
 `UNPROVEN_REQUIRES_SPIKE`; ADR 0010 grants no launch authority, and ADR 0011
 keeps warmups aligned with exact vLLM 0.26.0 behavior.**
 
@@ -292,6 +296,15 @@ conformance mutations, exact-archive review, and deterministic handoff. The
 review finds no secret, email, or public-IP detector matches and classifies the
 unchanged archive `EXTERNAL_ONLY` because owner approval and multiple license
 records remain unresolved. Raw bytes were not committed or uploaded.
+
+A100 execution-pack closure on 2026-08-22 adds a zero-spend, fail-closed path
+for the Qwen3-8B same-model hardware-control assignment. It binds exactly one
+`NVIDIA A100-PCIE-40GB` and rejects SXM or 80 GB variants; requires the exact
+Lambda API `instance_type_name` at runtime; freezes `$1.99/hour` and a `$1.25`
+session cap; and retains explicit operator confirmation as the only launch
+boundary. Its state is `LOCALLY_CONFORMANT_RUNTIME_UNPROVEN`, with no hardware
+attestation and no acceptance verdict. PR16 performed no cloud launch, and the
+reviewed A10 evidence and legacy verification path remain unchanged.
 
 Still required to close the external acceptance boundary: run the separately
 owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations against the exact

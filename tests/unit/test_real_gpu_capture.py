@@ -286,11 +286,15 @@ def test_qwen3_remote_command_requires_explicit_profile() -> None:
         startup_timeout_seconds=300,
         remote_timeout_seconds=1_500,
         managed_capability_profile=remote._QWEN3_PROFILE_ID,
+        qwen3_gpu_tier="a10-24gb-pcie",
     )
 
     assert "--managed-capability-profile" in script
+    assert "--qwen3-gpu-tier" in script
+    assert "a10-24gb-pcie" in script
     assert remote._QWEN3_PROFILE_ID in script
     assert "\n+  --managed-capability-profile" not in script
+    assert "\n+  --qwen3-gpu-tier" not in script
     preflight = remote._remote_preflight_script(
         "/tmp/inferdrome-safe",
         gpu_index=0,
@@ -325,8 +329,10 @@ def test_qwen3_capture_mode_enforces_lambda_rate_instance_and_cap() -> None:
         "lambda_billing_started_at": datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
         "lambda_hourly_rate_usd": Decimal("1.29"),
         "lambda_instance_id": "b" * 32,
+        "lambda_instance_type_name": "gpu_1x_a10",
         "managed_capability_profile": remote._QWEN3_PROFILE_ID,
         "max_cost_usd": Decimal("0.75"),
+        "qwen3_gpu_tier": "a10-24gb-pcie",
         "identity_file": "/tmp/inferdrome-key",
         "remote_timeout_seconds": 1_500,
         "startup_timeout_seconds": 300,
@@ -335,6 +341,7 @@ def test_qwen3_capture_mode_enforces_lambda_rate_instance_and_cap() -> None:
 
     for mutation, message in (
         ({"lambda_instance_id": None}, "instance-id"),
+        ({"lambda_instance_type_name": None}, "instance-type-name"),
         ({"lambda_hourly_rate_usd": Decimal("1.30")}, "1.29"),
         ({"max_cost_usd": Decimal("0.76")}, "0.75"),
         ({"identity_file": None}, "identity"),
@@ -356,6 +363,33 @@ def test_qwen3_capture_mode_enforces_lambda_rate_instance_and_cap() -> None:
         )
 
 
+def test_qwen3_a100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
+    base = {
+        "identity_file": "/tmp/inferdrome-key",
+        "lambda_billing_started_at": datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        "lambda_hourly_rate_usd": Decimal("1.99"),
+        "lambda_instance_id": "b" * 32,
+        "lambda_instance_type_name": "gpu_1x_a100_runtime_api_value",
+        "managed_capability_profile": remote._QWEN3_PROFILE_ID,
+        "max_cost_usd": Decimal("1.25"),
+        "qwen3_gpu_tier": "a100-40gb-pcie",
+        "remote_timeout_seconds": 1_500,
+        "startup_timeout_seconds": 300,
+    }
+
+    remote._validate_capture_mode(SimpleNamespace(**base))
+
+    for mutation, message in (
+        ({"lambda_hourly_rate_usd": Decimal("1.98")}, "1.99"),
+        ({"max_cost_usd": Decimal("1.26")}, "1.25"),
+        ({"qwen3_gpu_tier": "h100-80gb-pcie"}, "not implemented"),
+    ):
+        with pytest.raises(remote.RemoteCaptureError, match=message):
+            remote._validate_capture_mode(
+                SimpleNamespace(**{**base, **mutation})
+            )
+
+
 def test_qwen3_phase_budget_fits_the_exact_cost_window() -> None:
     allowed_seconds = int(Decimal("0.75") / Decimal("1.29") * Decimal(3_600))
 
@@ -363,6 +397,14 @@ def test_qwen3_phase_budget_fits_the_exact_cost_window() -> None:
     assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 2_078
     assert remote._QWEN3_POST_REMOTE_BUDGET_SECONDS == 298
     assert remote._QWEN3_TERMINATION_SAFETY_MARGIN_SECONDS == 300
+
+
+def test_a100_phase_budget_fits_its_exact_cost_window() -> None:
+    policy = remote.qwen3_gpu_tier_policy("a100-40gb-pcie")
+
+    assert policy.allowed_seconds == 2_261
+    assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 2_078
+    assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) < policy.allowed_seconds
 
 
 def test_qwen3_transfer_metadata_rejects_oversized_archive(tmp_path: Path) -> None:
@@ -396,8 +438,10 @@ def test_qwen3_dry_run_discloses_termination_before_semantic_verification(
         lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
         lambda_hourly_rate_usd=Decimal("1.29"),
         lambda_instance_id="b" * 32,
+        lambda_instance_type_name="gpu_1x_a10",
         managed_capability_profile=remote._QWEN3_PROFILE_ID,
         max_cost_usd=Decimal("0.75"),
+        qwen3_gpu_tier="a10-24gb-pcie",
         remote_timeout_seconds=1_500,
         startup_timeout_seconds=300,
     )
@@ -407,6 +451,7 @@ def test_qwen3_dry_run_discloses_termination_before_semantic_verification(
     plan = json.loads(capsys.readouterr().out)
     assert plan["expected_gpu_model"] == "NVIDIA A10"
     assert plan["expected_lambda_instance_type"] == "gpu_1x_a10"
+    assert plan["qwen3_gpu_tier"] == "a10-24gb-pcie"
     assert plan["source_archive_sha256"] == SOURCE_ARCHIVE_SHA256
     assert plan["source_archive_bytes"] == 1_024
     assert sum(plan["phase_budget_seconds"].values()) == 2_078
@@ -425,6 +470,39 @@ def test_qwen3_dry_run_discloses_termination_before_semantic_verification(
     )
     assert watchdog_index < guarded_source_index
     assert termination_index < verification_index
+
+
+def test_qwen3_a100_dry_run_binds_runtime_instance_type_and_exact_gpu(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        remote,
+        "_create_source_archive",
+        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@gpu.example.test",
+        gpu_index=0,
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.99"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name="gpu_1x_a100_api_runtime",
+        managed_capability_profile=remote._QWEN3_PROFILE_ID,
+        max_cost_usd=Decimal("1.25"),
+        qwen3_gpu_tier="a100-40gb-pcie",
+        remote_timeout_seconds=1_500,
+        startup_timeout_seconds=300,
+    )
+
+    remote._dry_run(args, COMMIT, None)
+    plan = json.loads(capsys.readouterr().out)
+
+    assert plan["expected_gpu_model"] == "NVIDIA A100-PCIE-40GB"
+    assert plan["expected_lambda_instance_type"] == "gpu_1x_a100_api_runtime"
+    assert plan["qwen3_gpu_tier"] == "a100-40gb-pcie"
+    assert plan["lambda_cost_guard"]["hourly_rate_usd"] == "1.99"
+    assert plan["lambda_cost_guard"]["max_cost_usd"] == "1.25"
 
 
 def test_live_cost_window_clamps_remote_work_before_termination() -> None:
@@ -526,9 +604,11 @@ def test_qwen3_fake_ssh_retrieval_stops_at_checksum_before_semantics(
         destination="ubuntu@gpu.example.test",
         gpu_index=0,
         host_key_sha256=None,
+        lambda_instance_type_name="gpu_1x_a10",
         managed_capability_profile=remote._QWEN3_PROFILE_ID,
         output_root=str(tmp_path / "retrieved"),
         port=22,
+        qwen3_gpu_tier="a10-24gb-pcie",
         remote_timeout_seconds=1_500,
         startup_timeout_seconds=300,
     )
@@ -548,6 +628,9 @@ def test_qwen3_fake_ssh_retrieval_stops_at_checksum_before_semantics(
     assert (result / "capture.tar.gz").read_bytes() == archive_bytes
     assert not (result / "capture").exists()
     receipt = json.loads((result / "retrieval-receipt.json").read_text())
+    assert receipt["gpu_tier_id"] == "a10-24gb-pcie"
+    assert receipt["lambda_instance_type_name"] == "gpu_1x_a10"
+    assert receipt["schema_version"] == "inferdrome.qwen3-gpu-retrieval.v2"
     assert receipt["semantic_verification"] == (
         "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
     )
@@ -799,6 +882,142 @@ def test_qwen3_finalization_binds_termination_then_publishes_semantics(
     )
 
 
+def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture_path = tmp_path / "retrieved"
+    capture_path.mkdir()
+    archive = capture_path / "capture.tar.gz"
+    archive.write_bytes(b"qwen3 a100 archive")
+    archive_sha256 = "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest()
+    (capture_path / "capture.tar.gz.sha256").write_text(
+        f"{archive_sha256.removeprefix('sha256:')}  capture.tar.gz\n",
+        encoding="ascii",
+    )
+    instance_type = "gpu_1x_a100_api_runtime"
+    _write_json(
+        capture_path / "retrieval-receipt.json",
+        {
+            "archive_sha256": archive_sha256,
+            "billing_action_required": "PROVIDER_TERMINATION_PENDING",
+            "gpu_tier_id": "a100-40gb-pcie",
+            "lambda_instance_type_name": instance_type,
+            "managed_capability_profile": remote._QWEN3_PROFILE_ID,
+            "repository_commit": COMMIT,
+            "schema_version": "inferdrome.qwen3-gpu-retrieval.v2",
+            "semantic_verification": (
+                "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
+            ),
+            "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
+            "ssh_host_identity_sha256": "sha256:" + "9" * 64,
+            "verified_at": "2026-08-20T20:19:00Z",
+        },
+    )
+    cost_window = remote.lambda_gpu_guard.CostWindow(
+        billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        deadline=datetime(2026, 8, 20, 20, 32, 41, tzinfo=UTC),
+        cost_limit_deadline=datetime(2026, 8, 20, 20, 37, 41, tzinfo=UTC),
+        allowed_seconds=2_261,
+        termination_safety_margin_seconds=300,
+        hourly_rate_usd=Decimal("1.99"),
+        max_cost_usd=Decimal("1.25"),
+    )
+    termination = remote.lambda_gpu_guard.TerminationResult(
+        instance_id="b" * 32,
+        final_status="absent",
+        request_sent=True,
+        confirmed_at=datetime(2026, 8, 20, 20, 20, tzinfo=UTC),
+    )
+    guard_root = tmp_path / "guard"
+    guard_root.mkdir()
+    guard_receipt = guard_root / "termination-receipt.json"
+    _write_json(
+        guard_receipt,
+        {
+            "cost_window": cost_window.public_record(),
+            "record_kind": "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION",
+            "schema_version": "inferdrome.lambda-termination-receipt.v2",
+            "termination": termination.public_record(),
+            "trigger": "controller-finally",
+        },
+    )
+    gpu_target = remote.qwen3_gpu_tier_policy(
+        "a100-40gb-pcie"
+    ).public_target()
+    verification = {
+        "capture_manifest_sha256": "sha256:" + "d" * 64,
+        "gpu_target": gpu_target,
+        "gpu_tier_id": "a100-40gb-pcie",
+        "profile_id": remote._QWEN3_PROFILE_ID,
+        "repository_commit": COMMIT,
+        "run": {"run_id": "run-" + "e" * 32},
+        "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
+        "valid": True,
+    }
+
+    def verify_archive(*_args: object, **kwargs: object) -> dict[str, object]:
+        assert kwargs["expected_gpu_tier_id"] == "a100-40gb-pcie"
+        return {
+            "archive_sha256": archive_sha256,
+            "capture_manifest_sha256": verification["capture_manifest_sha256"],
+            "verification": verification,
+        }
+
+    monkeypatch.setattr(
+        remote.qwen3_gpu_capture,
+        "verify_capture_archive",
+        verify_archive,
+    )
+
+    def extract(_archive: Path, destination: Path) -> Path:
+        extracted = destination / "capture"
+        (extracted / "runs").mkdir(parents=True)
+        return extracted
+
+    monkeypatch.setattr(remote.real_gpu_capture, "extract_capture_archive", extract)
+
+    def verify_extracted(*_args: object, **kwargs: object) -> dict[str, object]:
+        assert kwargs["expected_gpu_tier_id"] == "a100-40gb-pcie"
+        return verification
+
+    monkeypatch.setattr(
+        remote.qwen3_gpu_capture,
+        "verify_capture",
+        verify_extracted,
+    )
+    instance = remote.lambda_gpu_guard.LambdaInstance(
+        instance_id="b" * 32,
+        ip="203.0.113.10",
+        hostname="gpu.example.test",
+        status="active",
+        hourly_rate_usd=Decimal("1.99"),
+        instance_type_name=instance_type,
+    )
+    watchdog = SimpleNamespace(
+        cost_window=cost_window,
+        instance=instance,
+        receipt_path=guard_receipt,
+    )
+
+    assert remote._finalize_qwen3_capture(
+        capture_path,
+        commit=COMMIT,
+        watchdog=watchdog,
+        termination=termination,
+    ) == capture_path
+    semantic = json.loads(
+        (capture_path / "semantic-verification.json").read_text(encoding="utf-8")
+    )
+
+    assert semantic["schema_version"] == (
+        "inferdrome.qwen3-offline-verification.v2"
+    )
+    assert semantic["gpu_tier_id"] == "a100-40gb-pcie"
+    assert semantic["gpu_target"] == gpu_target
+    assert semantic["lambda_instance_type_name"] == instance_type
+
+
 def test_qwen3_offline_resume_uses_retained_guard_receipts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -847,6 +1066,22 @@ def test_qwen3_offline_resume_uses_retained_guard_receipts(
     }
     _write_json(guard_root / "termination-receipt.json", termination_receipt)
     capture_path = tmp_path / "retrieved"
+    _write_json(
+        capture_path / "retrieval-receipt.json",
+        {
+            "archive_sha256": "sha256:" + "8" * 64,
+            "billing_action_required": "PROVIDER_TERMINATION_PENDING",
+            "managed_capability_profile": remote._QWEN3_PROFILE_ID,
+            "repository_commit": COMMIT,
+            "schema_version": "inferdrome.qwen3-gpu-retrieval.v1",
+            "semantic_verification": (
+                "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
+            ),
+            "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
+            "ssh_host_identity_sha256": "sha256:" + "9" * 64,
+            "verified_at": "2026-08-20T20:19:00Z",
+        },
+    )
     observed: dict[str, object] = {}
 
     def finalize(
@@ -899,6 +1134,18 @@ def test_remote_preflight_requires_build_tools_and_python_headers() -> None:
     assert "at least 40 GiB free" not in script
     assert "import ensurepip" in script
     assert "Python 3.12 development headers" in script
+
+
+def test_a100_remote_preflight_requires_exact_40gb_pcie_name() -> None:
+    script = remote._remote_preflight_script(
+        "/tmp/inferdrome-safe",
+        expected_gpu_model="NVIDIA A100-PCIE-40GB",
+    )
+
+    assert "NVIDIA A100-PCIE-40GB" in script
+    assert "NVIDIA A100-SXM4-40GB" not in script
+    assert "NVIDIA A100-SXM4-80GB" not in script
+    assert "at least 40 GiB free" in script
 
 
 def test_lambda_guard_requires_actual_billing_start() -> None:
@@ -984,8 +1231,10 @@ def test_qwen3_guard_terminates_target_when_another_instance_is_active(
         lambda_guard_state_root="/tmp/inferdrome-test-guards",
         lambda_hourly_rate_usd=Decimal("1.29"),
         lambda_instance_id=target_id,
+        lambda_instance_type_name="gpu_1x_a10",
         managed_capability_profile=remote._QWEN3_PROFILE_ID,
         max_cost_usd=Decimal("0.75"),
+        qwen3_gpu_tier="a10-24gb-pcie",
     )
 
     with pytest.raises(remote.RemoteCaptureError, match="target terminated"):
@@ -1027,14 +1276,52 @@ def test_qwen3_guard_terminates_same_price_wrong_instance_type(
         lambda_guard_state_root="/tmp/inferdrome-test-guards",
         lambda_hourly_rate_usd=Decimal("1.29"),
         lambda_instance_id=target.instance_id,
+        lambda_instance_type_name="gpu_1x_a10",
         managed_capability_profile=remote._QWEN3_PROFILE_ID,
         max_cost_usd=Decimal("0.75"),
+        qwen3_gpu_tier="a10-24gb-pcie",
     )
 
     with pytest.raises(remote.RemoteCaptureError, match="target terminated"):
         remote._arm_lambda_watchdog(args)
 
     assert terminated == [(handle, "campaign-single-instance-check-failed")]
+
+
+def test_qwen3_a100_guard_accepts_only_the_runtime_bound_instance_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = SimpleNamespace(
+        instance_id="b" * 32,
+        instance_type_name="gpu_1x_a100_api_runtime",
+        status="active",
+    )
+    handle = SimpleNamespace(
+        client=SimpleNamespace(list_instances=lambda: (target,)),
+        cost_window=SimpleNamespace(
+            deadline=datetime(2026, 8, 20, 20, 20, tzinfo=UTC)
+        ),
+        instance=target,
+        state_directory=Path("/tmp/inferdrome-test-guard"),
+    )
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "arm_watchdog",
+        lambda *_args, **_kwargs: handle,
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@capture.example.test",
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_guard_state_root="/tmp/inferdrome-test-guards",
+        lambda_hourly_rate_usd=Decimal("1.99"),
+        lambda_instance_id=target.instance_id,
+        lambda_instance_type_name=target.instance_type_name,
+        managed_capability_profile=remote._QWEN3_PROFILE_ID,
+        max_cost_usd=Decimal("1.25"),
+        qwen3_gpu_tier="a100-40gb-pcie",
+    )
+
+    assert remote._arm_lambda_watchdog(args) is handle
 
 
 def test_capture_terminates_guarded_instance_even_after_capture_failure(
