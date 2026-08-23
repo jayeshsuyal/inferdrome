@@ -45,7 +45,7 @@ def _observation(
                     "H100 (80 GB PCIe)" if h100 else "A100 (40 GB PCIe)"
                 ),
                 gpus=1,
-                memory_gib=225 if h100 else 200,
+                memory_gib=200,
                 name="gpu_1x_h100_pcie" if h100 else "gpu_1x_a100_pcie",
                 price_cents_per_hour=329 if h100 else 199,
                 regions_with_capacity=(
