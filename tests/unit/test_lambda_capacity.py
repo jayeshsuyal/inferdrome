@@ -11,6 +11,8 @@ import pytest
 from inferdrome.lambda_capacity import (
     LAMBDA_A100_PCIE_DESCRIPTION,
     LAMBDA_A100_PCIE_GPU_DESCRIPTION,
+    LAMBDA_A100_SXM4_DESCRIPTION,
+    LAMBDA_A100_SXM4_GPU_DESCRIPTION,
     LAMBDA_H100_PCIE_DESCRIPTION,
     LAMBDA_H100_PCIE_GPU_DESCRIPTION,
     LambdaCapacityApiError,
@@ -18,6 +20,7 @@ from inferdrome.lambda_capacity import (
     LambdaCapacityError,
     LambdaCapacityObservation,
     observe_a100_pcie_capacity,
+    observe_a100_sxm4_capacity,
     observe_h100_pcie_capacity,
 )
 
@@ -188,6 +191,57 @@ def test_exact_h100_pcie_target_is_ready_and_tier_bound() -> None:
         "name": "gpu_1x_h100_pcie",
         "regions_with_capacity": [
             {"description": "Virginia, USA", "name": "us-east-1"}
+        ],
+    }
+
+
+def test_exact_a100_sxm4_extension_is_ready_and_tier_bound() -> None:
+    transport = FakeGetTransport(
+        [
+            _catalog(
+                _offer(
+                    name="gpu_1x_a100_sxm4",
+                    description=LAMBDA_A100_SXM4_DESCRIPTION,
+                    gpu_description=LAMBDA_A100_SXM4_GPU_DESCRIPTION,
+                    memory_gib=200,
+                    price_cents_per_hour=199,
+                    regions=[
+                        {"description": "Arizona, USA", "name": "us-west-2"}
+                    ],
+                    storage_gib=512,
+                    vcpus=30,
+                )
+            ),
+            {"data": []},
+        ]
+    )
+    client = LambdaCapacityClient(
+        API_KEY,
+        transport=transport,
+        sleeper=lambda _seconds: None,
+        monotonic=lambda: 0,
+    )
+
+    observation = observe_a100_sxm4_capacity(client, now=lambda: NOW)
+    record = observation.public_record()
+
+    assert observation.status == "READY_FOR_OPERATOR_CONFIRMATION"
+    assert observation.gpu_tier_id == "a100-40gb-sxm4"
+    assert record["gpu_target"] == {
+        "expected_nvidia_smi_name": "NVIDIA A100-SXM4-40GB",
+        "expected_provider_description": "1x A100 (40 GB SXM4)",
+        "expected_provider_gpu_description": "A100 (40 GB SXM4)",
+        "gpu_tier_id": "a100-40gb-sxm4",
+    }
+    assert record["instance_type"] == {
+        "architecture": "x86_64",
+        "description": "1x A100 (40 GB SXM4)",
+        "gpu_description": "A100 (40 GB SXM4)",
+        "gpus": 1,
+        "hourly_rate_usd": "1.99",
+        "name": "gpu_1x_a100_sxm4",
+        "regions_with_capacity": [
+            {"description": "Arizona, USA", "name": "us-west-2"}
         ],
     }
 

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from inferdrome.gpu_campaign import canonical_qwen_gpu_campaign
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_A100_SXM4_GPU_TIER_ID,
     QWEN3_H100_GPU_TIER_ID,
     QWEN3_PHASE_BUDGET_SECONDS,
     A100ExecutionPack,
@@ -151,6 +152,28 @@ def test_implemented_tier_policies_cross_bind_the_frozen_campaign(
     assert policy.allowed_seconds == allowed_seconds
     assert sum(QWEN3_PHASE_BUDGET_SECONDS.values()) == 2078
     assert sum(QWEN3_PHASE_BUDGET_SECONDS.values()) <= policy.allowed_seconds
+
+
+def test_a100_sxm4_policy_is_a_distinct_capacity_extension() -> None:
+    policy = qwen3_gpu_tier_policy(QWEN3_A100_SXM4_GPU_TIER_ID)
+
+    assert policy.public_target() == {
+        "campaign_gpu_model": "NVIDIA A100",
+        "expected_nvidia_smi_name": "NVIDIA A100-SXM4-40GB",
+        "gpu_count": 1,
+        "gpu_tier_id": "a100-40gb-sxm4",
+        "interconnect": "SXM4",
+        "provider": "lambda_cloud",
+        "provider_instance_type_policy": "api_resolved_exact_gpu_tier_v1",
+        "vram_gib": 40,
+    }
+    assert policy.hourly_rate_usd == Decimal("1.99")
+    assert policy.max_session_cost_usd == Decimal("1.25")
+    assert policy.allowed_seconds == 2261
+    assert all(
+        target.gpu_tier_id != QWEN3_A100_SXM4_GPU_TIER_ID
+        for target in canonical_qwen_gpu_campaign().gpu_targets
+    )
 
 
 def test_a100_execution_pack_freezes_the_unproven_qwen3_8b_control() -> None:

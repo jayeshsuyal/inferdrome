@@ -1,0 +1,67 @@
+[
+  {
+    "name": "valid-qwen3-a100-sxm4-capacity-extension",
+    "pack_valid": true,
+    "schema_valid": true
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/campaign_relationship",
+      "value": "REPLACES_A100_PCIE"
+    },
+    "name": "rejects-pcie-substitution-claim",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/gpu_target/expected_nvidia_smi_name",
+      "value": "NVIDIA A100-PCIE-40GB"
+    },
+    "name": "rejects-pcie-runtime-identity",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/provider_binding/exact_instance_type_name",
+      "value": "gpu_1x_a100"
+    },
+    "name": "rejects-provider-instance-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/cost_boundary/max_session_cost_usd",
+      "value": "1.26"
+    },
+    "name": "rejects-cost-cap-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/profile_binding/profile_sha256",
+      "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "name": "rejects-profile-digest-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/workload_binding/workload_sha256",
+      "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "name": "rejects-workload-digest-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  }
+]

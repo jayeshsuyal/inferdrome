@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_A100_SXM4_GPU_TIER_ID,
     QWEN3_H100_GPU_TIER_ID,
     qwen3_gpu_tier_policy,
 )
@@ -28,10 +29,13 @@ LAMBDA_CAPACITY_SCHEMA_VERSION = "inferdrome.lambda-capacity-observation.v1"
 
 LAMBDA_A100_PCIE_DESCRIPTION = "1x A100 (40 GB PCIe)"
 LAMBDA_A100_PCIE_GPU_DESCRIPTION = "A100 (40 GB PCIe)"
+LAMBDA_A100_SXM4_DESCRIPTION = "1x A100 (40 GB SXM4)"
+LAMBDA_A100_SXM4_GPU_DESCRIPTION = "A100 (40 GB SXM4)"
 LAMBDA_H100_PCIE_DESCRIPTION = "1x H100 (80 GB PCIe)"
 LAMBDA_H100_PCIE_GPU_DESCRIPTION = "H100 (80 GB PCIe)"
 LAMBDA_CAPACITY_GPU_TIERS = (
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_A100_SXM4_GPU_TIER_ID,
     QWEN3_H100_GPU_TIER_ID,
 )
 
@@ -105,6 +109,16 @@ _CAPACITY_TARGETS = MappingProxyType(
             provider_gpu_description=LAMBDA_A100_PCIE_GPU_DESCRIPTION,
             storage_gib=None,
             vcpus=None,
+        ),
+        QWEN3_A100_SXM4_GPU_TIER_ID: LambdaCapacityTarget(
+            architecture="x86_64",
+            gpu_tier_id=QWEN3_A100_SXM4_GPU_TIER_ID,
+            gpus=1,
+            memory_gib=200,
+            provider_description=LAMBDA_A100_SXM4_DESCRIPTION,
+            provider_gpu_description=LAMBDA_A100_SXM4_GPU_DESCRIPTION,
+            storage_gib=512,
+            vcpus=30,
         ),
         QWEN3_H100_GPU_TIER_ID: LambdaCapacityTarget(
             architecture="x86_64",
@@ -494,6 +508,20 @@ def observe_h100_pcie_capacity(
     return observe_gpu_capacity(
         client,
         QWEN3_H100_GPU_TIER_ID,
+        now=now,
+    )
+
+
+def observe_a100_sxm4_capacity(
+    client: LambdaCapacityClient,
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> LambdaCapacityObservation:
+    """Observe the dated A100 SXM4 capacity-extension target."""
+
+    return observe_gpu_capacity(
+        client,
+        QWEN3_A100_SXM4_GPU_TIER_ID,
         now=now,
     )
 

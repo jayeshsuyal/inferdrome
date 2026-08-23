@@ -390,6 +390,31 @@ def test_qwen3_a100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
             )
 
 
+def test_qwen3_a100_sxm4_capture_mode_freezes_exact_rate_and_cap() -> None:
+    base = {
+        "identity_file": "/tmp/inferdrome-key",
+        "lambda_billing_started_at": datetime(2026, 8, 23, 17, 0, tzinfo=UTC),
+        "lambda_hourly_rate_usd": Decimal("1.99"),
+        "lambda_instance_id": "b" * 32,
+        "lambda_instance_type_name": "gpu_1x_a100_sxm4",
+        "managed_capability_profile": remote._QWEN3_PROFILE_ID,
+        "max_cost_usd": Decimal("1.25"),
+        "qwen3_gpu_tier": "a100-40gb-sxm4",
+        "remote_timeout_seconds": 1_500,
+        "startup_timeout_seconds": 300,
+    }
+
+    remote._validate_capture_mode(SimpleNamespace(**base))
+
+    for mutation, message in (
+        ({"lambda_hourly_rate_usd": Decimal("2.00")}, "1.99"),
+        ({"max_cost_usd": Decimal("1.26")}, "1.25"),
+        ({"qwen3_gpu_tier": "h100-80gb-pcie"}, "3.29"),
+    ):
+        with pytest.raises(remote.RemoteCaptureError, match=message):
+            remote._validate_capture_mode(SimpleNamespace(**{**base, **mutation}))
+
+
 def test_qwen3_h100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
     base = {
         "identity_file": "/tmp/inferdrome-key",
@@ -536,6 +561,39 @@ def test_qwen3_a100_dry_run_binds_runtime_instance_type_and_exact_gpu(
     assert plan["expected_gpu_model"] == "NVIDIA A100-PCIE-40GB"
     assert plan["expected_lambda_instance_type"] == "gpu_1x_a100_api_runtime"
     assert plan["qwen3_gpu_tier"] == "a100-40gb-pcie"
+    assert plan["lambda_cost_guard"]["hourly_rate_usd"] == "1.99"
+    assert plan["lambda_cost_guard"]["max_cost_usd"] == "1.25"
+
+
+def test_qwen3_a100_sxm4_dry_run_binds_extension_instance_and_gpu(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        remote,
+        "_create_source_archive",
+        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@gpu.example.test",
+        gpu_index=0,
+        lambda_billing_started_at=datetime(2026, 8, 23, 17, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.99"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name="gpu_1x_a100_sxm4",
+        managed_capability_profile=remote._QWEN3_PROFILE_ID,
+        max_cost_usd=Decimal("1.25"),
+        qwen3_gpu_tier="a100-40gb-sxm4",
+        remote_timeout_seconds=1_500,
+        startup_timeout_seconds=300,
+    )
+
+    remote._dry_run(args, COMMIT, None)
+    plan = json.loads(capsys.readouterr().out)
+
+    assert plan["expected_gpu_model"] == "NVIDIA A100-SXM4-40GB"
+    assert plan["expected_lambda_instance_type"] == "gpu_1x_a100_sxm4"
+    assert plan["qwen3_gpu_tier"] == "a100-40gb-sxm4"
     assert plan["lambda_cost_guard"]["hourly_rate_usd"] == "1.99"
     assert plan["lambda_cost_guard"]["max_cost_usd"] == "1.25"
 
