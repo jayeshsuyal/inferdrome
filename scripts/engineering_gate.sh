@@ -14,6 +14,12 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/run_real_gpu_demo.py --check
 "$inferdrome_python" scripts/capture_real_gpu_over_ssh.py --check
 "$inferdrome_python" scripts/watch_lambda_a100_capacity.py --check
+"$inferdrome_python" scripts/watch_lambda_gpu_capacity.py \
+  --gpu-tier a100-40gb-pcie \
+  --check
+"$inferdrome_python" scripts/watch_lambda_gpu_capacity.py \
+  --gpu-tier h100-80gb-pcie \
+  --check
 "$inferdrome_python" scripts/review_qwen3_gpu_evidence_publication.py --check-records
 qwen3_evidence_archive="$repository_root/gpu-proof-retrieved/20260821T203940Z-058482df4737-68efd4f4/capture.tar.gz"
 if [[ -f "$qwen3_evidence_archive" ]]; then
@@ -32,6 +38,7 @@ bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/capture_real_gpu_over_ssh.py
 "$inferdrome_python" -m py_compile scripts/lambda_gpu_guard.py
 "$inferdrome_python" -m py_compile scripts/watch_lambda_a100_capacity.py
+"$inferdrome_python" -m py_compile scripts/watch_lambda_gpu_capacity.py
 "$inferdrome_python" -m py_compile scripts/materialize_real_gpu_receipt.py
 "$inferdrome_python" -m py_compile scripts/run_local_demo.py
 "$inferdrome_python" -m py_compile scripts/run_qwen3_evidence_dashboard.py

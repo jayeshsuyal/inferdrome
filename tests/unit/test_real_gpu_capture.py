@@ -382,12 +382,37 @@ def test_qwen3_a100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
     for mutation, message in (
         ({"lambda_hourly_rate_usd": Decimal("1.98")}, "1.99"),
         ({"max_cost_usd": Decimal("1.26")}, "1.25"),
-        ({"qwen3_gpu_tier": "h100-80gb-pcie"}, "not implemented"),
+        ({"qwen3_gpu_tier": "h100-80gb-pcie"}, "3.29"),
     ):
         with pytest.raises(remote.RemoteCaptureError, match=message):
             remote._validate_capture_mode(
                 SimpleNamespace(**{**base, **mutation})
             )
+
+
+def test_qwen3_h100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
+    base = {
+        "identity_file": "/tmp/inferdrome-key",
+        "lambda_billing_started_at": datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        "lambda_hourly_rate_usd": Decimal("3.29"),
+        "lambda_instance_id": "b" * 32,
+        "lambda_instance_type_name": "gpu_1x_h100_runtime_api_value",
+        "managed_capability_profile": remote._QWEN3_PROFILE_ID,
+        "max_cost_usd": Decimal("2.25"),
+        "qwen3_gpu_tier": "h100-80gb-pcie",
+        "remote_timeout_seconds": 1_500,
+        "startup_timeout_seconds": 300,
+    }
+
+    remote._validate_capture_mode(SimpleNamespace(**base))
+
+    for mutation, message in (
+        ({"lambda_hourly_rate_usd": Decimal("4.29")}, "3.29"),
+        ({"max_cost_usd": Decimal("2.26")}, "2.25"),
+        ({"qwen3_gpu_tier": "a100-40gb-pcie"}, "1.99"),
+    ):
+        with pytest.raises(remote.RemoteCaptureError, match=message):
+            remote._validate_capture_mode(SimpleNamespace(**{**base, **mutation}))
 
 
 def test_qwen3_phase_budget_fits_the_exact_cost_window() -> None:
@@ -405,6 +430,16 @@ def test_a100_phase_budget_fits_its_exact_cost_window() -> None:
     assert policy.allowed_seconds == 2_261
     assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 2_078
     assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) < policy.allowed_seconds
+
+
+def test_h100_phase_budget_preserves_termination_slack() -> None:
+    policy = remote.qwen3_gpu_tier_policy("h100-80gb-pcie")
+
+    assert policy.allowed_seconds == 2_462
+    assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 2_078
+    assert policy.allowed_seconds - sum(
+        remote._QWEN3_PHASE_BUDGET_SECONDS.values()
+    ) == 384
 
 
 def test_qwen3_transfer_metadata_rejects_oversized_archive(tmp_path: Path) -> None:
@@ -503,6 +538,39 @@ def test_qwen3_a100_dry_run_binds_runtime_instance_type_and_exact_gpu(
     assert plan["qwen3_gpu_tier"] == "a100-40gb-pcie"
     assert plan["lambda_cost_guard"]["hourly_rate_usd"] == "1.99"
     assert plan["lambda_cost_guard"]["max_cost_usd"] == "1.25"
+
+
+def test_qwen3_h100_dry_run_binds_runtime_instance_type_and_exact_gpu(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        remote,
+        "_create_source_archive",
+        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@gpu.example.test",
+        gpu_index=0,
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("3.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name="gpu_1x_h100_api_runtime",
+        managed_capability_profile=remote._QWEN3_PROFILE_ID,
+        max_cost_usd=Decimal("2.25"),
+        qwen3_gpu_tier="h100-80gb-pcie",
+        remote_timeout_seconds=1_500,
+        startup_timeout_seconds=300,
+    )
+
+    remote._dry_run(args, COMMIT, None)
+    plan = json.loads(capsys.readouterr().out)
+
+    assert plan["expected_gpu_model"] == "NVIDIA H100 PCIe"
+    assert plan["expected_lambda_instance_type"] == "gpu_1x_h100_api_runtime"
+    assert plan["qwen3_gpu_tier"] == "h100-80gb-pcie"
+    assert plan["lambda_cost_guard"]["hourly_rate_usd"] == "3.29"
+    assert plan["lambda_cost_guard"]["max_cost_usd"] == "2.25"
 
 
 def test_live_cost_window_clamps_remote_work_before_termination() -> None:
@@ -1145,6 +1213,18 @@ def test_a100_remote_preflight_requires_exact_40gb_pcie_name() -> None:
     assert "NVIDIA A100-PCIE-40GB" in script
     assert "NVIDIA A100-SXM4-40GB" not in script
     assert "NVIDIA A100-SXM4-80GB" not in script
+    assert "at least 40 GiB free" in script
+
+
+def test_h100_remote_preflight_requires_exact_pcie_product_name() -> None:
+    script = remote._remote_preflight_script(
+        "/tmp/inferdrome-safe",
+        expected_gpu_model="NVIDIA H100 PCIe",
+    )
+
+    assert "NVIDIA H100 PCIe" in script
+    assert "NVIDIA H100 80GB HBM3" not in script
+    assert "NVIDIA H100 NVL" not in script
     assert "at least 40 GiB free" in script
 
 

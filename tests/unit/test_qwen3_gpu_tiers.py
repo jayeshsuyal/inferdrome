@@ -14,13 +14,18 @@ from pydantic import ValidationError
 from inferdrome.gpu_campaign import canonical_qwen_gpu_campaign
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_H100_GPU_TIER_ID,
     QWEN3_PHASE_BUDGET_SECONDS,
     A100ExecutionPack,
+    H100ExecutionPack,
     qwen3_a100_execution_pack,
     qwen3_a100_execution_pack_conformance_cases,
     qwen3_a100_execution_pack_schema,
     qwen3_gpu_execution_documents,
     qwen3_gpu_tier_policy,
+    qwen3_h100_execution_pack,
+    qwen3_h100_execution_pack_conformance_cases,
+    qwen3_h100_execution_pack_schema,
 )
 
 PACK_PATH = "campaigns/v1/execution-packs/qwen3-8b-a100.json"
@@ -29,6 +34,13 @@ SCHEMA_PATH = (
 )
 CASES_PATH = (
     "tests/fixtures/campaigns/v1/qwen3-a100-execution-pack-cases.json"
+)
+H100_PACK_PATH = "campaigns/v1/execution-packs/qwen3-8b-h100.json"
+H100_SCHEMA_PATH = (
+    "campaigns/v1/execution-packs/qwen3-h100-execution-pack.schema.json"
+)
+H100_CASES_PATH = (
+    "tests/fixtures/campaigns/v1/qwen3-h100-execution-pack-cases.json"
 )
 
 
@@ -82,6 +94,15 @@ def _apply_mutation(payload: Any, mutation: dict[str, Any]) -> Any:
             Decimal("1.99"),
             Decimal("1.25"),
             2261,
+        ),
+        (
+            "h100-80gb-pcie",
+            "NVIDIA H100",
+            "NVIDIA H100 PCIe",
+            80,
+            Decimal("3.29"),
+            Decimal("2.25"),
+            2462,
         ),
     ],
 )
@@ -252,12 +273,100 @@ def test_generated_conformance_mutations_match_both_validators(
     assert pack_valid is case["pack_valid"]
 
 
-def test_unimplemented_h100_tier_rejects() -> None:
+def test_h100_execution_pack_freezes_the_unproven_qwen3_8b_control() -> None:
+    payload = qwen3_h100_execution_pack().model_dump(mode="json")
+
+    assert payload["acceptance_verdict"] is None
+    assert payload["capability_state"] == "LOCALLY_CONFORMANT_RUNTIME_UNPROVEN"
+    assert payload["cost_boundary"] == {
+        "allowed_seconds": 2462,
+        "api_rate_match_required": True,
+        "hourly_rate_snapshot_usd": "3.29",
+        "max_session_cost_usd": "2.25",
+        "rate_snapshot_date": "2026-08-20",
+        "termination_safety_margin_seconds": 300,
+    }
+    assert payload["gpu_target"] == {
+        "campaign_gpu_model": "NVIDIA H100",
+        "expected_nvidia_smi_name": "NVIDIA H100 PCIe",
+        "gpu_count": 1,
+        "gpu_tier_id": QWEN3_H100_GPU_TIER_ID,
+        "interconnect": "PCIE",
+        "provider": "lambda_cloud",
+        "provider_instance_type_policy": "api_resolved_exact_gpu_tier_v1",
+        "vram_gib": 80,
+    }
+    assert payload["hardware_attestation"] is False
+    assert payload["launch_authorization"] == (
+        "EXPLICIT_OPERATOR_CONFIRMATION_REQUIRED"
+    )
+    assert payload["model_binding"]["model_id"] == "Qwen/Qwen3-8B"
+    assert payload["profile_binding"]["profile_id"] == (
+        "managed-vllm-0.26-qwen3-8b-bf16-v1"
+    )
+    assert payload["schema_version"] == (
+        "inferdrome.qwen3-h100-execution-pack.v1"
+    )
+    assert payload["track_id"] == "qwen3-8b-hardware-control"
+    assert sum(payload["phase_budget_seconds"].values()) == 2078
+
+
+def test_generated_schema_validates_the_canonical_h100_pack() -> None:
+    schema = _generated_json(H100_SCHEMA_PATH)
+    payload = _generated_json(H100_PACK_PATH)
+
+    Draft202012Validator.check_schema(schema)
+    assert schema == qwen3_h100_execution_pack_schema()
+    assert payload == qwen3_h100_execution_pack().model_dump(mode="json")
+    assert not list(
+        Draft202012Validator(
+            schema,
+            format_checker=FormatChecker(),
+        ).iter_errors(payload)
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _generated_json(H100_CASES_PATH),
+    ids=[case["name"] for case in _generated_json(H100_CASES_PATH)],
+)
+def test_h100_conformance_mutations_match_both_validators(
+    case: dict[str, Any],
+) -> None:
+    schema = _generated_json(H100_SCHEMA_PATH)
+    payload = _generated_json(H100_PACK_PATH)
+    if mutation := case.get("mutation"):
+        payload = _apply_mutation(payload, mutation)
+
+    schema_valid = not list(
+        Draft202012Validator(
+            schema,
+            format_checker=FormatChecker(),
+        ).iter_errors(payload)
+    )
+    try:
+        H100ExecutionPack.model_validate_json(
+            json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        )
+    except ValidationError:
+        pack_valid = False
+    else:
+        pack_valid = True
+
+    assert _generated_json(H100_CASES_PATH) == (
+        qwen3_h100_execution_pack_conformance_cases()
+    )
+    assert schema_valid is case["schema_valid"]
+    assert pack_valid is case["pack_valid"]
+
+
+def test_unimplemented_b200_tier_rejects() -> None:
     with pytest.raises(
         ValueError,
-        match=r"Qwen3 GPU tier is not implemented: h100-80gb-pcie",
+        match=r"Qwen3 GPU tier is not implemented: b200-180gb-sxm6",
     ):
-        qwen3_gpu_tier_policy("h100-80gb-pcie")
+        qwen3_gpu_tier_policy("b200-180gb-sxm6")
 
 
 @pytest.mark.parametrize(
@@ -294,3 +403,20 @@ def test_a100_pack_rejects_digest_and_phase_budget_drift(
         format_checker=FormatChecker(),
     )
     assert (not list(validator.iter_errors(payload))) is schema_valid
+
+
+def test_h100_pack_rejects_runtime_claim_and_cost_drift() -> None:
+    payload = copy.deepcopy(_generated_json(H100_PACK_PATH))
+    payload["capability_state"] = "RUNTIME_PROVEN"
+    payload["cost_boundary"]["max_session_cost_usd"] = "2.26"
+
+    with pytest.raises(ValidationError):
+        H100ExecutionPack.model_validate_json(
+            json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        )
+
+    validator = Draft202012Validator(
+        _generated_json(H100_SCHEMA_PATH),
+        format_checker=FormatChecker(),
+    )
+    assert list(validator.iter_errors(payload))

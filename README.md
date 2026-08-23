@@ -37,6 +37,13 @@ producer commit `058482df47377aaae6303015746f9a8e05d7e0f7`. Its deterministic
 `EXTERNAL_ONLY`; this is one runtime observation, not hardware attestation, a
 cross-GPU comparison, or an acceptance verdict.
 
+The same-model hardware-control path is locally conformant for exact A100
+40 GB PCIe and H100 80 GB PCIe targets. Their generated execution packs freeze
+provider-rate and session-cost boundaries, exact `nvidia-smi` product names,
+the existing Qwen3-8B profile and workload, and explicit confirmation before
+every paid launch. A GET-only Lambda watcher can resolve live capacity without
+launching anything. Neither unexecuted pack is a GPU receipt or runtime claim.
+
 The repository also includes an accepted post-v0.1 local evidence dashboard.
 It presents Runs, Run detail, Compare, and Evidence views over the same bounded
 verification and deterministic recalculation path. It remains read-only,

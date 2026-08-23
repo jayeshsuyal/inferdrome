@@ -1,0 +1,77 @@
+[
+  {
+    "name": "valid-qwen3-h100-execution-pack",
+    "pack_valid": true,
+    "schema_valid": true
+  },
+  {
+    "mutation": {
+      "operation": "add",
+      "path": "/paid_launch_authorization",
+      "value": "GRANTED"
+    },
+    "name": "rejects-unknown-launch-authority",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/capability_state",
+      "value": "RUNTIME_PROVEN"
+    },
+    "name": "rejects-unearned-runtime-claim",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/gpu_target/expected_nvidia_smi_name",
+      "value": "NVIDIA H100 80GB HBM3"
+    },
+    "name": "rejects-wrong-h100-variant",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/cost_boundary/max_session_cost_usd",
+      "value": "2.26"
+    },
+    "name": "rejects-cost-cap-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/profile_binding/profile_sha256",
+      "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "name": "rejects-profile-digest-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/workload_binding/workload_sha256",
+      "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "name": "rejects-workload-digest-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  },
+  {
+    "mutation": {
+      "operation": "replace",
+      "path": "/phase_budget_seconds/remote_capture",
+      "value": 1299
+    },
+    "name": "rejects-phase-budget-drift",
+    "pack_valid": false,
+    "schema_valid": false
+  }
+]
