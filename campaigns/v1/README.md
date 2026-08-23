@@ -42,6 +42,15 @@ performed no cloud launch. It does not modify the reviewed A10 evidence or its
 legacy verification path, the genuine Qwen2.5 canary, or any public evidence
 schema.
 
+`scripts/watch_lambda_a100_capacity.py` is the launch-free capacity bridge for
+that pack. Its fixed API surface contains only `GET /instance-types` and, once
+the exact PCIe offer has a capacity-bearing region, `GET /instances`. It emits
+the API-resolved `instance_type.name` only after validating the exact provider
+descriptions, one-GPU x86 shape, `$1.99/hour` rate, and zero-active-instance
+boundary. A ready result still requires separate operator confirmation and is
+neither hardware attestation nor launch authorization. See the
+[campaign runbook](../../docs/QWEN3_CAMPAIGN_PROFILE.md#read-only-exact-capacity-watcher).
+
 Regenerate or verify the committed bytes with:
 
 ```bash

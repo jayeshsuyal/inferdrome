@@ -134,6 +134,21 @@ command-line argument, commit it, or paste it into a receipt. The guard projects
 only instance ID, endpoint, status, and hourly rate from the API response; it
 discards fields such as Jupyter tokens.
 
+For the frozen Qwen3 A100 PCIe tier, check volatile provider capacity before
+launch with the separate GET-only watcher:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/watch_lambda_a100_capacity.py \
+  --watch \
+  --poll-seconds 60 \
+  --max-wait-seconds 3600
+```
+
+The watcher cannot launch an instance. A zero exit status means only that the
+exact provider description, one-GPU shape, `$1.99/hour` rate, capacity region,
+and zero-active-instance preflight were observed. The returned instance-type
+name and region still require a separate paid-launch confirmation.
+
 Record the provider's UTC launch time before leaving the console. The guarded
 controller requires that billing origin, the exact displayed hourly rate, and
 an operator spend budget:

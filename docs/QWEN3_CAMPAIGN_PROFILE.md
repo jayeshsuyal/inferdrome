@@ -171,10 +171,58 @@ authorization. Removing `--dry-run` is a separate paid action that still
 requires explicit operator confirmation and a fresh review of availability,
 rate, endpoint, billing origin, and termination readiness.
 
+### Read-only exact-capacity watcher
+
+The A100 watcher closes the gap between a frozen execution pack and volatile
+provider capacity. It has a separate, GET-only client whose entire network
+allowlist is Lambda's `/instance-types` and `/instances` endpoints. It cannot
+represent a launch, restart, update, or termination request. The provider API
+key is accepted only through `LAMBDA_CLOUD_API_KEY` and never appears in output.
+
+Load an existing key without placing it in shell history, then run one
+observation:
+
+```bash
+read -r -s -p "Lambda API key: " LAMBDA_CLOUD_API_KEY
+echo
+export LAMBDA_CLOUD_API_KEY
+
+PYTHONPATH=src .venv/bin/python scripts/watch_lambda_a100_capacity.py
+unset LAMBDA_CLOUD_API_KEY
+```
+
+Or poll once per minute for at most one hour:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/watch_lambda_a100_capacity.py \
+  --watch \
+  --poll-seconds 60 \
+  --max-wait-seconds 3600
+```
+
+Each observation is one secret-free JSON line with a digest of the validated
+catalog projection. The watcher requires the provider description
+`1x A100 (40 GB PCIe)`, GPU description `A100 (40 GB PCIe)`, one GPU,
+`x86_64`, the exact `$1.99/hour` rate, at least one capacity-bearing region,
+and zero active instances. Available SXM, 80 GB, multi-GPU, ARM, or rate-drifted
+offers never satisfy the target. It queries `/instances` only after the exact
+PCIe offer has capacity and spaces those two API requests by more than one
+second to respect the general request limit in Lambda's
+[Cloud API documentation](https://docs.lambda.ai/api/cloud).
+
+Exit status `0` means only `READY_FOR_OPERATOR_CONFIRMATION`. Exit status `3`
+means unavailable or otherwise not launch-ready, and `2` means the observation
+failed. Even the ready record says `instance_launch_performed: false`,
+`hardware_attestation: false`, and
+`launch_authorization: EXPLICIT_OPERATOR_CONFIRMATION_REQUIRED`. The emitted
+provider `instance_type.name` and region are inputs to a later, separately
+confirmed launch; the watcher never performs that launch.
+
 ## Zero-cost local checks
 
 ```bash
 PYTHONPATH=src python3 scripts/generate_qwen3_launch_profile.py --check
+PYTHONPATH=src python3 scripts/watch_lambda_a100_capacity.py --check
 PYTHONPATH=src python3 -m inferdrome validate \
   campaigns/v1/qwen3-8b-concurrency-1.yaml
 PYTHONPATH=src python3 -m inferdrome run \
