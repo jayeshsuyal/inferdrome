@@ -33,6 +33,7 @@ from inferdrome.qwen3_campaign import (
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A10_GPU_TIER_ID,
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_A100_SXM4_GPU_TIER_ID,
     QWEN3_H100_GPU_TIER_ID,
 )
 from inferdrome.qwen3_tokenizer import (
@@ -318,6 +319,55 @@ def test_qwen3_a100_capture_rejects_sxm_variant(
         match="one NVIDIA A100-PCIE-40GB",
     ):
         _write_manifest(root, gpu_tier_id=QWEN3_A100_GPU_TIER_ID)
+
+
+def test_qwen3_a100_sxm4_capture_binds_capacity_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root, gpu_model="NVIDIA A100-SXM4-40GB")
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+
+    manifest_path = _write_manifest(
+        root,
+        gpu_tier_id=QWEN3_A100_SXM4_GPU_TIER_ID,
+    )
+    verification = capture.verify_capture(
+        root,
+        expected_repository_commit=COMMIT,
+        expected_gpu_tier_id=QWEN3_A100_SXM4_GPU_TIER_ID,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert verification["gpu_tier_id"] == QWEN3_A100_SXM4_GPU_TIER_ID
+    assert verification["gpu_target"]["expected_nvidia_smi_name"] == (
+        "NVIDIA A100-SXM4-40GB"
+    )
+    assert manifest["schema_version"] == (
+        "inferdrome.qwen3-gpu-capability-capture.v3"
+    )
+    assert manifest["campaign_extension_id"] == (
+        "qwen3-8b-a100-sxm4-capacity-extension-2026-08-23"
+    )
+    assert manifest["campaign_relationship"] == (
+        "DISTINCT_HARDWARE_TIER_DOES_NOT_REPLACE_A100_PCIE"
+    )
+
+
+def test_qwen3_a100_sxm4_capture_rejects_pcie_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root, gpu_model="NVIDIA A100-PCIE-40GB")
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+
+    with pytest.raises(
+        capture.Qwen3CaptureError,
+        match="one NVIDIA A100-SXM4-40GB",
+    ):
+        _write_manifest(root, gpu_tier_id=QWEN3_A100_SXM4_GPU_TIER_ID)
 
 
 def test_qwen3_h100_capture_binds_exact_pcie_tier(

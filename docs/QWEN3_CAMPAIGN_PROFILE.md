@@ -17,6 +17,7 @@ producer candidate: vLLM 0.26.0
 profile implementation state: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
 reviewed external capability: A10_RUNTIME_OBSERVED
 A100 execution pack: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
+A100 SXM4 dated extension: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
 H100 execution pack: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
 ```
 
@@ -219,6 +220,65 @@ failed. Even the ready record says `instance_launch_performed: false`,
 provider `instance_type.name` and region are inputs to a later, separately
 confirmed launch; the watcher never performs that launch.
 
+## Dated A100 SXM4 capacity extension
+
+The provider had no capacity for the frozen one-GPU A100 40 GB PCIe target on
+2026-08-23, while its live API offered a distinct one-GPU A100 40 GB SXM4
+shape. Inferdrome does not relabel that hardware or mutate the canonical
+campaign. The generated
+[`qwen3-8b-a100-sxm4-capacity-extension.json`](../campaigns/v1/execution-packs/qwen3-8b-a100-sxm4-capacity-extension.json)
+freezes a dated extension with the explicit relationship
+`DISTINCT_HARDWARE_TIER_DOES_NOT_REPLACE_A100_PCIE`.
+
+The extension reuses the canonical Qwen3-8B model revision, profile, workload,
+request order, sampling controls, vLLM producer candidate, and
+concurrency-one measurement. Its exact hardware target is
+`NVIDIA A100-SXM4-40GB`, never `NVIDIA A100-PCIE-40GB`. The provider preflight
+requires API instance type `gpu_1x_a100_sxm4`, description
+`1x A100 (40 GB SXM4)`, GPU description `A100 (40 GB SXM4)`, one `x86_64` GPU,
+30 vCPUs, 200 GiB host memory, 512 GiB storage, and exactly `$1.99/hour`.
+Any PCIe, 80 GB, multi-GPU, architecture, resource, rate, or runtime-name drift
+fails closed.
+
+The `$1.25` client-side session cap permits 2,261 billed seconds at the frozen
+rate. The unchanged 2,078-second phase ledger leaves 183 seconds of theoretical
+slack and includes the 300-second termination-confirmation allocation. This is
+not a provider billing guarantee. Capacity and the zero-active-instance
+condition must be checked again immediately before a separately confirmed
+launch.
+
+The zero-cost controller preview uses placeholders and contacts neither Lambda
+nor SSH:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  ubuntu@203.0.113.10 \
+  --dry-run \
+  --expected-commit 0123456789abcdef0123456789abcdef01234567 \
+  --identity-file /absolute/path/to/capture-only-id_ed25519 \
+  --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
+  --qwen3-gpu-tier a100-40gb-sxm4 \
+  --lambda-instance-type-name gpu_1x_a100_sxm4 \
+  --lambda-instance-id 0123456789abcdef0123456789abcdef \
+  --lambda-hourly-rate-usd 1.99 \
+  --max-cost-usd 1.25 \
+  --lambda-billing-started-at 2026-08-23T20:00:00Z \
+  --startup-timeout-seconds 300 \
+  --remote-timeout-seconds 1300
+```
+
+The GET-only local invariant check is:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/watch_lambda_gpu_capacity.py \
+  --gpu-tier a100-40gb-sxm4 --check
+```
+
+Generation and local conformance prove only that the extension is executable.
+Until a genuine capture succeeds, its state remains
+`LOCALLY_CONFORMANT_RUNTIME_UNPROVEN`, with no hardware attestation, receipt,
+or acceptance verdict.
+
 ## Zero-spend H100 execution pack
 
 The generated
@@ -270,8 +330,8 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   --remote-timeout-seconds 1300
 ```
 
-The generic watcher is GET-only and supports the implemented A100 and H100
-capacity targets:
+The generic watcher is GET-only and supports the implemented canonical A100
+and H100 targets plus the dated A100 SXM4 capacity extension:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/watch_lambda_gpu_capacity.py \
@@ -294,6 +354,8 @@ plan. Local conformance proves no H100 runtime behavior and creates no receipt.
 ```bash
 PYTHONPATH=src python3 scripts/generate_qwen3_launch_profile.py --check
 PYTHONPATH=src python3 scripts/watch_lambda_a100_capacity.py --check
+PYTHONPATH=src python3 scripts/watch_lambda_gpu_capacity.py \
+  --gpu-tier a100-40gb-sxm4 --check
 PYTHONPATH=src python3 scripts/watch_lambda_gpu_capacity.py \
   --gpu-tier h100-80gb-pcie --check
 PYTHONPATH=src python3 -m inferdrome validate \
@@ -379,16 +441,17 @@ true:
 
 - the selected profile ID and GPU tier are exact;
 - the Lambda API reports the selected tier's exact frozen rate: `$1.29/hour`
-  for A10, `$1.99/hour` for A100, or `$3.29/hour` for H100;
-- the session cap is exactly `$0.75` for A10, `$1.25` for A100, or `$2.25`
-  for H100;
+  for A10, `$1.99/hour` for either A100 variant, or `$3.29/hour` for H100;
+- the session cap is exactly `$0.75` for A10, `$1.25` for either A100 variant,
+  or `$2.25` for H100;
 - the explicit instance ID resolves to the SSH endpoint;
 - exactly one non-terminal paid Lambda instance exists and its API
   `instance_type_name` exactly matches the operator's runtime argument;
 - the independent termination watchdog publishes readiness;
 - the remote preflight observes exactly `NVIDIA A10` for A10,
-  `NVIDIA A100-PCIE-40GB` for A100, or `NVIDIA H100 PCIe` for H100 at the
-  selected physical GPU index;
+  `NVIDIA A100-PCIE-40GB` for A100 PCIe, `NVIDIA A100-SXM4-40GB` for the dated
+  A100 SXM4 extension, or `NVIDIA H100 PCIe` for H100 at the selected physical
+  GPU index;
 - Python 3.12 development, `venv`/`ensurepip`, and at least 40 GiB free under
   `/tmp` are available before source upload;
 - the source tree contains only regular Git blobs and no rejected secret-key
@@ -396,8 +459,9 @@ true:
 
 At the frozen A10 rate, `$0.75` permits 2,093 billed seconds. The watchdog
 requests termination 300 seconds before that cost boundary, at 1,793 billed
-seconds. For A100, `$1.25` at `$1.99/hour` permits 2,261 billed seconds and the
-same 300-second margin requests termination by 1,961 billed seconds. For H100,
+seconds. For either A100 variant, `$1.25` at `$1.99/hour` permits 2,261 billed
+seconds and the same 300-second margin requests termination by 1,961 billed
+seconds. For H100,
 `$2.25` at `$3.29/hour` permits 2,462 billed seconds and the margin requests
 termination by 2,162 billed seconds. The frozen
 phase ledger allocates 2,078 seconds: 90 preflight, 90 source upload,

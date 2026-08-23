@@ -33,8 +33,12 @@ from inferdrome.qwen3_campaign import (
     qwen3_model_manifest_sha256,
     qwen3_profile_sha256,
 )
+from inferdrome.qwen3_gpu_capacity_extensions import (
+    QWEN3_A100_SXM4_EXTENSION_ID,
+)
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A10_GPU_TIER_ID,
+    QWEN3_A100_SXM4_GPU_TIER_ID,
     QWEN3_IMPLEMENTED_GPU_TIERS,
     Qwen3GpuTierPolicy,
     qwen3_gpu_tier_policy,
@@ -50,6 +54,9 @@ else:
 
 _LEGACY_CAPTURE_SCHEMA = "inferdrome.qwen3-a10-capability-capture.v1"
 _TIER_BOUND_CAPTURE_SCHEMA = "inferdrome.qwen3-gpu-capability-capture.v2"
+_CAPACITY_EXTENSION_CAPTURE_SCHEMA = (
+    "inferdrome.qwen3-gpu-capability-capture.v3"
+)
 _CAPTURE_SCHEMA = _LEGACY_CAPTURE_SCHEMA
 _HOST_PREPARATION_SCHEMA = "inferdrome.qwen3-host-preparation.v1"
 _SOURCE_RELATIVE = "campaigns/v1/qwen3-8b-concurrency-1.yaml"
@@ -490,7 +497,7 @@ def _manifest_value(
         repository_commit,
     )
     run = _run_record(capture_root, policy)
-    return {
+    value = {
         "acceptance_verdict": None,
         "campaign_id": CANONICAL_CAMPAIGN_ID,
         "capture_kind": "BOUNDED_RUNTIME_CAPABILITY_SPIKE",
@@ -507,6 +514,17 @@ def _manifest_value(
         "source_archive_sha256": source_archive_sha256,
         "support": support,
     }
+    if policy.gpu_tier_id == QWEN3_A100_SXM4_GPU_TIER_ID:
+        value.update(
+            {
+                "campaign_extension_id": QWEN3_A100_SXM4_EXTENSION_ID,
+                "campaign_relationship": (
+                    "DISTINCT_HARDWARE_TIER_DOES_NOT_REPLACE_A100_PCIE"
+                ),
+                "schema_version": _CAPACITY_EXTENSION_CAPTURE_SCHEMA,
+            }
+        )
+    return value
 
 
 def _write_json_exclusive(path: Path, value: dict[str, Any]) -> None:
@@ -607,7 +625,10 @@ def verify_capture(
             "publication_state": "OBSERVATION_ONLY_PENDING_REVIEW",
             "schema_version": _LEGACY_CAPTURE_SCHEMA,
         }
-    elif schema_version == _TIER_BOUND_CAPTURE_SCHEMA:
+    elif schema_version in {
+        _TIER_BOUND_CAPTURE_SCHEMA,
+        _CAPACITY_EXTENSION_CAPTURE_SCHEMA,
+    }:
         expected_fields = {
             "acceptance_verdict",
             "campaign_id",
@@ -625,6 +646,10 @@ def verify_capture(
             "source_archive_sha256",
             "support",
         }
+        if schema_version == _CAPACITY_EXTENSION_CAPTURE_SCHEMA:
+            expected_fields.update(
+                {"campaign_extension_id", "campaign_relationship"}
+            )
         target = manifest.get("gpu_target")
         if not isinstance(target, dict):
             raise Qwen3CaptureError("Qwen3 capture GPU target is invalid")
@@ -634,6 +659,16 @@ def verify_capture(
         policy = _tier_policy(gpu_tier_id)
         if target != policy.public_target():
             raise Qwen3CaptureError("Qwen3 capture GPU target drifted")
+        if (
+            schema_version == _CAPACITY_EXTENSION_CAPTURE_SCHEMA
+            and gpu_tier_id != QWEN3_A100_SXM4_GPU_TIER_ID
+        ) or (
+            schema_version == _TIER_BOUND_CAPTURE_SCHEMA
+            and gpu_tier_id == QWEN3_A100_SXM4_GPU_TIER_ID
+        ):
+            raise Qwen3CaptureError(
+                "Qwen3 capture campaign relationship is invalid"
+            )
         static = {
             "acceptance_verdict": None,
             "campaign_id": CANONICAL_CAMPAIGN_ID,
@@ -643,8 +678,17 @@ def verify_capture(
             "profile_id": QWEN3_8B_PROFILE_ID,
             "profile_sha256": qwen3_profile_sha256(),
             "publication_state": "OBSERVATION_ONLY_PENDING_REVIEW",
-            "schema_version": _TIER_BOUND_CAPTURE_SCHEMA,
+            "schema_version": schema_version,
         }
+        if schema_version == _CAPACITY_EXTENSION_CAPTURE_SCHEMA:
+            static.update(
+                {
+                    "campaign_extension_id": QWEN3_A100_SXM4_EXTENSION_ID,
+                    "campaign_relationship": (
+                        "DISTINCT_HARDWARE_TIER_DOES_NOT_REPLACE_A100_PCIE"
+                    ),
+                }
+            )
     else:
         raise Qwen3CaptureError("Qwen3 capture schema version is unsupported")
     _require_exact_fields(
@@ -695,7 +739,10 @@ def verify_capture(
         "source_archive_sha256": source_archive_sha256,
         "valid": True,
     }
-    if schema_version == _TIER_BOUND_CAPTURE_SCHEMA:
+    if schema_version in {
+        _TIER_BOUND_CAPTURE_SCHEMA,
+        _CAPACITY_EXTENSION_CAPTURE_SCHEMA,
+    }:
         verification["gpu_target"] = policy.public_target()
         verification["gpu_tier_id"] = policy.gpu_tier_id
     return verification

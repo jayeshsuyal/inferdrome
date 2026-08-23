@@ -79,7 +79,7 @@ if [[ -n $managed_capability_profile && \
 fi
 if [[ -n $managed_capability_profile ]]; then
   case "$qwen3_gpu_tier" in
-    a10-24gb-pcie | a100-40gb-pcie) ;;
+    a10-24gb-pcie | a100-40gb-pcie | a100-40gb-sxm4 | h100-80gb-pcie) ;;
     "") fail "managed capability profile requires --qwen3-gpu-tier" ;;
     *) fail "Qwen3 GPU tier is unsupported" ;;
   esac

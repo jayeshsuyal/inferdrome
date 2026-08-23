@@ -28,10 +28,12 @@ from inferdrome.qwen3_campaign import (
 
 QWEN3_A10_GPU_TIER_ID = "a10-24gb-pcie"
 QWEN3_A100_GPU_TIER_ID = "a100-40gb-pcie"
+QWEN3_A100_SXM4_GPU_TIER_ID = "a100-40gb-sxm4"
 QWEN3_H100_GPU_TIER_ID = "h100-80gb-pcie"
 QWEN3_IMPLEMENTED_GPU_TIERS = (
     QWEN3_A10_GPU_TIER_ID,
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_A100_SXM4_GPU_TIER_ID,
     QWEN3_H100_GPU_TIER_ID,
 )
 QWEN3_A100_EXECUTION_PACK_SCHEMA_ID = (
@@ -129,6 +131,15 @@ _IMPLEMENTED_POLICIES = MappingProxyType(
             max_session_cost_usd=Decimal("1.25"),
             vram_gib=40,
         ),
+        QWEN3_A100_SXM4_GPU_TIER_ID: Qwen3GpuTierPolicy(
+            gpu_tier_id=QWEN3_A100_SXM4_GPU_TIER_ID,
+            campaign_gpu_model="NVIDIA A100",
+            expected_nvidia_smi_name="NVIDIA A100-SXM4-40GB",
+            hourly_rate_usd=Decimal("1.99"),
+            interconnect="SXM4",
+            max_session_cost_usd=Decimal("1.25"),
+            vram_gib=40,
+        ),
         QWEN3_H100_GPU_TIER_ID: Qwen3GpuTierPolicy(
             gpu_tier_id=QWEN3_H100_GPU_TIER_ID,
             campaign_gpu_model="NVIDIA H100",
@@ -143,11 +154,37 @@ _IMPLEMENTED_POLICIES = MappingProxyType(
 
 
 def qwen3_gpu_tier_policy(gpu_tier_id: str) -> Qwen3GpuTierPolicy:
-    """Resolve one implemented tier and cross-check it against the frozen plan."""
+    """Resolve a frozen campaign tier or dated capacity-extension tier."""
 
     selected = _IMPLEMENTED_POLICIES.get(gpu_tier_id)
     if selected is None:
         raise ValueError(f"Qwen3 GPU tier is not implemented: {gpu_tier_id}")
+    if gpu_tier_id == QWEN3_A100_SXM4_GPU_TIER_ID:
+        expected_extension_target = {
+            "campaign_gpu_model": "NVIDIA A100",
+            "expected_nvidia_smi_name": "NVIDIA A100-SXM4-40GB",
+            "gpu_count": 1,
+            "gpu_tier_id": QWEN3_A100_SXM4_GPU_TIER_ID,
+            "interconnect": "SXM4",
+            "provider": "lambda_cloud",
+            "provider_instance_type_policy": (
+                "api_resolved_exact_gpu_tier_v1"
+            ),
+            "vram_gib": 40,
+        }
+        if (
+            selected.public_target() != expected_extension_target
+            or selected.hourly_rate_usd != Decimal("1.99")
+            or selected.max_session_cost_usd != Decimal("1.25")
+        ):
+            raise AssertionError(
+                "A100 SXM4 capacity-extension policy drifted"
+            )
+        if sum(QWEN3_PHASE_BUDGET_SECONDS.values()) > selected.allowed_seconds:
+            raise AssertionError(
+                "A100 SXM4 phase budget exceeds its session cap"
+            )
+        return selected
     plan = canonical_qwen_gpu_campaign()
     target = next(
         item for item in plan.gpu_targets if item.gpu_tier_id == gpu_tier_id

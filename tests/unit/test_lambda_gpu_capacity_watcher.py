@@ -16,6 +16,7 @@ from inferdrome.lambda_capacity import (
 
 NOW = datetime(2026, 8, 23, 3, 0, tzinfo=UTC)
 H100_TIER = "h100-80gb-pcie"
+A100_SXM4_TIER = "a100-40gb-sxm4"
 
 
 def _observation(
@@ -75,6 +76,15 @@ def test_h100_local_check_requires_no_api_key(
     assert watcher.main(["--gpu-tier", H100_TIER, "--check"]) == 0
     assert capsys.readouterr().out == (
         "lambda-gpu-capacity: h100-80gb-pcie local invariants valid\n"
+    )
+
+
+def test_a100_sxm4_extension_local_check_requires_no_api_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert watcher.main(["--gpu-tier", A100_SXM4_TIER, "--check"]) == 0
+    assert capsys.readouterr().out == (
+        "lambda-gpu-capacity: a100-40gb-sxm4 local invariants valid\n"
     )
 
 

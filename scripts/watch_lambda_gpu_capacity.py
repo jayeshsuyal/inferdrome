@@ -35,6 +35,18 @@ _EXPECTED_LOCAL_INVARIANTS = {
         "storage_gib": None,
         "vcpus": None,
     },
+    "a100-40gb-sxm4": {
+        "architecture": "x86_64",
+        "expected_nvidia_smi_name": "NVIDIA A100-SXM4-40GB",
+        "gpus": 1,
+        "hourly_rate_usd": "1.99",
+        "max_session_cost_usd": "1.25",
+        "memory_gib": 200,
+        "provider_description": "1x A100 (40 GB SXM4)",
+        "provider_gpu_description": "A100 (40 GB SXM4)",
+        "storage_gib": 512,
+        "vcpus": 30,
+    },
     "h100-80gb-pcie": {
         "architecture": "x86_64",
         "expected_nvidia_smi_name": "NVIDIA H100 PCIe",

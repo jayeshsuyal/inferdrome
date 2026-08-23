@@ -18,6 +18,9 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
   --gpu-tier a100-40gb-pcie \
   --check
 "$inferdrome_python" scripts/watch_lambda_gpu_capacity.py \
+  --gpu-tier a100-40gb-sxm4 \
+  --check
+"$inferdrome_python" scripts/watch_lambda_gpu_capacity.py \
   --gpu-tier h100-80gb-pcie \
   --check
 "$inferdrome_python" scripts/review_qwen3_gpu_evidence_publication.py --check-records
