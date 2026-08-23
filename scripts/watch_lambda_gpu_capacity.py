@@ -41,7 +41,7 @@ _EXPECTED_LOCAL_INVARIANTS = {
         "gpus": 1,
         "hourly_rate_usd": "3.29",
         "max_session_cost_usd": "2.25",
-        "memory_gib": 225,
+        "memory_gib": 200,
         "provider_description": "1x H100 (80 GB PCIe)",
         "provider_gpu_description": "H100 (80 GB PCIe)",
         "storage_gib": 1_024,

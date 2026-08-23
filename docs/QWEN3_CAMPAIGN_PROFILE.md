@@ -233,14 +233,17 @@ The remote preflight requires the exact NVIDIA product literal
 `NVIDIA H100 PCIe`. Generic H100, H100 NVL, and H100 SXM product names fail
 closed. The provider preflight separately requires description
 `1x H100 (80 GB PCIe)`, GPU description `H100 (80 GB PCIe)`, one `x86_64` GPU,
-26 vCPUs, 225 GiB host memory, 1,024 GiB storage, and exactly `$3.29/hour`.
+26 vCPUs, 200 GiB host memory, 1,024 GiB storage, and exactly `$3.29/hour`.
 NVIDIA's
 [supported-GPU table](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/main/README.md?plain=1)
 and Lambda's
 [instance table](https://docs.lambda.ai/public-cloud/on-demand/#instance-types)
 are the primary identity sources; the provider API must still resolve the
 volatile instance-type name and capacity-bearing region immediately before a
-launch decision.
+launch decision. Lambda's dated public table currently lists 225 GiB RAM for
+this SKU, while its live launch catalog displayed 200 GiB on 2026-08-22. The
+execution preflight binds the live catalog value and fails closed if it changes
+again; the discrepancy is not silently normalized.
 
 The `$2.25` session cap permits 2,462 billed seconds at the frozen rate. The
 unchanged 2,078-second phase ledger therefore retains 384 seconds of outer
