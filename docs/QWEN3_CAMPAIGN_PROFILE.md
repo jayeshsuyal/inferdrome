@@ -17,6 +17,7 @@ producer candidate: vLLM 0.26.0
 profile implementation state: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
 reviewed external capability: A10_RUNTIME_OBSERVED
 A100 execution pack: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
+H100 execution pack: LOCALLY_CONFORMANT_RUNTIME_UNPROVEN
 ```
 
 The generated profile's implementation-state field remains frozen at its
@@ -218,11 +219,76 @@ failed. Even the ready record says `instance_launch_performed: false`,
 provider `instance_type.name` and region are inputs to a later, separately
 confirmed launch; the watcher never performs that launch.
 
+## Zero-spend H100 execution pack
+
+The generated
+[`qwen3-8b-h100.json`](../campaigns/v1/execution-packs/qwen3-8b-h100.json)
+extends the unchanged Qwen3-8B hardware-control contract to exactly one H100
+80 GB PCIe. It deliberately does not implement the separate Qwen3-32B
+capability-ladder assignment. Keeping the first H100 run on the same model,
+revision, workload, profile, request order, and concurrency as A10 makes a
+future hardware-control comparison methodologically valid.
+
+The remote preflight requires the exact NVIDIA product literal
+`NVIDIA H100 PCIe`. Generic H100, H100 NVL, and H100 SXM product names fail
+closed. The provider preflight separately requires description
+`1x H100 (80 GB PCIe)`, GPU description `H100 (80 GB PCIe)`, one `x86_64` GPU,
+26 vCPUs, 225 GiB host memory, 1,024 GiB storage, and exactly `$3.29/hour`.
+NVIDIA's
+[supported-GPU table](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/main/README.md?plain=1)
+and Lambda's
+[instance table](https://docs.lambda.ai/public-cloud/on-demand/#instance-types)
+are the primary identity sources; the provider API must still resolve the
+volatile instance-type name and capacity-bearing region immediately before a
+launch decision.
+
+The `$2.25` session cap permits 2,462 billed seconds at the frozen rate. The
+unchanged 2,078-second phase ledger therefore retains 384 seconds of outer
+slack, including the 300-second termination-confirmation allocation. This is a
+client-side safety boundary, not a provider billing guarantee.
+
+The zero-cost H100 controller preview uses placeholders and contacts neither
+Lambda nor SSH:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  ubuntu@203.0.113.10 \
+  --dry-run \
+  --expected-commit 0123456789abcdef0123456789abcdef01234567 \
+  --identity-file /absolute/path/to/capture-only-id_ed25519 \
+  --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
+  --qwen3-gpu-tier h100-80gb-pcie \
+  --lambda-instance-type-name '<exact Lambda API instance_type_name>' \
+  --lambda-instance-id 0123456789abcdef0123456789abcdef \
+  --lambda-hourly-rate-usd 3.29 \
+  --max-cost-usd 2.25 \
+  --lambda-billing-started-at 2026-08-23T20:00:00Z \
+  --startup-timeout-seconds 300 \
+  --remote-timeout-seconds 1300
+```
+
+The generic watcher is GET-only and supports the implemented A100 and H100
+capacity targets:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/watch_lambda_gpu_capacity.py \
+  --gpu-tier h100-80gb-pcie
+```
+
+It emits `READY_FOR_OPERATOR_CONFIRMATION` only after exact metadata, rate,
+capacity, and zero-active-instance checks pass. It has no launch endpoint and
+cannot turn readiness into authorization. A real launch still requires a
+separate explicit confirmation after reviewing the emitted instance type,
+region, rate, image, SSH key, current instance count, cap, and termination
+plan. Local conformance proves no H100 runtime behavior and creates no receipt.
+
 ## Zero-cost local checks
 
 ```bash
 PYTHONPATH=src python3 scripts/generate_qwen3_launch_profile.py --check
 PYTHONPATH=src python3 scripts/watch_lambda_a100_capacity.py --check
+PYTHONPATH=src python3 scripts/watch_lambda_gpu_capacity.py \
+  --gpu-tier h100-80gb-pcie --check
 PYTHONPATH=src python3 -m inferdrome validate \
   campaigns/v1/qwen3-8b-concurrency-1.yaml
 PYTHONPATH=src python3 -m inferdrome run \
@@ -306,14 +372,16 @@ true:
 
 - the selected profile ID and GPU tier are exact;
 - the Lambda API reports the selected tier's exact frozen rate: `$1.29/hour`
-  for A10 or `$1.99/hour` for A100;
-- the session cap is exactly `$0.75` for A10 or `$1.25` for A100;
+  for A10, `$1.99/hour` for A100, or `$3.29/hour` for H100;
+- the session cap is exactly `$0.75` for A10, `$1.25` for A100, or `$2.25`
+  for H100;
 - the explicit instance ID resolves to the SSH endpoint;
 - exactly one non-terminal paid Lambda instance exists and its API
   `instance_type_name` exactly matches the operator's runtime argument;
 - the independent termination watchdog publishes readiness;
-- the remote preflight observes exactly `NVIDIA A10` for the A10 tier or
-  `NVIDIA A100-PCIE-40GB` for the A100 tier at the selected physical GPU index;
+- the remote preflight observes exactly `NVIDIA A10` for A10,
+  `NVIDIA A100-PCIE-40GB` for A100, or `NVIDIA H100 PCIe` for H100 at the
+  selected physical GPU index;
 - Python 3.12 development, `venv`/`ensurepip`, and at least 40 GiB free under
   `/tmp` are available before source upload;
 - the source tree contains only regular Git blobs and no rejected secret-key
@@ -322,12 +390,15 @@ true:
 At the frozen A10 rate, `$0.75` permits 2,093 billed seconds. The watchdog
 requests termination 300 seconds before that cost boundary, at 1,793 billed
 seconds. For A100, `$1.25` at `$1.99/hour` permits 2,261 billed seconds and the
-same 300-second margin requests termination by 1,961 billed seconds. The frozen
+same 300-second margin requests termination by 1,961 billed seconds. For H100,
+`$2.25` at `$3.29/hour` permits 2,462 billed seconds and the margin requests
+termination by 2,162 billed seconds. The frozen
 phase ledger allocates 2,078 seconds: 90 preflight, 90 source upload,
 1,300 remote capture, 60 remote kill grace, 5 SSH-close grace, 30 metadata
 transfer, 180 archive transfer, 23 controller handoff, and 300 termination
 confirmation. That leaves 15 seconds of theoretical A10 ledger slack and 183
-seconds of theoretical A100 ledger slack. The remote work is capped at 1,300
+seconds of theoretical A100 ledger slack and 384 seconds of theoretical H100
+ledger slack. The remote work is capped at 1,300
 seconds and shortened further against the live termination deadline. Billing
 time already elapsed before controller startup, watchdog setup, and the guarded
 source rebuild is subtracted from that live window.
@@ -395,6 +466,6 @@ missing termination evidence or turn an incomplete capture into evidence.
 The reviewed receipt closes the A10 runtime-capability question for this exact
 profile and producer commit. It does not authorize another paid launch, prove a
 different GPU assignment, or establish a cross-GPU conclusion. The frozen
-profile and captured bytes remain immutable. The A100 execution pack remains
-runtime-unproven until a separately authorized, terminated, retrieved, and
-independently verified capture produces a separate receipt.
+profile and captured bytes remain immutable. The A100 and H100 execution packs
+remain runtime-unproven until each separately authorized, terminated,
+retrieved, and independently verified capture produces its own receipt.

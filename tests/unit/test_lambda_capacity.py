@@ -11,11 +11,14 @@ import pytest
 from inferdrome.lambda_capacity import (
     LAMBDA_A100_PCIE_DESCRIPTION,
     LAMBDA_A100_PCIE_GPU_DESCRIPTION,
+    LAMBDA_H100_PCIE_DESCRIPTION,
+    LAMBDA_H100_PCIE_GPU_DESCRIPTION,
     LambdaCapacityApiError,
     LambdaCapacityClient,
     LambdaCapacityError,
     LambdaCapacityObservation,
     observe_a100_pcie_capacity,
+    observe_h100_pcie_capacity,
 )
 
 API_KEY = "lambda-secret-api-key-value"
@@ -30,6 +33,9 @@ def _offer(
     price_cents_per_hour: int = 199,
     gpus: int = 1,
     architecture: str = "x86_64",
+    memory_gib: int = 200,
+    storage_gib: int = 512,
+    vcpus: int = 30,
     regions: list[dict[str, str]] | None = None,
 ) -> tuple[str, dict[str, object]]:
     return (
@@ -43,9 +49,9 @@ def _offer(
                 "price_cents_per_hour": price_cents_per_hour,
                 "specs": {
                     "gpus": gpus,
-                    "memory_gib": 200,
-                    "storage_gib": 512,
-                    "vcpus": 30,
+                    "memory_gib": memory_gib,
+                    "storage_gib": storage_gib,
+                    "vcpus": vcpus,
                 },
             },
             "regions_with_capacity_available": regions or [],
@@ -133,6 +139,206 @@ def test_exact_available_target_is_ready_only_after_zero_instance_check() -> Non
         ("/instances", API_KEY, 20),
     ]
     assert sleeps == [pytest.approx(1.05)]
+
+
+def test_exact_h100_pcie_target_is_ready_and_tier_bound() -> None:
+    transport = FakeGetTransport(
+        [
+            _catalog(
+                _offer(
+                    name="gpu_1x_h100_pcie",
+                    description=LAMBDA_H100_PCIE_DESCRIPTION,
+                    gpu_description=LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+                    memory_gib=225,
+                    price_cents_per_hour=329,
+                    regions=[
+                        {"description": "Virginia, USA", "name": "us-east-1"}
+                    ],
+                    storage_gib=1_024,
+                    vcpus=26,
+                )
+            ),
+            {"data": []},
+        ]
+    )
+    client = LambdaCapacityClient(
+        API_KEY,
+        transport=transport,
+        sleeper=lambda _seconds: None,
+        monotonic=lambda: 0,
+    )
+
+    observation = observe_h100_pcie_capacity(client, now=lambda: NOW)
+    record = observation.public_record()
+
+    assert observation.status == "READY_FOR_OPERATOR_CONFIRMATION"
+    assert observation.gpu_tier_id == "h100-80gb-pcie"
+    assert record["gpu_target"] == {
+        "expected_nvidia_smi_name": "NVIDIA H100 PCIe",
+        "expected_provider_description": "1x H100 (80 GB PCIe)",
+        "expected_provider_gpu_description": "H100 (80 GB PCIe)",
+        "gpu_tier_id": "h100-80gb-pcie",
+    }
+    assert record["instance_type"] == {
+        "architecture": "x86_64",
+        "description": "1x H100 (80 GB PCIe)",
+        "gpu_description": "H100 (80 GB PCIe)",
+        "gpus": 1,
+        "hourly_rate_usd": "3.29",
+        "name": "gpu_1x_h100_pcie",
+        "regions_with_capacity": [
+            {"description": "Virginia, USA", "name": "us-east-1"}
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "price_cents_per_hour",
+        "gpu_description",
+        "gpus",
+        "architecture",
+        "memory_gib",
+        "storage_gib",
+        "vcpus",
+        "expected_status",
+    ),
+    [
+        (
+            429,
+            LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+            1,
+            "x86_64",
+            225,
+            1_024,
+            26,
+            "RATE_MISMATCH",
+        ),
+        (
+            329,
+            "H100 (80 GB SXM5)",
+            1,
+            "x86_64",
+            225,
+            1_024,
+            26,
+            "TARGET_METADATA_MISMATCH",
+        ),
+        (
+            329,
+            LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+            8,
+            "x86_64",
+            225,
+            1_024,
+            26,
+            "TARGET_METADATA_MISMATCH",
+        ),
+        (
+            329,
+            LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+            1,
+            "arm64",
+            225,
+            1_024,
+            26,
+            "TARGET_METADATA_MISMATCH",
+        ),
+        (
+            329,
+            LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+            1,
+            "x86_64",
+            224,
+            1_024,
+            26,
+            "TARGET_METADATA_MISMATCH",
+        ),
+        (
+            329,
+            LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+            1,
+            "x86_64",
+            225,
+            512,
+            26,
+            "TARGET_METADATA_MISMATCH",
+        ),
+        (
+            329,
+            LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+            1,
+            "x86_64",
+            225,
+            1_024,
+            25,
+            "TARGET_METADATA_MISMATCH",
+        ),
+    ],
+)
+def test_h100_provider_variant_and_rate_drift_fail_closed(
+    price_cents_per_hour: int,
+    gpu_description: str,
+    gpus: int,
+    architecture: str,
+    memory_gib: int,
+    storage_gib: int,
+    vcpus: int,
+    expected_status: str,
+) -> None:
+    client = LambdaCapacityClient(
+        API_KEY,
+        transport=FakeGetTransport(
+            [
+                _catalog(
+                    _offer(
+                        name="gpu_1x_h100_pcie",
+                        description=LAMBDA_H100_PCIE_DESCRIPTION,
+                        gpu_description=gpu_description,
+                        price_cents_per_hour=price_cents_per_hour,
+                        gpus=gpus,
+                        architecture=architecture,
+                        memory_gib=memory_gib,
+                        storage_gib=storage_gib,
+                        vcpus=vcpus,
+                    )
+                )
+            ]
+        ),
+    )
+
+    observation = observe_h100_pcie_capacity(client, now=lambda: NOW)
+
+    assert observation.status == expected_status
+    assert observation.launch_preflight_ready is False
+    assert observation.gpu_tier_id == "h100-80gb-pcie"
+
+
+def test_available_h100_sxm_does_not_substitute_for_pcie() -> None:
+    client = LambdaCapacityClient(
+        API_KEY,
+        transport=FakeGetTransport(
+            [
+                _catalog(
+                    _offer(
+                        name="gpu_1x_h100_sxm5",
+                        description="1x H100 (80 GB SXM5)",
+                        gpu_description="H100 (80 GB SXM5)",
+                        price_cents_per_hour=429,
+                        regions=[
+                            {"description": "Texas, USA", "name": "us-south-1"}
+                        ],
+                    )
+                )
+            ]
+        ),
+    )
+
+    observation = observe_h100_pcie_capacity(client, now=lambda: NOW)
+
+    assert observation.status == "TARGET_NOT_OFFERED"
+    assert observation.instance_type is None
+    assert observation.launch_preflight_ready is False
 
 
 def test_out_of_capacity_never_queries_instances_or_selects_available_sxm() -> None:

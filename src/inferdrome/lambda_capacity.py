@@ -13,10 +13,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Literal
 
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_H100_GPU_TIER_ID,
     qwen3_gpu_tier_policy,
 )
 
@@ -26,6 +28,12 @@ LAMBDA_CAPACITY_SCHEMA_VERSION = "inferdrome.lambda-capacity-observation.v1"
 
 LAMBDA_A100_PCIE_DESCRIPTION = "1x A100 (40 GB PCIe)"
 LAMBDA_A100_PCIE_GPU_DESCRIPTION = "A100 (40 GB PCIe)"
+LAMBDA_H100_PCIE_DESCRIPTION = "1x H100 (80 GB PCIe)"
+LAMBDA_H100_PCIE_GPU_DESCRIPTION = "H100 (80 GB PCIe)"
+LAMBDA_CAPACITY_GPU_TIERS = (
+    QWEN3_A100_GPU_TIER_ID,
+    QWEN3_H100_GPU_TIER_ID,
+)
 
 _API_USER_AGENT = "Inferdrome-Lambda-Capacity/1.0"
 _ALLOWED_API_PATHS = frozenset({"/instance-types", "/instances"})
@@ -70,6 +78,60 @@ class LambdaCapacityError(RuntimeError):
 
 class LambdaCapacityApiError(LambdaCapacityError):
     """A bounded read-only Lambda API request failed."""
+
+
+@dataclass(frozen=True)
+class LambdaCapacityTarget:
+    """Exact provider metadata for one implemented read-only target."""
+
+    architecture: str
+    gpu_tier_id: str
+    gpus: int
+    memory_gib: int | None
+    provider_description: str
+    provider_gpu_description: str
+    storage_gib: int | None
+    vcpus: int | None
+
+
+_CAPACITY_TARGETS = MappingProxyType(
+    {
+        QWEN3_A100_GPU_TIER_ID: LambdaCapacityTarget(
+            architecture="x86_64",
+            gpu_tier_id=QWEN3_A100_GPU_TIER_ID,
+            gpus=1,
+            memory_gib=None,
+            provider_description=LAMBDA_A100_PCIE_DESCRIPTION,
+            provider_gpu_description=LAMBDA_A100_PCIE_GPU_DESCRIPTION,
+            storage_gib=None,
+            vcpus=None,
+        ),
+        QWEN3_H100_GPU_TIER_ID: LambdaCapacityTarget(
+            architecture="x86_64",
+            gpu_tier_id=QWEN3_H100_GPU_TIER_ID,
+            gpus=1,
+            memory_gib=225,
+            provider_description=LAMBDA_H100_PCIE_DESCRIPTION,
+            provider_gpu_description=LAMBDA_H100_PCIE_GPU_DESCRIPTION,
+            storage_gib=1_024,
+            vcpus=26,
+        ),
+    }
+)
+
+
+def lambda_capacity_target(gpu_tier_id: str) -> LambdaCapacityTarget:
+    """Resolve exact provider metadata for one implemented capacity target."""
+
+    target = _CAPACITY_TARGETS.get(gpu_tier_id)
+    if target is None:
+        raise LambdaCapacityError(
+            f"Lambda capacity GPU tier is not implemented: {gpu_tier_id}"
+        )
+    policy = qwen3_gpu_tier_policy(gpu_tier_id)
+    if target.gpu_tier_id != policy.gpu_tier_id:
+        raise AssertionError("Lambda capacity target drifted from Qwen3 policy")
+    return target
 
 
 @dataclass(frozen=True)
@@ -123,7 +185,7 @@ class LambdaInstanceTypeOffer:
 
 @dataclass(frozen=True)
 class LambdaCapacityObservation:
-    """One launch-free observation of the frozen A100 target."""
+    """One launch-free observation of a frozen GPU target."""
 
     observed_at: datetime
     status: CapacityStatus
@@ -131,8 +193,10 @@ class LambdaCapacityObservation:
     api_paths_observed: tuple[str, ...]
     instance_type: LambdaInstanceTypeOffer | None
     active_instance_count: int | None
+    gpu_tier_id: str = QWEN3_A100_GPU_TIER_ID
 
     def __post_init__(self) -> None:
+        target = lambda_capacity_target(self.gpu_tier_id)
         if self.status not in _CAPACITY_STATUSES:
             raise LambdaCapacityError("capacity observation status is invalid")
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
@@ -155,13 +219,25 @@ class LambdaCapacityObservation:
                 raise LambdaCapacityError(
                     "capacity-ready observation is internally inconsistent"
                 )
-            policy = qwen3_gpu_tier_policy(QWEN3_A100_GPU_TIER_ID)
+            policy = qwen3_gpu_tier_policy(self.gpu_tier_id)
             if (
-                self.instance_type.description != LAMBDA_A100_PCIE_DESCRIPTION
+                self.instance_type.description != target.provider_description
                 or self.instance_type.gpu_description
-                != LAMBDA_A100_PCIE_GPU_DESCRIPTION
-                or self.instance_type.gpus != 1
-                or self.instance_type.architecture != "x86_64"
+                != target.provider_gpu_description
+                or self.instance_type.gpus != target.gpus
+                or self.instance_type.architecture != target.architecture
+                or (
+                    target.memory_gib is not None
+                    and self.instance_type.memory_gib != target.memory_gib
+                )
+                or (
+                    target.storage_gib is not None
+                    and self.instance_type.storage_gib != target.storage_gib
+                )
+                or (
+                    target.vcpus is not None
+                    and self.instance_type.vcpus != target.vcpus
+                )
                 or self.instance_type.hourly_rate_usd != policy.hourly_rate_usd
             ):
                 raise LambdaCapacityError(
@@ -193,7 +269,8 @@ class LambdaCapacityObservation:
         return self.status == "READY_FOR_OPERATOR_CONFIRMATION"
 
     def public_record(self) -> dict[str, object]:
-        policy = qwen3_gpu_tier_policy(QWEN3_A100_GPU_TIER_ID)
+        target = lambda_capacity_target(self.gpu_tier_id)
+        policy = qwen3_gpu_tier_policy(self.gpu_tier_id)
         instance_type = self.instance_type
         return {
             "active_instance_count": self.active_instance_count,
@@ -202,9 +279,9 @@ class LambdaCapacityObservation:
             "catalog_projection_sha256": self.catalog_projection_sha256,
             "gpu_target": {
                 "expected_nvidia_smi_name": policy.expected_nvidia_smi_name,
-                "expected_provider_description": LAMBDA_A100_PCIE_DESCRIPTION,
+                "expected_provider_description": target.provider_description,
                 "expected_provider_gpu_description": (
-                    LAMBDA_A100_PCIE_GPU_DESCRIPTION
+                    target.provider_gpu_description
                 ),
                 "gpu_tier_id": policy.gpu_tier_id,
             },
@@ -400,15 +477,45 @@ def observe_a100_pcie_capacity(
 ) -> LambdaCapacityObservation:
     """Observe exact A100 PCIe capacity without authorizing or launching it."""
 
+    return observe_gpu_capacity(
+        client,
+        QWEN3_A100_GPU_TIER_ID,
+        now=now,
+    )
+
+
+def observe_h100_pcie_capacity(
+    client: LambdaCapacityClient,
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> LambdaCapacityObservation:
+    """Observe exact H100 PCIe capacity without authorizing or launching it."""
+
+    return observe_gpu_capacity(
+        client,
+        QWEN3_H100_GPU_TIER_ID,
+        now=now,
+    )
+
+
+def observe_gpu_capacity(
+    client: LambdaCapacityClient,
+    gpu_tier_id: str,
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> LambdaCapacityObservation:
+    """Observe one exact implemented GPU tier without any launch authority."""
+
     observed_at = (now or (lambda: datetime.now(UTC)))()
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise LambdaCapacityError("capacity observation time must be timezone-aware")
     observed_at = observed_at.astimezone(UTC)
-    policy = qwen3_gpu_tier_policy(QWEN3_A100_GPU_TIER_ID)
+    target = lambda_capacity_target(gpu_tier_id)
+    policy = qwen3_gpu_tier_policy(gpu_tier_id)
     offers = client.list_instance_types()
     catalog_projection_sha256 = _catalog_projection_sha256(offers)
     exact = [
-        offer for offer in offers if offer.description == LAMBDA_A100_PCIE_DESCRIPTION
+        offer for offer in offers if offer.description == target.provider_description
     ]
     if len(exact) > 1:
         return _observation(
@@ -416,12 +523,13 @@ def observe_a100_pcie_capacity(
             "TARGET_AMBIGUOUS",
             catalog_projection_sha256,
             None,
+            gpu_tier_id,
         )
     if not exact:
         near = [
             offer
             for offer in offers
-            if offer.gpu_description == LAMBDA_A100_PCIE_GPU_DESCRIPTION
+            if offer.gpu_description == target.provider_gpu_description
             and offer.gpus == 1
         ]
         if len(near) > 1:
@@ -430,25 +538,37 @@ def observe_a100_pcie_capacity(
                 "TARGET_AMBIGUOUS",
                 catalog_projection_sha256,
                 None,
+                gpu_tier_id,
             )
         return _observation(
             observed_at,
             "TARGET_METADATA_MISMATCH" if near else "TARGET_NOT_OFFERED",
             catalog_projection_sha256,
             near[0] if len(near) == 1 else None,
+            gpu_tier_id,
         )
 
     offer = exact[0]
     if (
-        offer.gpu_description != LAMBDA_A100_PCIE_GPU_DESCRIPTION
-        or offer.gpus != 1
-        or offer.architecture != "x86_64"
+        offer.gpu_description != target.provider_gpu_description
+        or offer.gpus != target.gpus
+        or offer.architecture != target.architecture
+        or (
+            target.memory_gib is not None
+            and offer.memory_gib != target.memory_gib
+        )
+        or (
+            target.storage_gib is not None
+            and offer.storage_gib != target.storage_gib
+        )
+        or (target.vcpus is not None and offer.vcpus != target.vcpus)
     ):
         return _observation(
             observed_at,
             "TARGET_METADATA_MISMATCH",
             catalog_projection_sha256,
             offer,
+            gpu_tier_id,
         )
     if offer.hourly_rate_usd != policy.hourly_rate_usd:
         return _observation(
@@ -456,6 +576,7 @@ def observe_a100_pcie_capacity(
             "RATE_MISMATCH",
             catalog_projection_sha256,
             offer,
+            gpu_tier_id,
         )
     if not offer.regions_with_capacity:
         return _observation(
@@ -463,6 +584,7 @@ def observe_a100_pcie_capacity(
             "OUT_OF_CAPACITY",
             catalog_projection_sha256,
             offer,
+            gpu_tier_id,
         )
 
     active_instance_count = client.count_active_instances()
@@ -470,6 +592,7 @@ def observe_a100_pcie_capacity(
         active_instance_count=active_instance_count,
         api_paths_observed=("/instance-types", "/instances"),
         catalog_projection_sha256=catalog_projection_sha256,
+        gpu_tier_id=gpu_tier_id,
         instance_type=offer,
         observed_at=observed_at,
         status=(
@@ -485,11 +608,13 @@ def _observation(
     status: CapacityStatus,
     catalog_projection_sha256: str,
     instance_type: LambdaInstanceTypeOffer | None,
+    gpu_tier_id: str,
 ) -> LambdaCapacityObservation:
     return LambdaCapacityObservation(
         active_instance_count=None,
         api_paths_observed=("/instance-types",),
         catalog_projection_sha256=catalog_projection_sha256,
+        gpu_tier_id=gpu_tier_id,
         instance_type=instance_type,
         observed_at=observed_at,
         status=status,

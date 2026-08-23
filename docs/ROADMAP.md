@@ -9,20 +9,21 @@ Current checkpoint: **The original Qwen2.5 producer-side real-GPU gate and the
 separate Qwen3-8B A10 capability spike are complete. The Qwen3 run contains
 96/96 successes, a valid customer-eligible bundle, independent post-termination
 verification, a bounded publication review, and deterministic handoff anchors.
-The zero-spend A100 execution pack is locally conformant but runtime-unproven;
-PR16 launched no cloud instance and produced no A100 receipt. A separate
-GET-only exact-capacity watcher now validates the provider description, rate,
-capacity regions, and zero-active-instance boundary without granting launch
-authority. Both reviewed raw archives remain EXTERNAL_ONLY; owner
+The zero-spend A100 and H100 execution packs are locally conformant but
+runtime-unproven; neither pack launched a cloud instance or produced a receipt.
+A separate GET-only exact-capacity watcher now validates each implemented
+provider description, rate, capacity region, and zero-active-instance boundary
+without granting launch authority. Both reviewed raw archives remain
+EXTERNAL_ONLY; owner
 license/publication decisions, security sign-off, ExitSpec outcomes, and
 release work remain open.**
 
-Next campaign checkpoint: **After a separate explicit operator launch decision,
-execute the exact Qwen3-8B same-model control on one A100 40 GB PCIe reported
-by `nvidia-smi` as `NVIDIA A100-PCIE-40GB`,
-terminate it within the frozen `$1.99/hour` and `$1.25` boundary, and retain a
-separately reviewed receipt. No cross-GPU conclusion exists until real runs
-complete. Every unexecuted model/runtime/GPU assignment remains
+Next campaign checkpoint: **After a fresh read-only preflight and separate
+explicit operator launch decision, execute the exact Qwen3-8B same-model
+control on one H100 80 GB PCIe reported by `nvidia-smi` as
+`NVIDIA H100 PCIe`, terminate it within the frozen `$3.29/hour` and `$2.25`
+boundary, and retain a separately reviewed receipt. No cross-GPU conclusion
+exists until real runs complete. Every unexecuted model/runtime/GPU assignment remains
 `UNPROVEN_REQUIRES_SPIKE`; ADR 0010 grants no launch authority, and ADR 0011
 keeps warmups aligned with exact vLLM 0.26.0 behavior.**
 
@@ -316,6 +317,16 @@ It rejects available SXM or multi-GPU substitutions, metadata and rate drift,
 ambiguous targets, and any active-instance conflict. Its strongest state is
 `READY_FOR_OPERATOR_CONFIRMATION`; it never emits launch authorization,
 hardware attestation, or a runtime receipt.
+
+H100 execution-pack closure extends the same unchanged Qwen3-8B
+hardware-control contract to exactly one H100 80 GB PCIe. It binds the NVIDIA
+runtime product literal `NVIDIA H100 PCIe`, rejects SXM/NVL/generic H100
+substitutions, freezes `$3.29/hour`, a `$2.25` cap, and a 2,462-second outer
+window, and reuses the 2,078-second phase ledger with 384 seconds of slack. The
+generic capacity watcher remains limited to Lambda GET inventory calls and
+requires the exact `1x H100 (80 GB PCIe)` provider metadata. This closure is
+still `LOCALLY_CONFORMANT_RUNTIME_UNPROVEN`: it launched nothing and produced
+no H100 evidence or cross-GPU result.
 
 Still required to close the external acceptance boundary: run the separately
 owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations against the exact

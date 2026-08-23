@@ -33,6 +33,7 @@ from inferdrome.qwen3_campaign import (
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A10_GPU_TIER_ID,
     QWEN3_A100_GPU_TIER_ID,
+    QWEN3_H100_GPU_TIER_ID,
 )
 from inferdrome.qwen3_tokenizer import (
     expected_qwen3_tokenizer_file_verification,
@@ -317,6 +318,55 @@ def test_qwen3_a100_capture_rejects_sxm_variant(
         match="one NVIDIA A100-PCIE-40GB",
     ):
         _write_manifest(root, gpu_tier_id=QWEN3_A100_GPU_TIER_ID)
+
+
+def test_qwen3_h100_capture_binds_exact_pcie_tier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root, gpu_model="NVIDIA H100 PCIe")
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+
+    manifest_path = _write_manifest(
+        root,
+        gpu_tier_id=QWEN3_H100_GPU_TIER_ID,
+    )
+    verification = capture.verify_capture(
+        root,
+        expected_repository_commit=COMMIT,
+        expected_gpu_tier_id=QWEN3_H100_GPU_TIER_ID,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert verification["gpu_tier_id"] == QWEN3_H100_GPU_TIER_ID
+    assert verification["gpu_target"]["expected_nvidia_smi_name"] == (
+        "NVIDIA H100 PCIe"
+    )
+    assert manifest["schema_version"] == (
+        "inferdrome.qwen3-gpu-capability-capture.v2"
+    )
+    assert manifest["gpu_target"] == verification["gpu_target"]
+
+
+@pytest.mark.parametrize(
+    "observed_gpu_model",
+    ["NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL", "NVIDIA H100"],
+)
+def test_qwen3_h100_capture_rejects_non_pcie_product_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observed_gpu_model: str,
+) -> None:
+    root = tmp_path / "capture"
+    _fake_capture(root, gpu_model=observed_gpu_model)
+    monkeypatch.setattr(capture, "recalculate_bundle", _fake_recalculation)
+
+    with pytest.raises(
+        capture.Qwen3CaptureError,
+        match="one NVIDIA H100 PCIe",
+    ):
+        _write_manifest(root, gpu_tier_id=QWEN3_H100_GPU_TIER_ID)
 
 
 def test_qwen3_capture_rejects_expected_tier_mismatch(
