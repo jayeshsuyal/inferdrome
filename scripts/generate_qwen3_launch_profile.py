@@ -7,14 +7,19 @@ import argparse
 from pathlib import Path
 
 from inferdrome.qwen3_campaign import qwen3_launch_documents
+from inferdrome.qwen3_gpu_tiers import qwen3_gpu_execution_documents
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def render_documents() -> dict[Path, bytes]:
+    documents = {
+        **qwen3_launch_documents(),
+        **qwen3_gpu_execution_documents(),
+    }
     return {
         REPOSITORY_ROOT / relative: content
-        for relative, content in qwen3_launch_documents().items()
+        for relative, content in documents.items()
     }
 
 

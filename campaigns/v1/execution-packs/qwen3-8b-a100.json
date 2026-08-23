@@ -1,0 +1,61 @@
+{
+  "acceptance_verdict": null,
+  "campaign_id": "qwen-gpu-capability-campaign-v1",
+  "capability_state": "LOCALLY_CONFORMANT_RUNTIME_UNPROVEN",
+  "cost_boundary": {
+    "allowed_seconds": 2261,
+    "api_rate_match_required": true,
+    "hourly_rate_snapshot_usd": "1.99",
+    "max_session_cost_usd": "1.25",
+    "rate_snapshot_date": "2026-08-20",
+    "termination_safety_margin_seconds": 300
+  },
+  "gpu_target": {
+    "campaign_gpu_model": "NVIDIA A100",
+    "expected_nvidia_smi_name": "NVIDIA A100-PCIE-40GB",
+    "gpu_count": 1,
+    "gpu_tier_id": "a100-40gb-pcie",
+    "interconnect": "PCIE",
+    "provider": "lambda_cloud",
+    "provider_instance_type_policy": "api_resolved_exact_gpu_tier_v1",
+    "vram_gib": 40
+  },
+  "hardware_attestation": false,
+  "launch_authorization": "EXPLICIT_OPERATOR_CONFIRMATION_REQUIRED",
+  "model_binding": {
+    "model_id": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218"
+  },
+  "phase_budget_seconds": {
+    "archive_transfer": 180,
+    "controller_handoff": 23,
+    "metadata_transfer": 30,
+    "remote_capture": 1300,
+    "remote_kill_grace": 60,
+    "remote_preflight": 90,
+    "source_upload": 90,
+    "ssh_close_grace": 5,
+    "termination_confirmation": 300
+  },
+  "profile_binding": {
+    "producer_name": "vllm",
+    "producer_version": "0.26.0",
+    "profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+    "profile_sha256": "sha256:858382b5ea2e86253f55ed914d11e4ab7e8b13aa6331e8699fb4d364a9ee9369"
+  },
+  "provider_binding": {
+    "exact_instance_type_name": "RUNTIME_ARGUMENT_REQUIRED",
+    "one_active_instance_required": true,
+    "remote_gpu_observation_required": true
+  },
+  "schema_version": "inferdrome.qwen3-a100-execution-pack.v1",
+  "track_id": "qwen3-8b-hardware-control",
+  "workload_binding": {
+    "concurrency": 1,
+    "measured_requests": 96,
+    "warmup_requests": 12,
+    "workload_id": "inferdrome.qwen-text-mixed-length.v1",
+    "workload_sha256": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f"
+  }
+}
