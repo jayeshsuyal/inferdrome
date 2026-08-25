@@ -766,18 +766,26 @@ def verify_capture_archive(
     with tempfile.TemporaryDirectory(
         prefix="inferdrome-qwen3-capture-verification-"
     ) as temporary:
+        root: Path | None = None
         try:
             root = real_gpu_capture.extract_capture_archive(
                 archive,
                 Path(temporary),
             )
+            verification = verify_capture(
+                root,
+                expected_repository_commit=expected_repository_commit,
+                expected_gpu_tier_id=expected_gpu_tier_id,
+            )
         except real_gpu_capture.CaptureError as error:
             _raise_capture(error)
-        verification = verify_capture(
-            root,
-            expected_repository_commit=expected_repository_commit,
-            expected_gpu_tier_id=expected_gpu_tier_id,
-        )
+        finally:
+            # Sealed archives preserve non-writable workspace modes.  Relax
+            # only this disposable extraction so TemporaryDirectory cleanup
+            # succeeds on macOS as well as Linux; verification remains
+            # read-only and happens before cleanup.
+            if root is not None:
+                real_gpu_capture._make_directories_writable_for_cleanup(root)
     return {
         "archive_sha256": actual,
         "capture_manifest_sha256": verification["capture_manifest_sha256"],

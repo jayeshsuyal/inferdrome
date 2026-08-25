@@ -44,6 +44,14 @@ the existing Qwen3-8B profile and workload, and explicit confirmation before
 every paid launch. A GET-only Lambda watcher can resolve live capacity without
 launching anything. Neither unexecuted pack is a GPU receipt or runtime claim.
 
+The 2026-08-23 A100 SXM4 Qwen3-8B capability capture now has committed,
+privacy-safe outer metadata and an archive-backed local dashboard launcher. Its
+exact raw archive remains ignored and `EXTERNAL_ONLY`; the committed records
+pin only digests, bounded measurements, provider configuration, controller
+termination evidence, and claim boundaries. The controller's cost is an
+estimate, not provider invoice truth. See the
+[A100 SXM4 evidence handoff](evidence/gpu/2026-08-23-qwen3-8b-a100-sxm4/README.md).
+
 The repository also includes an accepted post-v0.1 local evidence dashboard.
 It presents Runs, Run detail, Compare, and Evidence views over the same bounded
 verification and deterministic recalculation path. It remains read-only,

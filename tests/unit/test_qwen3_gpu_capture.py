@@ -277,6 +277,66 @@ def test_qwen3_capture_writes_and_reverifies_archive(
     assert archive_verification["verification"] == verification
 
 
+def test_qwen3_archive_verification_relaxes_disposable_workspace_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "capture.tar.gz"
+    archive.write_bytes(b"sealed archive placeholder")
+    expected_archive_sha256 = "sha256:" + "a" * 64
+    cleanup_roots: list[Path] = []
+
+    monkeypatch.setattr(
+        generic_capture,
+        "archive_sha256",
+        lambda _path: expected_archive_sha256,
+    )
+
+    def extract(_archive: Path, destination: Path) -> Path:
+        root = destination / "capture"
+        root.mkdir()
+        return root
+
+    monkeypatch.setattr(generic_capture, "extract_capture_archive", extract)
+    monkeypatch.setattr(
+        generic_capture,
+        "_make_directories_writable_for_cleanup",
+        cleanup_roots.append,
+    )
+    monkeypatch.setattr(
+        capture,
+        "verify_capture",
+        lambda *_args, **_kwargs: {
+            "capture_manifest_sha256": "sha256:" + "b" * 64,
+            "valid": True,
+        },
+    )
+
+    result = capture.verify_capture_archive(
+        archive,
+        expected_archive_sha256=expected_archive_sha256,
+    )
+
+    assert result["archive_sha256"] == expected_archive_sha256
+    assert cleanup_roots and cleanup_roots[0].name == "capture"
+
+
+def test_qwen3_archive_verification_rejects_tampered_bytes(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "capture.tar.gz"
+    archive.write_bytes(b"tampered archive")
+
+    with pytest.raises(
+        capture.Qwen3CaptureError,
+        match="archive failed SHA-256 verification",
+    ):
+        capture.verify_capture_archive(
+            archive,
+            expected_archive_sha256="sha256:" + "0" * 64,
+        )
+
+
 def test_qwen3_a100_capture_binds_exact_pcie_tier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
