@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import inferdrome.normalization.sglang_0_5 as sglang_normalization
 from inferdrome.adapters.sglang import (
     SGLANG_BENCHMARK_MODULE,
     SGLANG_DEFAULT_ENDPOINT,
@@ -167,6 +168,13 @@ def test_output_preflight_rejects_symlinked_ancestor(tmp_path: Path) -> None:
                 _config(tmp_path, output_path=str(link / "x.jsonl"))
             )
         )
+
+
+def test_output_preflight_accepts_real_tokenizer_and_absent_output(
+    tmp_path: Path,
+) -> None:
+    invocation = _invocation(tmp_path)
+    assert preflight_sglang_invocation(invocation) == invocation
 
 
 def test_builder_is_pure_for_canonical_deployment_paths(tmp_path: Path) -> None:
@@ -365,6 +373,15 @@ def test_type_coercion_and_failed_sentinel_reject() -> None:
         )
 
 
+def test_normalized_timing_rejects_rfc8785_integer_overflow(tmp_path: Path) -> None:
+    invocation = _invocation(tmp_path)
+    with pytest.raises(NormalizationError):
+        normalize_sglang_native(
+            _native(ttfts=[9007199.254740992, 0.020, 0.0]),
+            invocation,
+        )
+
+
 def test_random_ids_and_concurrency_bind_to_invocation(tmp_path: Path) -> None:
     invocation = _invocation(tmp_path)
     with pytest.raises(NormalizationError):
@@ -414,6 +431,38 @@ def test_normalized_report_fingerprint_and_row_order_are_bound(tmp_path: Path) -
             invocation,
             expected_native_bytes=native,
         )
+
+
+def test_normalized_report_native_replay_rejects_row_tampering(tmp_path: Path) -> None:
+    invocation = _invocation(tmp_path)
+    native = _native()
+    result = normalize_sglang_native(native, invocation)
+    forged_row = result.report.rows[0].model_copy(update={"ttft_ns": 13_000_000})
+    forged = result.report.model_copy(
+        update={"rows": (forged_row, result.report.rows[1], result.report.rows[2])}
+    )
+    with pytest.raises(NormalizationError):
+        validate_sglang_normalization_report(
+            canonical_json_bytes(forged.model_dump(mode="json")),
+            invocation,
+            expected_native_bytes=native,
+        )
+
+
+def test_normalized_report_size_bound_rejects_before_parse(tmp_path: Path) -> None:
+    invocation = _invocation(tmp_path)
+    with pytest.raises(NormalizationError):
+        validate_sglang_normalization_report(b" " * 2_097_153, invocation)
+
+
+def test_normalizer_emits_only_reports_accepted_by_size_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    invocation = _invocation(tmp_path)
+    monkeypatch.setattr(sglang_normalization, "_MAX_REPORT_BYTES", 1)
+    with pytest.raises(NormalizationError):
+        normalize_sglang_native(_native(), invocation)
 
 
 def test_server_info_integer_domain_failure_is_bounded() -> None:

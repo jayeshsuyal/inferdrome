@@ -58,9 +58,11 @@ _MAX_SERVER_INFO_STRING = 16_384
 _MAX_SERVER_INFO_INTEGER = 9_007_199_254_740_991
 _MAX_DIAGNOSTIC_STRING = 4_096
 _MAX_ITL_COUNT = 32_768
-_MAX_NS = 9_223_372_036_854_775_807
+_MAX_CANONICAL_INTEGER = 9_007_199_254_740_991
+_MAX_NS = _MAX_CANONICAL_INTEGER
 _MAX_ATTEMPTS = 10_000
 _MAX_TOTAL_TOKENS = 327_680_000
+_MAX_REPORT_BYTES = 2_097_152
 
 
 NonnegativeSeconds = Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
@@ -634,6 +636,18 @@ def _server_info_digest(value: object) -> str:
     return sha256_digest(encoded)
 
 
+def _canonical_report_bytes(report: SglangNormalizationReport) -> bytes:
+    try:
+        encoded = canonical_json_bytes(report.model_dump(mode="json", by_alias=True))
+    except (TypeError, ValueError, OverflowError, ArithmeticError):
+        raise NormalizationError(
+            "SGLang normalization report is not canonicalizable"
+        ) from None
+    if len(encoded) > _MAX_REPORT_BYTES:
+        raise NormalizationError("SGLang normalization report exceeds its size limit")
+    return encoded
+
+
 def _parse_native(content: bytes) -> SglangNativeDetailedResult:
     raw = _strict_native_object(content)
     try:
@@ -761,7 +775,7 @@ def normalize_sglang_native(
         raise NormalizationError(
             "SGLang normalization report is inconsistent"
         ) from None
-    report_bytes = canonical_json_bytes(report.model_dump(mode="json", by_alias=True))
+    report_bytes = _canonical_report_bytes(report)
     return SglangNormalizationResult(
         native_result=native,
         report=report,
@@ -809,6 +823,8 @@ def validate_sglang_normalization_report(
     digest's preimage.
     """
 
+    if len(content) > _MAX_REPORT_BYTES:
+        raise NormalizationError("SGLang normalization report exceeds its size limit")
     if not isinstance(invocation, SglangInvocation):
         raise NormalizationError("SGLang invocation context is invalid")
     try:

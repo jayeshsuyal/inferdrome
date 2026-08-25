@@ -56,7 +56,7 @@
         },
         "itl_ns": {
           "items": {
-            "maximum": 9223372036854775807,
+            "maximum": 9007199254740991,
             "minimum": 0,
             "type": "integer"
           },
@@ -94,7 +94,7 @@
         "ttft_ns": {
           "anyOf": [
             {
-              "maximum": 9223372036854775807,
+              "maximum": 9007199254740991,
               "minimum": 1,
               "type": "integer"
             },
