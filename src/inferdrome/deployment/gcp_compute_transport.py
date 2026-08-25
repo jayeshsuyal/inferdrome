@@ -19,14 +19,17 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Protocol, cast
 
 from inferdrome.deployment.gcp_lifecycle import (
+    GcpBootDiskObservation,
     GcpComputeTransport,
     GcpExecutionError,
     GcpExecutionLabels,
+    GcpImageObservation,
     GcpInsertRequest,
     GcpInstanceObservation,
     GcpOperationHandle,
     GcpOperationResult,
     GcpTransportError,
+    validate_gcp_a2_profile,
 )
 
 _GOOGLE_SCOPE_URLS = {
@@ -69,6 +72,14 @@ class _ZoneOperationsClient(Protocol):
     def get(
         self, *, project: str, zone: str, operation: str, timeout: int
     ) -> object: ...
+
+
+class _ImagesClient(Protocol):
+    def get(self, *, project: str, image: str, timeout: int) -> object: ...
+
+
+class _DisksClient(Protocol):
+    def get(self, *, project: str, zone: str, disk: str, timeout: int) -> object: ...
 
 
 def _sanitize_exception(error: BaseException, fallback: str) -> GcpTransportError:
@@ -137,12 +148,13 @@ def _canonical_resource_ref(
         ):
             return "/".join(parts)
         if (
-            len(parts) == 3
-            and parts[0] == "regions"
-            and parts[1] == region
-            and parts[2]
+            len(parts) == 4
+            and parts[:3] == ["regions", region, "subnetworks"]
+            and parts[3]
         ):
-            return f"projects/{project}/regions/{region}/subnetworks/{parts[2]}"
+            return f"projects/{project}/regions/{region}/subnetworks/{parts[3]}"
+        if len(parts) == 2 and parts[0] == "subnetworks" and parts[1]:
+            return f"projects/{project}/regions/{region}/subnetworks/{parts[1]}"
         if len(parts) == 1 and re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", parts[0]):
             return f"projects/{project}/regions/{region}/subnetworks/{parts[0]}"
         raise GcpTransportError("INSTANCE_SUBNETWORK_MALFORMED")
@@ -203,16 +215,27 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
             accelerator_values = list(accelerators or ())
         except TypeError:
             accelerator_values = []
-        if len(accelerator_values) != 1:
+        validate_gcp_a2_profile(
+            request.machine_type,
+            request.accelerator_model,
+            request.accelerator_count,
+        )
+        if len(accelerator_values) == 0 and (
+            request.accelerator_attachment_mode == "a2_fixed_gpu"
+        ):
+            accelerator_type = request.accelerator_provider_type
+            accelerator_count = request.accelerator_count
+        elif len(accelerator_values) == 1:
+            accelerator = accelerator_values[0]
+            accelerator_ref = str(getattr(accelerator, "accelerator_type", ""))
+            if "/acceleratorTypes/" not in accelerator_ref:
+                raise GcpTransportError("INSTANCE_ACCELERATOR_MALFORMED")
+            accelerator_type = accelerator_ref.rsplit("/acceleratorTypes/", 1)[-1]
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", accelerator_type):
+                raise GcpTransportError("INSTANCE_ACCELERATOR_MALFORMED")
+            accelerator_count = int(getattr(accelerator, "accelerator_count", 0))
+        else:
             raise GcpTransportError("INSTANCE_ACCELERATOR_MISMATCH")
-        accelerator = accelerator_values[0]
-        accelerator_ref = str(getattr(accelerator, "accelerator_type", ""))
-        if "/acceleratorTypes/" not in accelerator_ref:
-            raise GcpTransportError("INSTANCE_ACCELERATOR_MALFORMED")
-        accelerator_type = accelerator_ref.rsplit("/acceleratorTypes/", 1)[-1]
-        if not re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", accelerator_type):
-            raise GcpTransportError("INSTANCE_ACCELERATOR_MALFORMED")
-        accelerator_count = int(getattr(accelerator, "accelerator_count", 0))
         if (
             accelerator_type != request.accelerator_provider_type
             or accelerator_count != request.accelerator_count
@@ -337,6 +360,22 @@ def _is_not_found(error: BaseException) -> bool:
     )
 
 
+def _provider_error_present(value: object) -> bool:
+    """Return true only for a non-empty provider Operation.error message."""
+
+    if value is None:
+        return False
+    if isinstance(value, Mapping):
+        return any(_provider_error_present(child) for child in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_provider_error_present(child) for child in value)
+    for field in ("errors", "code", "message", "error_code", "error_message"):
+        child = getattr(value, field, None)
+        if child not in (None, "", (), [], {}):
+            return _provider_error_present(child) if field == "errors" else True
+    return bool(str(value).strip())
+
+
 class GoogleComputeTransport(GcpComputeTransport):
     """Thin projection over an already constructed official SDK client."""
 
@@ -346,10 +385,14 @@ class GoogleComputeTransport(GcpComputeTransport):
         sdk: Any,
         client: _InstancesClient,
         operations_client: _ZoneOperationsClient | None = None,
+        images_client: _ImagesClient | None = None,
+        disks_client: _DisksClient | None = None,
     ) -> None:
         self._sdk = sdk
         self._client = client
         self._operations_client = operations_client
+        self._images_client = images_client
+        self._disks_client = disks_client
         self._lock = threading.Lock()
         self._operations: dict[str, object] = {}
         self._sequence = 0
@@ -380,6 +423,7 @@ class GoogleComputeTransport(GcpComputeTransport):
         return GcpOperationHandle(
             operation_id=operation_id,
             operation_kind=cast(Literal["insert", "delete"], kind),
+            instance_name=request.instance_name,
             operation_name=name,
             project_id=request.project_id,
             zone=request.zone,
@@ -389,6 +433,12 @@ class GoogleComputeTransport(GcpComputeTransport):
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
     ) -> GcpOperationHandle:
         try:
+            if validate_gcp_a2_profile(
+                request.machine_type,
+                request.accelerator_model,
+                request.accelerator_count,
+            ) == "synthetic":
+                raise GcpTransportError("SYNTHETIC_PROFILE_NOT_LIVE")
             if (
                 request_id != request.insert_request_id
                 or uuid.UUID(request_id).int == 0
@@ -449,6 +499,74 @@ class GoogleComputeTransport(GcpComputeTransport):
                 "OPERATION_UNKNOWN", operation=operation, ambiguous=True
             )
 
+        raw_name = getattr(provider_operation, "name", None)
+        expected_raw_name = (
+            operation.operation_name.rsplit("/", 1)[-1]
+            if operation.operation_name is not None
+            else None
+        )
+        if not isinstance(raw_name, str) or raw_name != expected_raw_name:
+            raise GcpTransportError(
+                "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
+            )
+        for field, expected in (
+            ("project", operation.project_id),
+            ("project_id", operation.project_id),
+            ("zone", operation.zone),
+            ("zone_id", operation.zone),
+        ):
+            observed = getattr(provider_operation, field, None)
+            normalized_observed = (
+                str(observed) if observed not in (None, "") else observed
+            )
+            if field in {"project", "project_id"} and normalized_observed not in (
+                None,
+                "",
+                expected,
+            ):
+                parts = (
+                    normalized_observed.split("/")
+                    if isinstance(normalized_observed, str)
+                    else []
+                )
+                if "projects" in parts:
+                    index = parts.index("projects")
+                    normalized_observed = (
+                        parts[index + 1]
+                        if len(parts) > index + 1
+                        else normalized_observed
+                    )
+            if field in {"zone", "zone_id"} and normalized_observed not in (
+                None,
+                "",
+                expected,
+            ):
+                parts = (
+                    normalized_observed.split("/")
+                    if isinstance(normalized_observed, str)
+                    else []
+                )
+                if "zones" in parts:
+                    index = parts.index("zones")
+                    normalized_observed = (
+                        parts[index + 1]
+                        if len(parts) > index + 1
+                        else normalized_observed
+                    )
+            if normalized_observed not in (None, "", expected):
+                raise GcpTransportError(
+                    "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
+                )
+        target_link = getattr(provider_operation, "target_link", None)
+        if target_link and operation.instance_name:
+            target_text = str(target_link)
+            if "/instances/" not in target_text or not target_text.endswith(
+                "/instances/" + operation.instance_name
+            ):
+                raise GcpTransportError(
+                    "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
+                )
+
         def result_for(
             status: Literal["DONE", "ERROR", "TIMEOUT"], error_code: str | None = None
         ) -> GcpOperationResult:
@@ -475,7 +593,11 @@ class GoogleComputeTransport(GcpComputeTransport):
             if provider_status is not None and not is_done(provider_status):
                 return result_for("TIMEOUT")
             provider_error = getattr(provider_operation, "error", None)
-            if provider_error and (provider_status is None or is_done(provider_status)):
+            if (
+                _provider_error_present(provider_error)
+                and provider_status is not None
+                and is_done(provider_status)
+            ):
                 return result_for("ERROR", "PROVIDER_OPERATION_FAILED")
         except TimeoutError:
             return result_for("TIMEOUT")
@@ -486,7 +608,9 @@ class GoogleComputeTransport(GcpComputeTransport):
                 "Timeout",
             }:
                 return result_for("TIMEOUT")
-            if is_done(getattr(provider_operation, "status", None)):
+            if is_done(getattr(provider_operation, "status", None)) and (
+                _provider_error_present(getattr(provider_operation, "error", None))
+            ):
                 return result_for("ERROR", "PROVIDER_OPERATION_FAILED")
             # A polling transport error does not prove a provider failure.
             # Retain the exact handle so a later process can reconcile it.
@@ -539,6 +663,60 @@ class GoogleComputeTransport(GcpComputeTransport):
             raise
         except Exception:
             raise GcpTransportError("LIST_OWNED_FAILED") from None
+
+    def get_image(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpImageObservation:
+        if self._images_client is None:
+            raise GcpTransportError("IMAGE_OBSERVATION_UNAVAILABLE")
+        try:
+            image = self._images_client.get(
+                project=request.project_id,
+                image=request.boot_image.image_name.rsplit("/", 1)[-1],
+                timeout=timeout_seconds,
+            )
+            image_value = cast(Any, image)
+            value = GcpImageObservation(
+                image_name=request.boot_image.image_name,
+                project_id=request.project_id,
+                provider_image_id=int(image_value.id),
+                status=cast(Literal["READY"], str(image_value.status)),
+                self_link=str(image_value.self_link),
+            )
+            if value.provider_image_id != request.boot_image.provider_image_id:
+                raise GcpTransportError("BOOT_IMAGE_ID_MISMATCH")
+            return value
+        except GcpTransportError:
+            raise
+        except Exception as error:
+            if _is_not_found(error):
+                raise GcpTransportError("BOOT_IMAGE_NOT_FOUND") from None
+            raise _sanitize_exception(error, "BOOT_IMAGE_OBSERVATION_FAILED") from None
+
+    def get_boot_disk(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpBootDiskObservation:
+        if self._disks_client is None:
+            raise GcpTransportError("BOOT_DISK_OBSERVATION_UNAVAILABLE")
+        try:
+            disk = self._disks_client.get(
+                project=request.project_id,
+                zone=request.zone,
+                disk=request.instance_name,
+                timeout=timeout_seconds,
+            )
+            disk_value = cast(Any, disk)
+            return GcpBootDiskObservation(
+                instance_name=request.instance_name,
+                disk_name=str(disk_value.name),
+                source_image_id=int(disk_value.source_image_id),
+            )
+        except GcpTransportError:
+            raise
+        except Exception as error:
+            if _is_not_found(error):
+                raise GcpTransportError("BOOT_DISK_NOT_FOUND") from None
+            raise _sanitize_exception(error, "BOOT_DISK_OBSERVATION_FAILED") from None
 
     def delete(
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
@@ -632,6 +810,8 @@ def create_google_compute_transport(
     sdk_module: Any | None = None,
     client: _InstancesClient | None = None,
     operations_client: _ZoneOperationsClient | None = None,
+    images_client: _ImagesClient | None = None,
+    disks_client: _DisksClient | None = None,
 ) -> GoogleComputeTransport:
     """Explicitly select the live transport; import SDK/ADC only here."""
 
@@ -657,6 +837,24 @@ def create_google_compute_transport(
             ) from None
     if operations_client is None:
         raise GcpTransportError("GCP_OPERATION_CLIENT_UNAVAILABLE")
+    if images_client is None:
+        try:
+            images_client = sdk_module.ImagesClient()
+        except AttributeError:
+            raise GcpTransportError("GCP_IMAGE_CLIENT_UNAVAILABLE") from None
+        except Exception:
+            raise GcpTransportError("ADC_IMAGE_CLIENT_CONSTRUCTION_FAILED") from None
+    if disks_client is None:
+        try:
+            disks_client = sdk_module.DisksClient()
+        except AttributeError:
+            raise GcpTransportError("GCP_DISK_CLIENT_UNAVAILABLE") from None
+        except Exception:
+            raise GcpTransportError("ADC_DISK_CLIENT_CONSTRUCTION_FAILED") from None
     return GoogleComputeTransport(
-        sdk=sdk_module, client=client, operations_client=operations_client
+        sdk=sdk_module,
+        client=client,
+        operations_client=operations_client,
+        images_client=images_client,
+        disks_client=disks_client,
     )

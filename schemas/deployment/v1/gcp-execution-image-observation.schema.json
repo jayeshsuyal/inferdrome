@@ -1,0 +1,44 @@
+{
+  "$id": "urn:inferdrome:gcp-execution-image-observation:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read-only image identity observed from the provider immediately pre-create.",
+  "properties": {
+    "image_name": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Image Name",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "provider_image_id": {
+      "maximum": 10000000000000000000,
+      "minimum": 1,
+      "title": "Provider Image Id",
+      "type": "integer"
+    },
+    "self_link": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Self Link",
+      "type": "string"
+    },
+    "status": {
+      "const": "READY",
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "image_name",
+    "project_id",
+    "provider_image_id",
+    "status",
+    "self_link"
+  ],
+  "title": "GcpImageObservation",
+  "type": "object"
+}

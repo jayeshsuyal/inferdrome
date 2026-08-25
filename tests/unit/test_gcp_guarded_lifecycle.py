@@ -5,6 +5,8 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import signal
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +18,9 @@ from pydantic import ValidationError
 
 from inferdrome.deployment import (
     ARM_CONFIRMATION,
+    GCP_RECOVERY_CONFIRMATION,
     FakeGcpComputeTransport,
+    FileExecutionArmStore,
     GcpCapacityInput,
     GcpClock,
     GcpCostQuote,
@@ -30,6 +34,7 @@ from inferdrome.deployment import (
     GcpLeaseJournal,
     GcpPlanError,
     GcpQuoteComponent,
+    GcpTransportError,
     InMemoryExecutionArmStore,
     canonical_gcp_execution_arm_bytes,
     canonical_gcp_execution_outcome_bytes,
@@ -42,6 +47,7 @@ from inferdrome.deployment import (
     parse_gcp_inventory_json,
     plan_gcp_dry_run,
     system_gcp_clock,
+    validate_gcp_a2_profile,
     validate_gcp_execution_preflight,
 )
 from inferdrome.deployment.gcp_compute_transport import (
@@ -220,7 +226,7 @@ def _run(
 
 def test_generated_schema_is_closed_and_fixture_is_exact() -> None:
     schemas = gcp_execution_contract_schemas()
-    assert len(schemas) == 9
+    assert len(schemas) == 11
     for schema in schemas.values():
         Draft202012Validator.check_schema(schema)
         assert schema["$id"].startswith("urn:inferdrome:gcp-execution-")
@@ -607,6 +613,210 @@ def test_provider_observation_rejects_identity_and_network_drift() -> None:
         _observation(value, request)
 
 
+def test_provider_observation_accepts_documented_partial_network_references() -> None:
+    _spec, _inventory, _context, plan = _inputs()
+    arm = _arm()
+    from inferdrome.deployment import build_gcp_insert_request
+
+    request = build_gcp_insert_request(
+        plan=plan, arm=arm, environment=_environment(plan)
+    )
+    value = type(
+        "Instance",
+        (),
+        {
+            "name": request.instance_name,
+            "self_link": (
+                f"https://compute.googleapis.com/compute/v1/projects/{request.project_id}"
+                f"/zones/{request.zone}/instances/{request.instance_name}"
+            ),
+            "status": "RUNNING",
+            "zone": f"https://compute.googleapis.com/compute/v1/projects/{request.project_id}/zones/{request.zone}",
+            "machine_type": f"zones/{request.zone}/machineTypes/{request.machine_type}",
+            "guest_accelerators": [],
+            "can_ip_forward": False,
+            "labels": request.labels.model_dump(mode="json"),
+            "network_interfaces": [
+                type(
+                    "Nic",
+                    (),
+                    {
+                        "network": "global/networks/private",
+                        "subnetwork": f"regions/{request.region}/subnetworks/private",
+                        "stack_type": "IPV4_ONLY",
+                        "access_configs": [],
+                        "ipv6_access_configs": [],
+                        "network_i_p": "10.0.0.2",
+                    },
+                )()
+            ],
+        },
+    )()
+    observation = _observation(value, request)
+    assert observation.network == request.network.network
+    assert observation.subnetwork == request.network.subnetwork
+
+
+def test_real_sdk_image_and_boot_disk_observations_bind_provider_identity() -> None:
+    sdk = pytest.importorskip("google.cloud.compute_v1")
+    _spec, _inventory, _context, plan = _inputs()
+    arm = _arm()
+    from inferdrome.deployment import build_gcp_insert_request
+
+    request = build_gcp_insert_request(
+        plan=plan, arm=arm, environment=_environment(plan)
+    ).model_copy(
+        update={
+            "machine_type": "a2-highgpu-1g",
+            "accelerator_provider_type": "nvidia-tesla-a100",
+        }
+    )
+    image_name = request.boot_image.image_name.rsplit("/", 1)[-1]
+    image_link = (
+        f"https://www.googleapis.com/compute/v1/projects/{request.project_id}"
+        f"/global/images/{image_name}"
+    )
+
+    class Images:
+        def get(self, *, project: str, image: str, timeout: int) -> Any:
+            assert (project, image, timeout) == (request.project_id, image_name, 5)
+            return sdk.Image(
+                name=image_name,
+                id=request.boot_image.provider_image_id,
+                status="READY",
+                self_link=image_link,
+            )
+
+    class Disks:
+        def get(self, *, project: str, zone: str, disk: str, timeout: int) -> Any:
+            assert (project, zone, disk, timeout) == (
+                request.project_id,
+                request.zone,
+                request.instance_name,
+                5,
+            )
+            return sdk.Disk(
+                name=request.instance_name,
+                source_image_id=str(request.boot_image.provider_image_id),
+            )
+
+    transport = create_google_compute_transport(
+        sdk_module=sdk,
+        client=object(),
+        operations_client=object(),
+        images_client=Images(),
+        disks_client=Disks(),
+    )
+    assert (
+        transport.get_image(request, timeout_seconds=5).provider_image_id == 123456789
+    )
+    assert (
+        transport.get_boot_disk(request, timeout_seconds=5).source_image_id == 123456789
+    )
+
+
+def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
+    sdk = pytest.importorskip("google.cloud.compute_v1")
+    _spec, _inventory, _context, plan = _inputs()
+    arm = _arm()
+    from inferdrome.deployment import build_gcp_insert_request
+
+    request = build_gcp_insert_request(
+        plan=plan, arm=arm, environment=_environment(plan)
+    ).model_copy(
+        update={
+            "machine_type": "a2-highgpu-1g",
+            "accelerator_provider_type": "nvidia-tesla-a100",
+        }
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.operation: Any = None
+
+        def insert(self, *, request: Any, timeout: int) -> Any:
+            del request, timeout
+            return self.operation
+
+    client = Client()
+    transport = create_google_compute_transport(
+        sdk_module=sdk,
+        client=client,
+        operations_client=object(),
+        images_client=object(),
+        disks_client=object(),
+    )
+    for status in (sdk.Operation.Status.PENDING, sdk.Operation.Status.RUNNING):
+        client.operation = sdk.Operation(name="operation-1", status=status)
+        handle = transport.insert(
+            request, timeout_seconds=5, request_id=request.insert_request_id
+        )
+        assert transport.wait_operation(handle, timeout_seconds=5).status == "TIMEOUT"
+    client.operation = sdk.Operation(
+        name="operation-1", status=sdk.Operation.Status.DONE
+    )
+    handle = transport.insert(
+        request, timeout_seconds=5, request_id=request.insert_request_id
+    )
+    assert transport.wait_operation(handle, timeout_seconds=5).status == "DONE"
+    client.operation = sdk.Operation(
+        name="operation-1",
+        status=sdk.Operation.Status.DONE,
+        error=sdk.Error(errors=[{"code": "FAILED", "message": "provider"}]),
+    )
+    handle = transport.insert(
+        request, timeout_seconds=5, request_id=request.insert_request_id
+    )
+    assert transport.wait_operation(handle, timeout_seconds=5).status == "ERROR"
+
+    class PollFailure:
+        name = "operation-1"
+        status = sdk.Operation.Status.DONE
+        error = sdk.Error()
+
+        @staticmethod
+        def result(*, timeout: int) -> None:
+            del timeout
+            raise RuntimeError("transient provider polling failure")
+
+    client.operation = PollFailure()
+    handle = transport.insert(
+        request, timeout_seconds=5, request_id=request.insert_request_id
+    )
+    assert transport.wait_operation(handle, timeout_seconds=5).status == "TIMEOUT"
+
+    class Operations:
+        def get(self, **_: Any) -> Any:
+            return sdk.Operation(
+                name="different-operation", status=sdk.Operation.Status.DONE
+            )
+
+    client.operation = sdk.Operation(
+        name="operation-1", status=sdk.Operation.Status.DONE
+    )
+    handle = transport.insert(
+        request, timeout_seconds=5, request_id=request.insert_request_id
+    )
+    class FreshOperations:
+        def get(self, **_: Any) -> Any:
+            return sdk.Operation(
+                name="operation-1", status=sdk.Operation.Status.DONE
+            )
+
+    fresh = create_google_compute_transport(
+        sdk_module=sdk,
+        client=object(),
+        operations_client=FreshOperations(),
+        images_client=object(),
+        disks_client=object(),
+    )
+    assert fresh.wait_operation(handle, timeout_seconds=5).status == "DONE"
+    transport._operations.clear()
+    transport._operations_client = Operations()
+    with pytest.raises(GcpTransportError, match="OPERATION_RESPONSE_MISMATCH"):
+        transport.wait_operation(handle, timeout_seconds=5)
+
+
 def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
     class Value:
         def __init__(self, **kwargs: Any) -> None:
@@ -654,6 +864,12 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
         def ZoneOperationsClient() -> object:
             return object()
 
+        class ImagesClient:
+            pass
+
+        class DisksClient:
+            pass
+
     _, _, _, plan = _inputs()
     arm = _arm()
     from inferdrome.deployment import build_gcp_insert_request
@@ -661,9 +877,19 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
     request = build_gcp_insert_request(
         plan=plan, arm=arm, environment=_environment(plan)
     )
+    request = request.model_copy(
+        update={
+            "machine_type": "a2-highgpu-1g",
+            "accelerator_provider_type": "nvidia-tesla-a100",
+        }
+    )
     client = Client()
     transport = create_google_compute_transport(
-        sdk_module=Sdk, client=client, operations_client=object()
+        sdk_module=Sdk,
+        client=client,
+        operations_client=object(),
+        images_client=object(),
+        disks_client=object(),
     )
     operation = transport.insert(
         request, timeout_seconds=7, request_id=request.insert_request_id
@@ -817,6 +1043,223 @@ def test_event_chain_recovers_when_snapshot_replace_fails(
     )
 
 
+def test_partial_event_tail_is_truncated_before_chain_advances(tmp_path: Path) -> None:
+    outcome, controller = _run(
+        tmp_path, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    event_path = tmp_path / "ctl-12345678.events.jsonl"
+    with event_path.open("ab") as stream:
+        stream.write(b'{"partial_event":')
+    record = controller.journal.load("ctl-12345678")
+    controller.journal.update(
+        record.model_copy(update={"last_error_code": "TAIL_REPAIRED"})
+    )
+    assert controller.journal.load("ctl-12345678").last_error_code == "TAIL_REPAIRED"
+    assert event_path.read_bytes().endswith(b"\n")
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("arm_consumed", False),
+        ("provider_mutation_attempted", False),
+        ("cleanup_confirmed", False),
+        ("provider_operation_terminal", False),
+        ("provider_operation_status", "PENDING"),
+    ],
+)
+def test_journal_rejects_each_lifecycle_regression(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    outcome, controller = _run(
+        tmp_path, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    record = controller.journal.load("ctl-12345678")
+    with pytest.raises(GcpJournalError):
+        controller.journal.update(record.model_copy(update={field: value}))
+
+
+def _prepared_record(tmp_path: Path) -> Any:
+    (tmp_path / "seed").mkdir(parents=True, exist_ok=True)
+    outcome, controller = _run(
+        tmp_path / "seed", FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    record = controller.journal.load("ctl-12345678")
+    return record.model_copy(
+        update={
+            "state": "PREPARED",
+            "updated_at": record.created_at,
+            "provider_operation_id": None,
+            "provider_operation_name": None,
+            "provider_operation_kind": None,
+            "provider_operation_status": None,
+            "provider_operation_terminal": False,
+            "provider_mutation_ambiguous": False,
+            "arm_consumed": False,
+            "provider_mutation_attempted": False,
+            "cleanup_confirmed": False,
+            "orphaned": False,
+            "delete_attempts": 0,
+            "last_error_code": None,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "reserve_after_anchor_fsync",
+        "reserve_after_event_fsync",
+        "reserve_after_snapshot_fsync",
+    ],
+)
+def test_subprocess_reserve_death_leaves_conservative_authority(
+    tmp_path: Path, label: str
+) -> None:
+    record = _prepared_record(tmp_path)
+    root = tmp_path / label
+    root.mkdir()
+    pid = os.fork()
+    if pid == 0:
+        journal = GcpLeaseJournal(
+            root,
+            crash_hook=lambda point: os._exit(77) if point == label else None,
+        )
+        journal.reserve(record)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 77
+    journal = GcpLeaseJournal(root)
+    if label == "reserve_after_anchor_fsync":
+        with pytest.raises(GcpJournalError):
+            journal.load(record.controller_id)
+    else:
+        assert journal.load(record.controller_id) == record
+        with pytest.raises(GcpJournalError):
+            journal.reserve(record)
+
+
+def test_two_processes_cannot_both_reserve_the_same_plan(tmp_path: Path) -> None:
+    record = _prepared_record(tmp_path)
+    root = tmp_path / "race"
+    root.mkdir()
+    result_paths = [root / "child-one", root / "child-two"]
+    pids: list[int] = []
+    for result_path in result_paths:
+        pid = os.fork()
+        if pid == 0:
+            try:
+                GcpLeaseJournal(root).reserve(record)
+                result_path.write_text("reserved", encoding="ascii")
+            except GcpJournalError:
+                result_path.write_text("rejected", encoding="ascii")
+            os._exit(0)
+        pids.append(pid)
+    for pid in pids:
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+    results = [path.read_text(encoding="ascii") for path in result_paths]
+    assert sorted(results) == ["rejected", "reserved"]
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["update_after_stage_fsync", "update_after_event_fsync", "update_after_replace"],
+)
+def test_subprocess_update_death_leaves_readable_prefix(
+    tmp_path: Path, label: str
+) -> None:
+    seed_root = tmp_path / "update-seed"
+    record = _prepared_record(tmp_path)
+    seed_root.mkdir()
+    journal = GcpLeaseJournal(seed_root)
+    journal.reserve(record)
+    changed = record.model_copy(update={"last_error_code": "CRASH_BOUNDARY"})
+    pid = os.fork()
+    if pid == 0:
+        child = GcpLeaseJournal(
+            seed_root,
+            crash_hook=lambda point: os._exit(77) if point == label else None,
+        )
+        child.update(changed)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 77
+    loaded = journal.load(record.controller_id)
+    if label == "update_after_stage_fsync":
+        assert loaded == record
+    else:
+        assert loaded.last_error_code == "CRASH_BOUNDARY"
+
+
+def test_sigkill_after_durable_insert_intent_recovers_as_orphan(tmp_path: Path) -> None:
+    spec, inventory, context, plan = _inputs()
+    arm = _arm()
+    environment = _environment(plan)
+    request = __import__(
+        "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
+    ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    quote, capacity = _quote_and_capacity(plan, arm, request)
+    arms_root = tmp_path / "arms"
+    journal_root = tmp_path / "journal"
+    arms_root.mkdir()
+    journal_root.mkdir()
+    ready = tmp_path / "insert-called"
+
+    class CrashAfterCall(FakeGcpComputeTransport):
+        def insert(
+            self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
+        ) -> Any:
+            del request, timeout_seconds, request_id
+            ready.write_text("1", encoding="ascii")
+            while True:
+                time.sleep(0.01)
+
+    pid = os.fork()
+    if pid == 0:
+        child = GcpGuardedLifecycleController(
+            transport=CrashAfterCall(),
+            arm_store=FileExecutionArmStore(arms_root),
+            journal=GcpLeaseJournal(journal_root),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        )
+        child.execute(
+            plan=plan,
+            expected_spec=spec,
+            expected_inventory=inventory,
+            expected_context=context,
+            arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+            environment=environment,
+            quote=quote,
+            capacity=capacity,
+        )
+        os._exit(0)
+    deadline = time.monotonic() + 3.0
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    os.kill(pid, signal.SIGKILL)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == -signal.SIGKILL
+
+    recovery = GcpGuardedLifecycleController(
+        transport=FakeGcpComputeTransport(),
+        arm_store=FileExecutionArmStore(arms_root),
+        journal=GcpLeaseJournal(journal_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+    )
+    outcome = recovery.recover_cleanup(
+        controller_id=arm.controller_id, confirmation=GCP_RECOVERY_CONFIRMATION
+    )
+    assert outcome.status == "FAILED"
+    assert outcome.orphaned is True
+    assert outcome.cleanup_confirmed is False
+    assert outcome.error_code == "AMBIGUOUS_MUTATION_UNRESOLVED"
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -938,6 +1381,27 @@ def test_provider_labels_and_request_ids_are_provider_safe() -> None:
     assert len(request.delete_request_id) == 36
 
 
+@pytest.mark.parametrize(
+    "machine_type",
+    [
+        "a2-highgpu-2g",
+        "a2-highgpu-4g",
+        "a2-highgpu-8g",
+        "a2-ultragpu-1g",
+        "a2-highgpu-invented",
+    ],
+)
+def test_a2_mapping_rejects_every_non_closed_machine(machine_type: str) -> None:
+    with pytest.raises(GcpExecutionError, match="closed A2 profile"):
+        validate_gcp_a2_profile(machine_type, "NVIDIA A100-SXM4-40GB", 1)
+    assert validate_gcp_a2_profile(
+        "a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", 1
+    ) == "provider"
+    assert validate_gcp_a2_profile(
+        "synthetic-a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", 1
+    ) == "synthetic"
+
+
 def test_boot_image_requires_name_and_separate_provider_identity() -> None:
     with pytest.raises(ValidationError):
         GcpExecutionBootImage(
@@ -946,6 +1410,46 @@ def test_boot_image_requires_name_and_separate_provider_identity() -> None:
             digest="sha256:" + "1" * 64,
             status="READY",
         )
+
+
+def test_image_observation_mismatch_blocks_insert_before_provider_mutation(
+    tmp_path: Path,
+) -> None:
+    class WrongImage(FakeGcpComputeTransport):
+        def get_image(
+            self, request: GcpInsertRequest, *, timeout_seconds: int
+        ) -> Any:
+            return super().get_image(
+                request, timeout_seconds=timeout_seconds
+            ).model_copy(
+                update={"provider_image_id": 999999999}
+            )
+
+    transport = WrongImage()
+    outcome = _run(tmp_path, transport)
+    assert outcome.status == "FAILED"
+    assert outcome.error_code == "BOOT_IMAGE_OBSERVATION_MISMATCH"
+    assert transport.insert_calls == 0
+
+def test_boot_disk_source_mismatch_triggers_cleanup_before_work(
+    tmp_path: Path,
+) -> None:
+    class WrongDisk(FakeGcpComputeTransport):
+        def get_boot_disk(
+            self, request: GcpInsertRequest, *, timeout_seconds: int
+        ) -> Any:
+            return super().get_boot_disk(
+                request, timeout_seconds=timeout_seconds
+            ).model_copy(
+                update={"source_image_id": 999999999}
+            )
+
+    transport = WrongDisk()
+    outcome = _run(tmp_path, transport)
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "BOOT_DISK_IMAGE_MISMATCH"
+    assert outcome.cleanup_confirmed is True
+    assert transport.delete_calls == 1
 
 
 def test_lazy_transport_factory_is_not_activated_before_arm_validation(
@@ -985,6 +1489,139 @@ def test_lazy_transport_factory_is_not_activated_before_arm_validation(
     assert called is False
 
 
+@pytest.mark.parametrize("stale_kind", ["quote", "capacity"])
+def test_lazy_factory_is_not_activated_for_stale_execution_inputs(
+    tmp_path: Path, stale_kind: str
+) -> None:
+    called = False
+
+    def factory() -> Any:
+        nonlocal called
+        called = True
+        return FakeGcpComputeTransport()
+
+    spec, inventory, context, plan = _inputs()
+    arm = _arm()
+    environment = _environment(plan)
+    request = __import__(
+        "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
+    ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    quote, capacity = _quote_and_capacity(plan, arm, request)
+    if stale_kind == "quote":
+        quote = quote.model_copy(
+            update={
+                "issued_at": "2026-08-20T10:00:00Z",
+                "valid_until": "2026-08-20T11:00:00Z",
+            }
+        )
+    else:
+        capacity = capacity.model_copy(
+            update={"observed_at": "2026-08-20T10:00:00Z", "freshness_seconds": 1}
+        )
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(tmp_path),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+    )
+    with pytest.raises(GcpExecutionError):
+        controller.execute(
+            plan=plan,
+            expected_spec=spec,
+            expected_inventory=inventory,
+            expected_context=context,
+            arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+            environment=environment,
+            quote=quote,
+            capacity=capacity,
+        )
+    assert called is False
+
+
+def test_lazy_factory_is_not_activated_when_journal_reservation_fails(
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    class BrokenJournal(GcpLeaseJournal):
+        def reserve(self, record: Any) -> None:
+            del record
+            raise GcpJournalError("journal reserve failed")
+
+    def factory() -> Any:
+        nonlocal called
+        called = True
+        return FakeGcpComputeTransport()
+
+    spec, inventory, context, plan = _inputs()
+    arm = _arm()
+    environment = _environment(plan)
+    request = __import__(
+        "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
+    ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    quote, capacity = _quote_and_capacity(plan, arm, request)
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=BrokenJournal(tmp_path),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+    )
+    with pytest.raises(GcpJournalError):
+        controller.execute(
+            plan=plan,
+            expected_spec=spec,
+            expected_inventory=inventory,
+            expected_context=context,
+            arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+            environment=environment,
+            quote=quote,
+            capacity=capacity,
+        )
+    assert called is False
+
+
+def test_lazy_factory_is_not_activated_when_arm_replay_is_rejected(
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    class ReplayedArm:
+        def consume(self, arm_id: str, arm_sha256: str) -> bool:
+            del arm_id, arm_sha256
+            return False
+
+    def factory() -> Any:
+        nonlocal called
+        called = True
+        return FakeGcpComputeTransport()
+
+    spec, inventory, context, plan = _inputs()
+    arm = _arm()
+    environment = _environment(plan)
+    request = __import__(
+        "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
+    ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    quote, capacity = _quote_and_capacity(plan, arm, request)
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=ReplayedArm(),
+        journal=GcpLeaseJournal(tmp_path),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+    )
+    outcome = controller.execute(
+        plan=plan,
+        expected_spec=spec,
+        expected_inventory=inventory,
+        expected_context=context,
+        arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+        environment=environment,
+        quote=quote,
+        capacity=capacity,
+    )
+    assert outcome.error_code == "ARM_ALREADY_CONSUMED"
+    assert called is False
+
+
 def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> None:
     sdk = pytest.importorskip("google.cloud.compute_v1")
     assert hasattr(sdk, "AttachedDiskInitializeParams")
@@ -997,6 +1634,12 @@ def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> 
 
     request = build_gcp_insert_request(
         plan=plan, arm=arm, environment=_environment(plan)
+    )
+    request = request.model_copy(
+        update={
+            "machine_type": "a2-highgpu-1g",
+            "accelerator_provider_type": "nvidia-tesla-a100",
+        }
     )
 
     operation = sdk.Operation(name="operation-1", status=sdk.Operation.Status.DONE)
@@ -1019,7 +1662,11 @@ def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> 
 
     client = Client()
     transport = create_google_compute_transport(
-        sdk_module=sdk, client=client, operations_client=object()
+        sdk_module=sdk,
+        client=client,
+        operations_client=object(),
+        images_client=object(),
+        disks_client=object(),
     )
     handle = transport.insert(
         request, timeout_seconds=7, request_id=request.insert_request_id

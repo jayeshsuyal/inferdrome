@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated, Any, Final, Literal, Protocol, Self
+from typing import Annotated, Any, Final, Literal, Protocol, Self, cast
 
 from pydantic import (
     ConfigDict,
@@ -102,6 +102,10 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 _LABEL_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_A2_GPU_PROFILES: Final = {
+    "a2-highgpu-1g": ("NVIDIA A100-SXM4-40GB", 1, "provider"),
+    "synthetic-a2-highgpu-1g": ("NVIDIA A100-SXM4-40GB", 1, "synthetic"),
+}
 _NETWORK_RE = re.compile(
     r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$"
 )
@@ -196,6 +200,19 @@ class GcpTransportError(GcpExecutionError):
         super().__init__(code)
 
 
+def validate_gcp_a2_profile(
+    machine_type: str, accelerator_model: str, accelerator_count: int
+) -> Literal["provider", "synthetic"]:
+    """Validate the one closed A2 mapping used by every execution boundary."""
+
+    expected = _A2_GPU_PROFILES.get(machine_type)
+    if expected is None or expected[:2] != (accelerator_model, accelerator_count):
+        raise GcpExecutionError(
+            "selected accelerator does not match the closed A2 profile"
+        )
+    return cast(Literal["provider", "synthetic"], expected[2])
+
+
 def _normalized_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -241,7 +258,18 @@ def _reject_unsafe_values(value: object, *, path: tuple[str, ...] = ()) -> None:
         for child in value:
             _reject_unsafe_values(child, path=path)
     elif isinstance(value, str):
-        if re.fullmatch(r"(?:https?|ssh|ftp)://.*", value, flags=re.IGNORECASE):
+        is_url = re.fullmatch(
+            r"(?:https?|ssh|ftp)://.*", value, flags=re.IGNORECASE
+        )
+        is_safe_self_link = (
+            path
+            and path[-1] == "selflink"
+            and re.fullmatch(
+                r"https://www\.googleapis\.com/compute/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/(?:global/images|zones/[a-z][a-z0-9-]{0,61}[a-z0-9]/instances)/[a-z][a-z0-9-]{0,61}[a-z0-9]",
+                value,
+            )
+        )
+        if is_url and not is_safe_self_link:
             raise ValueError("GCP execution contains a public endpoint value")
         if _looks_credential(value) and (not path or path[-1] not in _IDENTITY_KEYS):
             raise ValueError("GCP execution contains a credential-shaped value")
@@ -435,6 +463,42 @@ class GcpExecutionBootImage(GcpExecutionModel):
     status: Literal["READY"]
 
 
+class GcpImageObservation(GcpExecutionModel):
+    """Read-only image identity observed from the provider immediately pre-create."""
+
+    image_name: Annotated[str, StringConstraints(pattern=_BOOT_IMAGE_RE.pattern)]
+    project_id: GcpProjectId
+    provider_image_id: int = Field(strict=True, ge=1, le=10**19)
+    status: Literal["READY"]
+    self_link: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+
+    @model_validator(mode="after")
+    def validate_image_identity(self) -> Self:
+        expected = (
+            f"https://www.googleapis.com/compute/v1/projects/{self.project_id}"
+            f"/global/images/{self.image_name.rsplit('/', 1)[-1]}"
+        )
+        if self.image_name.split("/")[1] != self.project_id or (
+            self.self_link != expected
+        ):
+            raise ValueError("provider image identity is inconsistent")
+        return self
+
+
+class GcpBootDiskObservation(GcpExecutionModel):
+    """Read-only boot-disk source identity observed after create."""
+
+    instance_name: GcpInstanceName
+    disk_name: GcpInstanceName
+    source_image_id: int = Field(strict=True, ge=1, le=10**19)
+
+    @model_validator(mode="after")
+    def validate_disk_identity(self) -> Self:
+        if self.disk_name != self.instance_name:
+            raise ValueError("provider boot disk identity is inconsistent")
+        return self
+
+
 class GcpExecutionEnvironment(GcpExecutionModel):
     """Exact provider-side environment, with references but no secret values."""
 
@@ -518,6 +582,9 @@ class GcpInsertRequest(GcpExecutionModel):
 
     @model_validator(mode="after")
     def validate_private_request(self) -> Self:
+        validate_gcp_a2_profile(
+            self.machine_type, self.accelerator_model, self.accelerator_count
+        )
         if self.network.external_access_config != "absent":
             raise ValueError("external access configuration must be absent")
         if self.network.ip_forwarding:
@@ -636,6 +703,7 @@ class GcpCapacityInput(GcpExecutionModel):
 class GcpOperationHandle(GcpExecutionModel):
     operation_id: Annotated[str, StringConstraints(pattern=r"^op-[a-z0-9]{8,48}$")]
     operation_kind: Literal["insert", "delete"]
+    instance_name: GcpInstanceName | None = None
     operation_name: Annotated[
         str | None, StringConstraints(min_length=1, max_length=256)
     ] = None
@@ -714,6 +782,14 @@ class GcpComputeTransport(Protocol):
     def list_owned(
         self, request: GcpInsertRequest, *, timeout_seconds: int
     ) -> tuple[GcpInstanceObservation, ...]: ...
+
+    def get_image(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpImageObservation: ...
+
+    def get_boot_disk(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpBootDiskObservation: ...
 
     def delete(
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
@@ -1421,14 +1497,9 @@ def build_gcp_insert_request(
         raise GcpExecutionError("execution architecture does not match selected GPU")
     if environment.accelerator_attachment_mode != "a2_fixed_gpu":
         raise GcpExecutionError("unsupported accelerator attachment mode")
-    if (
-        not provider.machine_type.startswith(("a2-", "synthetic-a2-"))
-        or provider.accelerator_count != 1
-        or provider.accelerator_model != "NVIDIA A100-SXM4-40GB"
-    ):
-        raise GcpExecutionError(
-            "selected accelerator does not match the closed A2 profile"
-        )
+    validate_gcp_a2_profile(
+        provider.machine_type, provider.accelerator_model, provider.accelerator_count
+    )
     if environment.boot_image.image_name.split("/")[1] != provider.project_id:
         raise GcpExecutionError("boot image project does not match selected project")
     if (
@@ -1533,6 +1604,9 @@ def validate_cost_and_capacity(
         request.machine_type,
     ):
         raise GcpExecutionError("cost quote selection does not match the request")
+    validate_gcp_a2_profile(
+        request.machine_type, request.accelerator_model, request.accelerator_count
+    )
     if (
         quote.accelerator_model != request.accelerator_model
         or quote.accelerator_provider_type != request.accelerator_provider_type
@@ -1735,9 +1809,18 @@ def _journal_event(
 class GcpLeaseJournal:
     """Small atomic local lease store; it never stores provider payloads/secrets."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, *, crash_hook: Callable[[str], None] | None = None
+    ) -> None:
         self.root = root
         self._lock = threading.Lock()
+        self._crash_hook = crash_hook
+
+    def _crash_point(self, label: str) -> None:
+        """Test-only process-death injection; production instances leave it unset."""
+
+        if self._crash_hook is not None:
+            self._crash_hook(label)
 
     def _checked_root(self) -> Path:
         if not self.root.is_absolute():
@@ -1914,6 +1997,55 @@ class GcpLeaseJournal:
             if descriptor is not None:
                 os.close(descriptor)
 
+    def _repair_event_tail_locked(self, path: Path) -> None:
+        """Truncate only an incomplete final JSONL line before advancing the chain."""
+
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDWR
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > GCP_MAX_JOURNAL_EVENT_BYTES
+            ):
+                raise GcpJournalError("GCP journal event chain is unsafe")
+            raw = os.read(descriptor, GCP_MAX_JOURNAL_EVENT_BYTES + 1)
+            final = os.fstat(descriptor)
+            if final.st_ino != metadata.st_ino or final.st_size != len(raw):
+                raise GcpJournalError("GCP journal event chain changed during repair")
+            if len(raw) > GCP_MAX_JOURNAL_EVENT_BYTES:
+                raise GcpJournalError("GCP journal event chain exceeds its bound")
+            if not raw.endswith(b"\n"):
+                newline = raw.rfind(b"\n")
+                if newline < 0:
+                    raise GcpJournalError(
+                        "GCP journal event chain has no recoverable prefix"
+                    )
+                os.ftruncate(descriptor, newline + 1)
+                os.fsync(descriptor)
+                self._fsync_directory()
+        except GcpJournalError:
+            raise
+        except OSError:
+            raise GcpJournalError("GCP journal event chain repair failed") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _fsync_directory(self) -> None:
+        directory = os.open(
+            self._checked_root(), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
     def _read_path(self, path: Path) -> GcpLeaseRecord:
         # The hash-chained event log is the recoverable source of truth.  The
         # snapshot is only a fast, derived view and may legitimately lag when
@@ -2006,20 +2138,40 @@ class GcpLeaseJournal:
             entries = sorted(root.iterdir(), key=lambda path: path.name)
         except OSError:
             raise GcpJournalError("GCP journal directory is unavailable") from None
+        controllers: set[str] = set()
         for entry in entries:
-            if (
-                entry.name == ".journal.lock"
-                or entry.name.endswith(".intent.json")
-                or entry.name.endswith(".events.jsonl")
-            ):
+            if entry.name == ".journal.lock":
                 continue
             if entry.name.startswith(".") and entry.name.endswith(".stage"):
-                raise GcpJournalError("GCP journal contains an incomplete stage")
-            if not entry.name.endswith(".lease.json"):
+                try:
+                    metadata = entry.lstat()
+                    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(
+                        metadata.st_mode
+                    ):
+                        raise GcpJournalError("GCP journal stage is unsafe")
+                    entry.unlink()
+                except GcpJournalError:
+                    raise
+                except OSError:
+                    raise GcpJournalError("GCP journal stage cleanup failed") from None
+                continue
+            if entry.name.endswith(".lease.json"):
+                controller = entry.name.removesuffix(".lease.json")
+            elif entry.name.endswith(".events.jsonl"):
+                controller = entry.name.removesuffix(".events.jsonl")
+            elif entry.name.endswith(".intent.json"):
+                controller = entry.name.removesuffix(".intent.json")
+            else:
                 raise GcpJournalError("GCP journal contains an unexpected entry")
-            if entry.is_symlink():
-                raise GcpJournalError("GCP journal contains a symlink")
-            records.append(self._read_path(entry))
+            if _CONTROLLER_RE.fullmatch(controller) is None:
+                raise GcpJournalError("GCP journal controller identifier is invalid")
+            controllers.add(controller)
+        for controller in sorted(controllers):
+            event_path = self._event_path_for(root, controller)
+            anchor_path = self._anchor_path_for(root, controller)
+            if not event_path.exists() or not anchor_path.exists():
+                raise GcpJournalError("GCP journal reserve is incomplete")
+            records.append(self._read_path(self._path_for(root, controller)))
         return records
 
     def reserve(self, record: GcpLeaseRecord) -> None:
@@ -2047,6 +2199,8 @@ class GcpLeaseJournal:
             )
             if len(raw) > GCP_MAX_JOURNAL_BYTES:
                 raise GcpJournalError("GCP journal record exceeds its bound")
+            if len(event_raw) > GCP_MAX_JOURNAL_EVENT_BYTES:
+                raise GcpJournalError("GCP journal event exceeds its bound")
             try:
                 anchor_path = self._anchor_path_for(root, record.controller_id)
                 event_path = self._event_path_for(root, record.controller_id)
@@ -2061,16 +2215,7 @@ class GcpLeaseJournal:
                     os.fsync(anchor_descriptor)
                 finally:
                     os.close(anchor_descriptor)
-                descriptor = os.open(
-                    path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                )
-                try:
-                    _write_all(descriptor, raw)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                self._crash_point("reserve_after_anchor_fsync")
                 event_descriptor = os.open(
                     event_path,
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -2081,11 +2226,19 @@ class GcpLeaseJournal:
                     os.fsync(event_descriptor)
                 finally:
                     os.close(event_descriptor)
-                directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                self._crash_point("reserve_after_event_fsync")
+                descriptor = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
                 try:
-                    os.fsync(directory)
+                    _write_all(descriptor, raw)
+                    os.fsync(descriptor)
                 finally:
-                    os.close(directory)
+                    os.close(descriptor)
+                self._crash_point("reserve_after_snapshot_fsync")
+                self._fsync_directory()
             except FileExistsError:
                 raise GcpJournalError("GCP controller lease already exists") from None
             except OSError:
@@ -2104,6 +2257,8 @@ class GcpLeaseJournal:
         raw = canonical_json_bytes(_json_value(record))
         with self._exclusive():
             try:
+                event_path = self._event_path_for(root, record.controller_id)
+                self._repair_event_tail_locked(event_path)
                 previous = self._read_path(path)
             except GcpJournalError:
                 raise
@@ -2145,6 +2300,36 @@ class GcpLeaseJournal:
                 raise GcpJournalError("GCP journal state transition is invalid")
             if record.delete_attempts < previous.delete_attempts:
                 raise GcpJournalError("GCP journal cleanup attempts regressed")
+            for field in (
+                "arm_consumed",
+                "provider_mutation_attempted",
+                "cleanup_confirmed",
+            ):
+                if getattr(previous, field) and not getattr(record, field):
+                    raise GcpJournalError("GCP journal lifecycle flag regressed")
+            if (
+                previous.provider_operation_terminal
+                and not record.provider_operation_terminal
+                and not (
+                    previous.provider_operation_kind in {"insert", "delete"}
+                    and record.provider_operation_kind == "delete"
+                    and record.provider_operation_id != previous.provider_operation_id
+                )
+            ):
+                raise GcpJournalError("GCP journal terminal operation regressed")
+            if (
+                previous.provider_operation_terminal
+                and record.provider_operation_id == previous.provider_operation_id
+                and record.provider_operation_status
+                != previous.provider_operation_status
+            ):
+                raise GcpJournalError("GCP journal terminal operation changed")
+            if (
+                previous.orphaned
+                and not record.orphaned
+                and record.state != "CLEANUP_CONFIRMED"
+            ):
+                raise GcpJournalError("GCP journal orphan state regressed")
             if _parse_timestamp(record.updated_at) < _parse_timestamp(
                 previous.updated_at
             ):
@@ -2226,7 +2411,15 @@ class GcpLeaseJournal:
                 )
                 + b"\n"
             )
-            if len(event_raw) > GCP_MAX_JOURNAL_EVENT_BYTES:
+            try:
+                event_size = self._event_path_for(
+                    root, record.controller_id
+                ).stat().st_size
+            except OSError:
+                raise GcpJournalError(
+                    "GCP journal event chain is unavailable"
+                ) from None
+            if event_size + len(event_raw) > GCP_MAX_JOURNAL_EVENT_BYTES:
                 raise GcpJournalError("GCP journal event exceeds its bound")
             try:
                 descriptor = os.open(
@@ -2239,8 +2432,9 @@ class GcpLeaseJournal:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
+                self._crash_point("update_after_stage_fsync")
                 event_descriptor = os.open(
-                    self._event_path_for(root, record.controller_id),
+                    event_path,
                     os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
                 )
                 try:
@@ -2248,10 +2442,12 @@ class GcpLeaseJournal:
                     os.fsync(event_descriptor)
                 finally:
                     os.close(event_descriptor)
+                self._crash_point("update_after_event_fsync")
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
                     raise GcpJournalError("GCP journal target is a symlink")
                 os.replace(stage, path)
+                self._crash_point("update_after_replace")
                 directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
                 try:
                     os.fsync(directory)
@@ -2380,6 +2576,7 @@ class FakeGcpComputeTransport:
         return GcpOperationHandle(
             operation_id=operation_id,
             operation_kind=kind,
+            instance_name=instance_name,
             operation_name=operation_name,
             project_id=request.project_id,
             zone=request.zone,
@@ -2455,6 +2652,31 @@ class FakeGcpComputeTransport:
             return ()
         return (self._owned,)
 
+    def get_image(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpImageObservation:
+        del timeout_seconds
+        return GcpImageObservation(
+            image_name=request.boot_image.image_name,
+            project_id=request.project_id,
+            provider_image_id=request.boot_image.provider_image_id,
+            status="READY",
+            self_link=(
+                f"https://www.googleapis.com/compute/v1/projects/{request.project_id}"
+                f"/global/images/{request.boot_image.image_name.rsplit('/', 1)[-1]}"
+            ),
+        )
+
+    def get_boot_disk(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpBootDiskObservation:
+        del timeout_seconds
+        return GcpBootDiskObservation(
+            instance_name=request.instance_name,
+            disk_name=request.instance_name,
+            source_image_id=request.boot_image.provider_image_id,
+        )
+
     def delete(
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
     ) -> GcpOperationHandle:
@@ -2480,6 +2702,14 @@ class FakeGcpComputeTransport:
 
 
 def _owned(observation: GcpInstanceObservation, request: GcpInsertRequest) -> bool:
+    try:
+        validate_gcp_a2_profile(
+            observation.machine_type,
+            observation.accelerator_model,
+            observation.accelerator_count,
+        )
+    except GcpExecutionError:
+        return False
     return (
         observation.state in {"RUNNING", "TERMINATED"}
         and observation.instance_name == request.instance_name
@@ -2599,6 +2829,7 @@ class GcpGuardedLifecycleController:
         return GcpOperationHandle(
             operation_id=record.provider_operation_id,
             operation_kind=record.provider_operation_kind,
+            instance_name=record.instance_name,
             operation_name=record.provider_operation_name,
             project_id=record.project_id,
             zone=record.zone,
@@ -2622,6 +2853,7 @@ class GcpGuardedLifecycleController:
         name_parts = name.split("/") if name is not None else ()
         if (
             parsed.operation_kind != expected_kind
+            or parsed.instance_name not in {None, request.instance_name}
             or parsed.project_id != request.project_id
             or parsed.zone != request.zone
             or len(name_parts) != 6
@@ -2778,14 +3010,22 @@ class GcpGuardedLifecycleController:
             nonlocal ambiguous_mutation, cleanup_error, current
             ambiguous_mutation = True
             cleanup_error = code
+            operation_updates: dict[str, Any] = {
+                "provider_mutation_ambiguous": True,
+                "last_error_code": code,
+            }
+            if not current.provider_operation_terminal:
+                operation_updates.update(
+                    {
+                        "provider_operation_status": "UNKNOWN",
+                        "provider_operation_terminal": False,
+                    }
+                )
             current, write_error = self._record_resilient(
                 current,
                 state="CLEANUP_PENDING",
                 now=now,
-                provider_operation_status="UNKNOWN",
-                provider_operation_terminal=False,
-                provider_mutation_ambiguous=True,
-                last_error_code=code,
+                **operation_updates,
             )
             if write_error is not None:
                 cleanup_error = write_error
@@ -3117,6 +3357,23 @@ class GcpGuardedLifecycleController:
                     error_code="ACTIVE_RESOURCE_EXISTS",
                     primary_error_code="ACTIVE_RESOURCE_EXISTS",
                 )
+            image_observation = GcpImageObservation.model_validate_json(
+                canonical_json_bytes(
+                    _json_value(
+                        self.transport.get_image(
+                            request, timeout_seconds=controller_timeout()
+                        )
+                    )
+                )
+            )
+            if (
+                image_observation.image_name != request.boot_image.image_name
+                or image_observation.project_id != request.project_id
+                or image_observation.provider_image_id
+                != request.boot_image.provider_image_id
+                or image_observation.status != "READY"
+            ):
+                raise GcpTransportError("BOOT_IMAGE_OBSERVATION_MISMATCH")
         except GcpTransportError as error:
             self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", error.code)
             record, _ = self._record_resilient(
@@ -3233,6 +3490,24 @@ class GcpGuardedLifecycleController:
             )
             if not _owned(observation, request):
                 primary_error = "OWNERSHIP_MISMATCH"
+                self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", primary_error)
+                raise GcpExecutionError(primary_error)
+            disk_observation = GcpBootDiskObservation.model_validate_json(
+                canonical_json_bytes(
+                    _json_value(
+                        self.transport.get_boot_disk(
+                            request, timeout_seconds=controller_timeout()
+                        )
+                    )
+                )
+            )
+            if (
+                disk_observation.instance_name != request.instance_name
+                or disk_observation.disk_name != request.instance_name
+                or disk_observation.source_image_id
+                != request.boot_image.provider_image_id
+            ):
+                primary_error = "BOOT_DISK_IMAGE_MISMATCH"
                 self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", primary_error)
                 raise GcpExecutionError(primary_error)
             record = self._record(record, state="OWNED", now=now)
@@ -3429,6 +3704,16 @@ def gcp_execution_contract_schemas() -> dict[str, dict[str, Any]]:
             "gcp-execution-capacity.schema.json",
             GcpCapacityInput,
             "urn:inferdrome:gcp-execution-capacity:v1",
+        ),
+        (
+            "gcp-execution-image-observation.schema.json",
+            GcpImageObservation,
+            "urn:inferdrome:gcp-execution-image-observation:v1",
+        ),
+        (
+            "gcp-execution-boot-disk-observation.schema.json",
+            GcpBootDiskObservation,
+            "urn:inferdrome:gcp-execution-boot-disk-observation:v1",
         ),
         (
             "gcp-execution-lease.schema.json",

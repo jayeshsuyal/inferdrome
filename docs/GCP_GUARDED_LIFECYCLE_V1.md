@@ -35,10 +35,14 @@ exact controller, arm, and plan IDs. The pinned A100 profile uses the closed A2
 fixed-GPU attachment mode; it does not project an N1-style guest-accelerator
 attachment. Provider labels contain only compact
 lowercase ownership keys; full IDs remain in the local request/lease and are
-compared before deletion. The runner and vLLM serving runtime remain separate
-boundaries. A startup-script digest may bind an external bootstrap artifact,
-but startup bytes and credential values are never part of this contract; PR8
-does not launch either runtime.
+compared before deletion. The only live A2 mapping is
+`a2-highgpu-1g -> NVIDIA A100-SXM4-40GB x1`; every other A2 size and invented
+machine name is rejected. `synthetic-a2-highgpu-1g` is accepted only by the
+offline deterministic fake and is rejected by the concrete live transport. The
+runner and vLLM serving runtime remain separate boundaries. A startup-script
+digest may bind an external bootstrap artifact, but startup bytes and
+credential values are never part of this contract; PR8 does not launch either
+runtime.
 
 ## Cost, capacity, and lifecycle
 
@@ -50,8 +54,11 @@ exact hard ceiling. Capacity input is a fresh, read-only observation bound to
 the exact request and reports zero matching owned resources; it is not a
 capacity proof. Pricing and invoice truth remain unavailable.
 
-The controller writes an immutable no-replace intent anchor and an atomic local
-lease before insert, under a cross-process journal lock. Immediately before the
+The controller writes an immutable no-replace intent anchor and a crash-safe
+hash-chain lease before insert, under a cross-process journal lock. Reserve
+publishes the authoritative initial event before the derived snapshot, so an
+operator-process death at any reserve boundary is either a readable
+conservative prefix or a deterministic blocked/incomplete journal. Immediately before the
 first provider insert it durably records `CREATE_SUBMITTED` with the stable
 insert UUID, `provider_mutation_ambiguous=true`, and an `UNKNOWN` operation
 status; if that write fails, insert is not called. Every lease transition is
@@ -85,16 +92,21 @@ the SDK and constructs the `InstancesClient` and restart-safe
 `ZoneOperationsClient`; it must be selected only after pure preflight, local
 lease reservation, and one-shot arm-consumption gates. With the extra absent it
 fails with the bounded
-`GCP optional dependency unavailable` error. Engineering-gate tests inject SDK
-modules, clients, and extended-operation fakes; they do not discover ADC,
+`GCP optional dependency unavailable` error. The factory also lazily constructs
+`ImagesClient` and `DisksClient`; image name -> numeric ID/READY is observed
+before insert, and the created boot disk's exact `source_image_id` is observed
+before any benchmark work. Engineering-gate tests inject SDK modules, clients,
+message objects, and extended-operation fakes; they do not discover ADC,
 metadata, sockets, subprocesses, or a provider.
 
 The concrete client follows Google's Compute Engine `instances.insert`, `get`,
 `list(request=ListInstancesRequest(...))`, and `delete` operation model and
 bounded extended-operation waits. Raw provider operation names are normalized
-to the exact zonal operation resource before they enter the journal. Polling
-transport errors remain pending/unknown; only a provider-confirmed terminal DONE
-operation may carry a provider error.
+to the exact zonal operation resource before they enter the journal; a fresh
+reconciliation response must match its persisted name, project, zone, and
+owned-instance target. Polling transport/result errors remain pending/unknown;
+only a provider-confirmed terminal DONE operation with a non-empty provider
+error may be reported as provider failure.
 Application Default Credentials are an external operator setup, never an
 Inferdrome API key or serialized receipt field. See Google's primary
 documentation for [Compute Engine insert](https://cloud.google.com/compute/docs/reference/rest/v1/instances/insert),
