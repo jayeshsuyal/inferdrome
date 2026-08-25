@@ -191,6 +191,7 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     )
 
 
@@ -237,19 +238,9 @@ def test_yaml_parser_has_an_explicit_token_work_bound() -> None:
         parse_kubernetes_yaml(above_raw)
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
-        b"\xff\xfe\x00",
-        b"apiVersion: batch/v1\n---\nkind: Job\n",
-        b"a: &anchor\n  b: *anchor\n",
-        b"!unsafe value\n",
-        b"x" * (KUBERNETES_MAX_MANIFEST_BYTES + 1),
-    ],
-)
-def test_kubernetes_cli_errors_are_bounded_for_malformed_yaml(
+def _run_kubernetes_validation_subprocess(
     tmp_path: Path, raw: bytes
-) -> None:
+) -> tuple[Path, subprocess.CompletedProcess[str]]:
     path = tmp_path / "malformed.yaml"
     path.write_bytes(raw)
     environment = os.environ.copy()
@@ -270,10 +261,41 @@ def test_kubernetes_cli_errors_are_bounded_for_malformed_yaml(
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,
     )
-    assert result.returncode == 2
+    return path, result
+
+
+def _assert_bounded_kubernetes_cli_error(
+    path: Path, result: subprocess.CompletedProcess[str]
+) -> None:
+    assert result.returncode == 2, result.stderr[-2000:]
     assert "Traceback" not in result.stderr
     assert str(path) not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\xff\xfe\x00",
+        b"apiVersion: batch/v1\n---\nkind: Job\n",
+        b"a: &anchor\n  b: *anchor\n",
+        b"!unsafe value\n",
+    ],
+)
+def test_kubernetes_cli_errors_are_bounded_for_malformed_yaml(
+    tmp_path: Path, raw: bytes
+) -> None:
+    path, result = _run_kubernetes_validation_subprocess(tmp_path, raw)
+    _assert_bounded_kubernetes_cli_error(path, result)
+
+
+def test_kubernetes_cli_errors_are_bounded_for_oversized_yaml(
+    tmp_path: Path,
+) -> None:
+    raw = b"x" * (KUBERNETES_MAX_MANIFEST_BYTES + 1)
+    path, result = _run_kubernetes_validation_subprocess(tmp_path, raw)
+    _assert_bounded_kubernetes_cli_error(path, result)
 
 
 @pytest.mark.parametrize(
@@ -484,9 +506,18 @@ def test_gpu_runner_uses_attached_canonical_command() -> None:
     runner = cast(Any, document)["spec"]["template"]["spec"]["containers"][0]
     assert runner["command"] == ["inferdrome"]
     assert "--managed-capability-profile" not in runner["args"]
+    environment = os.environ.copy()
+    source_path = str(REPOSITORY_ROOT / "src")
+    environment["PYTHONPATH"] = source_path + (
+        os.pathsep + environment["PYTHONPATH"]
+        if environment.get("PYTHONPATH")
+        else ""
+    )
     result = subprocess.run(
         [
-            str(REPOSITORY_ROOT / ".venv/bin/inferdrome"),
+            sys.executable,
+            "-m",
+            "inferdrome",
             "run",
             "/private/nonexistent/kubernetes-experiment.yaml",
             "--runs-root",
@@ -495,9 +526,11 @@ def test_gpu_runner_uses_attached_canonical_command() -> None:
             "/private/nonexistent/tokenizer",
         ],
         cwd=REPOSITORY_ROOT,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,
     )
     assert result.returncode != 0
     assert "managed vLLM options require" not in result.stderr
