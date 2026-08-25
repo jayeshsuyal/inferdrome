@@ -65,6 +65,13 @@ the benchmark methodology or frozen evidence schemas. Local mock, Lambda
 dry-run/reference, and GCP dry-run/reference examples are non-executing; no
 cloud resource or evidence publication is implied.
 
+The reproducible runner image is a separate packaging boundary documented in
+[RUNNER_IMAGE_V1.md](docs/RUNNER_IMAGE_V1.md). Its normal entrypoint is the
+canonical `inferdrome` CLI with unchanged benchmark semantics; serving engines
+remain separate. The explicitly named endpoint probe is synthetic and
+evidence-ineligible, and a Docker build or image digest is never presented as
+an executed receipt.
+
 The first v0.2 vertical slice adds an additive ninth public schema for immutable
 same-configuration trial sets. Each set pins 2–100 independently verified runs
 by run ID and bundle digest, keeps every request population separate, and
@@ -217,6 +224,7 @@ provider-neutral.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Deployment specification v1](docs/DEPLOYMENT_SPEC_V1.md)
 - [Deployment receipt v1](docs/DEPLOYMENT_RECEIPT_V1.md)
+- [Reproducible runner image v1](docs/RUNNER_IMAGE_V1.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [v0.1 definition of done](docs/V0_1_DEFINITION_OF_DONE.md)
 - [v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md)
