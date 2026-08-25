@@ -1,0 +1,29 @@
+{
+  "archive_sha256": "sha256:92e9456b33d2b8fe6b4df24ce6a487ea1fde09ddbc20b5acdfecdf19abd5efdc",
+  "bundle_digest": "sha256:6fcfa686c106a0fa1de2cf6c338d8de36cb8778d7880bb3e8701043ce5aa353a",
+  "capture_manifest_sha256": "sha256:3d80c59117c154cdc8157a9898f14cae3b9e17b968650fc8693cf45c8436c0f6",
+  "cost_observation": {
+    "billing_window_seconds": "781.806878",
+    "estimated_cost_usd": "0.432165",
+    "hourly_rate_usd": "1.99",
+    "max_cost_usd": "1.25",
+    "statement": "Controller-observed estimate only; provider billing granularity and the final invoice remain external."
+  },
+  "evidence_kind": "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION",
+  "provider": {
+    "gpu_tier_id": "a100-40gb-sxm4",
+    "instance_type_name": "gpu_1x_a100_sxm4",
+    "termination_confirmed_at": "2026-08-23T19:38:36.806878Z",
+    "termination_final_status": "absent",
+    "termination_trigger": "controller-finally"
+  },
+  "repository_commit": "a02bfd7c3f8bd0f734da0e84d476bcfa905fec4b",
+  "run_id": "run-9a01c9d8b4044e56eb68b2cf0345f5e0",
+  "schema_version": "inferdrome.qwen3-gpu-operational-summary.v1",
+  "semantic_verification": "VALID_AFTER_PROVIDER_TERMINATION",
+  "source_receipts": {
+    "retrieval_receipt_sha256": "sha256:000ccb6dc98c1e0bcdaeb2cdfd5d17058a91caf5c94eb1e231fb8c130d6b133f",
+    "semantic_verification_sha256": "sha256:b71382f52a9ca5593c3bd61ee06169ef2692cc40e5f67661f0c9b624fd856c1c",
+    "termination_receipt_sha256": "sha256:bd9009cb7aca2d754f78b71f06112d3144f19d74cf1b179d798a5ab08e3ac5f1"
+  }
+}

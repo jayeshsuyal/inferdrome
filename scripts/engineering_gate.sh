@@ -24,9 +24,18 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
   --gpu-tier h100-80gb-pcie \
   --check
 "$inferdrome_python" scripts/review_qwen3_gpu_evidence_publication.py --check-records
+"$inferdrome_python" scripts/review_qwen3_a100_sxm4_evidence.py --check-records
 qwen3_evidence_archive="$repository_root/gpu-proof-retrieved/20260821T203940Z-058482df4737-68efd4f4/capture.tar.gz"
 if [[ -f "$qwen3_evidence_archive" ]]; then
   "$inferdrome_python" scripts/review_qwen3_gpu_evidence_publication.py --check
+fi
+a100_evidence_archive="${INFERDROME_A100_EVIDENCE_ARCHIVE:-$repository_root/gpu-proof-retrieved/20260823T192609Z-a02bfd7c3f8b-dcb7a227/capture.tar.gz}"
+a100_capture_record="${INFERDROME_A100_CAPTURE_RECORD:-$(dirname "$a100_evidence_archive")}"
+if [[ -f "$a100_evidence_archive" ]]; then
+  "$inferdrome_python" scripts/review_qwen3_a100_sxm4_evidence.py \
+    "$a100_evidence_archive" \
+    --capture-record "$a100_capture_record" \
+    --check
 fi
 bash -n scripts/prepare_real_gpu_host.sh
 bash -n scripts/run_real_gpu_capture.sh
@@ -38,6 +47,7 @@ bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/generate_qwen3_launch_profile.py
 "$inferdrome_python" -m py_compile scripts/review_gpu_evidence_publication.py
 "$inferdrome_python" -m py_compile scripts/review_qwen3_gpu_evidence_publication.py
+"$inferdrome_python" -m py_compile scripts/review_qwen3_a100_sxm4_evidence.py
 "$inferdrome_python" -m py_compile scripts/capture_real_gpu_over_ssh.py
 "$inferdrome_python" -m py_compile scripts/lambda_gpu_guard.py
 "$inferdrome_python" -m py_compile scripts/watch_lambda_a100_capacity.py
@@ -45,6 +55,7 @@ bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/materialize_real_gpu_receipt.py
 "$inferdrome_python" -m py_compile scripts/run_local_demo.py
 "$inferdrome_python" -m py_compile scripts/run_qwen3_evidence_dashboard.py
+"$inferdrome_python" -m py_compile scripts/run_qwen3_a100_sxm4_evidence_dashboard.py
 "$inferdrome_python" -m py_compile scripts/verify_dashboard_install.py
 "$inferdrome_python" -m py_compile scripts/verify_qwen3_workload_tokenization.py
 "$inferdrome_python" -m ruff check .
