@@ -42,7 +42,7 @@ services:
         "--uvicorn-log-level",
         "warning",
       ]
-    user: "2000:0"
+    user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
     init: true
     read_only: true
     security_opt:
@@ -102,7 +102,7 @@ services:
         "--tokenizer-path",
         "/models/qwen3-8b",
       ]
-    user: "2000:0"
+    user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
     init: true
     read_only: true
     security_opt:

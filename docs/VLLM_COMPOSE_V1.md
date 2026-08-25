@@ -27,6 +27,15 @@ is loaded only by the guarded wrapper after preflight. The GPU override has a
 Compose interpolation gate and no development image/path defaults, so a direct
 `docker compose --profile gpu up` against the safe base cannot allocate a GPU;
 loading the GPU override without the wrapper gate fails during interpolation.
+Every service that uses a bind mount receives the same explicit non-root UID/GID
+derived by `run_vllm_compose.sh` from `id -u` and `id -g`. The wrapper rejects
+root, malformed, and out-of-range identities, then checks model/input read
+access and evidence-directory write access using that exact identity before
+Docker starts. The Compose files intentionally require these variables rather
+than silently falling back to root or an unrelated image user; direct Compose
+inspection or execution must export them first. A newly created host evidence
+directory with normal `0755` ownership is therefore writable by the configured
+container identity, while a read-only evidence directory fails closed.
 
 ## Immutable runtime identity
 
@@ -90,7 +99,9 @@ INFERDROME_COMPOSE_EVIDENCE_DIR="$PWD/.inferdrome-compose/evidence" \
 The equivalent structural inspection, when Compose is installed, is:
 
 ```bash
-docker compose -f compose.yaml config
+INFERDROME_COMPOSE_UID="$(id -u)" \
+INFERDROME_COMPOSE_GID="$(id -g)" \
+  docker compose -f compose.yaml config
 ```
 
 The GPU configuration is inspected separately and only with the required
@@ -98,6 +109,8 @@ non-secret image/path variables and wrapper gate:
 
 ```bash
 INFERDROME_GPU_COMPOSE_GATE=1 \
+INFERDROME_COMPOSE_UID="$(id -u)" \
+INFERDROME_COMPOSE_GID="$(id -g)" \
 INFERDROME_VLLM_RUNTIME_IMAGE='vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52' \
 INFERDROME_VLLM_RUNNER_IMAGE='registry.example.invalid/inferdrome-vllm-runner@sha256:<operator-supplied-digest>' \
 INFERDROME_QWEN3_MODEL_PATH='/absolute/path/to/prepared/qwen3-8b' \
@@ -142,6 +155,12 @@ export INFERDROME_COMPOSE_EVIDENCE_DIR='/absolute/path/to/evidence-output'
 
 scripts/run_vllm_compose.sh gpu --confirm-gpu
 ```
+
+The wrapper derives and exports `INFERDROME_COMPOSE_UID` and
+`INFERDROME_COMPOSE_GID`; operators do not need to set those variables for the
+armed command. They are shown in the structural example only because Compose
+must resolve the required `user` fields even when the wrapper is not being
+used.
 
 The placeholder runner digest above is intentionally not executable. Build the
 distinct runner artifact first, then obtain and verify its immutable image

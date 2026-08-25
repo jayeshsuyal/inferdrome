@@ -350,6 +350,32 @@ def build_image(
             )
         with context_manager as context:
             proof_command = [*command, str(context)]
+            # Docker resolves a relative --file from the client working
+            # directory, not from the build context.  Bind the Dockerfile to
+            # the exact archive materialized above so a dirty ambient
+            # checkout cannot be labeled as the archived commit.
+            dockerfile_candidate = context / dockerfile
+            try:
+                if (
+                    dockerfile_candidate.is_symlink()
+                    or not dockerfile_candidate.is_file()
+                ):
+                    raise RunnerImageBuildError(
+                        "proof Dockerfile is missing from the exact build context"
+                    )
+                archived_dockerfile = dockerfile_candidate.resolve()
+                if os.path.commonpath(
+                    (str(context.resolve()), str(archived_dockerfile))
+                ) != str(context.resolve()):
+                    raise RunnerImageBuildError(
+                        "proof Dockerfile is missing from the exact build context"
+                    )
+            except ValueError:
+                raise RunnerImageBuildError(
+                    "proof Dockerfile is missing from the exact build context"
+                ) from None
+            file_index = proof_command.index("--file")
+            proof_command[file_index + 1] = str(archived_dockerfile)
             _run_docker_build(proof_command)
             return tuple(proof_command)
 

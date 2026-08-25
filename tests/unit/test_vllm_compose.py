@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from inferdrome.vllm_compose import (
     VLLM_VERSION,
     ComposePreflightError,
     require_immutable_image_reference,
+    validate_compose_identity,
     validate_gpu_preflight,
     vllm_compose_contract,
     vllm_runtime_contract,
@@ -53,9 +55,7 @@ def _experiment_dir(root: Path, endpoint: str = COMPOSE_ENGINE_ENDPOINT) -> Path
     source = _attached_source_yaml(1).decode("utf-8")
     source = source.replace("http://127.0.0.1:18080", endpoint)
     (directory / "experiment.yaml").write_text(source, encoding="utf-8")
-    (workload / "qwen-text-mixed-length-v1.jsonl").write_bytes(
-        qwen3_workload_bytes()
-    )
+    (workload / "qwen-text-mixed-length-v1.jsonl").write_bytes(qwen3_workload_bytes())
     return directory
 
 
@@ -69,8 +69,7 @@ def _valid_preflight_kwargs(tmp_path: Path) -> dict[str, object]:
         "confirmation": "1",
         "platform_name": "Linux",
         "nvidia_available": True,
-        "runner_image": "registry.example.invalid/inferdrome-runner@sha256:"
-        + "a" * 64,
+        "runner_image": "registry.example.invalid/inferdrome-runner@sha256:" + "a" * 64,
         "runtime_image": VLLM_RUNTIME_IMAGE_REFERENCE,
         "model_path": str(model),
         "experiment_dir": str(experiment),
@@ -79,6 +78,8 @@ def _valid_preflight_kwargs(tmp_path: Path) -> dict[str, object]:
         "model_id": QWEN3_8B_MODEL_ID,
         "model_revision": QWEN3_8B_REVISION,
         "tokenizer_revision": QWEN3_8B_REVISION,
+        "compose_uid": os.getuid(),
+        "compose_gid": os.getgid(),
         "compose_available": True,
     }
 
@@ -86,6 +87,11 @@ def _valid_preflight_kwargs(tmp_path: Path) -> dict[str, object]:
 def test_default_compose_is_mock_only_and_gpu_free() -> None:
     services = _compose()["services"]
     assert set(services) == {"mock-engine", "synthetic-smoke"}
+    assert all(
+        "INFERDROME_COMPOSE_UID:?" in service["user"]
+        and "INFERDROME_COMPOSE_GID:?" in service["user"]
+        for service in services.values()
+    )
     assert all("deploy" not in service for service in services.values())
     assert all("ports" not in service for service in services.values())
     assert "vllm" not in str(services).lower()
@@ -129,6 +135,10 @@ def test_gpu_override_is_separate_gated_and_has_distinct_roles() -> None:
     assert QWEN3_8B_MODEL_ID in engine["command"]
     assert engine["read_only"] is True
     assert runner["read_only"] is True
+    assert "INFERDROME_COMPOSE_UID" in engine["user"]
+    assert "INFERDROME_COMPOSE_GID" in engine["user"]
+    assert "INFERDROME_COMPOSE_UID" in runner["user"]
+    assert "INFERDROME_COMPOSE_GID" in runner["user"]
     assert engine["restart"] == "no"
     assert runner["restart"] == "no"
 
@@ -198,15 +208,22 @@ def test_new_dockerfiles_are_pinned_non_root_and_provenanced(filename: str) -> N
 
 
 def test_benchmark_runner_uses_the_frozen_lock_and_cannot_start_server() -> None:
-    dockerfile = (
-        REPOSITORY_ROOT / "Dockerfile.vllm-benchmark-runner"
-    ).read_text(encoding="utf-8")
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile.vllm-benchmark-runner").read_text(
+        encoding="utf-8"
+    )
     assert "COPY pyproject.toml uv.lock README.md ./" in dockerfile
     assert "uv sync --frozen --no-dev --no-editable" in dockerfile
     assert "import jsonschema, pydantic, yaml, rfc8785" in dockerfile
     assert 'ENTRYPOINT ["inferdrome"]' in dockerfile
     assert 'ENTRYPOINT ["vllm", "serve"]' not in dockerfile
     assert "separate-vllm-engine-service" in dockerfile
+    assert "UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime" in dockerfile
+    assert "/build/.venv" not in dockerfile
+    assert (
+        "COPY --from=inferdrome-dependencies --chown=2000:0 "
+        "/opt/inferdrome-runtime /opt/inferdrome-runtime"
+    ) in dockerfile
+    assert "/opt/inferdrome-runtime/bin/inferdrome --version" in dockerfile
 
 
 @pytest.mark.parametrize(
@@ -296,9 +313,12 @@ def test_read_only_input_directories_pass_and_read_only_output_fails(
     try:
         input_dir.chmod(0o555)
         output_dir.chmod(0o555)
-        assert compose_policy._require_absolute_directory(
-            str(input_dir), "input", writable=False
-        ) == input_dir
+        assert (
+            compose_policy._require_absolute_directory(
+                str(input_dir), "input", writable=False
+            )
+            == input_dir
+        )
         with pytest.raises(ComposePreflightError, match="not writable"):
             compose_policy._require_absolute_directory(
                 str(output_dir), "output", writable=True
@@ -306,6 +326,56 @@ def test_read_only_input_directories_pass_and_read_only_output_fails(
     finally:
         input_dir.chmod(0o755)
         output_dir.chmod(0o755)
+
+
+def test_compose_identity_matches_bind_mount_permissions_and_rejects_root(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model"
+    experiment = tmp_path / "experiment"
+    evidence = tmp_path / "evidence"
+    model.mkdir(mode=0o755)
+    experiment.mkdir(mode=0o755)
+    evidence.mkdir(mode=0o755)
+    validate_compose_identity(
+        uid=os.getuid(),
+        gid=os.getgid(),
+        model_path=str(model),
+        experiment_dir=str(experiment),
+        evidence_dir=str(evidence),
+    )
+    with pytest.raises(ComposePreflightError):
+        validate_compose_identity(
+            uid=0,
+            gid=os.getgid(),
+            evidence_dir=str(evidence),
+        )
+    evidence.chmod(0o555)
+    try:
+        with pytest.raises(ComposePreflightError):
+            validate_compose_identity(
+                uid=os.getuid(),
+                gid=os.getgid(),
+                evidence_dir=str(evidence),
+            )
+    finally:
+        evidence.chmod(0o755)
+
+
+@pytest.mark.parametrize("invalid", (0, "0", 65_535, "65535", "not-an-id"))
+def test_compose_identity_rejects_root_and_unbounded_components(
+    tmp_path: Path,
+    invalid: int | str,
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    with pytest.raises(ComposePreflightError) as exc_info:
+        validate_compose_identity(
+            uid=invalid,
+            gid=os.getgid(),
+            evidence_dir=str(evidence),
+        )
+    assert str(invalid) not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -365,8 +435,11 @@ def _fake_docker_bin(tmp_path: Path, *, up_status: int = 17) -> tuple[Path, Path
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(
         "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$INFERDROME_TEST_DOCKER_LOG\"\n"
-        "case \"$*\" in\n"
+        "printf 'identity=%s:%s\\n' "
+        '"$INFERDROME_COMPOSE_UID" "$INFERDROME_COMPOSE_GID" '
+        '>> "$INFERDROME_TEST_DOCKER_LOG"\n'
+        'printf \'%s\\n\' "$*" >> "$INFERDROME_TEST_DOCKER_LOG"\n'
+        'case "$*" in\n'
         "  *version*) exit 0 ;;\n"
         f"  *' up '*) exit {up_status} ;;\n"
         "  *' down '*) exit 0 ;;\n"
@@ -386,6 +459,7 @@ def test_compose_wrapper_mock_targets_only_synthetic_runner_and_cleans_up(
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
     environment["INFERDROME_TEST_DOCKER_LOG"] = str(log_path)
     environment["INFERDROME_COMPOSE_EVIDENCE_DIR"] = str(tmp_path / "evidence")
+    environment["INFERDROME_PYTHON"] = sys.executable
     completed = subprocess.run(
         ["bash", "scripts/run_vllm_compose.sh", "mock"],
         cwd=REPOSITORY_ROOT,
@@ -402,15 +476,14 @@ def test_compose_wrapper_mock_targets_only_synthetic_runner_and_cleans_up(
     assert "vllm-engine" not in up_line
     assert "vllm-benchmark-runner" not in up_line
     assert down_line.endswith("down --remove-orphans --volumes")
+    assert f"identity={os.getuid()}:{os.getgid()}" in lines
 
 
 def test_compose_wrapper_gpu_targets_only_benchmark_runner_and_cleans_up(
     tmp_path: Path,
 ) -> None:
     fake_bin, log_path = _fake_docker_bin(tmp_path)
-    (fake_bin / "uname").write_text(
-        "#!/bin/sh\nprintf 'Linux\\n'\n", encoding="utf-8"
-    )
+    (fake_bin / "uname").write_text("#!/bin/sh\nprintf 'Linux\\n'\n", encoding="utf-8")
     (fake_bin / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     fake_python = fake_bin / "python"
     fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -454,6 +527,7 @@ def test_compose_wrapper_gpu_targets_only_benchmark_runner_and_cleans_up(
     assert "mock-engine" not in up_line
     assert "synthetic-smoke" not in up_line
     assert down_line.endswith("down --remove-orphans --volumes")
+    assert f"identity={os.getuid()}:{os.getgid()}" in lines
 
 
 def test_build_context_defense_in_depth_excludes_host_state() -> None:

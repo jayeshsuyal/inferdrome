@@ -22,6 +22,17 @@ fail() {
   exit 2
 }
 
+validate_identity_component() {
+  value=$1
+  label=$2
+  case "$value" in
+    ''|*[!0-9]*) fail "$label identity is invalid" ;;
+  esac
+  [[ "${#value}" -le 5 ]] || fail "$label identity is invalid"
+  value_number=$((10#$value))
+  (( value_number >= 1 && value_number <= 65534 )) || fail "$label identity is invalid"
+}
+
 while (($# > 0)); do
   case "$1" in
     --confirm-gpu)
@@ -72,12 +83,33 @@ fi
 if [[ -e "$evidence_dir" && ( ! -d "$evidence_dir" || -L "$evidence_dir" ) ]]; then
   fail "evidence output must be a real directory"
 fi
+compose_uid=$(id -u 2>/dev/null) || fail "host uid cannot be determined"
+compose_gid=$(id -g 2>/dev/null) || fail "host gid cannot be determined"
+validate_identity_component "$compose_uid" "Compose uid"
+validate_identity_component "$compose_gid" "Compose gid"
+export INFERDROME_COMPOSE_UID="$compose_uid"
+export INFERDROME_COMPOSE_GID="$compose_gid"
 mkdir -p -- "$evidence_dir" || fail "evidence output cannot be created"
 [[ -d "$evidence_dir" && ! -L "$evidence_dir" && -w "$evidence_dir" ]] || fail "evidence output is not writable"
 
+inferdrome_python=${INFERDROME_PYTHON:-python3}
+identity_args=(
+  -m inferdrome.vllm_compose identity-preflight
+  --uid "$compose_uid"
+  --gid "$compose_gid"
+  --evidence-dir "$evidence_dir"
+)
+if [[ "$mode" == "gpu" ]]; then
+  identity_args+=(
+    --model-path "$INFERDROME_QWEN3_MODEL_PATH"
+    --experiment-dir "$INFERDROME_EXPERIMENT_DIR"
+  )
+fi
+PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" "$inferdrome_python" \
+  "${identity_args[@]}" || exit $?
+
 preflight_args=()
 if [[ "$mode" == "gpu" ]]; then
-  inferdrome_python=${INFERDROME_PYTHON:-python3}
   preflight_args=(
     -m inferdrome.vllm_compose gpu-preflight
     --confirmation "$confirmation"
@@ -92,6 +124,8 @@ if [[ "$mode" == "gpu" ]]; then
     --model-id "$INFERDROME_QWEN3_MODEL_ID"
     --model-revision "$INFERDROME_QWEN3_MODEL_REVISION"
     --tokenizer-revision "$INFERDROME_QWEN3_TOKENIZER_REVISION"
+    --uid "$compose_uid"
+    --gid "$compose_gid"
   )
   PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" "$inferdrome_python" \
     "${preflight_args[@]}" || exit $?

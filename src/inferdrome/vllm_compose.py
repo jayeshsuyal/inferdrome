@@ -53,10 +53,10 @@ SOURCE_REPOSITORY_URL: Final = "https://github.com/jayeshsuyal/inferdrome"
 CANONICAL_CONTAINER_PLATFORM: Final = "linux/amd64"
 COMPOSE_NETWORK_ALIAS: Final = "vllm-engine.internal"
 COMPOSE_ENGINE_ENDPOINT: Final = "http://vllm-engine.internal:8000"
-QWEN3_COMPOSE_BINDING_SCHEMA_VERSION: Final = (
-    "inferdrome.qwen3-compose-binding.v1"
-)
+QWEN3_COMPOSE_BINDING_SCHEMA_VERSION: Final = "inferdrome.qwen3-compose-binding.v1"
 GPU_COMPOSE_GATE_ENV: Final = "INFERDROME_GPU_COMPOSE_GATE"
+COMPOSE_UID_ENV: Final = "INFERDROME_COMPOSE_UID"
+COMPOSE_GID_ENV: Final = "INFERDROME_COMPOSE_GID"
 COMPOSE_CLEANUP_COMMAND: Final = (
     "docker",
     "compose",
@@ -230,6 +230,144 @@ def _require_absolute_directory(
     return path
 
 
+def _validate_identity_component(value: int | str | None, label: str) -> int:
+    """Validate a non-root Linux identity without disclosing its value."""
+
+    if isinstance(value, bool):
+        raise ComposePreflightError(f"{label} identity is invalid")
+    if isinstance(value, int):
+        if value < 1 or value > 65_534:
+            raise ComposePreflightError(f"{label} identity is invalid")
+        return value
+    elif isinstance(value, str) and value and len(value) <= 5:
+        if not value.isascii() or not value.isdigit():
+            raise ComposePreflightError(f"{label} identity is invalid")
+        candidate = value
+    else:
+        raise ComposePreflightError(f"{label} identity is invalid")
+    try:
+        parsed = int(candidate, 10)
+    except (TypeError, ValueError):
+        raise ComposePreflightError(f"{label} identity is invalid") from None
+    if parsed < 1 or parsed > 65_534:
+        raise ComposePreflightError(f"{label} identity is invalid")
+    return parsed
+
+
+def _require_identity_access(
+    path: Path,
+    *,
+    uid: int,
+    gid: int,
+    directory: bool,
+    writable: bool = False,
+) -> None:
+    """Check access using the exact uid/gid Compose will run as.
+
+    ``os.access`` would answer for the host process, which is not sufficient
+    for a Linux bind mount.  This bounded mode/owner check mirrors the normal
+    Unix permission selection for the configured non-root identity.
+    """
+
+    try:
+        path_stat = path.lstat()
+    except OSError:
+        raise ComposePreflightError("Compose input path is unavailable") from None
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise ComposePreflightError("Compose input path must not be a symlink")
+    if directory and not stat.S_ISDIR(path_stat.st_mode):
+        raise ComposePreflightError("Compose input path is not a directory")
+    if not directory and not stat.S_ISREG(path_stat.st_mode):
+        raise ComposePreflightError("Compose input path is not a regular file")
+
+    if path_stat.st_uid == uid:
+        readable = bool(path_stat.st_mode & stat.S_IRUSR)
+        searchable = bool(path_stat.st_mode & stat.S_IXUSR)
+        writable_bit = bool(path_stat.st_mode & stat.S_IWUSR)
+    elif path_stat.st_gid == gid:
+        readable = bool(path_stat.st_mode & stat.S_IRGRP)
+        searchable = bool(path_stat.st_mode & stat.S_IXGRP)
+        writable_bit = bool(path_stat.st_mode & stat.S_IWGRP)
+    else:
+        readable = bool(path_stat.st_mode & stat.S_IROTH)
+        searchable = bool(path_stat.st_mode & stat.S_IXOTH)
+        writable_bit = bool(path_stat.st_mode & stat.S_IWOTH)
+
+    if (
+        not readable
+        or (directory and not searchable)
+        or (writable and not writable_bit)
+    ):
+        raise ComposePreflightError(
+            "Compose identity cannot access a required bind path"
+        )
+
+
+def _require_identity_tree(path: Path, *, uid: int, gid: int) -> None:
+    """Check bounded read access for every model/experiment tree member."""
+
+    _require_identity_access(path, uid=uid, gid=gid, directory=True)
+    entries = 0
+    for directory, directories, files in os.walk(path, followlinks=False):
+        directory_path = Path(directory)
+        for name in (*directories, *files):
+            entries += 1
+            if entries > 100_000:
+                raise ComposePreflightError("Compose input tree is too large")
+            child = directory_path / name
+            child_stat = child.lstat()
+            if stat.S_ISLNK(child_stat.st_mode):
+                raise ComposePreflightError(
+                    "Compose input tree must not contain symlinks"
+                )
+            _require_identity_access(
+                child,
+                uid=uid,
+                gid=gid,
+                directory=stat.S_ISDIR(child_stat.st_mode),
+            )
+
+
+def validate_compose_identity(
+    *,
+    uid: int | str | None,
+    gid: int | str | None,
+    evidence_dir: str | None,
+    model_path: str | None = None,
+    experiment_dir: str | None = None,
+) -> None:
+    """Validate the explicit non-root bind-mount identity contract."""
+
+    resolved_uid = _validate_identity_component(uid, "Compose uid")
+    resolved_gid = _validate_identity_component(gid, "Compose gid")
+    if model_path is not None:
+        model = _require_absolute_directory(
+            model_path,
+            "Qwen3 model snapshot",
+            writable=False,
+        )
+        _require_identity_tree(model, uid=resolved_uid, gid=resolved_gid)
+    if experiment_dir is not None:
+        experiment = _require_absolute_directory(
+            experiment_dir,
+            "experiment input",
+            writable=False,
+        )
+        _require_identity_tree(experiment, uid=resolved_uid, gid=resolved_gid)
+    evidence = _require_absolute_directory(
+        evidence_dir,
+        "evidence output",
+        writable=True,
+    )
+    _require_identity_access(
+        evidence,
+        uid=resolved_uid,
+        gid=resolved_gid,
+        directory=True,
+        writable=True,
+    )
+
+
 def _require_model_snapshot(value: str | None) -> Path:
     path = _require_absolute_directory(
         value,
@@ -366,6 +504,8 @@ def validate_gpu_preflight(
     model_id: str | None,
     model_revision: str | None,
     tokenizer_revision: str | None,
+    compose_uid: int | str | None,
+    compose_gid: int | str | None,
     compose_available: bool | None,
 ) -> None:
     """Fail closed before Docker for an explicitly armed GPU Compose run."""
@@ -396,6 +536,13 @@ def validate_gpu_preflight(
     _require_model_snapshot(model_path)
     _require_experiment_input(experiment_dir)
     _require_evidence_output(evidence_dir)
+    validate_compose_identity(
+        uid=compose_uid,
+        gid=compose_gid,
+        model_path=model_path,
+        experiment_dir=experiment_dir,
+        evidence_dir=evidence_dir,
+    )
     if compose_available is False:
         raise ComposePreflightError("Docker Compose is unavailable")
 
@@ -422,36 +569,55 @@ def _parser() -> argparse.ArgumentParser:
     preflight.add_argument("--model-id")
     preflight.add_argument("--model-revision")
     preflight.add_argument("--tokenizer-revision")
+    preflight.add_argument("--uid", dest="compose_uid")
+    preflight.add_argument("--gid", dest="compose_gid")
+    identity = subparsers.add_parser("identity-preflight")
+    identity.add_argument("--uid", dest="compose_uid", required=True)
+    identity.add_argument("--gid", dest="compose_gid", required=True)
+    identity.add_argument("--evidence-dir", required=True)
+    identity.add_argument("--model-path")
+    identity.add_argument("--experiment-dir")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
-    if arguments.command != "gpu-preflight":
-        return 2
     try:
-        validate_gpu_preflight(
-            confirmation=arguments.confirmation,
-            platform_name=arguments.platform_name,
-            nvidia_available=arguments.nvidia_available,
-            runner_image=arguments.runner_image,
-            runtime_image=arguments.runtime_image,
-            model_path=arguments.model_path,
-            experiment_dir=arguments.experiment_dir,
-            evidence_dir=arguments.evidence_dir,
-            profile_id=arguments.profile_id,
-            model_id=arguments.model_id,
-            model_revision=arguments.model_revision,
-            tokenizer_revision=arguments.tokenizer_revision,
-            compose_available=arguments.compose_available,
-        )
+        if arguments.command == "gpu-preflight":
+            validate_gpu_preflight(
+                confirmation=arguments.confirmation,
+                platform_name=arguments.platform_name,
+                nvidia_available=arguments.nvidia_available,
+                runner_image=arguments.runner_image,
+                runtime_image=arguments.runtime_image,
+                model_path=arguments.model_path,
+                experiment_dir=arguments.experiment_dir,
+                evidence_dir=arguments.evidence_dir,
+                profile_id=arguments.profile_id,
+                model_id=arguments.model_id,
+                model_revision=arguments.model_revision,
+                tokenizer_revision=arguments.tokenizer_revision,
+                compose_uid=arguments.compose_uid,
+                compose_gid=arguments.compose_gid,
+                compose_available=arguments.compose_available,
+            )
+        else:
+            validate_compose_identity(
+                uid=arguments.compose_uid,
+                gid=arguments.compose_gid,
+                model_path=arguments.model_path,
+                experiment_dir=arguments.experiment_dir,
+                evidence_dir=arguments.evidence_dir,
+            )
     except ComposePreflightError as error:
         print(f"vLLM Compose preflight failed: {error}", file=sys.stderr)
         return 2
-    if arguments.compose_available is None:
+    if arguments.command == "gpu-preflight" and arguments.compose_available is None:
         print("vLLM Compose GPU input preflight: OK (Compose not checked)")
-    else:
+    elif arguments.command == "gpu-preflight":
         print("vLLM Compose GPU preflight: OK")
+    else:
+        print("vLLM Compose identity preflight: OK")
     return 0
 
 
@@ -459,7 +625,9 @@ __all__ = [
     "CANONICAL_CONTAINER_PLATFORM",
     "COMPOSE_CLEANUP_COMMAND",
     "COMPOSE_ENGINE_ENDPOINT",
+    "COMPOSE_GID_ENV",
     "COMPOSE_NETWORK_ALIAS",
+    "COMPOSE_UID_ENV",
     "GPU_COMPOSE_GATE_ENV",
     "QWEN3_COMPOSE_BINDING_SCHEMA_VERSION",
     "SOURCE_REPOSITORY_URL",
@@ -474,6 +642,7 @@ __all__ = [
     "VLLM_VERSION",
     "ComposePreflightError",
     "require_immutable_image_reference",
+    "validate_compose_identity",
     "validate_gpu_preflight",
     "vllm_compose_contract",
     "vllm_runtime_contract",

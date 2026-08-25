@@ -11,6 +11,7 @@ services:
         SOURCE_REPOSITORY_COMMIT: development-unpinned
         INFERDROME_VERSION: 0.1.0.dev0
     command: ["--host", "0.0.0.0", "--port", "8000"]
+    user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
     init: true
     read_only: true
     security_opt:
@@ -46,6 +47,7 @@ services:
         SOURCE_REPOSITORY_COMMIT: development-unpinned
         INFERDROME_VERSION: 0.1.0.dev0
     entrypoint: ["/opt/inferdrome-runtime/bin/inferdrome-runner-probe"]
+    user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
     command:
       [
         "--endpoint",

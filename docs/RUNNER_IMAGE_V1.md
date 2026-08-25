@@ -89,8 +89,10 @@ evidence verdict, acceptance verdict, or provider attestation.
 
 ## Container contract
 
-The final image runs as UID/GID `10001:10001`, has no serving process, and
-expects a read-only root filesystem. The only intended writable locations are
+The final image defaults to UID/GID `10001:10001`, has no serving process, and
+expects a read-only root filesystem. Compose overrides that default with the
+invoking non-root host UID/GID for bind-mounted runs; direct Docker use must
+preserve the same explicit non-root ownership contract. The only intended writable locations are
 the explicitly mounted `/evidence` directory and `/tmp/inferdrome` temporary
 directory. The canonical command writes its normal run workspace/output under
 the explicit mounted path supplied by the caller.

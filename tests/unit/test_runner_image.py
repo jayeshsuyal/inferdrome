@@ -37,6 +37,13 @@ def test_runner_dockerfile_has_pinned_base_non_root_and_locked_install() -> None
     assert 'TMPDIR="/tmp/inferdrome"' in dockerfile
     assert 'ENTRYPOINT ["/opt/inferdrome-runtime/bin/inferdrome"]' in dockerfile
     assert "inferdrome.runner" not in dockerfile.split("ENTRYPOINT", 1)[-1]
+    assert "UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime" in dockerfile
+    assert "/build/.venv" not in dockerfile
+    assert (
+        "COPY --from=builder --chown=10001:10001 "
+        "/opt/inferdrome-runtime /opt/inferdrome-runtime"
+    ) in dockerfile
+    assert "/opt/inferdrome-runtime/bin/inferdrome --version" in dockerfile
 
 
 def test_runner_dockerfile_has_proof_identity_labels_and_no_serving_engine() -> None:
