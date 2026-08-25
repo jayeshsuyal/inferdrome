@@ -201,6 +201,12 @@ def _timestamp_now() -> str:
 def _safe_path(path: Path) -> Path:
     if not path.is_absolute():
         path = path.absolute()
+    # Do not silently normalize traversal aliases.  The parent check below
+    # also compares the lexical and strict-resolved paths, but rejecting an
+    # explicit traversal component keeps the path boundary unambiguous when
+    # a component is created concurrently.
+    if any(part in {".", ".."} for part in path.parts):
+        raise DashboardAuthError("dashboard keyring path is invalid")
     if path.name in {"", ".", ".."} or "/" in path.name or "\\" in path.name:
         raise DashboardAuthError("dashboard keyring path is invalid")
     return path
@@ -217,11 +223,20 @@ class DashboardKeyringStore:
         parent = self.path.parent
         try:
             metadata = parent.lstat()
+            resolved_parent = parent.resolve(strict=True)
         except OSError:
             raise DashboardAuthError(
                 "dashboard keyring storage is unavailable"
             ) from None
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        except RuntimeError:
+            raise DashboardAuthError(
+                "dashboard keyring storage is unavailable"
+            ) from None
+        if (
+            resolved_parent != parent
+            or stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+        ):
             raise DashboardAuthError("dashboard keyring storage is unavailable")
         return parent
 
@@ -432,25 +447,49 @@ class DashboardKeyringStore:
             keyring = self._read_unlocked()
             found: DashboardKeyRecord | None = None
             keys: list[DashboardKeyRecord] = []
-            now = _timestamp_now()
             for current in keyring.keys:
                 if current.key_id != key_id:
                     keys.append(current)
                     continue
                 found = current
                 if current.status == "active":
-                    current = current.model_copy(
-                        update={"status": "revoked", "revoked_at": now}
-                    )
+                    try:
+                        now = _timestamp_now()
+                        if now < current.created_at:
+                            raise ValueError("clock precedes key creation")
+                        current = DashboardKeyRecord(
+                            schema_version=current.schema_version,
+                            key_id=current.key_id,
+                            label=current.label,
+                            scope=current.scope,
+                            token_digest=current.token_digest,
+                            created_at=current.created_at,
+                            revoked_at=now,
+                            status="revoked",
+                        )
+                    except DashboardAuthError:
+                        raise
+                    except (TypeError, ValueError):
+                        raise DashboardAuthError(
+                            "dashboard key revocation was rejected"
+                        ) from None
                 keys.append(current)
             if found is None:
                 raise DashboardAuthError("dashboard key cannot be revoked")
-            updated = DashboardKeyring(
-                schema_version=KEYRING_SCHEMA_VERSION,
-                keys=tuple(keys),
-            )
+            try:
+                updated = DashboardKeyring(
+                    schema_version=KEYRING_SCHEMA_VERSION,
+                    keys=tuple(keys),
+                )
+            except (TypeError, ValueError):
+                raise DashboardAuthError(
+                    "dashboard key revocation was rejected"
+                ) from None
             if updated != keyring:
                 self._publish_unlocked(updated, parent)
+                return next(
+                    record for record in updated.keys if record.key_id == key_id
+                )
             return found
 
     def list_public(self) -> tuple[dict[str, str | None], ...]:

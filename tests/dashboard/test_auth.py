@@ -2,7 +2,10 @@
 
 import hmac
 import json
+import multiprocessing as mp
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,7 @@ from inferdrome.dashboard.auth import (
     validate_token_shape,
 )
 from inferdrome.dashboard.index import DashboardIndex
+from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.errors import DashboardAuthError
 
 
@@ -26,6 +30,35 @@ def _store(tmp_path: Path) -> tuple[DashboardKeyringStore, str, str]:
     store = DashboardKeyringStore(path)
     token, record = store.create("test-key")
     return store, token, record.key_id
+
+
+def _create_in_process(path: str, output: Any) -> None:
+    try:
+        token, record = DashboardKeyringStore(Path(path)).create("process-worker")
+        output.put(("ok", token, record.key_id))
+    except Exception:
+        output.put(("error",))
+
+
+def _revoke_or_rotate_in_process(
+    path: str,
+    key_id: str,
+    operation: str,
+    start: Any,
+    output: Any,
+) -> None:
+    start.wait()
+    try:
+        store = DashboardKeyringStore(Path(path))
+        if operation == "revoke":
+            store.revoke(key_id)
+        else:
+            store.rotate(key_id, "process-rotation")
+        output.put((operation, "ok"))
+    except DashboardAuthError:
+        output.put((operation, "rejected"))
+    except Exception:
+        output.put((operation, "error"))
 
 
 def test_create_persists_only_digest_with_private_canonical_keyring(
@@ -131,10 +164,184 @@ def test_keyring_rejects_noncanonical_oversized_and_unsafe_files(
         store.load()
 
 
+def test_keyring_rejects_symlinked_ancestors_and_nonregular_boundaries(
+    tmp_path: Path,
+) -> None:
+    normal_parent = tmp_path / "normal"
+    normal_parent.mkdir()
+    normal_store = DashboardKeyringStore(
+        Path(os.path.abspath(normal_parent / "keyring.json"))
+    )
+    normal_store.create("normal")
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    immediate_target = real_parent / "immediate-target"
+    immediate_target.mkdir()
+    immediate_link = tmp_path / "immediate-link"
+    immediate_link.symlink_to(immediate_target, target_is_directory=True)
+    with pytest.raises(DashboardAuthError):
+        DashboardKeyringStore(immediate_link / "keyring.json").create("rejected")
+
+    deep_target = real_parent / "deep-target"
+    (deep_target / "nested").mkdir(parents=True)
+    deep_link = tmp_path / "deep-link"
+    deep_link.symlink_to(deep_target, target_is_directory=True)
+    with pytest.raises(DashboardAuthError):
+        DashboardKeyringStore(deep_link / "nested" / "keyring.json").create(
+            "rejected"
+        )
+
+    leaf = tmp_path / "leaf.json"
+    leaf_target = tmp_path / "leaf-target.json"
+    leaf_target.write_bytes(b"not-a-keyring")
+    os.chmod(leaf_target, 0o600)
+    leaf.symlink_to(leaf_target)
+    with pytest.raises(DashboardAuthError):
+        DashboardKeyringStore(leaf).load()
+
+    lock_store_path = tmp_path / "lock-keyring.json"
+    lock_target = tmp_path / "lock-target"
+    lock_target.write_bytes(b"")
+    os.chmod(lock_target, 0o600)
+    lock_store = DashboardKeyringStore(lock_store_path)
+    lock_store.lock_path.symlink_to(lock_target)
+    with pytest.raises(DashboardAuthError):
+        lock_store.create("rejected")
+
+    nonregular_leaf = tmp_path / "nonregular-leaf"
+    nonregular_leaf.mkdir()
+    with pytest.raises(DashboardAuthError):
+        DashboardKeyringStore(nonregular_leaf).load()
+
+    nonregular_lock_store = DashboardKeyringStore(tmp_path / "nonregular-lock.json")
+    nonregular_lock_store.lock_path.mkdir()
+    with pytest.raises(DashboardAuthError):
+        nonregular_lock_store.create("rejected")
+
+
+def test_keyring_create_is_process_safe_on_a_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "process-keyring.json"
+    context = mp.get_context("spawn")
+    output = context.Queue()
+    workers = [
+        context.Process(target=_create_in_process, args=(str(path), output))
+        for _ in range(12)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(20)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(5)
+        assert worker.exitcode == 0
+
+    results = [output.get(timeout=5) for _ in workers]
+    assert all(result[0] == "ok" for result in results)
+    tokens = [result[1] for result in results]
+    key_ids = [result[2] for result in results]
+    assert len(set(tokens)) == len(tokens) == 12
+    assert len(set(key_ids)) == len(key_ids) == 12
+    store = DashboardKeyringStore(path)
+    assert len(store.load().keys) == 12
+    assert all(store.verify(token) for token in tokens)
+    public = json.dumps(store.list_public())
+    assert all(token not in public for token in tokens)
+    assert "token_digest" not in public
+    assert not list(tmp_path.glob(f".{path.name}.*.stage"))
+
+
+def test_keyring_rotate_revoke_process_collision_has_valid_closed_result(
+    tmp_path: Path,
+) -> None:
+    store, _, old_id = _store(tmp_path)
+    context = mp.get_context("spawn")
+    start = context.Event()
+    output = context.Queue()
+    workers = [
+        context.Process(
+            target=_revoke_or_rotate_in_process,
+            args=(str(store.path), old_id, operation, start, output),
+        )
+        for operation in ("revoke", "rotate")
+    ]
+    for worker in workers:
+        worker.start()
+    start.set()
+    for worker in workers:
+        worker.join(20)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(5)
+        assert worker.exitcode == 0
+
+    results = [output.get(timeout=5) for _ in workers]
+    assert {result[0] for result in results} == {"revoke", "rotate"}
+    assert all(result[1] in {"ok", "rejected"} for result in results)
+    final = store.load()
+    old_record = next(record for record in final.keys if record.key_id == old_id)
+    assert old_record.status == "revoked"
+    assert len(final.keys) in {1, 2}
+    assert not list(tmp_path.glob(f".{store.path.name}.*.stage"))
+
+
+@pytest.mark.parametrize("clock_mode", ["future", "rollback"])
+def test_cli_revoke_validation_failure_is_bounded_and_preserves_bytes(
+    tmp_path: Path,
+    clock_mode: str,
+) -> None:
+    store, _, key_id = _store(tmp_path)
+    if clock_mode == "future":
+        payload = json.loads(store.path.read_bytes())
+        payload["keys"][0]["created_at"] = "2099-01-01T00:00:00Z"
+        store.path.write_bytes(canonical_json_bytes(payload))
+        os.chmod(store.path, 0o600)
+    before = store.path.read_bytes()
+    script = """
+import sys
+import inferdrome.dashboard.auth as auth
+from inferdrome.cli import main
+if sys.argv[1] == "rollback":
+    auth._timestamp_now = lambda: "2000-01-01T00:00:00Z"
+raise SystemExit(
+    main(["dashboard-keyring", "revoke", "--keyring", sys.argv[2], sys.argv[3]])
+)
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[2] / "src")
+    result = subprocess.run(
+        [sys.executable, "-c", script, clock_mode, str(store.path), key_id],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "inferdrome: error: dashboard key revocation was rejected\n"
+    assert "traceback" not in result.stderr.lower()
+    assert str(store.path) not in result.stderr
+    assert key_id not in result.stderr
+    assert "sha256:" not in result.stderr
+    assert store.path.read_bytes() == before
+
+
 def test_revoke_is_explicitly_idempotent_and_rotation_is_atomic(
     tmp_path: Path,
 ) -> None:
-    store, token, old_id = _store(tmp_path)
+    revoke_root = tmp_path / "revoke"
+    revoke_root.mkdir()
+    revoke_store, token, revoke_id = _store(revoke_root)
+    first = revoke_store.revoke(revoke_id)
+    assert first.status == "revoked"
+    assert first.revoked_at is not None
+    assert not revoke_store.verify(token)
+    assert revoke_store.revoke(revoke_id) == first
+
+    rotation_root = tmp_path / "rotation"
+    rotation_root.mkdir()
+    store, token, old_id = _store(rotation_root)
     new_token, new_record = store.rotate(old_id, "replacement")
     assert new_record.status == "active"
     assert not store.verify(token)
@@ -180,6 +387,35 @@ def test_auth_is_opt_in_and_protects_evidence_routes_only(tmp_path: Path) -> Non
     assert valid.status_code == 200
     assert valid.headers["cache-control"] == "no-store"
     assert valid.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/runs",
+        "/api/v1/runs/nonexistent",
+        "/api/v1/compare",
+        "/api/v1/trial-sets",
+        "/api/v1/trial-sets/nonexistent",
+        "/api/v1/controlled-comparisons",
+        "/api/v1/controlled-comparisons/nonexistent",
+    ],
+)
+def test_auth_precedes_route_validation_and_lookup(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    _, _, _ = _store(tmp_path)
+    keyring = tmp_path / "dashboard-keyring.json"
+    app = create_app(
+        DashboardIndex(tmp_path / "runs"),
+        keyring_path=keyring,
+    )
+    with TestClient(app) as client:
+        response = client.get(path)
+    assert response.status_code == 401
+    assert response.json() == {"detail": "dashboard authentication failed"}
+    assert response.headers["www-authenticate"] == "Bearer"
 
 
 def test_auth_rejects_duplicate_authorization_and_oversized_tokens(

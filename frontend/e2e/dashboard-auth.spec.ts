@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -150,7 +150,9 @@ function makeTreeWritable(path: string): void {
 }
 
 test("authenticated local server blocks evidence, unlocks, and traverses every route", async ({ page }) => {
-  const root = mkdtempSync(join(tmpdir(), FIXTURE_PREFIX));
+  // Dashboard keyring paths reject symlinked ancestors; use the strict path
+  // explicitly rather than relying on a production-side path rewrite.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), FIXTURE_PREFIX)));
   let server: ChildProcess | undefined;
   try {
     const paths = prepareFixture(root);
@@ -223,8 +225,8 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     expect(browserErrors.every((message) => !message.includes(keyring.token))).toBe(true);
   } finally {
     if (server) await stopServer(server);
-    const resolvedRoot = resolve(root);
-    if (!resolvedRoot.startsWith(`${resolve(tmpdir())}${sep}${FIXTURE_PREFIX}`)) {
+    const resolvedRoot = realpathSync(root);
+    if (!resolvedRoot.startsWith(`${realpathSync(tmpdir())}${sep}${FIXTURE_PREFIX}`)) {
       throw new Error("refusing to remove unexpected authenticated E2E root");
     }
     makeTreeWritable(resolvedRoot);
