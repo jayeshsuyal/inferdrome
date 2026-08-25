@@ -43,6 +43,38 @@
       "title": "Accelerator Model",
       "type": "string"
     },
+    "accelerator_provider_type": {
+      "maxLength": 96,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+      "title": "Accelerator Provider Type",
+      "type": "string"
+    },
+    "billable_duration_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Billable Duration Seconds",
+      "type": "integer"
+    },
+    "boot_disk_size_gib": {
+      "maximum": 16384,
+      "minimum": 10,
+      "title": "Boot Disk Size Gib",
+      "type": "integer"
+    },
+    "boot_disk_type": {
+      "enum": [
+        "pd-balanced",
+        "pd-ssd"
+      ],
+      "title": "Boot Disk Type",
+      "type": "string"
+    },
+    "boot_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Boot Image Digest",
+      "type": "string"
+    },
     "complete": {
       "const": true,
       "title": "Complete",
@@ -65,6 +97,11 @@
     "currency": {
       "const": "USD",
       "title": "Currency",
+      "type": "string"
+    },
+    "environment_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Environment Digest",
       "type": "string"
     },
     "freshness_seconds": {
@@ -91,6 +128,11 @@
       "title": "Machine Type",
       "type": "string"
     },
+    "network": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Network",
+      "type": "string"
+    },
     "plan_id": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Plan Id",
@@ -111,6 +153,12 @@
       "title": "Project Id",
       "type": "string"
     },
+    "provider_max_runtime_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Provider Max Runtime Seconds",
+      "type": "integer"
+    },
     "quote_id": {
       "pattern": "^quote-[a-z0-9]{8,32}$",
       "title": "Quote Id",
@@ -123,6 +171,16 @@
       "title": "Region",
       "type": "string"
     },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "runner_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Runner Image Digest",
+      "type": "string"
+    },
     "safety_margin_microusd": {
       "maximum": 1000000000000,
       "minimum": 0,
@@ -132,6 +190,21 @@
     "schema_version": {
       "const": "inferdrome.gcp-execution-quote.v1",
       "title": "Schema Version",
+      "type": "string"
+    },
+    "service_account": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$",
+      "title": "Service Account",
+      "type": "string"
+    },
+    "serving_runtime_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Serving Runtime Image Digest",
+      "type": "string"
+    },
+    "subnetwork": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Subnetwork",
       "type": "string"
     },
     "valid_until": {
@@ -153,12 +226,25 @@
     "quote_id",
     "plan_id",
     "controller_id",
+    "request_digest",
+    "environment_digest",
     "project_id",
     "region",
     "zone",
     "machine_type",
     "accelerator_model",
+    "accelerator_provider_type",
     "accelerator_count",
+    "network",
+    "subnetwork",
+    "boot_image_digest",
+    "runner_image_digest",
+    "serving_runtime_image_digest",
+    "boot_disk_size_gib",
+    "boot_disk_type",
+    "service_account",
+    "provider_max_runtime_seconds",
+    "billable_duration_seconds",
     "issued_at",
     "valid_until",
     "freshness_seconds",

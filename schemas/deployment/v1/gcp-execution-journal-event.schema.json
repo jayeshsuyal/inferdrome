@@ -330,6 +330,280 @@
       "title": "GcpInsertRequest",
       "type": "object"
     },
+    "GcpLeaseRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_consumed": {
+          "default": false,
+          "title": "Arm Consumed",
+          "type": "boolean"
+        },
+        "arm_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "capacity_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Capacity Digest",
+          "type": "string"
+        },
+        "cleanup_confirmed": {
+          "default": false,
+          "title": "Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "cleanup_timeout_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Cleanup Timeout Seconds",
+          "type": "integer"
+        },
+        "controller_id": {
+          "pattern": "^ctl-[a-z0-9]{8,24}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "created_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Created At",
+          "type": "string"
+        },
+        "declared_cost_ceiling_usd": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Declared Cost Ceiling Usd",
+          "type": "string"
+        },
+        "delete_attempts": {
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Delete Attempts",
+          "type": "integer"
+        },
+        "environment_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Environment Digest",
+          "type": "string"
+        },
+        "estimate_basis": {
+          "const": "operator_supplied_fixed_point_quote",
+          "title": "Estimate Basis",
+          "type": "string"
+        },
+        "estimated_max_microusd": {
+          "maximum": 1000000000000,
+          "minimum": 0,
+          "title": "Estimated Max Microusd",
+          "type": "integer"
+        },
+        "instance_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Instance Name",
+          "type": "string"
+        },
+        "intent_anchor_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Intent Anchor Digest",
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/$defs/GcpExecutionLabels"
+        },
+        "last_error_code": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Error Code"
+        },
+        "max_cleanup_attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Cleanup Attempts",
+          "type": "integer"
+        },
+        "orphaned": {
+          "default": false,
+          "title": "Orphaned",
+          "type": "boolean"
+        },
+        "plan_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "provider_mutation_ambiguous": {
+          "default": false,
+          "title": "Provider Mutation Ambiguous",
+          "type": "boolean"
+        },
+        "provider_mutation_attempted": {
+          "default": false,
+          "title": "Provider Mutation Attempted",
+          "type": "boolean"
+        },
+        "provider_operation_id": {
+          "anyOf": [
+            {
+              "pattern": "^op-[a-z0-9]{8,48}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Operation Id"
+        },
+        "provider_operation_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "insert",
+                "delete"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Operation Kind"
+        },
+        "provider_operation_name": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Operation Name"
+        },
+        "provider_operation_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "PENDING",
+                "DONE",
+                "ERROR",
+                "TIMEOUT",
+                "UNKNOWN"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Operation Status"
+        },
+        "provider_operation_terminal": {
+          "default": false,
+          "title": "Provider Operation Terminal",
+          "type": "boolean"
+        },
+        "quote_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Quote Digest",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+          "title": "Region",
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/GcpInsertRequest"
+        },
+        "request_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Request Digest",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-execution-lease.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "PREPARED",
+            "ARM_CONSUMED",
+            "CREATE_SUBMITTED",
+            "OWNED",
+            "CLEANUP_PENDING",
+            "CLEANUP_CONFIRMED",
+            "ORPHANED",
+            "BLOCKED"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "updated_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state",
+        "controller_id",
+        "arm_id",
+        "plan_id",
+        "project_id",
+        "region",
+        "zone",
+        "instance_name",
+        "request",
+        "request_digest",
+        "environment_digest",
+        "quote_digest",
+        "capacity_digest",
+        "estimated_max_microusd",
+        "declared_cost_ceiling_usd",
+        "estimate_basis",
+        "labels",
+        "intent_anchor_digest",
+        "created_at",
+        "updated_at",
+        "delete_attempts",
+        "max_cleanup_attempts",
+        "cleanup_timeout_seconds"
+      ],
+      "title": "GcpLeaseRecord",
+      "type": "object"
+    },
     "GcpPlanImage": {
       "additionalProperties": false,
       "properties": {
@@ -354,278 +628,62 @@
       "type": "object"
     }
   },
-  "$id": "urn:inferdrome:gcp-execution-lease:v1",
+  "$id": "urn:inferdrome:gcp-execution-journal-event:v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "description": "Append-only hash-chain entry for a persisted controller transition.",
   "properties": {
-    "arm_consumed": {
-      "default": false,
-      "title": "Arm Consumed",
-      "type": "boolean"
-    },
-    "arm_id": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Arm Id",
-      "type": "string"
-    },
-    "capacity_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Capacity Digest",
-      "type": "string"
-    },
-    "cleanup_confirmed": {
-      "default": false,
-      "title": "Cleanup Confirmed",
-      "type": "boolean"
-    },
-    "cleanup_timeout_seconds": {
-      "maximum": 3600,
-      "minimum": 1,
-      "title": "Cleanup Timeout Seconds",
-      "type": "integer"
-    },
     "controller_id": {
       "pattern": "^ctl-[a-z0-9]{8,24}$",
       "title": "Controller Id",
       "type": "string"
     },
-    "created_at": {
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Created At",
-      "type": "string"
-    },
-    "declared_cost_ceiling_usd": {
-      "maxLength": 32,
-      "minLength": 1,
-      "title": "Declared Cost Ceiling Usd",
-      "type": "string"
-    },
-    "delete_attempts": {
-      "maximum": 3,
-      "minimum": 0,
-      "title": "Delete Attempts",
-      "type": "integer"
-    },
-    "environment_digest": {
+    "event_digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Environment Digest",
+      "title": "Event Digest",
       "type": "string"
     },
-    "estimate_basis": {
-      "const": "operator_supplied_fixed_point_quote",
-      "title": "Estimate Basis",
-      "type": "string"
-    },
-    "estimated_max_microusd": {
-      "maximum": 1000000000000,
-      "minimum": 0,
-      "title": "Estimated Max Microusd",
-      "type": "integer"
-    },
-    "instance_name": {
-      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
-      "title": "Instance Name",
-      "type": "string"
-    },
-    "intent_anchor_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Intent Anchor Digest",
-      "type": "string"
-    },
-    "labels": {
-      "$ref": "#/$defs/GcpExecutionLabels"
-    },
-    "last_error_code": {
+    "previous_event_digest": {
       "anyOf": [
         {
-          "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+          "pattern": "^sha256:[0-9a-f]{64}$",
           "type": "string"
         },
         {
           "type": "null"
         }
       ],
-      "default": null,
-      "title": "Last Error Code"
+      "title": "Previous Event Digest"
     },
-    "max_cleanup_attempts": {
-      "maximum": 3,
-      "minimum": 1,
-      "title": "Max Cleanup Attempts",
-      "type": "integer"
+    "record": {
+      "$ref": "#/$defs/GcpLeaseRecord"
     },
-    "orphaned": {
-      "default": false,
-      "title": "Orphaned",
-      "type": "boolean"
-    },
-    "plan_id": {
+    "record_sha256": {
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Plan Id",
-      "type": "string"
-    },
-    "project_id": {
-      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
-      "title": "Project Id",
-      "type": "string"
-    },
-    "provider_mutation_ambiguous": {
-      "default": false,
-      "title": "Provider Mutation Ambiguous",
-      "type": "boolean"
-    },
-    "provider_mutation_attempted": {
-      "default": false,
-      "title": "Provider Mutation Attempted",
-      "type": "boolean"
-    },
-    "provider_operation_id": {
-      "anyOf": [
-        {
-          "pattern": "^op-[a-z0-9]{8,48}$",
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Provider Operation Id"
-    },
-    "provider_operation_kind": {
-      "anyOf": [
-        {
-          "enum": [
-            "insert",
-            "delete"
-          ],
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Provider Operation Kind"
-    },
-    "provider_operation_name": {
-      "anyOf": [
-        {
-          "maxLength": 256,
-          "minLength": 1,
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Provider Operation Name"
-    },
-    "provider_operation_status": {
-      "anyOf": [
-        {
-          "enum": [
-            "PENDING",
-            "DONE",
-            "ERROR",
-            "TIMEOUT",
-            "UNKNOWN"
-          ],
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Provider Operation Status"
-    },
-    "provider_operation_terminal": {
-      "default": false,
-      "title": "Provider Operation Terminal",
-      "type": "boolean"
-    },
-    "quote_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Quote Digest",
-      "type": "string"
-    },
-    "region": {
-      "maxLength": 32,
-      "minLength": 5,
-      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
-      "title": "Region",
-      "type": "string"
-    },
-    "request": {
-      "$ref": "#/$defs/GcpInsertRequest"
-    },
-    "request_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Request Digest",
+      "title": "Record Sha256",
       "type": "string"
     },
     "schema_version": {
-      "const": "inferdrome.gcp-execution-lease.v1",
+      "const": "inferdrome.gcp-execution-journal-event.v1",
       "title": "Schema Version",
       "type": "string"
     },
-    "state": {
-      "enum": [
-        "PREPARED",
-        "ARM_CONSUMED",
-        "CREATE_SUBMITTED",
-        "OWNED",
-        "CLEANUP_PENDING",
-        "CLEANUP_CONFIRMED",
-        "ORPHANED",
-        "BLOCKED"
-      ],
-      "title": "State",
-      "type": "string"
-    },
-    "updated_at": {
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Updated At",
-      "type": "string"
-    },
-    "zone": {
-      "maxLength": 64,
-      "minLength": 7,
-      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
-      "title": "Zone",
-      "type": "string"
+    "sequence": {
+      "maximum": 4096,
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
     }
   },
   "required": [
     "schema_version",
-    "state",
     "controller_id",
-    "arm_id",
-    "plan_id",
-    "project_id",
-    "region",
-    "zone",
-    "instance_name",
-    "request",
-    "request_digest",
-    "environment_digest",
-    "quote_digest",
-    "capacity_digest",
-    "estimated_max_microusd",
-    "declared_cost_ceiling_usd",
-    "estimate_basis",
-    "labels",
-    "intent_anchor_digest",
-    "created_at",
-    "updated_at",
-    "delete_attempts",
-    "max_cleanup_attempts",
-    "cleanup_timeout_seconds"
+    "sequence",
+    "previous_event_digest",
+    "record_sha256",
+    "record",
+    "event_digest"
   ],
-  "title": "GcpLeaseRecord",
+  "title": "GcpLeaseJournalEvent",
   "type": "object"
 }

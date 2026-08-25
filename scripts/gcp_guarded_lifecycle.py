@@ -30,6 +30,7 @@ from inferdrome.deployment import (
     GcpLeaseJournal,
     GcpPlanningContext,
     InMemoryExecutionArmStore,
+    build_gcp_insert_request,
     canonical_gcp_execution_arm_bytes,
     canonical_gcp_execution_outcome_bytes,
     gcp_execution_arm_id,
@@ -214,6 +215,42 @@ def _fake_run(args: argparse.Namespace) -> int:
     return 0 if outcome.status == "SUCCEEDED" else 2
 
 
+def _request_preview(args: argparse.Namespace) -> int:
+    _spec, _inventory, _context, plan = _load_inputs(args)
+    arm = parse_gcp_execution_arm_json(_read_regular(args.arm))
+    environment = GcpExecutionEnvironment.model_validate_json(
+        _read_regular(args.environment)
+    )
+    request = build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    from inferdrome.deployment import canonical_gcp_execution_request_bytes
+
+    sys.stdout.buffer.write(canonical_gcp_execution_request_bytes(request))
+    sys.stdout.buffer.write(b"\n")
+    return 0
+
+
+def _recovery_preview(args: argparse.Namespace) -> int:
+    from inferdrome.deployment import canonical_gcp_execution_request_bytes
+
+    record = GcpLeaseJournal(args.journal).load(args.controller_id)
+    if record.state == "CLEANUP_CONFIRMED":
+        raise ValueError("GCP lease is already confirmed absent")
+    output = {
+        "offline": True,
+        "controller_id": record.controller_id,
+        "plan_id": record.plan_id,
+        "instance_name": record.instance_name,
+        "request_digest": record.request_digest,
+        "delete_attempts_remaining": record.max_cleanup_attempts
+        - record.delete_attempts,
+        "request": json.loads(canonical_gcp_execution_request_bytes(record.request)),
+        "provider_call_performed": False,
+    }
+    sys.stdout.write(json.dumps(output, sort_keys=True, separators=(",", ":")))
+    sys.stdout.write("\n")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="offline guarded GCP lifecycle boundary"
@@ -251,6 +288,13 @@ def _parser() -> argparse.ArgumentParser:
     fake.add_argument("--journal", type=Path, required=True)
     fake.add_argument("--now", required=True)
     fake.add_argument("--output", type=Path)
+    preview = subparsers.add_parser("request-preview")
+    add_inputs(preview, with_plan=True)
+    preview.add_argument("--arm", type=Path, required=True)
+    preview.add_argument("--environment", type=Path, required=True)
+    recovery = subparsers.add_parser("recover-preview")
+    recovery.add_argument("--journal", type=Path, required=True)
+    recovery.add_argument("--controller-id", required=True)
     return parser
 
 
@@ -263,6 +307,10 @@ def main(argv: list[str] | None = None) -> int:
             return _verify(args)
         if args.command == "fake-run":
             return _fake_run(args)
+        if args.command == "request-preview":
+            return _request_preview(args)
+        if args.command == "recover-preview":
+            return _recovery_preview(args)
         return 2
     except Exception:
         print("gcp guarded lifecycle failed: invalid offline input", file=sys.stderr)

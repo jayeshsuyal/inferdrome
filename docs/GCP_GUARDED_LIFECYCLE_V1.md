@@ -17,39 +17,50 @@ signature and not a Google/provider attestation. Its canonical payload binds:
 - the unchanged hard USD ceiling.
 
 The arm is accepted only from canonical bytes, at the expected clock instant,
-with all cross-input bindings verified. An injected, thread-safe arm store
-atomically consumes it. A replay, altered input, expired arm, copied/constructed
+with all cross-input bindings verified. The file-backed arm store atomically
+consumes it across controller processes; the in-memory store is test-only. A
+replay, altered input, expired arm, copied/constructed
 invalid model, or ceiling substitution fails before the Compute transport is
 called.
 
 The execution environment and request contracts require an immutable numeric
 Compute image resource identity (never an image family or floating tag) plus its
-Inferdrome digest,
-runner, and serving image identities; an explicit private VPC/subnetwork; no
+Inferdrome digest, runner, and serving image identities; an explicit private
+VPC/subnetwork; no
 external access configuration; no IP forwarding; automatic restart disabled;
 boot-disk auto-delete; `TERMINATE` GPU maintenance behavior; bounded disk and
-service-account scope references; and ownership labels containing the exact
-controller, arm, and plan IDs. The runner and vLLM serving runtime remain
-separate boundaries. Startup script bytes and credential values are never part
-of the contract.
+service-account scope references; and local ownership bindings containing the
+exact controller, arm, and plan IDs. Provider labels contain only compact
+lowercase ownership keys; full IDs remain in the local request/lease and are
+compared before deletion. The runner and vLLM serving runtime remain separate
+boundaries. A startup-script digest may bind an external bootstrap artifact,
+but startup bytes and credential values are never part of this contract; PR8
+does not launch either runtime.
 
 ## Cost, capacity, and lifecycle
 
 Before a provider mutation, an operator-supplied fixed-point micro-USD quote
-must cover compute, GPU, boot disk, and network for the maximum lifetime plus a
-declared safety margin. It must be fresh and no greater than the exact hard
-ceiling. Capacity input must identify the exact selection, claim offline
-catalog eligibility, and report zero matching active resources; the controller
-still records `capacity_proven=false`. Pricing and invoice truth remain
-unavailable.
+must bind the exact request/environment, image, network, disk, service-account,
+accelerator, provider lifetime, and a billable duration covering the cleanup
+and termination-confirmation tail. It must be fresh and no greater than the
+exact hard ceiling. Capacity input is a fresh, read-only observation bound to
+the exact request and reports zero matching owned resources; it is not a
+capacity proof. Pricing and invoice truth remain unavailable.
 
-The controller writes an atomic local lease before insert, then calls only the
-injected `GcpComputeTransport`. It waits boundedly for the extended insert
-operation. An operation timeout is ambiguous: the controller reconciles only
-the exact instance and ownership labels, deletes only an exactly owned target,
-and requires GET-not-found plus a zero-result owned-label query. Failure to
-confirm absence creates an `ORPHANED` lease and blocks the next run. Recovery is
-an explicit exact-lease operation; there is no broad cleanup.
+The controller writes an immutable no-replace intent anchor and an atomic local
+lease before insert, under a cross-process journal lock. Every lease transition
+is also appended as a bounded, canonical, domain-separated hash-chain event;
+the lease head must match that chain before recovery. The controller then calls
+only the injected `GcpComputeTransport`. Insert and delete operation identities
+and statuses are persisted. A post-send operation timeout is ambiguous: the
+controller must first reconcile the exact zonal operation to terminal before
+using GET/list, then deletes only an exactly owned target and requires
+GET-not-found plus a zero-result owned-label query. If the operation remains
+unknown at the cleanup deadline, the lease is `ORPHANED` and cannot be
+confirmed absent. Delete attempts are persisted before each call and the limit
+is total across the original process and recovery. A late VM is therefore
+eligible for exact cleanup after the operation becomes terminal. Recovery is an
+explicit exact-lease operation; there is no broad cleanup.
 
 The additive execution outcome is ephemeral controller state, not a benchmark
 result, deployment receipt, GPU receipt, evidence bundle, or acceptance
@@ -68,7 +79,7 @@ preflight and local lease gates. With the extra absent it fails with the bounded
 modules, clients, and extended-operation fakes; they do not discover ADC,
 metadata, sockets, subprocesses, or a provider.
 
-The eventual concrete client follows Google's Compute Engine `instances.insert`,
+The concrete client follows Google's Compute Engine `instances.insert`,
 `get`, list, and `delete` operation model and bounded extended-operation waits.
 Application Default Credentials are an external operator setup, never an
 Inferdrome API key or serialized receipt field. See Google's primary
@@ -78,21 +89,31 @@ and [Application Default Credentials](https://cloud.google.com/docs/authenticati
 
 ## Offline command surface
 
-The only PR8 script commands are offline `arm`, `verify-arm`, and `fake-run`:
+The PR8 script commands are offline `arm`, `verify-arm`, `request-preview`,
+`recover-preview`, and `fake-run`:
 
 ```text
 python scripts/gcp_guarded_lifecycle.py arm ... --confirmation EXECUTE_GCP_ONCE
 python scripts/gcp_guarded_lifecycle.py verify-arm ...
+python scripts/gcp_guarded_lifecycle.py request-preview ...
+python scripts/gcp_guarded_lifecycle.py recover-preview ...
 python scripts/gcp_guarded_lifecycle.py fake-run ...
 ```
 
-There is deliberately no live `execute` command in this slice. A future live
+There is deliberately no live `execute` command in this slice. `request-preview`
+projects the exact private provider request without a transport.
+`recover-preview` shows the exact journal target and remaining budget without a
+provider call. The controller's `recover_cleanup` API is the explicit recovery
+boundary for a separately selected injected/live transport. A future live
 command must require the exact arm, plan, deployment spec, inventory, context,
 environment, quote, journal, and an explicitly selected concrete transport.
 `fake-run` is deterministic and non-provider; it cannot produce customer-
 eligible evidence.
 
-The implementation proves contract behavior and fake cleanup only. No ADC was
-resolved, no Google SDK client was constructed by tests or engineering gate,
-no network/provider call was made, no VM/GPU was launched or deleted, and no
-money, GPU result, receipt, or evidence was produced.
+The implementation proves the provider-envelope contract and fake cleanup only;
+it does not claim runtime bootstrap, vLLM readiness, benchmark serving, a live
+canary, capacity, pricing, a GPU result, a deployment receipt, or evidence. No
+ADC was resolved, no real provider SDK client was constructed by engineering
+gate, no network/provider call was made, no VM/GPU was launched or deleted, and
+no money or evidence was produced. The optional SDK compatibility check uses
+only installed message types and injected clients.

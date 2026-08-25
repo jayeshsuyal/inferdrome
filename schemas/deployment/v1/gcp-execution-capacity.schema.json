@@ -27,6 +27,12 @@
       "title": "Capacity Status",
       "type": "string"
     },
+    "freshness_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Freshness Seconds",
+      "type": "integer"
+    },
     "machine_type": {
       "maxLength": 96,
       "minLength": 1,
@@ -39,6 +45,12 @@
       "minimum": 0,
       "title": "Matching Active Resources",
       "type": "integer"
+    },
+    "observed_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Observed At",
+      "type": "string"
     },
     "plan_id": {
       "pattern": "^sha256:[0-9a-f]{64}$",
@@ -57,9 +69,19 @@
       "title": "Region",
       "type": "string"
     },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
     "schema_version": {
       "const": "inferdrome.gcp-execution-capacity.v1",
       "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "const": "operator_supplied_read_only_observation",
+      "title": "Source",
       "type": "string"
     },
     "zone": {
@@ -73,6 +95,10 @@
   "required": [
     "schema_version",
     "plan_id",
+    "request_digest",
+    "source",
+    "observed_at",
+    "freshness_seconds",
     "project_id",
     "region",
     "zone",

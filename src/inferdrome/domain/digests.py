@@ -23,8 +23,11 @@ class DigestDomain(StrEnum):
     GCP_PLAN = "gcp-dry-run-plan-v1"
     GCP_EXECUTION_ARM = "gcp-execution-arm-v1"
     GCP_EXECUTION_REQUEST = "gcp-execution-request-v1"
+    GCP_EXECUTION_ENVIRONMENT = "gcp-execution-environment-v1"
+    GCP_EXECUTION_CAPACITY = "gcp-execution-capacity-v1"
     GCP_EXECUTION_QUOTE = "gcp-execution-quote-v1"
     GCP_EXECUTION_RESULT = "gcp-execution-result-v1"
+    GCP_EXECUTION_JOURNAL = "gcp-execution-journal-v1"
 
 
 def digest_bytes(domain: DigestDomain, payload: bytes) -> str:

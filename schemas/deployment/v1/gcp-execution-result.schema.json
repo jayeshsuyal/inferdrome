@@ -69,6 +69,11 @@
       "title": "Arm Id",
       "type": "string"
     },
+    "capacity_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Capacity Digest",
+      "type": "string"
+    },
     "cleanup_confirmed": {
       "title": "Cleanup Confirmed",
       "type": "boolean"
@@ -91,6 +96,17 @@
       "title": "Controller Id",
       "type": "string"
     },
+    "declared_cost_ceiling_usd": {
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Declared Cost Ceiling Usd",
+      "type": "string"
+    },
+    "environment_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Environment Digest",
+      "type": "string"
+    },
     "error_code": {
       "anyOf": [
         {
@@ -103,6 +119,17 @@
       ],
       "default": null,
       "title": "Error Code"
+    },
+    "estimate_basis": {
+      "const": "operator_supplied_fixed_point_quote",
+      "title": "Estimate Basis",
+      "type": "string"
+    },
+    "estimated_max_microusd": {
+      "maximum": 1000000000000,
+      "minimum": 0,
+      "title": "Estimated Max Microusd",
+      "type": "integer"
     },
     "evidence_eligible": {
       "const": false,
@@ -154,6 +181,16 @@
       "title": "Provider Mutation Attempted",
       "type": "boolean"
     },
+    "quote_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Quote Digest",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
     "schema_version": {
       "const": "inferdrome.gcp-execution-result.v1",
       "title": "Schema Version",
@@ -186,6 +223,13 @@
     "plan_id",
     "controller_id",
     "arm_id",
+    "request_digest",
+    "environment_digest",
+    "quote_digest",
+    "capacity_digest",
+    "estimated_max_microusd",
+    "declared_cost_ceiling_usd",
+    "estimate_basis",
     "arm_consumed",
     "provider_mutation_attempted",
     "cleanup_confirmed",

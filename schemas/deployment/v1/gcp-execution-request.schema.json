@@ -4,12 +4,12 @@
       "additionalProperties": false,
       "properties": {
         "arm_id": {
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Arm Id",
           "type": "string"
         },
         "controller_id": {
-          "pattern": "^ctl-[a-z0-9]{8,24}$",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Controller Id",
           "type": "string"
         },
@@ -19,17 +19,17 @@
           "type": "string"
         },
         "managed_by": {
-          "const": "inferdrome-gcp-execution-v1",
+          "const": "inferdrome_gcp_execution_v1",
           "title": "Managed By",
           "type": "string"
         },
         "plan_id": {
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Plan Id",
           "type": "string"
         },
         "role": {
-          "const": "benchmark-serving-boundary",
+          "const": "provider-envelope",
           "title": "Role",
           "type": "string"
         }
@@ -117,9 +117,21 @@
       "title": "Accelerator Model",
       "type": "string"
     },
+    "accelerator_provider_type": {
+      "maxLength": 96,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+      "title": "Accelerator Provider Type",
+      "type": "string"
+    },
     "architecture": {
       "const": "amd64",
       "title": "Architecture",
+      "type": "string"
+    },
+    "arm_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Arm Id",
       "type": "string"
     },
     "automatic_restart": {
@@ -149,6 +161,16 @@
     "boot_image": {
       "$ref": "#/$defs/GcpPlanImage"
     },
+    "controller_id": {
+      "pattern": "^ctl-[a-z0-9]{8,24}$",
+      "title": "Controller Id",
+      "type": "string"
+    },
+    "delete_request_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Delete Request Id",
+      "type": "string"
+    },
     "deletion_protection": {
       "const": false,
       "title": "Deletion Protection",
@@ -157,6 +179,11 @@
     "endpoint_scope": {
       "const": "private",
       "title": "Endpoint Scope",
+      "type": "string"
+    },
+    "insert_request_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Insert Request Id",
       "type": "string"
     },
     "instance_name": {
@@ -192,6 +219,11 @@
     },
     "network": {
       "$ref": "#/$defs/GcpExecutionNetwork"
+    },
+    "plan_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Id",
+      "type": "string"
     },
     "project_id": {
       "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
@@ -256,6 +288,19 @@
     "serving_runtime_image": {
       "$ref": "#/$defs/GcpPlanImage"
     },
+    "startup_script_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Startup Script Digest"
+    },
     "tokenizer_revision": {
       "pattern": "^[0-9a-f]{40,64}$",
       "title": "Tokenizer Revision",
@@ -278,6 +323,7 @@
     "machine_type",
     "architecture",
     "accelerator_model",
+    "accelerator_provider_type",
     "accelerator_count",
     "boot_image",
     "runner_image",
@@ -292,6 +338,11 @@
     "automatic_restart",
     "maintenance_policy",
     "provider_max_runtime_seconds",
+    "plan_id",
+    "arm_id",
+    "controller_id",
+    "insert_request_id",
+    "delete_request_id",
     "labels",
     "model_id",
     "model_revision",
