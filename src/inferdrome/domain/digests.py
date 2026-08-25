@@ -17,6 +17,8 @@ class DigestDomain(StrEnum):
     COMPARISON_PLAN = "comparison-plan-v1"
     COMPARISON_RESULT = "comparison-result-v1"
     DEPLOYMENT_SPEC = "deployment-spec-v1"
+    LIFECYCLE_OUTCOME = "lifecycle-outcome-v1"
+    DEPLOYMENT_RECEIPT = "deployment-receipt-v1"
 
 
 def digest_bytes(domain: DigestDomain, payload: bytes) -> str:
