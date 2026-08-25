@@ -682,6 +682,35 @@ def _read_receipt_file(directory: Path) -> bytes:
         os.close(descriptor)
 
 
+def _revalidate_receipt_for_publication(
+    receipt: DeploymentReceipt,
+) -> tuple[DeploymentReceipt, bytes]:
+    """Revalidate an in-memory receipt before any publication side effect."""
+
+    try:
+        content = canonical_deployment_receipt_bytes(receipt)
+        validated = parse_deployment_receipt_json(content)
+        if validated.receipt_id != receipt.receipt_id:
+            raise ReceiptPublicationError(
+                "receipt publication identity disagrees"
+            )
+        if validated.receipt_id != deployment_receipt_id(validated):
+            raise ReceiptPublicationError(
+                "receipt publication identity is invalid"
+            )
+        if canonical_deployment_receipt_bytes(validated) != content:
+            raise ReceiptPublicationError(
+                "receipt publication canonical bytes changed"
+            )
+        return validated, content
+    except ReceiptPublicationError:
+        raise
+    except Exception:
+        raise ReceiptPublicationError(
+            "receipt publication input failed closed"
+        ) from None
+
+
 def publish_deployment_receipt(
     *,
     root: Path,
@@ -689,11 +718,11 @@ def publish_deployment_receipt(
 ) -> PublishedDeploymentReceipt:
     """Publish one canonical receipt without replacement and verify read-back."""
 
-    content = canonical_deployment_receipt_bytes(receipt)
+    validated, content = _revalidate_receipt_for_publication(receipt)
     try:
         path = publish_immutable_directory(
             root=root,
-            artifact_id=receipt.receipt_id,
+            artifact_id=validated.receipt_id,
             filename=RECEIPT_FILENAME,
             content=content,
         )

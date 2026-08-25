@@ -42,6 +42,7 @@ from inferdrome.deployment import (
     verify_published_deployment_receipt,
 )
 from inferdrome.domain.digests import canonical_json_bytes
+from inferdrome.domain.ids import sha256_digest
 from inferdrome.errors import VerificationError
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -137,15 +138,19 @@ def test_committed_schema_is_closed_and_current() -> None:
 
 def test_deterministic_synthetic_vector_and_identity_rules() -> None:
     spec, outcome, receipt = _receipt()
-    assert FIXTURE_PATH.read_bytes().rstrip(b"\n") == (
-        canonical_deployment_receipt_bytes(receipt)
-    )
-    assert parse_deployment_receipt_json(FIXTURE_PATH.read_bytes()) == receipt
+    fixture_bytes = FIXTURE_PATH.read_bytes()
+    assert fixture_bytes == canonical_deployment_receipt_bytes(receipt)
+    assert parse_deployment_receipt_json(fixture_bytes) == receipt
     assert receipt.receipt_id == deployment_receipt_id(receipt)
-    assert deployment_receipt_sha256(receipt) == (
+    assert sha256_digest(fixture_bytes) == (
         "sha256:fa8beaa0366e2628f8ac1b9890a7a4828c391e663440f57affb57e4426a2262d"
     )
+    assert deployment_receipt_sha256(receipt) == sha256_digest(fixture_bytes)
     assert verify_deployment_receipt(receipt, **_expected(spec, outcome)) == receipt
+    assert (
+        verify_deployment_receipt_bytes(fixture_bytes, **_expected(spec, outcome))
+        == receipt
+    )
 
 
 def test_reordered_json_has_one_meaning_but_is_not_published_as_canonical() -> None:
@@ -333,6 +338,42 @@ def test_synthetic_boundary_rejects_evidence_provider_and_invoice_claims() -> No
         candidate = {**value, **mutation}
         with pytest.raises((ValidationError, ValueError)):
             parse_deployment_receipt_json(canonical_json_bytes(candidate))
+
+
+def test_publication_revalidates_untrusted_in_memory_receipts_before_side_effects(
+    tmp_path: Path,
+) -> None:
+    _, outcome, receipt = _receipt()
+    mutated_lifecycle = outcome.model_copy(update={"orphaned": True})
+    mutated_cleanup = receipt.local_controller_facts.cleanup_state.model_copy(
+        update={"orphaned": True}
+    )
+    mutated_controller = receipt.local_controller_facts.model_copy(
+        update={"cleanup_state": mutated_cleanup}
+    )
+    forged_id = "sha256:" + "0" * 64
+    constructed_fields = dict(receipt)
+    constructed_fields["receipt_id"] = forged_id
+    candidates = (
+        receipt.model_copy(update={"source_repository_commit": "f" * 40}),
+        receipt.model_copy(update={"lifecycle_outcome": mutated_lifecycle}),
+        receipt.model_copy(
+            update={"local_controller_facts": mutated_controller}
+        ),
+        receipt.model_copy(update={"receipt_id": forged_id}),
+        DeploymentReceipt.model_construct(**constructed_fields),
+    )
+
+    for index, candidate in enumerate(candidates):
+        root = tmp_path / f"candidate-{index}"
+        with pytest.raises(ReceiptPublicationError):
+            publish_deployment_receipt(root=root, receipt=candidate)
+        assert not root.exists()
+
+    published = publish_deployment_receipt(
+        root=tmp_path / "candidate-0", receipt=receipt
+    )
+    assert published.path.name == receipt.receipt_id
 
 
 def test_failed_cleanup_remains_synthetic_and_cannot_become_executed() -> None:
