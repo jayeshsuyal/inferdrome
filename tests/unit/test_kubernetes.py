@@ -5,25 +5,31 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from inferdrome.domain.digests import canonical_json_bytes
+from inferdrome.domain.experiment import AttachedVllmTarget
 from inferdrome.kubernetes import (
     GPU_MANIFEST_RELATIVE_PATH,
     KUBERNETES_MAX_MANIFEST_BYTES,
+    KUBERNETES_MAX_YAML_TOKENS,
     MOCK_MANIFEST_RELATIVE_PATH,
     KubernetesContractError,
     kubernetes_contract,
     parse_kubernetes_yaml,
     publish_synthetic_output,
+    validate_kubernetes_experiment,
     validate_kubernetes_job,
     validate_kubernetes_manifest,
+    validate_kubernetes_server_version,
+    validate_synthetic_output_directory,
     verify_synthetic_output,
 )
 
@@ -64,10 +70,28 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
     kind = bin_dir / "kind"
     kind.write_text(
         "#!/bin/sh\n"
-        "printf 'kind %s\\n' \"$*\" >> \"$INFERDROME_K8S_TEST_LOG\"\n"
+        "printf 'kind %s kubeconfig=%s\\n' \"$*\" \"$KUBECONFIG\" "
+        ">> \"$INFERDROME_K8S_TEST_LOG\"\n"
+        "if [ \"$1\" = --kubeconfig ]; then exit 91; fi\n"
         "case \"$1 $2\" in\n"
-        "  'create cluster') exit \"${INFERDROME_K8S_FAIL_CREATE:-0}\" ;;\n"
+        "  'create cluster')\n"
+        "    for arg in \"$@\"; do\n"
+        "      if [ \"$previous\" = --name ]; then "
+        "printf '%s\\n' \"$arg\" > \"$INFERDROME_K8S_CLUSTER_MARKER\"; fi\n"
+        "      previous=\"$arg\"\n"
+        "    done\n"
+        "    exit \"${INFERDROME_K8S_FAIL_CREATE:-0}\"\n"
+        "    ;;\n"
         "  'load docker-image') exit \"${INFERDROME_K8S_FAIL_LOAD:-0}\" ;;\n"
+        "  'get clusters')\n"
+        "    if [ \"${INFERDROME_K8S_COLLISION:-0}\" = 1 ] && "
+        "[ ! -s \"$INFERDROME_K8S_CLUSTER_MARKER\" ]; then "
+        "printf '%s\\n' \"$INFERDROME_K8S_EXPECTED_CLUSTER_NAME\"; "
+        "fi\n"
+        "    cat \"$INFERDROME_K8S_CLUSTER_MARKER\"; "
+        "if [ \"${INFERDROME_K8S_FAIL_GET_AFTER_CREATE:-0}\" = 17 ] && "
+        "[ -s \"$INFERDROME_K8S_CLUSTER_MARKER\" ]; then exit 17; fi; "
+        "exit \"${INFERDROME_K8S_FAIL_GET:-0}\" ;;\n"
         "  'delete cluster') exit \"${INFERDROME_K8S_FAIL_DELETE_CLUSTER:-0}\" ;;\n"
         "  *) exit 0 ;;\n"
         "esac\n",
@@ -76,8 +100,13 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
     kubectl = bin_dir / "kubectl"
     kubectl.write_text(
         "#!/bin/sh\n"
-        "printf 'kubectl %s\\n' \"$*\" >> \"$INFERDROME_K8S_TEST_LOG\"\n"
+        "printf 'kubectl %s kubeconfig=%s\\n' \"$*\" \"$KUBECONFIG\" "
+        ">> \"$INFERDROME_K8S_TEST_LOG\"\n"
         "case \"$*\" in\n"
+        "  *' version '*) printf '%s\\n' \"$INFERDROME_K8S_SERVER_VERSION_JSON\" "
+        "> \"$INFERDROME_K8S_VERSION_CAPTURE\"; "
+        "cat \"$INFERDROME_K8S_VERSION_CAPTURE\"; "
+        "exit \"${INFERDROME_K8S_FAIL_VERSION:-0}\" ;;\n"
         "  *' create namespace '*) exit \"${INFERDROME_K8S_FAIL_NAMESPACE:-0}\" ;;\n"
         "  *' apply '*) exit \"${INFERDROME_K8S_FAIL_APPLY:-0}\" ;;\n"
         "  *' wait '*)\n"
@@ -95,6 +124,15 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
     )
     kind.chmod(0o755)
     kubectl.chmod(0o755)
+    docker = bin_dir / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "printf 'docker %s\\n' \"$*\" >> \"$INFERDROME_K8S_TEST_LOG\"\n"
+        "exit \"${INFERDROME_K8S_FAIL_DOCKER:-0}\"\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    (root / "cluster.marker").write_text("", encoding="ascii")
     source.chmod(0o600)
     log_path.touch(mode=0o600)
     return bin_dir, log_path
@@ -114,6 +152,15 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
             "INFERDROME_KUBERNETES_PYTHON": str(REPOSITORY_ROOT / ".venv/bin/python"),
             "INFERDROME_K8S_LOG_SOURCE": str(source),
             "INFERDROME_K8S_TEST_LOG": str(log_path),
+            "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
+            "INFERDROME_KUBERNETES_TEST_MODE": "1",
+            "INFERDROME_KIND_NODE_IMAGE": "kindest/node:v1.33.1@sha256:" + "a" * 64,
+            "INFERDROME_K8S_SERVER_VERSION_JSON":
+            '{"clientVersion":{"major":"1","minor":"33"},'
+            '"kustomizeVersion":"v5.6.0",'
+            '"serverVersion":{"major":"1","minor":"33",'
+            '"gitVersion":"v1.33.1"}}',
+            "INFERDROME_K8S_VERSION_CAPTURE": str(tmp_path / "version.capture"),
         }
     )
     environment.update(extra)
@@ -147,6 +194,69 @@ def test_yaml_parser_rejects_duplicate_nested_keys_extra_documents_and_bounds() 
 
 
 @pytest.mark.parametrize(
+    "raw",
+    [
+        b"root:\n" + b"  child:\n" * 70 + b"    value: true\n",
+        b"root: &anchor\n  value: true\ncopy: *anchor\n",
+        b"!custom {value: true}\n",
+    ],
+)
+def test_yaml_parser_rejects_depth_alias_and_custom_tag(raw: bytes) -> None:
+    with pytest.raises(KubernetesContractError):
+        parse_kubernetes_yaml(raw)
+
+
+def test_yaml_parser_has_an_explicit_token_work_bound() -> None:
+    below = max(1, KUBERNETES_MAX_YAML_TOKENS // 4 - 20)
+    below_raw = "".join(f"key_{index}: {index}\n" for index in range(below)).encode()
+    assert len(below_raw) < KUBERNETES_MAX_MANIFEST_BYTES
+    parse_kubernetes_yaml(below_raw)
+    above = KUBERNETES_MAX_YAML_TOKENS // 4 + 100
+    above_raw = "".join(f"key_{index}: {index}\n" for index in range(above)).encode()
+    with pytest.raises(KubernetesContractError):
+        parse_kubernetes_yaml(above_raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\xff\xfe\x00",
+        b"apiVersion: batch/v1\n---\nkind: Job\n",
+        b"a: &anchor\n  b: *anchor\n",
+        b"!unsafe value\n",
+        b"x" * (KUBERNETES_MAX_MANIFEST_BYTES + 1),
+    ],
+)
+def test_kubernetes_cli_errors_are_bounded_for_malformed_yaml(
+    tmp_path: Path, raw: bytes
+) -> None:
+    path = tmp_path / "malformed.yaml"
+    path.write_bytes(raw)
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(REPOSITORY_ROOT / "src")
+    result = subprocess.run(
+        [
+            str(REPOSITORY_ROOT / ".venv/bin/python"),
+            "-m",
+            "inferdrome.kubernetes",
+            "validate",
+            "--profile",
+            "mock",
+            "--manifest",
+            str(path),
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert str(path) not in result.stderr
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         lambda value: value["spec"]["template"]["spec"].update(
@@ -162,6 +272,12 @@ def test_yaml_parser_rejects_duplicate_nested_keys_extra_documents_and_bounds() 
         lambda value: value["spec"]["template"]["spec"].update(
             {"hostNetwork": True}
         ),
+        lambda value: value["spec"]["template"]["spec"]["securityContext"].update(
+            {"allowPrivilegeEscalation": False}
+        ),
+        lambda value: value["spec"]["template"]["spec"]["securityContext"][
+            "seccompProfile"
+        ].update({"type": "Unconfined"}),
         lambda value: value["spec"]["template"]["spec"]["volumes"][0].update(
             {"hostPath": {"path": "/"}}
         ),
@@ -204,6 +320,15 @@ def test_mock_job_rejects_unsafe_shape_mutations(mutation: Any) -> None:
         lambda value: value["spec"]["template"]["spec"]["containers"][0][
             "volumeMounts"
         ][0].update({"readOnly": False}),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "volumeMounts"
+        ][1].update({"readOnly": True}),
+        lambda value: value["spec"]["template"]["spec"]["volumes"][3][
+            "emptyDir"
+        ].update({"sizeLimit": "1Gi"}),
+        lambda value: value["spec"]["template"]["spec"]["volumes"][4].update(
+            {"emptyDir": {"medium": "Memory", "sizeLimit": "1Gi"}}
+        ),
         lambda value: value["spec"]["template"]["spec"]["volumes"][2].update(
             {
                 "persistentVolumeClaim": {
@@ -230,6 +355,95 @@ def test_profiles_cannot_be_cross_substituted() -> None:
         validate_kubernetes_manifest(GPU_MANIFEST, "mock")
     with pytest.raises(KubernetesContractError):
         validate_kubernetes_manifest(GPU_MANIFEST, "gpu")
+
+
+def test_gpu_runner_uses_attached_canonical_command() -> None:
+    document = _document(GPU_MANIFEST, "gpu")
+    runner = cast(Any, document)["spec"]["template"]["spec"]["containers"][0]
+    assert runner["command"] == ["inferdrome"]
+    assert "--managed-capability-profile" not in runner["args"]
+    result = subprocess.run(
+        [
+            str(REPOSITORY_ROOT / ".venv/bin/inferdrome"),
+            "run",
+            "/private/nonexistent/kubernetes-experiment.yaml",
+            "--runs-root",
+            "/private/nonexistent/kubernetes-runs",
+            "--tokenizer-path",
+            "/private/nonexistent/tokenizer",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "managed vLLM options require" not in result.stderr
+
+
+def test_attached_qwen3_experiment_binding_maps_loopback_to_frozen_validation(
+    tmp_path: Path,
+) -> None:
+    campaign_root = tmp_path / "campaigns" / "v1"
+    shutil.copytree(REPOSITORY_ROOT / "campaigns/v1", campaign_root)
+    experiment = campaign_root / "qwen3-8b-concurrency-1.yaml"
+    experiment.write_text(
+        experiment.read_text(encoding="utf-8").replace(
+            "http://127.0.0.1:18080", "http://127.0.0.1:8000"
+        ),
+        encoding="utf-8",
+    )
+    resolved = validate_kubernetes_experiment(experiment)
+    assert isinstance(resolved.target, AttachedVllmTarget)
+    assert str(resolved.target.endpoint).rstrip("/") == "http://127.0.0.1:8000"
+    experiment.write_text(
+        experiment.read_text(encoding="utf-8").replace(
+            "http://127.0.0.1:8000", "https://public.invalid"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(KubernetesContractError):
+        validate_kubernetes_experiment(experiment)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (b'{"serverVersion":{"major":"1","minor":"33"}}', (1, 33)),
+        (b'{"serverVersion":{"major":"1","minor":"34+"}}', (1, 34)),
+    ],
+)
+def test_kubernetes_server_version_accepts_current_bounded_shape(
+    raw: bytes, expected: tuple[int, int]
+) -> None:
+    assert validate_kubernetes_server_version(raw) == expected
+
+
+def test_kubernetes_server_version_accepts_real_kubectl_metadata() -> None:
+    raw = (
+        b'{"clientVersion":{"major":"1","minor":"33",'
+        b'"gitVersion":"v1.33.1","platform":"darwin/arm64"},'
+        b'"kustomizeVersion":"v5.6.0",'
+        b'"serverVersion":{"major":"1","minor":"33",'
+        b'"gitVersion":"v1.33.1","platform":"linux/amd64"}}'
+    )
+    assert validate_kubernetes_server_version(raw) == (1, 33)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"serverVersion":{"major":"1","minor":"32"}}',
+        b'{"serverVersion":{"major":"one","minor":"33"}}',
+        b'{"serverVersion":{"major":"1","minor":"33","minor":"34"}}',
+        b'{"serverVersion":{"major":"1","minor":"99"},"extra":true}',
+    ],
+)
+def test_kubernetes_server_version_rejects_old_malformed_and_duplicate(
+    raw: bytes,
+) -> None:
+    with pytest.raises(KubernetesContractError):
+        validate_kubernetes_server_version(raw)
 
 
 @pytest.mark.parametrize(
@@ -302,11 +516,19 @@ def test_fake_kind_wrapper_retrieves_logs_verifies_and_cleans_exact_resources(
     assert "delete namespace" in log
     assert "delete cluster" in log
     assert not list((tmp_path / "evidence").glob(".runner-output.*"))
+    kind_lines = [line for line in log.splitlines() if line.startswith("kind ")]
+    assert kind_lines
+    assert not any(line.startswith("kind --kubeconfig") for line in kind_lines)
+    create_line = next(line for line in kind_lines if "create cluster" in line)
+    assert create_line.index("--kubeconfig") > create_line.index("create cluster")
+    assert "kubeconfig=" in create_line
 
 
 @pytest.mark.parametrize(
     "failure_env",
     [
+        {"INFERDROME_K8S_FAIL_CREATE": "17"},
+        {"INFERDROME_K8S_FAIL_GET_AFTER_CREATE": "17"},
         {"INFERDROME_K8S_FAIL_APPLY": "17"},
         {"INFERDROME_K8S_FAIL_WAIT": "17"},
         {"INFERDROME_K8S_FAIL_LOGS": "17"},
@@ -320,13 +542,40 @@ def test_fake_kind_wrapper_attempts_cleanup_on_failures(
 ) -> None:
     result = _run_fake_wrapper(tmp_path, **failure_env)
     log = (tmp_path / "commands.log").read_text()
-    assert "delete namespace" in log
-    assert "delete cluster" in log
+    if "FAIL_CREATE" in "".join(failure_env) or "FAIL_GET" in "".join(failure_env):
+        assert result.returncode == 2
+        assert "delete namespace" not in log
+        assert "delete cluster" in log
+    else:
+        assert "delete namespace" in log
+        assert "delete cluster" in log
     if "DELETE_" in "".join(failure_env):
         assert result.returncode == 70
-    else:
+    elif "FAIL_CREATE" not in "".join(failure_env):
         assert result.returncode == 2
     assert "Traceback" not in result.stderr
+
+
+def test_fake_wrapper_does_not_delete_preexisting_collision(tmp_path: Path) -> None:
+    result = _run_fake_wrapper(tmp_path, INFERDROME_K8S_COLLISION="1")
+    assert result.returncode == 2
+    log = (tmp_path / "commands.log").read_text()
+    assert "kind get clusters" in log
+    assert "kind create cluster" not in log
+    assert "delete cluster" not in log
+
+
+def test_fake_partial_create_cleanup_failure_is_distinct(tmp_path: Path) -> None:
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_K8S_FAIL_CREATE="17",
+        INFERDROME_K8S_FAIL_DELETE_CLUSTER="17",
+    )
+    assert result.returncode == 70
+    log = (tmp_path / "commands.log").read_text()
+    assert "kind create cluster" in log
+    assert "kind get clusters" in log
+    assert "delete cluster" in log
 
 
 def test_cleanup_failure_cannot_erase_published_log_artifact(tmp_path: Path) -> None:
@@ -338,6 +587,85 @@ def test_cleanup_failure_cannot_erase_published_log_artifact(tmp_path: Path) -> 
     artifact = tmp_path / "evidence/runner-output.json"
     assert verify_synthetic_output(artifact)["evidence_eligible"] is False
     assert "cleanup was not confirmed" in result.stderr
+
+
+def test_fake_wrapper_uses_private_kubeconfig_and_preserves_ambient_sentinel(
+    tmp_path: Path,
+) -> None:
+    ambient = tmp_path / "ambient-kubeconfig"
+    ambient.write_bytes(b"ambient sentinel")
+    result = _run_fake_wrapper(tmp_path, KUBECONFIG=str(ambient))
+    assert result.returncode == 0, result.stderr
+    assert ambient.read_bytes() == b"ambient sentinel"
+    log = (tmp_path / "commands.log").read_text()
+    assert f"kubeconfig={ambient}" not in log
+    assert "create cluster" in log
+
+
+@pytest.mark.parametrize(
+    "version_json",
+    [
+        '{"serverVersion":{"major":"1","minor":"32"}}',
+        '{"serverVersion":{"major":"one","minor":"33"}}',
+    ],
+)
+def test_fake_wrapper_rejects_old_or_malformed_server_before_namespace(
+    tmp_path: Path, version_json: str
+) -> None:
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_K8S_SERVER_VERSION_JSON=version_json,
+    )
+    assert result.returncode == 2
+    log = (tmp_path / "commands.log").read_text()
+    assert " create namespace " not in log
+    assert "delete cluster" in log
+
+
+def test_fake_wrapper_rejects_missing_local_kind_image_before_cluster(
+    tmp_path: Path,
+) -> None:
+    result = _run_fake_wrapper(tmp_path, INFERDROME_K8S_FAIL_DOCKER="17")
+    assert result.returncode == 2
+    log = (tmp_path / "commands.log").read_text()
+    assert "docker image inspect" in log
+    assert "kind create cluster" not in log
+
+
+def test_fake_wrapper_rejects_unsafe_output_directory_before_cluster(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_KUBERNETES_OUTPUT_DIR=str(link / "nested"),
+    )
+    assert result.returncode == 2
+    assert (tmp_path / "commands.log").read_text() == ""
+
+
+def test_fake_wrapper_rejects_traversal_alias_before_cluster(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_KUBERNETES_OUTPUT_DIR=str(real / ".." / "evidence"),
+    )
+    assert result.returncode == 2
+    assert (tmp_path / "commands.log").read_text() == ""
+
+
+def test_output_directory_preflight_allows_a_safe_missing_suffix(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "nested" / "evidence"
+    validate_synthetic_output_directory(target)
+    target.parent.mkdir()
+    target.mkdir()
+    validate_synthetic_output_directory(target)
 
 
 def test_publication_rejects_symlinked_ancestor_without_writing_through_it(
@@ -378,7 +706,15 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
             "INFERDROME_KUBERNETES_PYTHON": str(REPOSITORY_ROOT / ".venv/bin/python"),
             "INFERDROME_K8S_LOG_SOURCE": str(source),
             "INFERDROME_K8S_TEST_LOG": str(log_path),
+            "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
+            "INFERDROME_KIND_NODE_IMAGE": "kindest/node:v1.33.1@sha256:" + "a" * 64,
             "INFERDROME_K8S_INTERRUPT_WAIT": "1",
+            "INFERDROME_K8S_SERVER_VERSION_JSON":
+            '{"clientVersion":{"major":"1","minor":"33"},'
+            '"kustomizeVersion":"v5.6.0",'
+            '"serverVersion":{"major":"1","minor":"33",'
+            '"gitVersion":"v1.33.1"}}',
+            "INFERDROME_K8S_VERSION_CAPTURE": str(tmp_path / "version.capture"),
         }
     )
     process = subprocess.Popen(

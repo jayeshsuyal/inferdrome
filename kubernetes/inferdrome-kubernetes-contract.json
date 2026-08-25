@@ -25,7 +25,7 @@
     "gpu": {
       "evidence_eligible": false,
       "evidence_persistence": "operator-provided-evidence-pvc-required",
-      "manifest_sha256": "sha256:7c38614f72b0af1295b0e9b5602e3282961895785ef69034f76ebb42f8a31990",
+      "manifest_sha256": "sha256:d250fbe67d8b124fddd5ad72319ea0fc06a8664c5a4898d3c746225b7d2992cd",
       "manifest_template": "kubernetes/inferdrome-benchmark-gpu-job.template.yaml",
       "runner_image": "immutable-digest-required-at-render-time",
       "synthetic_only": false

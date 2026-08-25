@@ -26,6 +26,8 @@ frozen evidence schemas:
 .venv/bin/python -m inferdrome.kubernetes validate \
   --profile gpu --template \
   --manifest kubernetes/inferdrome-benchmark-gpu-job.template.yaml
+.venv/bin/python -m inferdrome.kubernetes preflight-experiment \
+  --experiment /absolute/path/to/experiment.yaml
 ```
 
 The YAML parser rejects duplicate keys, multiple documents, unknown contract
@@ -62,6 +64,16 @@ failure, cleanup, and interrupt paths. They are orchestration simulations, not
 Kubernetes execution or evidence. On a host without Docker/kind/kubectl, the
 real local-cluster gate is `UNRUN`, not a successful smoke.
 
+The wrapper requires an operator-supplied immutable local kind node image in
+`INFERDROME_KIND_NODE_IMAGE`, matching `kindest/node:v1.33.x@sha256:<digest>`;
+it verifies that image with local Docker before creating a cluster and checks
+the actual server version after creation. It uses a private temporary
+`KUBECONFIG`; `kind get`, `kind load`, and `kind delete` use the exported
+context, while the private path is passed to `kind create cluster` in its
+supported subcommand position. A failed create is never treated as ownership
+of a pre-existing name; the wrapper reports cleanup status 70 when ownership
+cannot be established. No ambient kubeconfig or cluster is used.
+
 ## GPU/vLLM template
 
 `kubernetes/inferdrome-benchmark-gpu-job.template.yaml` is a non-executable
@@ -79,6 +91,23 @@ does not launch a GPU, run vLLM, retrieve a bundle, issue a receipt, or make an
 evidence-eligibility claim. A future operator must separately verify the PVC,
 image digests, input snapshot, experiment binding, cluster security policy,
 and retrieval/verification path before any authorized execution.
+
+The GPU runner uses the attached-endpoint form of the canonical command:
+`inferdrome run /inputs/experiment.yaml --runs-root /evidence/runs
+--tokenizer-path /models/qwen3-8b`. It intentionally does not pass the
+`--managed-capability-profile` or `--managed-local-vllm` options. Before an
+operator renders or applies a concrete template, the offline
+`preflight-experiment` command resolves the experiment, requires an attached
+vLLM target at exactly `http://127.0.0.1:8000`, and validates a validation-only
+copy against the frozen campaign endpoint `http://127.0.0.1:18080`. The input
+workload files must be available beside the experiment; this check does not
+inspect or certify PVC contents. The command remains a preflight, not a
+benchmark or evidence run.
+
+The read-only GPU containers receive bounded disposable scratch volumes: the
+engine has `/tmp` and an 8 GiB memory-backed `/dev/shm`, and the runner has a
+512 MiB `/tmp`. These mounts make the declared cache/root-filesystem contract
+structurally executable without changing the unresolved model/PVC boundary.
 
 ## Cleanup and claim boundary
 

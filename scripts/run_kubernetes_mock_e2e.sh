@@ -51,8 +51,6 @@ done
 if [[ -e "$output_dir" && ( ! -d "$output_dir" || -L "$output_dir" ) ]]; then
   fail "output directory must be a real directory"
 fi
-mkdir -p -- "$output_dir" || fail "output directory cannot be created"
-[[ -d "$output_dir" && ! -L "$output_dir" ]] || fail "output directory is unsafe"
 artifact="$output_dir/runner-output.json"
 if [[ -e "$artifact" || -L "$artifact" ]]; then
   fail "output artifact already exists"
@@ -74,37 +72,77 @@ PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
   "$inferdrome_python" -m inferdrome.kubernetes validate \
   --profile mock --manifest "$manifest" >/dev/null 2>&1 || \
   fail "mock manifest contract is invalid"
+PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+  "$inferdrome_python" -m inferdrome.kubernetes preflight-output-dir "$output_dir" \
+  >/dev/null 2>&1 || fail "output directory is unsafe"
+mkdir -p -- "$output_dir" || fail "output directory cannot be created"
+[[ -d "$output_dir" && ! -L "$output_dir" ]] || fail "output directory is unsafe"
+PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+  "$inferdrome_python" -m inferdrome.kubernetes preflight-output "$artifact" \
+  >/dev/null 2>&1 || fail "output destination is unsafe or already exists"
 
 kind_bin=$(command -v kind 2>/dev/null || true)
 kubectl_bin=$(command -v kubectl 2>/dev/null || true)
+docker_bin=$(command -v docker 2>/dev/null || true)
 [[ -n "$kind_bin" ]] || fail "kind is unavailable"
 [[ -n "$kubectl_bin" ]] || fail "kubectl is unavailable"
+[[ -n "$docker_bin" ]] || fail "Docker is unavailable"
 
-suffix="${BASHPID:-$$}-${RANDOM}"
+kind_node_image=${INFERDROME_KIND_NODE_IMAGE:-}
+[[ "$kind_node_image" =~ ^kindest/node:v1\.33\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || \
+  fail "an immutable Kubernetes 1.33 kind node image is required"
+"$docker_bin" image inspect "$kind_node_image" >/dev/null 2>&1 || \
+  fail "the pinned kind node image is not present locally"
+
+suffix=$(
+  "$inferdrome_python" -c 'import secrets; print(secrets.token_hex(16))' \
+    2>/dev/null
+) || fail "private Kubernetes identity could not be generated"
+[[ "$suffix" =~ ^[0-9a-f]{32}$ ]] || fail "private Kubernetes identity is invalid"
 cluster_name="inferdrome-k8s-${suffix}"
 namespace="inferdrome-mock-${suffix}"
 context="kind-${cluster_name}"
 job_name="inferdrome-benchmark-mock"
+if [[ "${INFERDROME_KUBERNETES_TEST_MODE:-0}" == "1" ]]; then
+  export INFERDROME_K8S_EXPECTED_CLUSTER_NAME="$cluster_name"
+fi
 stage=""
-cluster_created=0
-namespace_created=0
+state_dir=""
+kubeconfig=""
+server_version_file=""
+cluster_create_attempted=0
+cluster_owned=0
+namespace_create_attempted=0
+namespace_owned=0
 cleanup_status=0
 
-kind=("$kind_bin")
-kubectl=("$kubectl_bin" --context "$context")
+kind=()
+kubectl=()
 
 cleanup() {
   set +e
   local result=0
-  if ((namespace_created)); then
+  if ((namespace_owned)) && ((${#kubectl[@]} > 0)); then
     "${kubectl[@]}" delete namespace "$namespace" --wait=true --timeout=60s \
       >/dev/null 2>&1 || result=1
   fi
-  if ((cluster_created)); then
+  if ((cluster_owned)) && ((${#kind[@]} > 0)); then
     "${kind[@]}" delete cluster --name "$cluster_name" >/dev/null 2>&1 || result=1
   fi
   if [[ -n "$stage" ]]; then
     rm -f -- "$stage" || result=1
+  fi
+  if ((cluster_create_attempted && !cluster_owned)); then
+    result=1
+  fi
+  if ((namespace_create_attempted && !namespace_owned)); then
+    result=1
+  fi
+  if [[ -n "$kubeconfig" ]]; then
+    rm -f -- "$kubeconfig" "$server_version_file" || result=1
+  fi
+  if [[ -n "$state_dir" ]]; then
+    rmdir -- "$state_dir" || result=1
   fi
   cleanup_status=$result
 }
@@ -123,16 +161,67 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT TERM
 
-cluster_created=1
-"${kind[@]}" create cluster --name "$cluster_name" --wait 60s \
-  >/dev/null 2>&1 || fail "local kind cluster could not be created"
+temp_root=$(cd -- "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P) || \
+  fail "private Kubernetes temporary root is unavailable"
+[[ "$temp_root" = /* && -d "$temp_root" && ! -L "$temp_root" ]] || \
+  fail "private Kubernetes temporary root is unsafe"
+state_dir=$(mktemp -d "$temp_root/inferdrome-k8s.XXXXXX") || \
+  fail "private Kubernetes state directory could not be created"
+[[ "$state_dir" = /* && -d "$state_dir" && ! -L "$state_dir" ]] || \
+  fail "private Kubernetes state directory is unsafe"
+kubeconfig="$state_dir/kubeconfig"
+server_version_file="$state_dir/server-version.json"
+(umask 077 && : >"$kubeconfig") || fail "private kubeconfig could not be created"
+chmod 600 "$kubeconfig" || fail "private kubeconfig could not be secured"
+export KUBECONFIG="$kubeconfig"
+
+kind=("$kind_bin")
+kubectl=("$kubectl_bin" --kubeconfig "$kubeconfig" --context "$context")
+
+cluster_list=$("${kind[@]}" get clusters 2>/dev/null) || \
+  fail "kind cluster inventory could not be read"
+printf '%s\n' "$cluster_list" | grep -Fx "$cluster_name" >/dev/null && \
+  fail "private Kubernetes cluster identity is already in use"
+
+cluster_create_attempted=1
+if "${kind[@]}" create cluster --name "$cluster_name" \
+  --image "$kind_node_image" --wait 60s \
+  --kubeconfig "$kubeconfig" \
+  >/dev/null 2>&1; then
+  # A successful create is ownership evidence even if the read-only
+  # confirmation below is temporarily unavailable.
+  cluster_owned=1
+else
+  # A provider-side failure can occur after kind has created the cluster.
+  # Reconcile the exact previously-absent name before deciding whether it is
+  # safe to delete; an unresolved result remains cleanup-blocked.
+  cluster_list=$("${kind[@]}" get clusters 2>/dev/null) || \
+    fail "local kind cluster ownership is ambiguous"
+  if printf '%s\n' "$cluster_list" | grep -Fx "$cluster_name" >/dev/null; then
+    cluster_owned=1
+  fi
+  fail "local kind cluster could not be created"
+fi
+cluster_list=$("${kind[@]}" get clusters 2>/dev/null) || \
+  fail "kind cluster ownership could not be confirmed"
+printf '%s\n' "$cluster_list" | grep -Fx "$cluster_name" >/dev/null || \
+  fail "kind cluster ownership could not be confirmed"
 "${kind[@]}" load docker-image inferdrome/compose-mock:development \
   inferdrome/runner:development --name "$cluster_name" >/dev/null 2>&1 || \
   fail "development images could not be loaded into kind"
 
-namespace_created=1
+server_version_file="$state_dir/server-version.json"
+"${kubectl[@]}" version --output=json >"$server_version_file" 2>/dev/null || \
+  fail "Kubernetes server version could not be read"
+PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+  "$inferdrome_python" -m inferdrome.kubernetes server-version \
+  "$server_version_file" >/dev/null 2>&1 || \
+  fail "Kubernetes server version is unsupported"
+
+namespace_create_attempted=1
 "${kubectl[@]}" create namespace "$namespace" >/dev/null 2>&1 || \
   fail "unique Kubernetes namespace could not be created"
+namespace_owned=1
 "${kubectl[@]}" apply --namespace "$namespace" --filename "$manifest" \
   >/dev/null 2>&1 || fail "mock Job could not be applied"
 "${kubectl[@]}" wait --namespace "$namespace" --for=condition=complete \

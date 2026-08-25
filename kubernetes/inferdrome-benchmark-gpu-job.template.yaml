@@ -89,6 +89,8 @@ spec:
             limits: {cpu: 4, memory: 16Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: model, mountPath: /models/qwen3-8b, readOnly: true}
+            - {name: engine-tmp, mountPath: /tmp}
+            - {name: engine-shm, mountPath: /dev/shm}
           env:
             - {name: HF_HUB_OFFLINE, value: "1"}
             - {name: TRANSFORMERS_OFFLINE, value: "1"}
@@ -122,8 +124,6 @@ spec:
             - /evidence/runs
             - --tokenizer-path
             - /models/qwen3-8b
-            - --managed-capability-profile
-            - managed-vllm-0.26-qwen3-8b-bf16-v1
           securityContext:
             runAsNonRoot: true
             runAsUser: 2000
@@ -141,6 +141,7 @@ spec:
             - {name: model, mountPath: /models/qwen3-8b, readOnly: true}
             - {name: experiment, mountPath: /inputs, readOnly: true}
             - {name: evidence, mountPath: /evidence}
+            - {name: runner-tmp, mountPath: /tmp}
           env:
             - {name: HF_HUB_OFFLINE, value: "1"}
             - {name: TRANSFORMERS_OFFLINE, value: "1"}
@@ -159,3 +160,13 @@ spec:
           persistentVolumeClaim:
             claimName: REQUIRED_EVIDENCE_PVC
             readOnly: false
+        - name: engine-tmp
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: engine-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: runner-tmp
+          emptyDir:
+            sizeLimit: 512Mi

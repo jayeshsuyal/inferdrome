@@ -19,9 +19,13 @@ from pathlib import Path
 from typing import Final
 
 import yaml
+from pydantic import ValidationError
 from yaml.nodes import MappingNode
+from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 from inferdrome.domain.digests import canonical_json_bytes
+from inferdrome.domain.experiment import AttachedVllmTarget, ExperimentSpec
+from inferdrome.errors import AdapterError, ResolutionError, SourceInputError
 from inferdrome.qwen3_campaign import (
     QWEN3_8B_MODEL_ID,
     QWEN3_8B_PROFILE_ID,
@@ -31,7 +35,9 @@ from inferdrome.qwen3_campaign import (
     qwen3_expected_snapshot_sha256,
     qwen3_model_manifest_sha256,
     qwen3_workload_sha256,
+    validate_qwen3_campaign_spec,
 )
+from inferdrome.resolution import resolve_experiment
 from inferdrome.runner import RUNNER_OUTPUT_SCHEMA_VERSION
 from inferdrome.vllm_compose import (
     VLLM_RUNTIME_IMAGE_REFERENCE,
@@ -52,7 +58,13 @@ GPU_JOB_NAME: Final = "inferdrome-benchmark-gpu"
 MOCK_OUTPUT_NAME: Final = "runner-output.json"
 KUBERNETES_MAX_MANIFEST_BYTES: Final = 512 * 1024
 KUBERNETES_MAX_OUTPUT_BYTES: Final = 64 * 1024
+KUBERNETES_MAX_VERSION_BYTES: Final = 16 * 1024
+KUBERNETES_MAX_YAML_DEPTH: Final = 64
+KUBERNETES_MAX_YAML_TOKENS: Final = 20_000
+KUBERNETES_LOOPBACK_ENDPOINT: Final = "http://127.0.0.1:8000"
+KUBERNETES_FROZEN_CAMPAIGN_ENDPOINT: Final = "http://127.0.0.1:18080"
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_VERSION_COMPONENT_RE = re.compile(r"^[0-9]{1,3}\+?$")
 
 
 class KubernetesContractError(ValueError):
@@ -148,14 +160,56 @@ def _reject_symlinked_ancestors(
             raise KubernetesContractError(f"{label} is unavailable")
 
 
+def _preflight_yaml_tokens(raw: bytes) -> None:
+    """Reject YAML features and nesting that are unnecessary for these Jobs."""
+
+    starts = (
+        yaml.tokens.BlockMappingStartToken,
+        yaml.tokens.BlockSequenceStartToken,
+        yaml.tokens.FlowMappingStartToken,
+        yaml.tokens.FlowSequenceStartToken,
+    )
+    ends = (
+        yaml.tokens.BlockEndToken,
+        yaml.tokens.FlowMappingEndToken,
+        yaml.tokens.FlowSequenceEndToken,
+    )
+    depth = 0
+    token_count = 0
+    try:
+        for token in yaml.scan(raw):
+            token_count += 1
+            if token_count > KUBERNETES_MAX_YAML_TOKENS:
+                raise KubernetesContractError("Kubernetes YAML is too complex")
+            if isinstance(token, (AliasToken, AnchorToken, TagToken)):
+                raise KubernetesContractError("Kubernetes YAML feature is unsupported")
+            if isinstance(token, starts):
+                depth += 1
+                if depth > KUBERNETES_MAX_YAML_DEPTH:
+                    raise KubernetesContractError("Kubernetes YAML is too deep")
+            elif isinstance(token, ends):
+                depth = max(0, depth - 1)
+    except KubernetesContractError:
+        raise
+    except (RecursionError, yaml.YAMLError, TypeError, ValueError):
+        raise KubernetesContractError("Kubernetes manifest is invalid") from None
+
+
 def parse_kubernetes_yaml(raw: bytes) -> dict[str, object]:
     """Parse exactly one bounded YAML document with duplicate-key rejection."""
 
     if len(raw) > KUBERNETES_MAX_MANIFEST_BYTES:
         raise KubernetesContractError("Kubernetes manifest exceeds its bound")
     try:
+        _preflight_yaml_tokens(raw)
         documents = list(yaml.load_all(raw, Loader=_UniqueSafeLoader))
-    except (UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError):
+    except (
+        UnicodeDecodeError,
+        RecursionError,
+        yaml.YAMLError,
+        TypeError,
+        ValueError,
+    ):
         raise KubernetesContractError("Kubernetes manifest is invalid") from None
     if len(documents) != 1 or not isinstance(documents[0], dict):
         raise KubernetesContractError("Kubernetes manifest must contain one object")
@@ -251,13 +305,33 @@ def _validate_metadata(value: object, profile: str) -> dict[str, object]:
     return metadata
 
 
-def _validate_security(
-    value: object,
-    label: str,
-    *,
-    uid: int,
-    container: bool = False,
-) -> None:
+def _validate_pod_security(value: object, label: str, *, uid: int) -> None:
+    security = _mapping(value, label)
+    _expect_keys(
+        security,
+        {
+            "runAsNonRoot",
+            "runAsUser",
+            "runAsGroup",
+            "seccompProfile",
+        },
+        {
+            "runAsNonRoot",
+            "runAsUser",
+            "runAsGroup",
+            "seccompProfile",
+        },
+        label,
+    )
+    if security.get("runAsNonRoot") is not True:
+        raise KubernetesContractError("Kubernetes security must run as non-root")
+    if security.get("runAsUser") != uid or security.get("runAsGroup") != uid:
+        raise KubernetesContractError("Kubernetes container identity is not bound")
+    if security.get("seccompProfile") != {"type": "RuntimeDefault"}:
+        raise KubernetesContractError("Kubernetes seccomp profile is not bound")
+
+
+def _validate_container_security(value: object, label: str, *, uid: int) -> None:
     security = _mapping(value, label)
     _expect_keys(
         security,
@@ -275,6 +349,9 @@ def _validate_security(
             "runAsUser",
             "runAsGroup",
             "seccompProfile",
+            "allowPrivilegeEscalation",
+            "readOnlyRootFilesystem",
+            "capabilities",
         },
         label,
     )
@@ -282,11 +359,11 @@ def _validate_security(
         raise KubernetesContractError("Kubernetes security must run as non-root")
     if security.get("runAsUser") != uid or security.get("runAsGroup") != uid:
         raise KubernetesContractError("Kubernetes container identity is not bound")
-    if container and security.get("allowPrivilegeEscalation") is not False:
+    if security.get("allowPrivilegeEscalation") is not False:
         raise KubernetesContractError("Kubernetes privilege escalation is forbidden")
-    if container and security.get("readOnlyRootFilesystem") is not True:
+    if security.get("readOnlyRootFilesystem") is not True:
         raise KubernetesContractError("Kubernetes root filesystem must be read-only")
-    if container and security.get("capabilities") != {"drop": ["ALL"]}:
+    if security.get("capabilities") != {"drop": ["ALL"]}:
         raise KubernetesContractError("Kubernetes capabilities must be dropped")
     if security.get("seccompProfile") != {"type": "RuntimeDefault"}:
         raise KubernetesContractError("Kubernetes seccomp profile is not bound")
@@ -408,6 +485,9 @@ def _validate_mounts(value: object, label: str, expected: dict[str, bool]) -> No
             "model": "/models/qwen3-8b",
             "experiment": "/inputs",
             "evidence": "/evidence",
+            "engine-tmp": "/tmp",
+            "engine-shm": "/dev/shm",
+            "runner-tmp": "/tmp",
         }.get(name)
         if expected_path is not None and mount_path != expected_path:
             raise KubernetesContractError("Kubernetes volume mount path is not bound")
@@ -453,12 +533,35 @@ def _validate_volumes(value: object, profile: str) -> None:
             }[name]
             if claim != expected_claim or pvc["readOnly"] != (name != "evidence"):
                 raise KubernetesContractError("Kubernetes PVC boundary is not bound")
+        elif profile == "gpu" and name in {"engine-tmp", "engine-shm", "runner-tmp"}:
+            empty_dir = _mapping(item.get("emptyDir"), f"{name} emptyDir")
+            expected_empty_dir = {
+                "engine-tmp": {"sizeLimit": "2Gi"},
+                "engine-shm": {"medium": "Memory", "sizeLimit": "8Gi"},
+                "runner-tmp": {"sizeLimit": "512Mi"},
+            }[name]
+            _expect_keys(
+                empty_dir,
+                set(expected_empty_dir),
+                set(expected_empty_dir),
+                f"{name} emptyDir",
+            )
+            if empty_dir != expected_empty_dir:
+                raise KubernetesContractError("Kubernetes scratch volume is not bound")
         else:
             raise KubernetesContractError("Kubernetes volume shape is unsupported")
     if (
         seen != {"evidence"}
         if profile == "mock"
-        else seen != {"model", "experiment", "evidence"}
+        else seen
+        != {
+            "model",
+            "experiment",
+            "evidence",
+            "engine-tmp",
+            "engine-shm",
+            "runner-tmp",
+        }
     ):
         raise KubernetesContractError("Kubernetes volumes are incomplete")
 
@@ -611,25 +714,27 @@ def _validate_container(
             "/evidence/runs",
             "--tokenizer-path",
             "/models/qwen3-8b",
-            "--managed-capability-profile",
-            QWEN3_8B_PROFILE_ID,
         ]
         if command != ["inferdrome"] or args != expected_args:
             raise KubernetesContractError(
                 "Kubernetes benchmark command is not canonical"
             )
-        if (
-            "--managed-capability-profile" not in args
-            or QWEN3_8B_PROFILE_ID not in args
-        ):
-            raise KubernetesContractError("Kubernetes benchmark profile is not bound")
     if engine:
-        expected_mounts = {"model": True} if profile == "gpu" else {}
+        expected_mounts = (
+            {"model": True, "engine-tmp": False, "engine-shm": False}
+            if profile == "gpu"
+            else {}
+        )
     else:
         expected_mounts = (
             {"evidence": False}
             if profile == "mock"
-            else {"model": True, "experiment": True, "evidence": False}
+            else {
+                "model": True,
+                "experiment": True,
+                "evidence": False,
+                "runner-tmp": False,
+            }
         )
     if expected_mounts:
         _validate_mounts(
@@ -637,11 +742,10 @@ def _validate_container(
         )
     elif "volumeMounts" in container:
         raise KubernetesContractError("Kubernetes engine volume mounts are unsupported")
-    _validate_security(
+    _validate_container_security(
         container["securityContext"],
         "container security",
         uid=10001 if profile == "mock" else 2000,
-        container=True,
     )
     _validate_resources(
         container["resources"],
@@ -752,7 +856,7 @@ def validate_kubernetes_job(
     expected_grace = 30 if profile == "mock" else 60
     if pod["terminationGracePeriodSeconds"] != expected_grace:
         raise KubernetesContractError("Kubernetes termination grace is not bound")
-    _validate_security(pod["securityContext"], "Pod security", uid=2000)
+    _validate_pod_security(pod["securityContext"], "Pod security", uid=2000)
     if any(pod.get(key) is True for key in ("hostNetwork", "hostPID", "hostIPC")):
         raise KubernetesContractError("Kubernetes host namespace sharing is forbidden")
     if profile == "gpu" and pod.get("nodeSelector") != {"kubernetes.io/arch": "amd64"}:
@@ -790,6 +894,116 @@ def validate_kubernetes_manifest(
     document = parse_kubernetes_yaml(raw)
     validate_kubernetes_job(document, profile, template=template)
     return document
+
+
+def validate_kubernetes_experiment(path: Path) -> ExperimentSpec:
+    """Validate one operator-supplied attached Qwen3 experiment offline.
+
+    The PVC contents are outside this static check.  Only the exact experiment
+    bytes and the repository's frozen campaign validator are examined here.
+    """
+
+    try:
+        _bounded_bytes(path, maximum=512 * 1024, label="Kubernetes experiment")
+        metadata = os.lstat(path)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise KubernetesContractError("Kubernetes experiment is unavailable")
+        resolution = resolve_experiment(path, strict=True)
+        spec = resolution.resolved_spec
+        if not isinstance(spec.target, AttachedVllmTarget):
+            raise KubernetesContractError(
+                "Kubernetes experiment target is unsupported"
+            )
+        if str(spec.target.endpoint).rstrip("/") != KUBERNETES_LOOPBACK_ENDPOINT:
+            raise KubernetesContractError(
+                "Kubernetes experiment endpoint is not loopback"
+            )
+        frozen_target = spec.target.model_copy(
+            update={"endpoint": KUBERNETES_FROZEN_CAMPAIGN_ENDPOINT}
+        )
+        frozen_spec = spec.model_copy(update={"target": frozen_target})
+        validate_qwen3_campaign_spec(frozen_spec)
+        if spec.workload.sha256 != qwen3_workload_sha256():
+            raise KubernetesContractError(
+                "Kubernetes experiment workload is not pinned"
+            )
+        return spec
+    except KubernetesContractError:
+        raise
+    except (
+        AdapterError,
+        OSError,
+        ResolutionError,
+        SourceInputError,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ):
+        raise KubernetesContractError(
+            "Kubernetes experiment does not match the frozen Qwen3 binding"
+        ) from None
+
+
+def validate_kubernetes_server_version(raw: bytes) -> tuple[int, int]:
+    """Validate bounded ``kubectl version --output=json`` server metadata."""
+
+    if len(raw) > KUBERNETES_MAX_VERSION_BYTES:
+        raise KubernetesContractError("Kubernetes server version exceeds its bound")
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=_unique_json_pairs,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+        root = _mapping(value, "server version")
+        _expect_keys(
+            root,
+            {"clientVersion", "kustomizeVersion", "serverVersion"},
+            {"serverVersion"},
+            "server version root",
+        )
+        version_fields = {
+            "major",
+            "minor",
+            "gitVersion",
+            "gitCommit",
+            "gitTreeState",
+            "buildDate",
+            "goVersion",
+            "compiler",
+            "platform",
+        }
+        for info_name in ("clientVersion", "serverVersion"):
+            if info_name not in root:
+                continue
+            info = _mapping(root[info_name], f"{info_name}")
+            _expect_keys(info, version_fields, set(), info_name)
+            for field_name, field_value in info.items():
+                _string(field_value, f"{info_name} {field_name}", maximum=256)
+        if "kustomizeVersion" in root:
+            _string(root["kustomizeVersion"], "kustomize version", maximum=128)
+        server = _mapping(root.get("serverVersion"), "server version")
+        _expect_keys(
+            server,
+            version_fields,
+            {"major", "minor"},
+            "server version",
+        )
+        major_text = _string(server["major"], "server major", maximum=3)
+        minor_text = _string(server["minor"], "server minor", maximum=4)
+        if _VERSION_COMPONENT_RE.fullmatch(major_text) is None:
+            raise ValueError
+        if _VERSION_COMPONENT_RE.fullmatch(minor_text) is None:
+            raise ValueError
+        major = int(major_text, 10)
+        minor = int(minor_text.rstrip("+"), 10)
+    except KubernetesContractError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        raise KubernetesContractError("Kubernetes server version is invalid") from None
+    if (major, minor) < (1, 33):
+        raise KubernetesContractError("Kubernetes server version is unsupported")
+    return major, minor
 
 
 def _manifest_path(relative: str) -> Path:
@@ -933,6 +1147,56 @@ def verify_synthetic_output(path: Path) -> dict[str, object]:
     )
 
 
+def validate_synthetic_output_destination(destination: Path) -> None:
+    """Preflight a no-replace output path before cluster allocation."""
+
+    _reject_symlinked_ancestors(
+        destination, "synthetic output destination", allow_missing_leaf=True
+    )
+    parent = destination.parent
+    try:
+        metadata = parent.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise KubernetesContractError("synthetic output directory is unsafe")
+        leaf = os.lstat(destination)
+    except FileNotFoundError:
+        return
+    except KubernetesContractError:
+        raise
+    except OSError:
+        raise KubernetesContractError(
+            "synthetic output destination is unsafe"
+        ) from None
+    if stat.S_ISLNK(leaf.st_mode) or not stat.S_ISREG(leaf.st_mode):
+        raise KubernetesContractError("synthetic output destination is occupied")
+    raise KubernetesContractError("synthetic output already exists")
+
+
+def validate_synthetic_output_directory(directory: Path) -> None:
+    """Preflight an output directory before creating it or allocating a cluster."""
+
+    if ".." in Path(directory).parts:
+        raise KubernetesContractError("synthetic output directory is unsafe")
+    selected = Path(os.path.abspath(directory))
+    current = Path(selected.anchor)
+    missing_suffix = False
+    for component in selected.parts[1:]:
+        current /= component
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            missing_suffix = True
+            continue
+        except OSError:
+            raise KubernetesContractError(
+                "synthetic output directory is unsafe"
+            ) from None
+        if missing_suffix or stat.S_ISLNK(metadata.st_mode):
+            raise KubernetesContractError("synthetic output directory is unsafe")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise KubernetesContractError("synthetic output directory is unsafe")
+
+
 def publish_synthetic_output(source: Path, destination: Path) -> None:
     source_raw = _bounded_bytes(
         source, maximum=KUBERNETES_MAX_OUTPUT_BYTES, label="synthetic output source"
@@ -1004,6 +1268,14 @@ def main(argv: list[str] | None = None) -> int:
     publish = subparsers.add_parser("publish-output")
     publish.add_argument("source", type=Path)
     publish.add_argument("destination", type=Path)
+    preflight = subparsers.add_parser("preflight-experiment")
+    preflight.add_argument("--experiment", type=Path, required=True)
+    preflight_output = subparsers.add_parser("preflight-output")
+    preflight_output.add_argument("path", type=Path)
+    preflight_output_directory = subparsers.add_parser("preflight-output-dir")
+    preflight_output_directory.add_argument("path", type=Path)
+    server_version = subparsers.add_parser("server-version")
+    server_version.add_argument("path", type=Path)
     subparsers.add_parser("contract")
     try:
         if arguments := parser.parse_args(argv):
@@ -1018,6 +1290,23 @@ def main(argv: list[str] | None = None) -> int:
             elif arguments.command == "publish-output":
                 publish_synthetic_output(arguments.source, arguments.destination)
                 print("synthetic Kubernetes output publication: OK")
+            elif arguments.command == "preflight-experiment":
+                validate_kubernetes_experiment(arguments.experiment)
+                print("Kubernetes experiment binding: OK")
+            elif arguments.command == "preflight-output":
+                validate_synthetic_output_destination(arguments.path)
+                print("synthetic Kubernetes output destination: OK")
+            elif arguments.command == "preflight-output-dir":
+                validate_synthetic_output_directory(arguments.path)
+                print("synthetic Kubernetes output directory: OK")
+            elif arguments.command == "server-version":
+                raw = _bounded_bytes(
+                    arguments.path,
+                    maximum=KUBERNETES_MAX_VERSION_BYTES,
+                    label="Kubernetes server version",
+                )
+                major, minor = validate_kubernetes_server_version(raw)
+                print(f"Kubernetes server version: {major}.{minor}")
             else:
                 sys.stdout.buffer.write(_pretty(kubernetes_contract()))
     except KubernetesContractError as error:
@@ -1030,8 +1319,12 @@ __all__ = [
     "GPU_MANIFEST_RELATIVE_PATH",
     "GPU_RUNNER_IMAGE_PLACEHOLDER",
     "KUBERNETES_CONTRACT_SCHEMA_VERSION",
+    "KUBERNETES_FROZEN_CAMPAIGN_ENDPOINT",
+    "KUBERNETES_LOOPBACK_ENDPOINT",
     "KUBERNETES_MAX_MANIFEST_BYTES",
     "KUBERNETES_MAX_OUTPUT_BYTES",
+    "KUBERNETES_MAX_VERSION_BYTES",
+    "KUBERNETES_MAX_YAML_TOKENS",
     "KUBERNETES_MIN_VERSION",
     "MOCK_ENGINE_IMAGE",
     "MOCK_JOB_NAME",
@@ -1042,8 +1335,12 @@ __all__ = [
     "kubernetes_contract",
     "parse_kubernetes_yaml",
     "publish_synthetic_output",
+    "validate_kubernetes_experiment",
     "validate_kubernetes_job",
     "validate_kubernetes_manifest",
+    "validate_kubernetes_server_version",
+    "validate_synthetic_output_destination",
+    "validate_synthetic_output_directory",
     "verify_synthetic_output",
 ]
 
