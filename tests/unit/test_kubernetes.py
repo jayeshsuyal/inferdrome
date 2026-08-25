@@ -18,6 +18,7 @@ from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.domain.experiment import AttachedVllmTarget
 from inferdrome.kubernetes import (
     GPU_MANIFEST_RELATIVE_PATH,
+    KIND_NODE_IMAGE_REFERENCE,
     KUBERNETES_MAX_MANIFEST_BYTES,
     KUBERNETES_MAX_YAML_TOKENS,
     MOCK_MANIFEST_RELATIVE_PATH,
@@ -37,6 +38,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MOCK_MANIFEST = REPOSITORY_ROOT / MOCK_MANIFEST_RELATIVE_PATH
 GPU_MANIFEST = REPOSITORY_ROOT / GPU_MANIFEST_RELATIVE_PATH
 WRAPPER = REPOSITORY_ROOT / "scripts" / "run_kubernetes_mock_e2e.sh"
+PUBLIC_HEALTH_CODE = "http.client.HTTPConnection('0.0.0.0',8000)"
 
 
 def _document(path: Path, profile: str) -> dict[str, object]:
@@ -70,7 +72,9 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
     kind = bin_dir / "kind"
     kind.write_text(
         "#!/bin/sh\n"
-        "printf 'kind %s kubeconfig=%s\\n' \"$*\" \"$KUBECONFIG\" "
+        "printf 'kind %s kubeconfig=%s provider=%s network=%s\\n' "
+        "\"$*\" \"$KUBECONFIG\" \"${KIND_EXPERIMENTAL_PROVIDER:-}\" "
+        "\"${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}\" "
         ">> \"$INFERDROME_K8S_TEST_LOG\"\n"
         "if [ \"$1\" = --kubeconfig ]; then exit 91; fi\n"
         "case \"$1 $2\" in\n"
@@ -154,7 +158,7 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
             "INFERDROME_K8S_TEST_LOG": str(log_path),
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
             "INFERDROME_KUBERNETES_TEST_MODE": "1",
-            "INFERDROME_KIND_NODE_IMAGE": "kindest/node:v1.33.1@sha256:" + "a" * 64,
+            "INFERDROME_KIND_NODE_IMAGE": KIND_NODE_IMAGE_REFERENCE,
             "INFERDROME_K8S_SERVER_VERSION_JSON":
             '{"clientVersion":{"major":"1","minor":"33"},'
             '"kustomizeVersion":"v5.6.0",'
@@ -265,12 +269,32 @@ def test_kubernetes_cli_errors_are_bounded_for_malformed_yaml(
         lambda value: value["spec"]["template"]["spec"]["initContainers"][0].update(
             {"restartPolicy": "Never"}
         ),
+        lambda value: value["spec"]["template"]["spec"]["containers"][0].update(
+            {"restartPolicy": "Always"}
+        ),
         lambda value: value["spec"]["template"]["spec"]["containers"].append(
             copy.deepcopy(value["spec"]["template"]["spec"]["containers"][0])
         ),
         lambda value: value["spec"]["template"]["spec"]["initContainers"].clear(),
         lambda value: value["spec"]["template"]["spec"].update(
             {"hostNetwork": True}
+        ),
+        lambda value: value["spec"]["template"]["spec"].update(
+            {"hostNetwork": 1}
+        ),
+        lambda value: value["spec"]["template"]["spec"].update(
+            {"hostPID": 1}
+        ),
+        lambda value: value["spec"]["template"]["spec"].update(
+            {"hostIPC": 1}
+        ),
+        lambda value: value["spec"]["template"]["spec"].update(
+            {"automountServiceAccountToken": 1}
+        ),
+        lambda value: value["spec"].update({"backoffLimit": False}),
+        lambda value: value["spec"].update({"activeDeadlineSeconds": True}),
+        lambda value: value["spec"]["template"]["spec"].update(
+            {"terminationGracePeriodSeconds": False}
         ),
         lambda value: value["spec"]["template"]["spec"]["securityContext"].update(
             {"allowPrivilegeEscalation": False}
@@ -299,12 +323,60 @@ def test_mock_job_rejects_unsafe_shape_mutations(mutation: Any) -> None:
         lambda value: value["spec"]["template"]["spec"]["containers"][0][
             "resources"
         ]["limits"].update({"nvidia.com/gpu": "1"}),
+        lambda value: value["spec"]["template"]["spec"]["containers"][0][
+            "resources"
+        ]["requests"].update({"cpu": True}),
+        lambda value: value["spec"]["template"]["spec"]["containers"][0][
+            "resources"
+        ]["limits"].update({"cpu": True}),
         lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
             "resources"
         ]["limits"].update({"nvidia.com/gpu": "2"}),
         lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "resources"
+        ]["requests"].update({"cpu": 2.0}),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "resources"
+        ]["limits"].update({"cpu": 4.0}),
+        lambda value: value["spec"]["template"]["spec"]["securityContext"].update(
+            {"runAsUser": 2000.0}
+        ),
+        lambda value: value["spec"]["template"]["spec"]["securityContext"].update(
+            {"runAsGroup": 2000.0}
+        ),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "securityContext"
+        ].update({"runAsUser": 2000.0}),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "securityContext"
+        ].update({"runAsGroup": 2000.0}),
+        lambda value: value["spec"]["template"]["spec"]["containers"][0][
+            "securityContext"
+        ].update({"runAsUser": 2000.0}),
+        lambda value: value["spec"]["template"]["spec"]["containers"][0][
+            "securityContext"
+        ].update({"runAsGroup": 2000.0}),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
             "startupProbe"
-        ]["httpGet"].update({"host": "0.0.0.0"}),
+        ].update({"httpGet": {"path": "/health", "port": 8000}}),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "startupProbe"
+        ].update({"tcpSocket": {"port": 8000}}),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "startupProbe"
+        ]["exec"]["command"].__setitem__(0, "sh"),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "startupProbe"
+        ]["exec"]["command"].__setitem__(2, "operator supplied code"),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "startupProbe"
+        ]["exec"]["command"].__setitem__(2, PUBLIC_HEALTH_CODE),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "startupProbe"
+        ].update({"successThreshold": 0}),
+        lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
+            "startupProbe"
+        ].update({"initialDelaySeconds": -1}),
         lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
             "args"
         ].__setitem__(5, "Other/Qwen"),
@@ -320,6 +392,9 @@ def test_mock_job_rejects_unsafe_shape_mutations(mutation: Any) -> None:
         lambda value: value["spec"]["template"]["spec"]["containers"][0][
             "volumeMounts"
         ][0].update({"readOnly": False}),
+        lambda value: value["spec"]["template"]["spec"]["containers"][0][
+            "volumeMounts"
+        ][0].update({"readOnly": "false"}),
         lambda value: value["spec"]["template"]["spec"]["initContainers"][0][
             "volumeMounts"
         ][1].update({"readOnly": True}),
@@ -337,6 +412,9 @@ def test_mock_job_rejects_unsafe_shape_mutations(mutation: Any) -> None:
                 }
             }
         ),
+        lambda value: value["spec"]["template"]["spec"]["volumes"][2][
+            "persistentVolumeClaim"
+        ].update({"readOnly": "false"}),
     ],
 )
 def test_gpu_template_rejects_identity_security_and_storage_drift(
@@ -346,6 +424,34 @@ def test_gpu_template_rejects_identity_security_and_storage_drift(
     mutation(value)
     with pytest.raises(KubernetesContractError):
         validate_kubernetes_job(value, "gpu", template=True)
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "runner:latest",
+        "runner/repo:tag",
+        "sha256:" + "a" * 64,
+        "@sha256:" + "a" * 64,
+        "runner/repo@sha256:" + "A" * 64,
+        "runner/repo@sha256:" + "a" * 63,
+    ],
+)
+def test_gpu_runner_image_requires_a_repository_digest(image: str) -> None:
+    value = _document(GPU_MANIFEST, "gpu")
+    runner = cast(Any, value)["spec"]["template"]["spec"]["containers"][0]
+    runner["image"] = image
+    with pytest.raises(KubernetesContractError) as error:
+        validate_kubernetes_job(value, "gpu", template=True)
+    assert image not in str(error.value)
+
+
+def test_gpu_placeholders_cannot_be_executed_without_template_mode() -> None:
+    value = _document(GPU_MANIFEST, "gpu")
+    runner = cast(Any, value)["spec"]["template"]["spec"]["containers"][0]
+    runner["image"] = "inferdrome/runner@sha256:" + "a" * 64
+    with pytest.raises(KubernetesContractError):
+        validate_kubernetes_job(value, "gpu", template=False)
 
 
 def test_profiles_cannot_be_cross_substituted() -> None:
@@ -522,6 +628,46 @@ def test_fake_kind_wrapper_retrieves_logs_verifies_and_cleans_exact_resources(
     create_line = next(line for line in kind_lines if "create cluster" in line)
     assert create_line.index("--kubeconfig") > create_line.index("create cluster")
     assert "kubeconfig=" in create_line
+    assert all("provider=docker" in line for line in kind_lines)
+    assert all("network=attacker-selected-network" not in line for line in kind_lines)
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "kindest/node:v1.33.999@sha256:" + "b" * 64,
+        "kindest/node:v1.33.1@sha256:" + "b" * 64,
+        "kindest/node:v1.33.1",
+    ],
+)
+def test_fake_wrapper_rejects_unapproved_kind_node_image_before_kind(
+    tmp_path: Path, image: str
+) -> None:
+    result = _run_fake_wrapper(tmp_path, INFERDROME_KIND_NODE_IMAGE=image)
+    assert result.returncode == 2
+    assert not any(
+        line.startswith("kind ")
+        for line in (tmp_path / "commands.log").read_text().splitlines()
+    )
+
+
+def test_fake_wrapper_forces_docker_kind_provider_and_clears_network_override(
+    tmp_path: Path,
+) -> None:
+    result = _run_fake_wrapper(
+        tmp_path,
+        KIND_EXPERIMENTAL_PROVIDER="podman",
+        KIND_EXPERIMENTAL_DOCKER_NETWORK="attacker-selected-network",
+    )
+    assert result.returncode == 0, result.stderr
+    kind_lines = [
+        line
+        for line in (tmp_path / "commands.log").read_text().splitlines()
+        if line.startswith("kind ")
+    ]
+    assert kind_lines
+    assert all("provider=docker" in line for line in kind_lines)
+    assert all("attacker-selected-network" not in line for line in kind_lines)
 
 
 @pytest.mark.parametrize(
@@ -707,7 +853,7 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
             "INFERDROME_K8S_LOG_SOURCE": str(source),
             "INFERDROME_K8S_TEST_LOG": str(log_path),
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
-            "INFERDROME_KIND_NODE_IMAGE": "kindest/node:v1.33.1@sha256:" + "a" * 64,
+            "INFERDROME_KIND_NODE_IMAGE": KIND_NODE_IMAGE_REFERENCE,
             "INFERDROME_K8S_INTERRUPT_WAIT": "1",
             "INFERDROME_K8S_SERVER_VERSION_JSON":
             '{"clientVersion":{"major":"1","minor":"33"},'

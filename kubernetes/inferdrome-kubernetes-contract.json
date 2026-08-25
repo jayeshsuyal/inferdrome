@@ -13,6 +13,12 @@
   },
   "job_shape": "batch/v1-job-native-sidecar",
   "kubernetes_min_version": "1.33",
+  "local_cluster": {
+    "kind_node_image": "kindest/node:v1.33.1@sha256:050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f",
+    "kind_version": "0.29.0",
+    "kubernetes_version": "1.33.1",
+    "provider": "docker"
+  },
   "model": {
     "model_id": "Qwen/Qwen3-8B",
     "model_manifest_sha256": "sha256:ef291a8dd0f21604c8da3025f5112bd6641e891a3401c8550584725eaabe55cc",
@@ -25,7 +31,7 @@
     "gpu": {
       "evidence_eligible": false,
       "evidence_persistence": "operator-provided-evidence-pvc-required",
-      "manifest_sha256": "sha256:d250fbe67d8b124fddd5ad72319ea0fc06a8664c5a4898d3c746225b7d2992cd",
+      "manifest_sha256": "sha256:609ae12edf4d17466f843404f810a48ba76a879ae260fa6cffd8068ab0ed1f9c",
       "manifest_template": "kubernetes/inferdrome-benchmark-gpu-job.template.yaml",
       "runner_image": "immutable-digest-required-at-render-time",
       "synthetic_only": false
@@ -34,7 +40,7 @@
       "evidence_eligible": false,
       "evidence_persistence": "disposable-emptydir-log-retrieval",
       "manifest": "kubernetes/inferdrome-benchmark-mock-job.yaml",
-      "manifest_sha256": "sha256:245c98d4c9fa6a0d9f9e8f4d8e76813ff560125bcb415d20e4f76505ba7295ae",
+      "manifest_sha256": "sha256:3193610f8fae1751e45813544e33e193a7c684dca4aeb466756bd48174a81db2",
       "synthetic_only": true
     }
   },

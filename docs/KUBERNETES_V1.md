@@ -34,7 +34,10 @@ The YAML parser rejects duplicate keys, multiple documents, unknown contract
 fields, unsafe volume sources, public networking, shell construction, mutable
 GPU images, GPU assignment to the runner, missing probes/security controls,
 and unbound model/runtime/benchmark arguments. It performs no Kubernetes API
-call and has bounded, non-disclosing errors.
+call and has bounded, non-disclosing errors. Engine health probes are exact
+argv-form `exec` probes using the repository-fixed Python standard-library
+health request to `127.0.0.1:8000`; HTTP probes are not used because kubelet
+HTTP probes originate from the node rather than the Pod's loopback namespace.
 
 ## Synthetic local mock
 
@@ -64,10 +67,13 @@ failure, cleanup, and interrupt paths. They are orchestration simulations, not
 Kubernetes execution or evidence. On a host without Docker/kind/kubectl, the
 real local-cluster gate is `UNRUN`, not a successful smoke.
 
-The wrapper requires an operator-supplied immutable local kind node image in
-`INFERDROME_KIND_NODE_IMAGE`, matching `kindest/node:v1.33.x@sha256:<digest>`;
-it verifies that image with local Docker before creating a cluster and checks
-the actual server version after creation. It uses a private temporary
+The wrapper requires the exact official kind v0.29.0 Kubernetes 1.33.1 node
+image `kindest/node:v1.33.1@sha256:050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f`.
+An `INFERDROME_KIND_NODE_IMAGE` override, if supplied, must equal that exact
+reference. It verifies the image with local Docker before creating a cluster
+and checks the actual server version after creation. It forces kind's Docker
+provider and removes the ambient Docker-network override, so the inspected
+image/provider cannot diverge. It uses a private temporary
 `KUBECONFIG`; `kind get`, `kind load`, and `kind delete` use the exported
 context, while the private path is passed to `kind create cluster` in its
 supported subcommand position. A failed create is never treated as ownership

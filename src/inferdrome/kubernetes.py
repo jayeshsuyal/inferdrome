@@ -42,6 +42,8 @@ from inferdrome.runner import RUNNER_OUTPUT_SCHEMA_VERSION
 from inferdrome.vllm_compose import (
     VLLM_RUNTIME_IMAGE_REFERENCE,
     VLLM_VERSION,
+    ComposePreflightError,
+    require_immutable_image_reference,
 )
 
 KUBERNETES_CONTRACT_SCHEMA_VERSION: Final = "inferdrome.kubernetes-job.v1"
@@ -63,6 +65,18 @@ KUBERNETES_MAX_YAML_DEPTH: Final = 64
 KUBERNETES_MAX_YAML_TOKENS: Final = 20_000
 KUBERNETES_LOOPBACK_ENDPOINT: Final = "http://127.0.0.1:8000"
 KUBERNETES_FROZEN_CAMPAIGN_ENDPOINT: Final = "http://127.0.0.1:18080"
+KIND_NODE_IMAGE_REFERENCE: Final = (
+    "kindest/node:v1.33.1@sha256:"
+    "050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f"
+)
+KUBERNETES_HEALTH_EXEC_COMMAND: Final = [
+    "python",
+    "-c",
+    "import http.client; "
+    "c=http.client.HTTPConnection('127.0.0.1',8000,timeout=2); "
+    "c.request('GET','/health'); r=c.getresponse(); r.read(4096); "
+    "c.close(); raise SystemExit(0 if 200 <= r.status < 300 else 1)",
+]
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERSION_COMPONENT_RE = re.compile(r"^[0-9]{1,3}\+?$")
 
@@ -244,6 +258,32 @@ def _integer(
     return value
 
 
+def _boolean(value: object, label: str) -> bool:
+    if type(value) is not bool:
+        raise KubernetesContractError(f"Kubernetes {label} is invalid")
+    return value
+
+
+def _exact_integer(value: object, expected: int, label: str) -> None:
+    if type(value) is not int or value != expected:
+        raise KubernetesContractError(f"Kubernetes {label} is not bound")
+
+
+def _strict_equal(actual: object, expected: object) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _strict_equal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _strict_equal(left, right)
+            for left, right in zip(actual, expected, strict=True)
+        )
+    return actual == expected
+
+
 def _expect_keys(
     value: dict[str, object],
     allowed: set[str],
@@ -325,8 +365,8 @@ def _validate_pod_security(value: object, label: str, *, uid: int) -> None:
     )
     if security.get("runAsNonRoot") is not True:
         raise KubernetesContractError("Kubernetes security must run as non-root")
-    if security.get("runAsUser") != uid or security.get("runAsGroup") != uid:
-        raise KubernetesContractError("Kubernetes container identity is not bound")
+    _exact_integer(security.get("runAsUser"), uid, "Pod identity")
+    _exact_integer(security.get("runAsGroup"), uid, "Pod identity")
     if security.get("seccompProfile") != {"type": "RuntimeDefault"}:
         raise KubernetesContractError("Kubernetes seccomp profile is not bound")
 
@@ -357,8 +397,8 @@ def _validate_container_security(value: object, label: str, *, uid: int) -> None
     )
     if security.get("runAsNonRoot") is not True:
         raise KubernetesContractError("Kubernetes security must run as non-root")
-    if security.get("runAsUser") != uid or security.get("runAsGroup") != uid:
-        raise KubernetesContractError("Kubernetes container identity is not bound")
+    _exact_integer(security.get("runAsUser"), uid, "container identity")
+    _exact_integer(security.get("runAsGroup"), uid, "container identity")
     if security.get("allowPrivilegeEscalation") is not False:
         raise KubernetesContractError("Kubernetes privilege escalation is forbidden")
     if security.get("readOnlyRootFilesystem") is not True:
@@ -374,30 +414,19 @@ def _validate_probe(value: object, label: str) -> None:
     _expect_keys(
         probe,
         {
-            "httpGet",
+            "exec",
             "periodSeconds",
             "timeoutSeconds",
             "failureThreshold",
-            "successThreshold",
-            "initialDelaySeconds",
         },
-        {"httpGet", "periodSeconds", "timeoutSeconds", "failureThreshold"},
+        {"exec", "periodSeconds", "timeoutSeconds", "failureThreshold"},
         label,
     )
-    http_get = _mapping(probe.get("httpGet"), f"{label} httpGet")
-    _expect_keys(
-        http_get,
-        {"path", "port", "host", "scheme"},
-        {"path", "port", "host"},
-        f"{label} httpGet",
-    )
-    if http_get != {
-        "path": "/health",
-        "port": 8000,
-        "host": "127.0.0.1",
-        "scheme": "HTTP",
-    }:
-        raise KubernetesContractError("Kubernetes health probe is not loopback-bound")
+    exec_probe = _mapping(probe.get("exec"), f"{label} exec")
+    _expect_keys(exec_probe, {"command"}, {"command"}, f"{label} exec")
+    command = _list(exec_probe["command"], f"{label} exec command")
+    if command != KUBERNETES_HEALTH_EXEC_COMMAND:
+        raise KubernetesContractError("Kubernetes health probe is not bound")
     _integer(probe.get("periodSeconds"), f"{label} period", minimum=1, maximum=60)
     _integer(probe.get("timeoutSeconds"), f"{label} timeout", minimum=1, maximum=10)
     _integer(
@@ -438,7 +467,7 @@ def _validate_resources(
     expected = expected_resources[profile][engine]
     resources = _mapping(value, label)
     _expect_keys(resources, {"requests", "limits"}, {"requests", "limits"}, label)
-    if resources != expected:
+    if not _strict_equal(resources, expected):
         raise KubernetesContractError("Kubernetes resources are not bound")
 
 
@@ -491,7 +520,7 @@ def _validate_mounts(value: object, label: str, expected: dict[str, bool]) -> No
         }.get(name)
         if expected_path is not None and mount_path != expected_path:
             raise KubernetesContractError("Kubernetes volume mount path is not bound")
-        read_only = bool(item.get("readOnly", False))
+        read_only = _boolean(item.get("readOnly", False), f"{label} readOnly")
         if read_only != expected[name]:
             raise KubernetesContractError(
                 "Kubernetes volume mount mutability is unsafe"
@@ -501,7 +530,7 @@ def _validate_mounts(value: object, label: str, expected: dict[str, bool]) -> No
         raise KubernetesContractError("Kubernetes volume mounts are incomplete")
 
 
-def _validate_volumes(value: object, profile: str) -> None:
+def _validate_volumes(value: object, profile: str, *, template: bool) -> None:
     volumes = _list(value, "volumes")
     seen: set[str] = set()
     for volume in volumes:
@@ -531,8 +560,17 @@ def _validate_volumes(value: object, profile: str) -> None:
                 "experiment": "REQUIRED_EXPERIMENT_PVC",
                 "evidence": "REQUIRED_EVIDENCE_PVC",
             }[name]
-            if claim != expected_claim or pvc["readOnly"] != (name != "evidence"):
+            if type(pvc.get("readOnly")) is not bool:
+                raise KubernetesContractError("Kubernetes PVC mutability is invalid")
+            if (
+                claim != expected_claim
+                or pvc["readOnly"] != (name != "evidence")
+            ):
                 raise KubernetesContractError("Kubernetes PVC boundary is not bound")
+            if not template and claim.startswith("REQUIRED_"):
+                raise KubernetesContractError(
+                    "Kubernetes GPU PVC placeholders require a template"
+                )
         elif profile == "gpu" and name in {"engine-tmp", "engine-shm", "runner-tmp"}:
             empty_dir = _mapping(item.get("emptyDir"), f"{name} emptyDir")
             expected_empty_dir = {
@@ -583,23 +621,26 @@ def _validate_container(
     }
     if not engine or profile == "gpu":
         required_keys.add("volumeMounts")
+    allowed_keys = {
+        "name",
+        "image",
+        "imagePullPolicy",
+        "command",
+        "args",
+        "securityContext",
+        "resources",
+        "volumeMounts",
+        "env",
+        "startupProbe",
+        "readinessProbe",
+        "livenessProbe",
+    }
+    if engine:
+        allowed_keys.add("restartPolicy")
+        required_keys.add("restartPolicy")
     _expect_keys(
         container,
-        {
-            "name",
-            "image",
-            "imagePullPolicy",
-            "command",
-            "args",
-            "securityContext",
-            "resources",
-            "volumeMounts",
-            "env",
-            "startupProbe",
-            "readinessProbe",
-            "livenessProbe",
-            "restartPolicy",
-        },
+        allowed_keys,
         required_keys,
         "container",
     )
@@ -627,10 +668,13 @@ def _validate_container(
                 raise KubernetesContractError(
                     "Kubernetes GPU runner image must be immutable"
                 )
-        elif _DIGEST_RE.fullmatch(image.rsplit("@", 1)[-1]) is None:
-            raise KubernetesContractError(
-                "Kubernetes GPU runner image must be immutable"
-            )
+        else:
+            try:
+                require_immutable_image_reference(image, "Kubernetes GPU runner")
+            except ComposePreflightError:
+                raise KubernetesContractError(
+                    "Kubernetes GPU runner image must be immutable"
+                ) from None
         if container.get("imagePullPolicy") != "IfNotPresent":
             raise KubernetesContractError("Kubernetes GPU image pull policy is unsafe")
     command = _list(container["command"], "container command")
@@ -802,13 +846,32 @@ def validate_kubernetes_job(
         },
         "Job spec",
     )
-    if spec["backoffLimit"] != 0:
+    if (
+        _integer(spec["backoffLimit"], "Kubernetes Job retries", minimum=0, maximum=0)
+        != 0
+    ):
         raise KubernetesContractError("Kubernetes Job retries must be disabled")
     expected_deadline = 300 if profile == "mock" else 1_800
     expected_ttl = 60 if profile == "mock" else 300
-    if spec["activeDeadlineSeconds"] != expected_deadline:
+    if (
+        _integer(
+            spec["activeDeadlineSeconds"],
+            "Kubernetes Job active deadline",
+            minimum=1,
+            maximum=86_400,
+        )
+        != expected_deadline
+    ):
         raise KubernetesContractError("Kubernetes Job active deadline is not bound")
-    if spec["ttlSecondsAfterFinished"] != expected_ttl:
+    if (
+        _integer(
+            spec["ttlSecondsAfterFinished"],
+            "Kubernetes Job TTL",
+            minimum=0,
+            maximum=86_400,
+        )
+        != expected_ttl
+    ):
         raise KubernetesContractError("Kubernetes Job TTL is not bound")
     pod_template = _mapping(spec["template"], "Pod template")
     _expect_keys(
@@ -849,16 +912,28 @@ def validate_kubernetes_job(
         "Pod spec",
     )
     if (
-        pod["automountServiceAccountToken"] is not False
+        _boolean(pod["automountServiceAccountToken"], "automountServiceAccountToken")
+        is not False
         or pod["restartPolicy"] != "Never"
     ):
         raise KubernetesContractError("Kubernetes Pod lifecycle is unsafe")
     expected_grace = 30 if profile == "mock" else 60
-    if pod["terminationGracePeriodSeconds"] != expected_grace:
+    if (
+        _integer(
+            pod["terminationGracePeriodSeconds"],
+            "Kubernetes termination grace",
+            minimum=1,
+            maximum=120,
+        )
+        != expected_grace
+    ):
         raise KubernetesContractError("Kubernetes termination grace is not bound")
     _validate_pod_security(pod["securityContext"], "Pod security", uid=2000)
-    if any(pod.get(key) is True for key in ("hostNetwork", "hostPID", "hostIPC")):
-        raise KubernetesContractError("Kubernetes host namespace sharing is forbidden")
+    for key in ("hostNetwork", "hostPID", "hostIPC"):
+        if key in pod and _boolean(pod[key], key):
+            raise KubernetesContractError(
+                "Kubernetes host namespace sharing is forbidden"
+            )
     if profile == "gpu" and pod.get("nodeSelector") != {"kubernetes.io/arch": "amd64"}:
         raise KubernetesContractError("Kubernetes GPU architecture is not pinned")
     if profile == "mock" and "nodeSelector" in pod:
@@ -874,7 +949,9 @@ def validate_kubernetes_job(
         raise KubernetesContractError("Kubernetes engine must be a native sidecar")
     _validate_container(init, profile, engine=True, template=template)
     _validate_container(containers[0], profile, engine=False, template=template)
-    _validate_volumes(pod["volumes"], profile)
+    _validate_volumes(pod["volumes"], profile, template=template)
+    if profile == "gpu" and not template and "REQUIRED_" in json.dumps(document):
+        raise KubernetesContractError("Kubernetes GPU placeholders require a template")
     if (
         template
         and profile == "gpu"
@@ -1021,6 +1098,12 @@ def kubernetes_contract() -> dict[str, object]:
         "schema_version": KUBERNETES_CONTRACT_SCHEMA_VERSION,
         "kubernetes_min_version": KUBERNETES_MIN_VERSION,
         "job_shape": "batch/v1-job-native-sidecar",
+        "local_cluster": {
+            "provider": "docker",
+            "kind_node_image": KIND_NODE_IMAGE_REFERENCE,
+            "kind_version": "0.29.0",
+            "kubernetes_version": "1.33.1",
+        },
         "profiles": {
             "mock": {
                 "manifest": MOCK_MANIFEST_RELATIVE_PATH,
@@ -1318,8 +1401,10 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "GPU_MANIFEST_RELATIVE_PATH",
     "GPU_RUNNER_IMAGE_PLACEHOLDER",
+    "KIND_NODE_IMAGE_REFERENCE",
     "KUBERNETES_CONTRACT_SCHEMA_VERSION",
     "KUBERNETES_FROZEN_CAMPAIGN_ENDPOINT",
+    "KUBERNETES_HEALTH_EXEC_COMMAND",
     "KUBERNETES_LOOPBACK_ENDPOINT",
     "KUBERNETES_MAX_MANIFEST_BYTES",
     "KUBERNETES_MAX_OUTPUT_BYTES",

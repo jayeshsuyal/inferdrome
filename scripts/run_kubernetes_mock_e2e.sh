@@ -88,9 +88,15 @@ docker_bin=$(command -v docker 2>/dev/null || true)
 [[ -n "$kubectl_bin" ]] || fail "kubectl is unavailable"
 [[ -n "$docker_bin" ]] || fail "Docker is unavailable"
 
-kind_node_image=${INFERDROME_KIND_NODE_IMAGE:-}
-[[ "$kind_node_image" =~ ^kindest/node:v1\.33\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || \
-  fail "an immutable Kubernetes 1.33 kind node image is required"
+canonical_kind_node_image=$(
+  PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+    "$inferdrome_python" -c \
+    'from inferdrome.kubernetes import KIND_NODE_IMAGE_REFERENCE; print(KIND_NODE_IMAGE_REFERENCE)' \
+    2>/dev/null
+) || fail "the pinned kind node image policy is unavailable"
+kind_node_image=${INFERDROME_KIND_NODE_IMAGE:-$canonical_kind_node_image}
+[[ "$kind_node_image" == "$canonical_kind_node_image" ]] || \
+  fail "the pinned kind node image is not approved"
 "$docker_bin" image inspect "$kind_node_image" >/dev/null 2>&1 || \
   fail "the pinned kind node image is not present locally"
 
@@ -174,6 +180,10 @@ server_version_file="$state_dir/server-version.json"
 (umask 077 && : >"$kubeconfig") || fail "private kubeconfig could not be created"
 chmod 600 "$kubeconfig" || fail "private kubeconfig could not be secured"
 export KUBECONFIG="$kubeconfig"
+# Do not inherit kind's alternate provider or network override.  The Docker
+# image inspection above and every kind operation must use the same provider.
+export KIND_EXPERIMENTAL_PROVIDER=docker
+unset KIND_EXPERIMENTAL_DOCKER_NETWORK
 
 kind=("$kind_bin")
 kubectl=("$kubectl_bin" --kubeconfig "$kubeconfig" --context "$context")
