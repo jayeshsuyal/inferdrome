@@ -1,5 +1,7 @@
 import { AppShell } from "./components/AppShell";
+import { DashboardUnlockScreen } from "./components/DashboardUnlockScreen";
 import { EmptyState, PageHeader } from "./components/Primitives";
+import { useDashboardAuth } from "./context/DashboardAuthContext";
 import { RunsProvider } from "./context/RunsContext";
 import { Navigate, useLocation } from "./lib/router";
 import { CompareView } from "./views/CompareView";
@@ -24,6 +26,7 @@ function NotFoundView() {
 }
 
 export function App() {
+  const { authRequired, token } = useDashboardAuth();
   const { pathname } = useLocation();
   let view;
   if (pathname === "/") view = <Navigate to="/runs" replace />;
@@ -40,7 +43,7 @@ export function App() {
 
   return (
     <RunsProvider>
-      <AppShell>{view}</AppShell>
+      {authRequired && token === null ? <DashboardUnlockScreen /> : <AppShell>{view}</AppShell>}
     </RunsProvider>
   );
 }

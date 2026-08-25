@@ -29,3 +29,4 @@ a new ADR that supersedes the old one.
 - [ADR 0009: Add fail-closed controlled-comparison execution](0009-add-fail-closed-comparison-execution.md)
 - [ADR 0010: Freeze a two-track cross-GPU capability campaign](0010-freeze-cross-gpu-capability-campaign.md)
 - [ADR 0011: Align campaign warmups with pinned vLLM semantics](0011-align-campaign-warmups-with-vllm.md)
+- [ADR 0012: Add opt-in local dashboard authentication](0012-opt-in-local-dashboard-authentication.md)

@@ -53,6 +53,10 @@ class DashboardError(InferdromeError):
     """The local read-only dashboard could not be started or queried safely."""
 
 
+class DashboardAuthError(DashboardError):
+    """The optional local dashboard authentication boundary failed closed."""
+
+
 class DashboardRunNotFound(DashboardError):
     """A dashboard run ID was not present in the verified index."""
 

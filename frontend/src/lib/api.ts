@@ -29,6 +29,11 @@ import type {
 } from "./types";
 
 const API_ROOT = "/api/v1";
+let dashboardToken: string | null = null;
+
+export function setDashboardToken(token: string | null): void {
+  dashboardToken = token;
+}
 const RUN_PAGE_LIMIT = 200;
 const MAX_RUN_PAGES = 5;
 const TRIAL_SET_PAGE_LIMIT = 100;
@@ -165,9 +170,11 @@ async function readError(response: Response): Promise<string> {
 async function fetchJson(path: string, signal?: AbortSignal): Promise<unknown> {
   let response: Response;
   try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (dashboardToken !== null) headers.Authorization = `Bearer ${dashboardToken}`;
     response = await fetch(`${API_ROOT}${path}`, {
       method: "GET",
-      headers: { Accept: "application/json" },
+      headers,
       signal,
     });
   } catch (error) {

@@ -5,6 +5,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
+import { DashboardAuthProvider } from "./context/DashboardAuthContext";
 import { BrowserRouter } from "./lib/router";
 import "./styles.css";
 
@@ -13,8 +14,10 @@ if (!root) throw new Error("Inferdrome dashboard root is missing");
 
 createRoot(root).render(
   <StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <DashboardAuthProvider>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </DashboardAuthProvider>
   </StrictMode>,
 );
