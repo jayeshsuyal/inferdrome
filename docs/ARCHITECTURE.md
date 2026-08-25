@@ -157,8 +157,10 @@ managed-vLLM loopback profile.
 PR7 adds the separate offline GCP planning boundary in
 [`src/inferdrome/deployment/gcp.py`](../src/inferdrome/deployment/gcp.py) and
 [`GCP_DRY_RUN_V1.md`](GCP_DRY_RUN_V1.md). It consumes the unchanged GCP
-dry-run deployment shape, a strict local inventory snapshot, and an explicit
-compute project/region context. The planner has no cloud transport, SDK,
+dry-run deployment shape, a strict local zone-scoped inventory snapshot, and an
+explicit compute project/region context. Every selectable machine/accelerator
+tuple is bound to its exact zone in one offering; the planner never forms a
+Cartesian product. The planner has no cloud transport, SDK,
 credential resolution, subprocess, runtime, or mutation surface. Its stable
 selection is an inventory-derived plan only: capacity, pricing, invoice truth,
 execution authorization, evidence eligibility, and provider attestation remain

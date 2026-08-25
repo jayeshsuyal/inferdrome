@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -34,15 +35,38 @@ MAX_INPUT_BYTES: Final = 524_288
 
 
 def _read_regular(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
     try:
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink < 1:
             raise ValueError("input is not a regular file")
         if metadata.st_size > MAX_INPUT_BYTES:
             raise ValueError("input exceeds its bound")
-        return path.read_bytes()
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_INPUT_BYTES:
+            chunk = os.read(descriptor, min(65_536, MAX_INPUT_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        content = b"".join(chunks)
+        final_metadata = os.fstat(descriptor)
+        if (
+            final_metadata.st_dev != metadata.st_dev
+            or final_metadata.st_ino != metadata.st_ino
+            or final_metadata.st_size != len(content)
+            or len(content) > MAX_INPUT_BYTES
+        ):
+            raise ValueError("input changed during read")
+        return content
     except (OSError, ValueError):
         raise ValueError("GCP plan input is unavailable") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _load_context(path: Path) -> GcpPlanningContext:

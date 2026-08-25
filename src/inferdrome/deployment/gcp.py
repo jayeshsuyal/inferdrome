@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Protocol, Self
 
@@ -55,11 +56,8 @@ SUPPORTED_GCP_GPU_MODEL: Final = "NVIDIA A100-SXM4-40GB"
 MAX_GCP_INVENTORY_BYTES: Final = 524_288
 MAX_GCP_PLAN_BYTES: Final = 524_288
 
-_TIMESTAMP = re.compile(
-    r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:"
-    r"[0-9]{2}(?:\.[0-9]{1,6})?Z$"
-)
-_PUBLIC_ENDPOINT = re.compile(r"^(?:https?|ssh|ftp)://", re.IGNORECASE)
+_TIMESTAMP = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+_PUBLIC_ENDPOINT = re.compile(r"^(?:https?|ssh|ftp)://.*$", re.IGNORECASE)
 _SENSITIVE_KEYS = frozenset(
     {
         "access_token",
@@ -82,6 +80,10 @@ _SENSITIVE_KEYS = frozenset(
         "host",
     }
 )
+_SENSITIVE_KEYS_NORMALIZED = frozenset(
+    re.sub(r"[^a-z0-9]+", "", key.lower()) for key in _SENSITIVE_KEYS
+)
+_HEX_IDENTITY_KEYS = frozenset({"modelrevision", "tokenizerrevision"})
 _CREDENTIAL_SHAPES = (
     re.compile(r"^(?:sk|rk)-[A-Za-z0-9_-]{16,}$"),
     re.compile(r"^(?:gh[pousr]_)[A-Za-z0-9_]{16,}$"),
@@ -98,13 +100,17 @@ GcpProjectId = Annotated[
 GcpRegion = Annotated[
     str,
     StringConstraints(
-        min_length=1, max_length=32, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$"
+        min_length=5,
+        max_length=32,
+        pattern=r"^[a-z]+-[a-z]+[0-9]{1,2}$",
     ),
 ]
 GcpZone = Annotated[
     str,
     StringConstraints(
-        min_length=3, max_length=64, pattern=r"^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$"
+        min_length=7,
+        max_length=64,
+        pattern=r"^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
     ),
 ]
 GcpResourceName = Annotated[
@@ -149,28 +155,38 @@ def _normalized_key(key: str) -> str:
 
 
 def _looks_credential_shaped(value: str) -> bool:
-    # Pinned revisions and digests are intentionally long lowercase hex, not
-    # credential values.  They are allowed only where the closed model also
-    # constrains them to an identity field.
-    if re.fullmatch(r"[0-9a-f]{40,64}", value):
-        return False
     return any(pattern.fullmatch(value) is not None for pattern in _CREDENTIAL_SHAPES)
 
 
-def _reject_unsafe_inventory_values(value: object) -> None:
+def _is_allowed_hex_identity(value: str, key_path: tuple[str, ...]) -> bool:
+    return (
+        _looks_credential_shaped(value)
+        and len(key_path) > 0
+        and key_path[-1] in _HEX_IDENTITY_KEYS
+        and re.fullmatch(r"[0-9a-f]{40,64}", value) is not None
+    )
+
+
+def _reject_unsafe_inventory_values(
+    value: object, *, key_path: tuple[str, ...] = ()
+) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             if not isinstance(key, str):
                 raise ValueError("GCP inventory object keys must be strings")
             normalized = _normalized_key(key)
-            if normalized in {_normalized_key(item) for item in _SENSITIVE_KEYS}:
+            if normalized in _SENSITIVE_KEYS_NORMALIZED:
                 raise ValueError("GCP inventory contains forbidden sensitive fields")
-            _reject_unsafe_inventory_values(child)
+            _reject_unsafe_inventory_values(child, key_path=(*key_path, normalized))
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for child in value:
-            _reject_unsafe_inventory_values(child)
+            _reject_unsafe_inventory_values(child, key_path=key_path)
     elif isinstance(value, str) and (
-        _PUBLIC_ENDPOINT.fullmatch(value) or _looks_credential_shaped(value)
+        _PUBLIC_ENDPOINT.fullmatch(value) is not None
+        or (
+            _looks_credential_shaped(value)
+            and not _is_allowed_hex_identity(value, key_path)
+        )
     ):
         raise ValueError("GCP inventory contains forbidden sensitive values")
 
@@ -219,6 +235,13 @@ class GcpInventorySource(GcpModel):
 
     @model_validator(mode="after")
     def validate_source_time(self) -> Self:
+        if self.observed_at is not None:
+            try:
+                datetime.strptime(self.observed_at, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                raise ValueError(
+                    "inventory observation time is not a valid UTC timestamp"
+                ) from None
         if self.kind == "synthetic_fixture" and self.observed_at is not None:
             raise ValueError("synthetic inventory cannot claim an observation time")
         if self.kind == "offline_snapshot" and self.observed_at is None:
@@ -226,34 +249,19 @@ class GcpInventorySource(GcpModel):
         return self
 
 
-class GcpInventoryZone(GcpModel):
-    name: GcpZone
-    status: Literal["available", "unavailable", "unknown"]
+class GcpInventoryOffering(GcpModel):
+    """One explicit zone-scoped catalog offering, never a cross-product."""
 
-
-class GcpInventoryAccelerator(GcpModel):
-    accelerator_model: GcpHardwareName
-    provider_type: GcpResourceName
-    max_count: int = Field(strict=True, ge=1, le=16)
-    status: Literal["available", "unavailable", "unknown"]
-
-
-class GcpInventoryMachine(GcpModel):
+    zone: GcpZone
     machine_type: GcpResourceName
     architecture: Literal["amd64", "arm64"]
     cpu_cores: int = Field(strict=True, ge=1, le=256)
     memory_mib: int = Field(strict=True, ge=256, le=1_048_576)
     ephemeral_storage_gib: int = Field(strict=True, ge=1, le=16_384)
-    accelerators: tuple[GcpInventoryAccelerator, ...] = Field(max_length=16)
-
-    @model_validator(mode="after")
-    def unique_accelerators(self) -> Self:
-        pairs = {
-            (item.accelerator_model, item.provider_type) for item in self.accelerators
-        }
-        if len(pairs) != len(self.accelerators):
-            raise ValueError("GCP machine accelerator identities must be unique")
-        return self
+    accelerator_model: GcpHardwareName
+    accelerator_provider_type: GcpResourceName
+    accelerator_max_count: int = Field(strict=True, ge=1, le=16)
+    catalog_eligibility: Literal["catalog_eligible", "catalog_unavailable", "unknown"]
 
 
 class GcpInventorySnapshot(GcpModel):
@@ -261,19 +269,26 @@ class GcpInventorySnapshot(GcpModel):
     project_id: GcpProjectId
     region: GcpRegion
     source: GcpInventorySource
-    zones: tuple[GcpInventoryZone, ...] = Field(min_length=1, max_length=64)
-    machine_types: tuple[GcpInventoryMachine, ...] = Field(min_length=1, max_length=128)
+    offerings: tuple[GcpInventoryOffering, ...] = Field(min_length=1, max_length=256)
 
     @model_validator(mode="after")
     def validate_snapshot(self) -> Self:
-        zone_names = [zone.name for zone in self.zones]
-        if len(set(zone_names)) != len(zone_names):
-            raise ValueError("GCP inventory zones must be unique")
-        if any(not zone.startswith(f"{self.region}-") for zone in zone_names):
-            raise ValueError("GCP inventory zone is outside the declared region")
-        machine_names = [machine.machine_type for machine in self.machine_types]
-        if len(set(machine_names)) != len(machine_names):
-            raise ValueError("GCP inventory machine types must be unique")
+        identities = [
+            (
+                offering.zone,
+                offering.machine_type,
+                offering.accelerator_model,
+                offering.accelerator_provider_type,
+            )
+            for offering in self.offerings
+        ]
+        if len(set(identities)) != len(identities):
+            raise ValueError("GCP inventory offerings must be unique")
+        if any(
+            not offering.zone.startswith(f"{self.region}-")
+            for offering in self.offerings
+        ):
+            raise ValueError("GCP inventory offering is outside the declared region")
         return self
 
     @classmethod
@@ -373,7 +388,7 @@ class GcpPlanProvider(GcpModel):
     accelerator_model: Literal["NVIDIA A100-SXM4-40GB"]
     accelerator_provider_type: GcpResourceName
     accelerator_count: int = Field(strict=True, ge=1, le=16)
-    inventory_status: Literal["available"]
+    catalog_eligibility: Literal["catalog_eligible"]
 
 
 class GcpPlanScope(GcpModel):
@@ -470,15 +485,15 @@ def _payload_value(plan: GcpDryRunPlan | GcpDryRunPlanPayload) -> dict[str, Any]
 
 def canonical_gcp_inventory_bytes(snapshot: GcpInventorySnapshot) -> bytes:
     value = _json_value(snapshot)
-    value["zones"] = sorted(value["zones"], key=lambda item: item["name"])
-    value["machine_types"] = sorted(
-        value["machine_types"], key=lambda item: item["machine_type"]
+    value["offerings"] = sorted(
+        value["offerings"],
+        key=lambda item: (
+            item["zone"],
+            item["machine_type"],
+            item["accelerator_model"],
+            item["accelerator_provider_type"],
+        ),
     )
-    for machine in value["machine_types"]:
-        machine["accelerators"] = sorted(
-            machine["accelerators"],
-            key=lambda item: (item["accelerator_model"], item["provider_type"]),
-        )
     return canonical_json_bytes(value)
 
 
@@ -600,45 +615,40 @@ def _select(
         or inventory.region != context.region
     ):
         raise GcpPlanError("GCP inventory does not match deployment project and region")
-    available_zones = sorted(
-        zone.name for zone in inventory.zones if zone.status == "available"
+    candidates = [
+        offering
+        for offering in inventory.offerings
+        if (
+            offering.catalog_eligibility == "catalog_eligible"
+            and offering.architecture == "amd64"
+            and offering.accelerator_model == SUPPORTED_GCP_GPU_MODEL
+            and offering.accelerator_max_count >= spec.resources.gpu_count
+            and offering.cpu_cores >= spec.resources.cpu_cores
+            and offering.memory_mib >= spec.resources.memory_mib
+            and offering.ephemeral_storage_gib >= spec.resources.ephemeral_storage_gib
+        )
+    ]
+    candidates.sort(
+        key=lambda offering: (
+            offering.zone,
+            offering.machine_type,
+            offering.accelerator_model,
+            offering.accelerator_provider_type,
+        )
     )
-    candidates: list[tuple[str, GcpInventoryMachine, GcpInventoryAccelerator]] = []
-    for zone in available_zones:
-        for machine in sorted(
-            inventory.machine_types, key=lambda item: item.machine_type
-        ):
-            if machine.architecture != "amd64":
-                continue
-            if machine.cpu_cores < spec.resources.cpu_cores:
-                continue
-            if machine.memory_mib < spec.resources.memory_mib:
-                continue
-            if machine.ephemeral_storage_gib < spec.resources.ephemeral_storage_gib:
-                continue
-            for accelerator in sorted(
-                machine.accelerators,
-                key=lambda item: (item.accelerator_model, item.provider_type),
-            ):
-                if (
-                    accelerator.status == "available"
-                    and accelerator.accelerator_model == SUPPORTED_GCP_GPU_MODEL
-                    and accelerator.max_count >= spec.resources.gpu_count
-                ):
-                    candidates.append((zone, machine, accelerator))
     if not candidates:
         raise GcpPlanError("GCP inventory has no eligible resource match")
-    zone, machine, accelerator = candidates[0]
+    offering = candidates[0]
     return GcpPlanProvider(
         project_id=context.compute_project_id,
         region=inventory.region,
-        zone=zone,
-        machine_type=machine.machine_type,
+        zone=offering.zone,
+        machine_type=offering.machine_type,
         architecture="amd64",
         accelerator_model=SUPPORTED_GCP_GPU_MODEL,
-        accelerator_provider_type=accelerator.provider_type,
+        accelerator_provider_type=offering.accelerator_provider_type,
         accelerator_count=spec.resources.gpu_count,
-        inventory_status="available",
+        catalog_eligibility="catalog_eligible",
     )
 
 

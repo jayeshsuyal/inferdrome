@@ -1,9 +1,16 @@
 {
   "$comment": "Offline bounded inventory only; no provider capacity or credential truth.",
   "$defs": {
-    "GcpInventoryAccelerator": {
+    "GcpInventoryOffering": {
       "additionalProperties": false,
+      "description": "One explicit zone-scoped catalog offering, never a cross-product.",
       "properties": {
+        "accelerator_max_count": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Accelerator Max Count",
+          "type": "integer"
+        },
         "accelerator_model": {
           "maxLength": 128,
           "minLength": 1,
@@ -11,48 +18,12 @@
           "title": "Accelerator Model",
           "type": "string"
         },
-        "max_count": {
-          "maximum": 16,
-          "minimum": 1,
-          "title": "Max Count",
-          "type": "integer"
-        },
-        "provider_type": {
+        "accelerator_provider_type": {
           "maxLength": 96,
           "minLength": 1,
           "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
-          "title": "Provider Type",
+          "title": "Accelerator Provider Type",
           "type": "string"
-        },
-        "status": {
-          "enum": [
-            "available",
-            "unavailable",
-            "unknown"
-          ],
-          "title": "Status",
-          "type": "string"
-        }
-      },
-      "required": [
-        "accelerator_model",
-        "provider_type",
-        "max_count",
-        "status"
-      ],
-      "title": "GcpInventoryAccelerator",
-      "type": "object"
-    },
-    "GcpInventoryMachine": {
-      "additionalProperties": false,
-      "properties": {
-        "accelerators": {
-          "items": {
-            "$ref": "#/$defs/GcpInventoryAccelerator"
-          },
-          "maxItems": 16,
-          "title": "Accelerators",
-          "type": "array"
         },
         "architecture": {
           "enum": [
@@ -60,6 +31,15 @@
             "arm64"
           ],
           "title": "Architecture",
+          "type": "string"
+        },
+        "catalog_eligibility": {
+          "enum": [
+            "catalog_eligible",
+            "catalog_unavailable",
+            "unknown"
+          ],
+          "title": "Catalog Eligibility",
           "type": "string"
         },
         "cpu_cores": {
@@ -86,17 +66,28 @@
           "minimum": 256,
           "title": "Memory Mib",
           "type": "integer"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
         }
       },
       "required": [
+        "zone",
         "machine_type",
         "architecture",
         "cpu_cores",
         "memory_mib",
         "ephemeral_storage_gib",
-        "accelerators"
+        "accelerator_model",
+        "accelerator_provider_type",
+        "accelerator_max_count",
+        "catalog_eligibility"
       ],
-      "title": "GcpInventoryMachine",
+      "title": "GcpInventoryOffering",
       "type": "object"
     },
     "GcpInventorySource": {
@@ -114,7 +105,7 @@
           "anyOf": [
             {
               "maxLength": 32,
-              "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+              "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
               "type": "string"
             },
             {
@@ -130,46 +121,19 @@
       ],
       "title": "GcpInventorySource",
       "type": "object"
-    },
-    "GcpInventoryZone": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "maxLength": 64,
-          "minLength": 3,
-          "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$",
-          "title": "Name",
-          "type": "string"
-        },
-        "status": {
-          "enum": [
-            "available",
-            "unavailable",
-            "unknown"
-          ],
-          "title": "Status",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "status"
-      ],
-      "title": "GcpInventoryZone",
-      "type": "object"
     }
   },
   "$id": "urn:inferdrome:gcp-inventory:v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "machine_types": {
+    "offerings": {
       "items": {
-        "$ref": "#/$defs/GcpInventoryMachine"
+        "$ref": "#/$defs/GcpInventoryOffering"
       },
-      "maxItems": 128,
+      "maxItems": 256,
       "minItems": 1,
-      "title": "Machine Types",
+      "title": "Offerings",
       "type": "array"
     },
     "project_id": {
@@ -179,8 +143,8 @@
     },
     "region": {
       "maxLength": 32,
-      "minLength": 1,
-      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$",
+      "minLength": 5,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
       "title": "Region",
       "type": "string"
     },
@@ -191,15 +155,6 @@
     },
     "source": {
       "$ref": "#/$defs/GcpInventorySource"
-    },
-    "zones": {
-      "items": {
-        "$ref": "#/$defs/GcpInventoryZone"
-      },
-      "maxItems": 64,
-      "minItems": 1,
-      "title": "Zones",
-      "type": "array"
     }
   },
   "required": [
@@ -207,8 +162,7 @@
     "project_id",
     "region",
     "source",
-    "zones",
-    "machine_types"
+    "offerings"
   ],
   "title": "GcpInventorySnapshot",
   "type": "object"

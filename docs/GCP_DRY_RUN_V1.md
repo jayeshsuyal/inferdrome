@@ -22,7 +22,9 @@ metadata-server connection, reads no environment credentials, invokes no
 subprocess, and performs no provider mutation. It validates the exact existing
 deployment shape, cross-checks the explicit compute scope against the supplied
 inventory, and chooses the first stable `(zone, machine type, accelerator)`
-candidate after sorting each collection by its closed identity fields.
+candidate after sorting the explicit zone-scoped offerings by their closed
+identity fields. An offering binds one exact zone to one machine/accelerator
+tuple; the planner never forms a zone/machine Cartesian product.
 
 The inventory is an input claim, not live capacity. The resulting plan marks
 all of these as false: `execution_authorized`,
@@ -37,8 +39,10 @@ The inventory contract has no endpoint, public-IP, token, credential, raw
 provider-payload, billing, or instance-identifier fields. Values and keys are
 bounded, object keys are unique, unknown fields are rejected, and non-finite
 numbers are forbidden. The checked-in inventory is synthetic and uses opaque
-`synthetic-*` resource identities; it is not an assertion about current Google
-Cloud offerings or availability.
+`synthetic-*` resource identities. Each entry uses `catalog_eligibility`, not
+provider availability; `catalog_eligible` means only that the supplied offline
+catalog permits deterministic selection. It is not an assertion about current
+Google Cloud offerings, capacity, or availability.
 
 ## Identity and publication
 

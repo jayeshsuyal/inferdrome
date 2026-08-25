@@ -145,9 +145,9 @@
           "title": "Architecture",
           "type": "string"
         },
-        "inventory_status": {
-          "const": "available",
-          "title": "Inventory Status",
+        "catalog_eligibility": {
+          "const": "catalog_eligible",
+          "title": "Catalog Eligibility",
           "type": "string"
         },
         "machine_type": {
@@ -164,15 +164,15 @@
         },
         "region": {
           "maxLength": 32,
-          "minLength": 1,
-          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$",
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
           "title": "Region",
           "type": "string"
         },
         "zone": {
           "maxLength": 64,
-          "minLength": 3,
-          "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$",
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
           "title": "Zone",
           "type": "string"
         }
@@ -186,7 +186,7 @@
         "accelerator_model",
         "accelerator_provider_type",
         "accelerator_count",
-        "inventory_status"
+        "catalog_eligibility"
       ],
       "title": "GcpPlanProvider",
       "type": "object"
@@ -295,8 +295,8 @@
         },
         "region": {
           "maxLength": 32,
-          "minLength": 1,
-          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$",
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
           "title": "Region",
           "type": "string"
         }
