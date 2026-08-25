@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -165,7 +166,7 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
             "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
             "INFERDROME_ALLOW_LOCAL_KUBERNETES": "1",
             "INFERDROME_KUBERNETES_OUTPUT_DIR": str(output),
-            "INFERDROME_KUBERNETES_PYTHON": str(REPOSITORY_ROOT / ".venv/bin/python"),
+            "INFERDROME_KUBERNETES_PYTHON": sys.executable,
             "INFERDROME_K8S_LOG_SOURCE": str(source),
             "INFERDROME_K8S_TEST_LOG": str(log_path),
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
@@ -255,7 +256,7 @@ def test_kubernetes_cli_errors_are_bounded_for_malformed_yaml(
     environment["PYTHONPATH"] = str(REPOSITORY_ROOT / "src")
     result = subprocess.run(
         [
-            str(REPOSITORY_ROOT / ".venv/bin/python"),
+            sys.executable,
             "-m",
             "inferdrome.kubernetes",
             "validate",
@@ -673,6 +674,17 @@ def test_fake_kind_wrapper_retrieves_logs_verifies_and_cleans_exact_resources(
     assert list(private_tmp.iterdir()) == []
 
 
+def test_kubernetes_harness_uses_active_python_not_repo_local_venv(
+    tmp_path: Path,
+) -> None:
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_KUBERNETES_PYTHON=sys.executable,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "evidence/runner-output.json").is_file()
+
+
 @pytest.mark.parametrize(
     "image",
     [
@@ -927,7 +939,7 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
             "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
             "INFERDROME_ALLOW_LOCAL_KUBERNETES": "1",
             "INFERDROME_KUBERNETES_OUTPUT_DIR": str(output),
-            "INFERDROME_KUBERNETES_PYTHON": str(REPOSITORY_ROOT / ".venv/bin/python"),
+            "INFERDROME_KUBERNETES_PYTHON": sys.executable,
             "INFERDROME_K8S_LOG_SOURCE": str(source),
             "INFERDROME_K8S_TEST_LOG": str(log_path),
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
