@@ -1,7 +1,7 @@
 # Deployment specification v1
 
-Status: **Provider-neutral outer deployment contract; lifecycle adapters are not
-implemented in this slice**
+Status: **Provider-neutral outer deployment contract; PR3 adds interfaces and a
+synthetic local adapter, while cloud/runtime adapters remain unimplemented**
 
 The deployment specification is an additive control-plane document for future
 local, Lambda, GCP, Docker, and Kubernetes adapters. It describes deployment
@@ -87,6 +87,56 @@ The provider/runtime combinations are intentionally narrow:
   it only as a development dry-run reference. No SGLang lifecycle, serving,
   normalization, or evidence adapter is present.
 - Other providers, engines, versions, and adapters fail closed.
+
+## Lifecycle interfaces and local mock
+
+The execution-side interface is in
+[`src/inferdrome/deployment/lifecycle.py`](../src/inferdrome/deployment/lifecycle.py).
+It consumes a validated `DeploymentSpec` but does not alter this contract or
+the frozen benchmark/evidence contracts.
+
+`ProviderAdapter` owns only provider resource state:
+
+- `validate(spec)` checks capability without side effects;
+- `acquire(spec)` returns opaque in-memory provider state;
+- `cleanup(spec, handle)` is attempted once when acquisition was attempted;
+- `confirm_cleanup(spec, handle)` is the final bounded confirmation.
+
+`RuntimeAdapter` owns only serving state:
+
+- `validate(spec)` checks the engine capability without side effects;
+- `start()` and `wait_ready()` establish the serving endpoint;
+- `stop()` is attempted once whenever runtime start was attempted.
+
+`LifecycleCoordinator` executes the fixed validation, acquisition, runtime
+start/readiness, injected benchmark callback, runtime stop, provider cleanup,
+and final-confirmation phases. The callback receives only a bounded endpoint;
+it remains responsible for invoking the existing benchmark methodology. The
+coordinator injects process control, readiness probing, a monotonic clock, and
+the callback so tests do not require CUDA, a subprocess, or a network.
+
+The runtime adapter's returned endpoint must exactly match the spec's scheme,
+host, port, and path before readiness or benchmark. If it drifts, the actual
+returned handle is retained and stopped, then provider cleanup and final
+confirmation still run. A stop, cleanup, or confirmation result is successful
+only when `confirmed` is true, `orphaned` is false, and `error_code` is null;
+unconfirmed, orphaned, or contradictory results produce a failed phase.
+
+The ephemeral outcome has separate bounded `primary_error_code` and
+`cleanup_error_code` fields. Its effective `error_code` is the cleanup error
+when cleanup is unconfirmed, and the terminal status is `FAILED`; this keeps a
+cancellation, interrupt, benchmark, or runtime-start cause without allowing a
+safety-critical cleanup failure to appear successful or merely cancelled.
+
+PR3 rejects Lambda/GCP provider execution and SGLang execution before any
+provider or runtime side effect. The committed local adapter accepts only
+`local` + `mock_only` + pinned vLLM-shaped development specifications. It
+provisions no resource and uses an in-memory process/readiness boundary. Its
+outcome is explicitly `synthetic_only: true` and `evidence_eligible: false`;
+it is not a deployment receipt and does not attest to serving, latency, GPU,
+cost, cleanup, or provider state. The existing `inferdrome run` CLI and local
+measurement pipeline remain backward compatible and are not routed through
+this non-evidence-producing mock path.
 
 ## Methodology and topology
 
@@ -208,5 +258,8 @@ outer deployment receipt. It must not change the benchmark command or frozen
 evidence schemas.
 
 This v1 contract intentionally includes no cloud SDK, network call, Dockerfile,
-Compose file, Kubernetes manifest, provider lifecycle implementation, public
-API, authentication path, raw evidence publication path, or acceptance verdict.
+Compose file, Kubernetes manifest, cloud provider lifecycle implementation,
+runtime image, public API, authentication path, raw evidence publication path,
+or acceptance verdict. PR3's local in-memory lifecycle interfaces and mock
+adapter are the only execution-side additions; PR4 owns the immutable outer
+deployment receipt.

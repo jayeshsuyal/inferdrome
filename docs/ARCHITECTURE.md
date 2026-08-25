@@ -63,6 +63,50 @@ cannot be mistaken for executed GPU evidence. See
 [DEPLOYMENT_SPEC_V1.md](DEPLOYMENT_SPEC_V1.md) for the exact schema and later
 adapter obligations.
 
+### Deployment lifecycle boundary
+
+The execution-side deployment boundary is implemented in
+`inferdrome.deployment.lifecycle`. `ProviderAdapter` owns provider resource
+acquisition, cleanup, and final cleanup confirmation. `RuntimeAdapter` owns
+serving-engine start, readiness, and stop. Neither interface receives or
+produces benchmark methodology, canonical request records, evidence bundles,
+or acceptance verdicts. `LifecycleCoordinator` supplies the injected benchmark
+callback with a bounded runtime endpoint; it does not reimplement the existing
+benchmark command or orchestrator.
+
+The coordinator has one bounded phase trace:
+
+```text
+validation -> provider acquisition -> runtime start -> readiness -> benchmark
+         -> runtime stop -> provider cleanup -> provider final confirmation
+```
+
+Validation and adapter capability checks complete before acquisition. Once
+acquisition or runtime start is attempted, the coordinator makes at most one
+state-aware stop/cleanup/final-confirmation attempt for each applicable
+boundary, including benchmark exceptions, cancellation, `KeyboardInterrupt`,
+and safely catchable `BaseException` paths. An unconfirmed or orphaned result
+cannot be successful. Errors are reduced to bounded lifecycle codes; adapter
+payloads, credentials, and raw exception text are never placed in the outcome.
+The ephemeral outcome exposes `primary_error_code` and
+`cleanup_error_code`; its effective `error_code` is the cleanup code whenever
+cleanup is unconfirmed, so safety failures deterministically dominate while
+the original cancellation, interrupt, benchmark, or start cause remains
+available.
+
+A runtime adapter's returned endpoint must exactly equal the validated spec
+endpoint before readiness or benchmark. The returned runtime handle is still
+retained for stop when this postcondition fails. A stop, cleanup, or final
+confirmation result is successful only when `confirmed=true`,
+`orphaned=false`, and `error_code=null`; all other combinations record a
+failed cleanup phase with a bounded phase-appropriate error.
+
+PR3 provides only `LocalProviderAdapter` and
+`LocalMockRuntimeAdapter`. They perform no cloud, CUDA, subprocess, or network
+action and return a structurally synthetic, evidence-ineligible outcome. The
+existing local CLI and v0.1 run orchestrator remain unchanged. Lambda, GCP,
+SGLang, runtime images, and deployment receipts belong to later slices.
+
 ### Resolver
 
 The resolver validates source input, applies explicit defaults, resolves local
