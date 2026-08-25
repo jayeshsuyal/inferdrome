@@ -21,6 +21,13 @@ engine service's private DNS alias. The synthetic `inferdrome-runner-probe`
 is used only by the default mock smoke and is never a substitute for this
 benchmark path.
 
+The default [`compose.yaml`](../compose.yaml) contains only the synthetic mock
+services. GPU services live in [`compose.gpu.yaml`](../compose.gpu.yaml), which
+is loaded only by the guarded wrapper after preflight. The GPU override has a
+Compose interpolation gate and no development image/path defaults, so a direct
+`docker compose --profile gpu up` against the safe base cannot allocate a GPU;
+loading the GPU override without the wrapper gate fails during interpolation.
+
 ## Immutable runtime identity
 
 The serving image is the official `vllm/vllm-openai` image for vLLM `0.26.0`,
@@ -47,8 +54,21 @@ The same source also supplies model-manifest digest
 `sha256:ef291a8dd0f21604c8da3025f5112bd6641e891a3401c8550584725eaabe55cc`
 and expected snapshot digest
 `sha256:588d19e9e489cccdad793718d8c5efbad0738be717369f9eacb94ce514992d2c`.
-The GPU preflight requires the snapshot's bounded file set; full model-byte
-verification remains the existing host-preparation/capability gate.
+The GPU preflight verifies the complete frozen file manifest, including every
+expected regular-file path, declared size, aggregate snapshot digest, file
+count, total bytes, no-extra/no-symlink policy, and the pinned tokenizer file
+digests. It also strictly parses and resolves the experiment and binds its
+model, revisions, vLLM producer/version, workload digest, measurement contract,
+traffic limits, and endpoint to the versioned
+`inferdrome.qwen3-compose-binding.v1` contract.
+
+The frozen managed-vLLM profile retains its exact loopback endpoint
+`http://127.0.0.1:18080`. Compose does not mutate that profile: its explicit
+versioned binding reuses the frozen model/workload/methodology fields while
+declaring the private Compose endpoint `http://vllm-engine.internal:8000`.
+Consequently the Compose runner does not pass `--managed-capability-profile`,
+which is reserved for the local managed-server path; its attached experiment
+still carries the same producer and measurement semantics.
 
 ## Default synthetic mock
 
@@ -72,6 +92,21 @@ The equivalent structural inspection, when Compose is installed, is:
 ```bash
 docker compose -f compose.yaml config
 ```
+
+The GPU configuration is inspected separately and only with the required
+non-secret image/path variables and wrapper gate:
+
+```bash
+INFERDROME_GPU_COMPOSE_GATE=1 \
+INFERDROME_VLLM_RUNTIME_IMAGE='vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52' \
+INFERDROME_VLLM_RUNNER_IMAGE='registry.example.invalid/inferdrome-vllm-runner@sha256:<operator-supplied-digest>' \
+INFERDROME_QWEN3_MODEL_PATH='/absolute/path/to/prepared/qwen3-8b' \
+INFERDROME_EXPERIMENT_DIR='/absolute/path/to/compose-input' \
+INFERDROME_COMPOSE_EVIDENCE_DIR='/absolute/path/to/evidence-output' \
+docker compose -f compose.yaml -f compose.gpu.yaml --profile gpu config
+```
+
+This is still a structural check, not a GPU execution or evidence result.
 
 This is a synthetic smoke only. It is not `inferdrome run`, does not invoke
 `vllm bench serve`, and cannot produce customer-eligible evidence.
@@ -118,13 +153,30 @@ weights are mounted read-only and offline environment flags prevent downloads.
 The development artifact boundary is explicit:
 
 ```bash
-docker build --platform linux/amd64 \
-  -f Dockerfile.vllm-benchmark-runner \
-  --build-arg BUILD_FLAVOR=development \
-  --build-arg SOURCE_REPOSITORY_COMMIT=development-unpinned \
-  --build-arg INFERDROME_VERSION=0.1.0.dev0 \
-  -t inferdrome/vllm-benchmark-runner:development .
+python scripts/build_runner_image.py \
+  --image-kind vllm-benchmark-runner \
+  --flavor development \
+  --tag inferdrome/vllm-benchmark-runner:development
 ```
+
+The wrapper passes `--platform linux/amd64`. Development uses the ambient
+working-tree context and is explicitly unpinned. A proof/release invocation
+uses the clean relevant-input check and an exact tracked-HEAD archive context:
+
+```bash
+python scripts/build_runner_image.py \
+  --image-kind vllm-benchmark-runner \
+  --flavor proof \
+  --tag inferdrome/vllm-benchmark-runner:proof
+```
+
+The wrapper derives the source commit and packaged Inferdrome version, checks
+the specialized Dockerfile and trust-root inputs for cleanliness, and removes
+the temporary context on success, Docker failure, interrupt, or cleanup error.
+The Dockerfile itself verifies the packaged version and all four direct
+Inferdrome runtime imports after the lock-built environment is copied into the
+upstream vLLM image. A successful build or mutable local tag is not a final
+image digest or execution receipt.
 
 This command is an image-build gate only. A proof-shaped invocation must use
 operator-supplied immutable source and runner image identities, and the

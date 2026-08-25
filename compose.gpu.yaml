@@ -1,0 +1,135 @@
+# This override is intentionally not loaded by the default Compose path.
+# The interpolation gate is set only after run_vllm_compose.sh completes host,
+# image, model, experiment, and evidence preflight.
+x-inferdrome-gpu-gate: "${INFERDROME_GPU_COMPOSE_GATE:?GPU Compose must be launched through the guarded wrapper}"
+
+services:
+  vllm-engine:
+    profiles: [gpu]
+    image: "${INFERDROME_VLLM_RUNTIME_IMAGE:?GPU runtime image reference is required}"
+    platform: linux/amd64
+    command:
+      [
+        "/models/qwen3-8b",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--served-model-name",
+        "Qwen/Qwen3-8B",
+        "--tokenizer",
+        "/models/qwen3-8b",
+        "--tokenizer-mode",
+        "auto",
+        "--dtype",
+        "bfloat16",
+        "--seed",
+        "42",
+        "--load-format",
+        "safetensors",
+        "--generation-config",
+        "vllm",
+        "--model-impl",
+        "vllm",
+        "--max-model-len",
+        "2048",
+        "--gpu-memory-utilization",
+        "0.90",
+        "--tensor-parallel-size",
+        "1",
+        "--no-enable-log-requests",
+        "--disable-uvicorn-access-log",
+        "--uvicorn-log-level",
+        "warning",
+      ]
+    user: "2000:0"
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    restart: "no"
+    expose: ["8000"]
+    networks:
+      inferdrome-internal:
+        aliases: ["vllm-engine.internal"]
+    volumes:
+      - type: bind
+        source: "${INFERDROME_QWEN3_MODEL_PATH:?Qwen3 model path is required}"
+        target: /models/qwen3-8b
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      - /home/vllm/.cache:rw,nosuid,size=512m
+    shm_size: "1g"
+    environment:
+      HF_HOME: /home/vllm/.cache/huggingface
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VLLM_CACHE_ROOT: /home/vllm/.cache/vllm
+      TRITON_CACHE_DIR: /home/vllm/.cache/triton
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read(32)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  vllm-benchmark-runner:
+    profiles: [gpu]
+    image: "${INFERDROME_VLLM_RUNNER_IMAGE:?GPU runner image reference is required}"
+    platform: linux/amd64
+    entrypoint: ["inferdrome"]
+    command:
+      [
+        "run",
+        "/inputs/experiment.yaml",
+        "--runs-root",
+        "/evidence/runs",
+        "--tokenizer-path",
+        "/models/qwen3-8b",
+      ]
+    user: "2000:0"
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    restart: "no"
+    depends_on:
+      vllm-engine:
+        condition: service_healthy
+    networks: [inferdrome-internal]
+    volumes:
+      - type: bind
+        source: "${INFERDROME_EXPERIMENT_DIR:?experiment input directory is required}"
+        target: /inputs
+        read_only: true
+      - type: bind
+        source: "${INFERDROME_QWEN3_MODEL_PATH:?Qwen3 model path is required}"
+        target: /models/qwen3-8b
+        read_only: true
+      - type: bind
+        source: "${INFERDROME_COMPOSE_EVIDENCE_DIR:?evidence output directory is required}"
+        target: /evidence
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      - /home/vllm/.cache:rw,nosuid,size=512m
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VLLM_CACHE_ROOT: /home/vllm/.cache/vllm
+      TRITON_CACHE_DIR: /home/vllm/.cache/triton

@@ -5,6 +5,7 @@ set -u
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 compose_file=${INFERDROME_COMPOSE_FILE:-"$repository_root/compose.yaml"}
+gpu_compose_file=${INFERDROME_GPU_COMPOSE_FILE:-"$repository_root/compose.gpu.yaml"}
 evidence_dir=${INFERDROME_COMPOSE_EVIDENCE_DIR:-"$repository_root/.inferdrome-compose/evidence"}
 mode=${1:-mock}
 shift || true
@@ -64,36 +65,53 @@ case "$mode" in
 esac
 
 [[ -f "$compose_file" && ! -L "$compose_file" ]] || fail "Compose file is unavailable"
+if [[ "$mode" == "gpu" ]]; then
+  [[ -f "$gpu_compose_file" && ! -L "$gpu_compose_file" ]] || \
+    fail "GPU Compose override is unavailable"
+fi
 if [[ -e "$evidence_dir" && ( ! -d "$evidence_dir" || -L "$evidence_dir" ) ]]; then
   fail "evidence output must be a real directory"
 fi
 mkdir -p -- "$evidence_dir" || fail "evidence output cannot be created"
 [[ -d "$evidence_dir" && ! -L "$evidence_dir" && -w "$evidence_dir" ]] || fail "evidence output is not writable"
 
+preflight_args=()
 if [[ "$mode" == "gpu" ]]; then
   inferdrome_python=${INFERDROME_PYTHON:-python3}
-  PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" "$inferdrome_python" -m inferdrome.vllm_compose gpu-preflight \
-    --confirmation "$confirmation" \
-    --platform "$(uname -s)" \
-    --nvidia-available \
-    --compose-available \
-    --runner-image "$INFERDROME_VLLM_RUNNER_IMAGE" \
-    --runtime-image "$INFERDROME_VLLM_RUNTIME_IMAGE" \
-    --model-path "$INFERDROME_QWEN3_MODEL_PATH" \
-    --experiment-dir "$INFERDROME_EXPERIMENT_DIR" \
-    --evidence-dir "$evidence_dir" \
-    --profile-id "$INFERDROME_QWEN3_PROFILE_ID" \
-    --model-id "$INFERDROME_QWEN3_MODEL_ID" \
-    --model-revision "$INFERDROME_QWEN3_MODEL_REVISION" \
-    --tokenizer-revision "$INFERDROME_QWEN3_TOKENIZER_REVISION" || exit $?
+  preflight_args=(
+    -m inferdrome.vllm_compose gpu-preflight
+    --confirmation "$confirmation"
+    --platform "$(uname -s)"
+    --nvidia-available
+    --runner-image "$INFERDROME_VLLM_RUNNER_IMAGE"
+    --runtime-image "$INFERDROME_VLLM_RUNTIME_IMAGE"
+    --model-path "$INFERDROME_QWEN3_MODEL_PATH"
+    --experiment-dir "$INFERDROME_EXPERIMENT_DIR"
+    --evidence-dir "$evidence_dir"
+    --profile-id "$INFERDROME_QWEN3_PROFILE_ID"
+    --model-id "$INFERDROME_QWEN3_MODEL_ID"
+    --model-revision "$INFERDROME_QWEN3_MODEL_REVISION"
+    --tokenizer-revision "$INFERDROME_QWEN3_TOKENIZER_REVISION"
+  )
+  PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" "$inferdrome_python" \
+    "${preflight_args[@]}" || exit $?
 fi
 
 command -v docker >/dev/null 2>&1 || fail "Docker is unavailable"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
 
+if [[ "$mode" == "gpu" ]]; then
+  PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" "$inferdrome_python" \
+    "${preflight_args[@]}" --compose-available || exit $?
+fi
+
 compose=(docker compose -f "$compose_file")
 if [[ "$mode" == "gpu" ]]; then
-  compose+=(--profile gpu)
+  compose+=(
+    -f "$gpu_compose_file"
+    --profile gpu
+  )
+  export INFERDROME_GPU_COMPOSE_GATE=1
 fi
 cleanup_status=0
 cleanup() {
@@ -117,6 +135,7 @@ trap 'exit 130' INT TERM
 "${compose[@]}" up \
   --abort-on-container-exit \
   --exit-code-from "$exit_service" \
-  --remove-orphans
+  --remove-orphans \
+  "$exit_service"
 run_status=$?
 exit "$run_status"

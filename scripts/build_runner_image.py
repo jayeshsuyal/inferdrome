@@ -36,6 +36,24 @@ ARCHIVE_BUILD_INPUTS = (
     "README.md",
     "src",
 )
+VLLM_RELEVANT_BUILD_INPUTS = (
+    "Dockerfile.vllm-benchmark-runner",
+    ".dockerignore",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "src",
+    # The wrapper is checked as a trust-root input but is not archived.
+    "scripts/build_runner_image.py",
+)
+VLLM_ARCHIVE_BUILD_INPUTS = (
+    "Dockerfile.vllm-benchmark-runner",
+    ".dockerignore",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "src",
+)
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
 _VERSION_PATTERN = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -66,7 +84,10 @@ def _capture(command: Sequence[str]) -> str:
     return completed.stdout.strip()
 
 
-def _require_clean_relevant_inputs() -> None:
+def _require_clean_relevant_inputs(
+    inputs: Sequence[str] | None = None,
+) -> None:
+    selected_inputs = RELEVANT_BUILD_INPUTS if inputs is None else inputs
     status = _capture(
         (
             "git",
@@ -75,15 +96,21 @@ def _require_clean_relevant_inputs() -> None:
             "--untracked-files=all",
             "--ignored=matching",
             "--",
-            *RELEVANT_BUILD_INPUTS,
+            *selected_inputs,
         )
     )
     if status:
         raise RunnerImageBuildError("proof/release build inputs are not clean")
 
 
-def _archive_head(archive_path: Path, source_commit: str) -> None:
+def _archive_head(
+    archive_path: Path,
+    source_commit: str,
+    inputs: Sequence[str] | None = None,
+) -> None:
     """Materialize allowlisted bytes from the labeled commit into ``archive_path``."""
+
+    selected_inputs = ARCHIVE_BUILD_INPUTS if inputs is None else inputs
 
     try:
         completed = subprocess.run(
@@ -93,7 +120,7 @@ def _archive_head(archive_path: Path, source_commit: str) -> None:
                 "--format=tar",
                 source_commit,
                 "--",
-                *ARCHIVE_BUILD_INPUTS,
+                *selected_inputs,
             ],
             cwd=REPOSITORY_ROOT,
             capture_output=True,
@@ -175,7 +202,10 @@ def _extract_archive(archive_path: Path, context: Path) -> None:
 
 
 @contextlib.contextmanager
-def _materialize_proof_context(source_commit: str) -> Iterator[Path]:
+def _materialize_proof_context(
+    source_commit: str,
+    archive_inputs: Sequence[str] | None = None,
+) -> Iterator[Path]:
     """Yield a temporary context containing exact allowlisted labeled-commit bytes."""
 
     try:
@@ -185,7 +215,7 @@ def _materialize_proof_context(source_commit: str) -> Iterator[Path]:
             temporary_root = Path(temporary)
             archive_path = temporary_root / "head.tar"
             context = temporary_root / "context"
-            _archive_head(archive_path, source_commit)
+            _archive_head(archive_path, source_commit, archive_inputs)
             _extract_archive(archive_path, context)
             yield context
     except RunnerImageBuildError:
@@ -254,18 +284,35 @@ def build_image(
     *,
     flavor: str = "development",
     platform: str = CANONICAL_PLATFORM,
-    tag: str = "inferdrome-runner:development",
+    tag: str | None = None,
+    image_kind: str = "runner",
 ) -> tuple[str, ...]:
     if flavor not in {"development", "proof", "release"}:
         raise RunnerImageBuildError("unsupported build flavor")
     if platform != CANONICAL_PLATFORM:
         raise RunnerImageBuildError("runner image target platform must be linux/amd64")
-    _validate_tag(tag)
+    if image_kind == "runner":
+        dockerfile = "Dockerfile"
+        relevant_inputs = RELEVANT_BUILD_INPUTS
+        archive_inputs = ARCHIVE_BUILD_INPUTS
+        default_tag = "inferdrome-runner:development"
+    elif image_kind == "vllm-benchmark-runner":
+        dockerfile = "Dockerfile.vllm-benchmark-runner"
+        relevant_inputs = VLLM_RELEVANT_BUILD_INPUTS
+        archive_inputs = VLLM_ARCHIVE_BUILD_INPUTS
+        default_tag = "inferdrome-vllm-benchmark-runner:development"
+    else:
+        raise RunnerImageBuildError("unsupported runner image kind")
+    selected_tag = default_tag if tag is None else tag
+    _validate_tag(selected_tag)
 
     source_commit: str | None = None
     package_version: str | None = None
     if flavor in {"proof", "release"}:
-        _require_clean_relevant_inputs()
+        if image_kind == "runner":
+            _require_clean_relevant_inputs()
+        else:
+            _require_clean_relevant_inputs(relevant_inputs)
         source_commit = _source_commit()
         package_version = _package_version()
 
@@ -280,6 +327,8 @@ def build_image(
         "--pull=false",
         "--build-arg",
         f"BUILD_FLAVOR={flavor}",
+        "--file",
+        dockerfile,
     ]
     if source_commit is not None and package_version is not None:
         command.extend(
@@ -290,9 +339,16 @@ def build_image(
                 f"INFERDROME_VERSION={package_version}",
             ]
         )
-    command.extend(["-t", tag])
+    command.extend(["-t", selected_tag])
     if flavor in {"proof", "release"}:
-        with _materialize_proof_context(source_commit) as context:
+        if image_kind == "runner":
+            context_manager = _materialize_proof_context(source_commit)
+        else:
+            context_manager = _materialize_proof_context(
+                source_commit,
+                archive_inputs=archive_inputs,
+            )
+        with context_manager as context:
             proof_command = [*command, str(context)]
             _run_docker_build(proof_command)
             return tuple(proof_command)
@@ -313,7 +369,12 @@ def main(argv: list[str] | None = None) -> int:
         default="development",
     )
     parser.add_argument("--platform", default=CANONICAL_PLATFORM)
-    parser.add_argument("--tag", default="inferdrome-runner:development")
+    parser.add_argument("--tag")
+    parser.add_argument(
+        "--image-kind",
+        choices=("runner", "vllm-benchmark-runner"),
+        default="runner",
+    )
     parser.add_argument(
         "--check",
         action="store_true",
@@ -332,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
             flavor=arguments.flavor,
             platform=arguments.platform,
             tag=arguments.tag,
+            image_kind=arguments.image_kind,
         )
     except RunnerImageBuildError as error:
         print(f"runner image build failed: {error}", file=sys.stderr)

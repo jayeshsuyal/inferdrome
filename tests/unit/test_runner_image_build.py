@@ -220,3 +220,70 @@ def test_wrapper_rejects_noncanonical_platform_without_docker() -> None:
         builder.build_image(platform="linux/arm64")
 
     assert "linux/amd64" in str(exc_info.value)
+
+
+def test_vllm_runner_proof_build_uses_specialized_archive_and_dockerfile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_commit = "b" * 40
+    captures: list[tuple[str, ...]] = []
+
+    def capture(command: tuple[str, ...]) -> str:
+        captures.append(command)
+        return "" if command[1] == "status" else source_commit
+
+    @contextmanager
+    def materialized_context(
+        _source_commit: str,
+        *,
+        archive_inputs: tuple[str, ...] | None = None,
+    ):
+        assert archive_inputs == builder.VLLM_ARCHIVE_BUILD_INPUTS
+        context = tmp_path / "vllm-proof-context"
+        context.mkdir()
+        try:
+            yield context
+        finally:
+            context.rmdir()
+
+    docker_commands: list[list[str]] = []
+    monkeypatch.setattr(builder, "_capture", capture)
+    monkeypatch.setattr(builder, "_package_version", lambda: "0.1.0.dev0")
+    monkeypatch.setattr(builder.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(builder, "_materialize_proof_context", materialized_context)
+    monkeypatch.setattr(
+        builder.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            docker_commands.append(list(command))
+            or SimpleNamespace(returncode=0)
+        ),
+    )
+
+    command = builder.build_image(
+        flavor="proof",
+        image_kind="vllm-benchmark-runner",
+        tag="inferdrome-vllm-runner:test",
+    )
+
+    assert "--file" in command
+    assert command[command.index("--file") + 1] == (
+        "Dockerfile.vllm-benchmark-runner"
+    )
+    assert f"SOURCE_REPOSITORY_COMMIT={source_commit}" in command
+    assert docker_commands == [list(command)]
+    assert captures[0][0:2] == ("git", "status")
+
+
+def test_specialized_proof_context_is_exact_allowlist() -> None:
+    with builder._materialize_proof_context(
+        builder._source_commit(),
+        archive_inputs=builder.VLLM_ARCHIVE_BUILD_INPUTS,
+    ) as context:
+        assert (context / "Dockerfile.vllm-benchmark-runner").is_file()
+        assert not (context / "Dockerfile").exists()
+        assert (context / "uv.lock").is_file()
+        assert (context / "src").is_dir()
+        assert not (context / "scripts").exists()
+        assert not any(path.is_symlink() for path in context.rglob("*"))
