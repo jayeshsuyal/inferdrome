@@ -215,6 +215,8 @@ provider-neutral.
 
 - [Product charter](docs/PRODUCT.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Deployment specification v1](docs/DEPLOYMENT_SPEC_V1.md)
+- [Deployment receipt v1](docs/DEPLOYMENT_RECEIPT_V1.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [v0.1 definition of done](docs/V0_1_DEFINITION_OF_DONE.md)
 - [v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md)

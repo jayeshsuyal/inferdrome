@@ -104,8 +104,21 @@ failed cleanup phase with a bounded phase-appropriate error.
 PR3 provides only `LocalProviderAdapter` and
 `LocalMockRuntimeAdapter`. They perform no cloud, CUDA, subprocess, or network
 action and return a structurally synthetic, evidence-ineligible outcome. The
-existing local CLI and v0.1 run orchestrator remain unchanged. Lambda, GCP,
-SGLang, runtime images, and deployment receipts belong to later slices.
+existing local CLI and v0.1 run orchestrator remain unchanged. PR4 adds the
+separate immutable outer receipt boundary in
+[`DEPLOYMENT_RECEIPT_V1.md`](DEPLOYMENT_RECEIPT_V1.md). It consumes accepted
+spec/outcome inputs, binds declared and locally observed provenance, and never
+assigns an evidence or acceptance verdict. Its only issuer is the synthetic
+local form; executed receipts remain fail-closed until a later slice can bind
+independently verified proof, provider, and invoice facts. Lambda, GCP, SGLang,
+runtime images, and cloud lifecycle remain later slices.
+
+Receipt identity is a domain-separated digest over the canonical payload
+excluding `receipt_id`. Publication also returns a separate SHA-256 of the
+exact complete canonical JSON bytes; that external hash is not placed inside
+the receipt, so there is no recursive self-hash. The receipt is written through
+the existing no-replace, symlink-safe, fsync-backed immutable publication
+primitive and remains outside sealed evidence bundles.
 
 ### Resolver
 

@@ -1,0 +1,929 @@
+{
+  "$comment": "Cross-field receipt identity, provenance, synthetic-only, and anchor rules are normative; this receipt never assigns an acceptance verdict and is outside frozen evidence schemas.",
+  "$defs": {
+    "BenchmarkMethodologyReference": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "methodology_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^inferdrome\\.[a-z0-9](?:[a-z0-9._-]{0,120}[a-z0-9])?\\.v[0-9]+$",
+          "title": "Methodology Id",
+          "type": "string"
+        },
+        "source": {
+          "const": "registered_manifest",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "methodology_id",
+        "manifest_sha256"
+      ],
+      "title": "BenchmarkMethodologyReference",
+      "type": "object"
+    },
+    "BenchmarkTopology": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_scope": {
+          "enum": [
+            "loopback",
+            "private"
+          ],
+          "title": "Endpoint Scope",
+          "type": "string"
+        },
+        "methodology": {
+          "$ref": "#/$defs/BenchmarkMethodologyReference"
+        },
+        "runner_runtime_colocation": {
+          "const": "colocated",
+          "title": "Runner Runtime Colocation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "methodology",
+        "runner_runtime_colocation",
+        "endpoint_scope"
+      ],
+      "title": "BenchmarkTopology",
+      "type": "object"
+    },
+    "CleanupPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_on_every_exit": {
+          "const": true,
+          "title": "Cleanup On Every Exit",
+          "type": "boolean"
+        },
+        "cleanup_receipt_required": {
+          "const": true,
+          "title": "Cleanup Receipt Required",
+          "type": "boolean"
+        },
+        "max_cleanup_attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Cleanup Attempts",
+          "type": "integer"
+        },
+        "orphan_policy": {
+          "const": "block_next_run",
+          "title": "Orphan Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cleanup_on_every_exit",
+        "cleanup_receipt_required",
+        "orphan_policy",
+        "max_cleanup_attempts"
+      ],
+      "title": "CleanupPolicy",
+      "type": "object"
+    },
+    "ImageIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Digest"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._/-]{0,254}[a-z0-9])?$",
+          "title": "Repository",
+          "type": "string"
+        },
+        "tag": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]$|^[A-Za-z0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tag"
+        }
+      },
+      "required": [
+        "repository",
+        "digest",
+        "tag"
+      ],
+      "title": "ImageIdentity",
+      "type": "object"
+    },
+    "LifecycleErrorCode": {
+      "enum": [
+        "INVALID_SPEC",
+        "INVALID_CALLBACK",
+        "UNSUPPORTED_PROVIDER",
+        "UNSUPPORTED_RUNTIME",
+        "UNSUPPORTED_INTENT",
+        "CAPABILITY_MISMATCH",
+        "PROVIDER_ACQUIRE_FAILED",
+        "RUNTIME_START_FAILED",
+        "READINESS_FAILED",
+        "BENCHMARK_FAILED",
+        "RUNTIME_STOP_FAILED",
+        "PROVIDER_CLEANUP_FAILED",
+        "CLEANUP_UNCONFIRMED",
+        "CANCELLED",
+        "INTERRUPTED",
+        "BASE_EXCEPTION"
+      ],
+      "title": "LifecycleErrorCode",
+      "type": "string"
+    },
+    "LifecycleEventResult": {
+      "enum": [
+        "SUCCEEDED",
+        "FAILED"
+      ],
+      "title": "LifecycleEventResult",
+      "type": "string"
+    },
+    "LifecycleOutcome": {
+      "additionalProperties": false,
+      "description": "Ephemeral, synthetic-only lifecycle result; not a deployment receipt.",
+      "properties": {
+        "cleanup_error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LifecycleErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LifecycleErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_eligible": {
+          "const": false,
+          "title": "Evidence Eligible",
+          "type": "boolean"
+        },
+        "orphaned": {
+          "title": "Orphaned",
+          "type": "boolean"
+        },
+        "primary_error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LifecycleErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_cleanup_attempted": {
+          "title": "Provider Cleanup Attempted",
+          "type": "boolean"
+        },
+        "provider_cleanup_confirmed": {
+          "title": "Provider Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "provider_final_confirmation": {
+          "title": "Provider Final Confirmation",
+          "type": "boolean"
+        },
+        "provider_final_confirmation_attempted": {
+          "title": "Provider Final Confirmation Attempted",
+          "type": "boolean"
+        },
+        "runtime_stop_attempted": {
+          "title": "Runtime Stop Attempted",
+          "type": "boolean"
+        },
+        "runtime_stop_confirmed": {
+          "title": "Runtime Stop Confirmed",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "inferdrome.lifecycle-result.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/LifecycleStatus"
+        },
+        "synthetic_only": {
+          "const": true,
+          "title": "Synthetic Only",
+          "type": "boolean"
+        },
+        "terminal_phase": {
+          "$ref": "#/$defs/LifecyclePhase"
+        },
+        "trace": {
+          "items": {
+            "$ref": "#/$defs/LifecycleTraceEvent"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Trace",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "synthetic_only",
+        "evidence_eligible",
+        "terminal_phase",
+        "error_code",
+        "primary_error_code",
+        "cleanup_error_code",
+        "trace",
+        "runtime_stop_attempted",
+        "runtime_stop_confirmed",
+        "provider_cleanup_attempted",
+        "provider_cleanup_confirmed",
+        "provider_final_confirmation_attempted",
+        "provider_final_confirmation",
+        "orphaned"
+      ],
+      "title": "LifecycleOutcome",
+      "type": "object"
+    },
+    "LifecyclePhase": {
+      "description": "The only phases a deployment lifecycle may enter.",
+      "enum": [
+        "VALIDATION",
+        "PROVIDER_ACQUISITION",
+        "RUNTIME_START",
+        "RUNTIME_READINESS",
+        "BENCHMARK",
+        "RUNTIME_STOP",
+        "PROVIDER_CLEANUP",
+        "PROVIDER_FINAL_CONFIRMATION"
+      ],
+      "title": "LifecyclePhase",
+      "type": "string"
+    },
+    "LifecycleStatus": {
+      "enum": [
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+        "INTERRUPTED"
+      ],
+      "title": "LifecycleStatus",
+      "type": "string"
+    },
+    "LifecycleTimeouts": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Cleanup Seconds",
+          "type": "integer"
+        },
+        "request_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Request Seconds",
+          "type": "integer"
+        },
+        "startup_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Startup Seconds",
+          "type": "integer"
+        },
+        "termination_confirmation_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Termination Confirmation Seconds",
+          "type": "integer"
+        },
+        "total_seconds": {
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Total Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "startup_seconds",
+        "request_seconds",
+        "total_seconds",
+        "cleanup_seconds",
+        "termination_confirmation_seconds"
+      ],
+      "title": "LifecycleTimeouts",
+      "type": "object"
+    },
+    "LifecycleTraceEvent": {
+      "additionalProperties": false,
+      "description": "One bounded state-machine event; no adapter payload is retained.",
+      "properties": {
+        "error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LifecycleErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/LifecyclePhase"
+        },
+        "result": {
+          "$ref": "#/$defs/LifecycleEventResult"
+        },
+        "sequence_index": {
+          "maximum": 15,
+          "minimum": 0,
+          "title": "Sequence Index",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence_index",
+        "phase",
+        "result",
+        "error_code"
+      ],
+      "title": "LifecycleTraceEvent",
+      "type": "object"
+    },
+    "ReceiptAdapterIdentity": {
+      "additionalProperties": false,
+      "description": "Versioned adapter contract identity, never a mutable class name.",
+      "properties": {
+        "adapter_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^inferdrome\\.(?:provider|runtime)\\.[a-z0-9](?:[a-z0-9._-]{0,92}[a-z0-9])?$",
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "adapter_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Adapter Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "adapter_version"
+      ],
+      "title": "ReceiptAdapterIdentity",
+      "type": "object"
+    },
+    "ReceiptCleanupState": {
+      "additionalProperties": false,
+      "description": "The cleanup/final-confirmation projection bound to the lifecycle result.",
+      "properties": {
+        "orphaned": {
+          "title": "Orphaned",
+          "type": "boolean"
+        },
+        "provider_cleanup_attempted": {
+          "title": "Provider Cleanup Attempted",
+          "type": "boolean"
+        },
+        "provider_cleanup_confirmed": {
+          "title": "Provider Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "provider_final_confirmation": {
+          "title": "Provider Final Confirmation",
+          "type": "boolean"
+        },
+        "provider_final_confirmation_attempted": {
+          "title": "Provider Final Confirmation Attempted",
+          "type": "boolean"
+        },
+        "runtime_stop_attempted": {
+          "title": "Runtime Stop Attempted",
+          "type": "boolean"
+        },
+        "runtime_stop_confirmed": {
+          "title": "Runtime Stop Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "runtime_stop_attempted",
+        "runtime_stop_confirmed",
+        "provider_cleanup_attempted",
+        "provider_cleanup_confirmed",
+        "provider_final_confirmation_attempted",
+        "provider_final_confirmation",
+        "orphaned"
+      ],
+      "title": "ReceiptCleanupState",
+      "type": "object"
+    },
+    "ReceiptDeclaredConfiguration": {
+      "additionalProperties": false,
+      "description": "Safe projection of declared deployment intent, excluding credentials.",
+      "properties": {
+        "cleanup_policy": {
+          "$ref": "#/$defs/CleanupPolicy"
+        },
+        "cost_ceiling": {
+          "$ref": "#/$defs/ReceiptDeclaredCostCeiling"
+        },
+        "deployment_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+          "title": "Deployment Id",
+          "type": "string"
+        },
+        "execution_intent": {
+          "enum": [
+            "mock_only",
+            "local_execute",
+            "dry_run_reference"
+          ],
+          "title": "Execution Intent",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "development",
+            "proof"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}[A-Za-z0-9]$|^[A-Za-z0-9]$",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "provider_id": {
+          "enum": [
+            "local",
+            "lambda_cloud",
+            "gcp"
+          ],
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "resources": {
+          "$ref": "#/$defs/ResourceRequirements"
+        },
+        "runner_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        },
+        "runtime_engine": {
+          "enum": [
+            "vllm",
+            "sglang"
+          ],
+          "title": "Runtime Engine",
+          "type": "string"
+        },
+        "runtime_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Runtime Version",
+          "type": "string"
+        },
+        "serving_runtime_image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeouts": {
+          "$ref": "#/$defs/LifecycleTimeouts"
+        },
+        "tokenizer_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        },
+        "topology": {
+          "$ref": "#/$defs/BenchmarkTopology"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "mode",
+        "execution_intent",
+        "provider_id",
+        "runtime_engine",
+        "runtime_version",
+        "model_id",
+        "model_revision",
+        "tokenizer_revision",
+        "runner_image",
+        "serving_runtime_image",
+        "topology",
+        "resources",
+        "timeouts",
+        "cleanup_policy",
+        "cost_ceiling"
+      ],
+      "title": "ReceiptDeclaredConfiguration",
+      "type": "object"
+    },
+    "ReceiptDeclaredCostCeiling": {
+      "additionalProperties": false,
+      "description": "Declared controller estimate; this is not an invoice amount.",
+      "properties": {
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "estimate_basis": {
+          "const": "controller_estimate",
+          "title": "Estimate Basis",
+          "type": "string"
+        },
+        "hard_limit": {
+          "const": true,
+          "title": "Hard Limit",
+          "type": "boolean"
+        },
+        "max_cost_usd": {
+          "maxLength": 16,
+          "pattern": "^(?:0|[1-9][0-9]{0,9})(?:\\.[0-9]{1,2})?$",
+          "title": "Max Cost Usd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "max_cost_usd",
+        "hard_limit",
+        "estimate_basis"
+      ],
+      "title": "ReceiptDeclaredCostCeiling",
+      "type": "object"
+    },
+    "ReceiptEvidenceAnchor": {
+      "additionalProperties": false,
+      "description": "Future independently verified evidence anchor; absent for synthetic runs.",
+      "properties": {
+        "archive_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Archive Digest"
+        },
+        "bundle_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Bundle Digest",
+          "type": "string"
+        },
+        "capture_manifest_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Capture Manifest Digest"
+        },
+        "run_id": {
+          "pattern": "^run-[0-9a-f]{32}$",
+          "title": "Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "bundle_digest",
+        "archive_digest",
+        "capture_manifest_digest"
+      ],
+      "title": "ReceiptEvidenceAnchor",
+      "type": "object"
+    },
+    "ReceiptExternalFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_attestation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReceiptProviderAttestation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "provider_attestation"
+      ],
+      "title": "ReceiptExternalFacts",
+      "type": "object"
+    },
+    "ReceiptInvoiceTruth": {
+      "additionalProperties": false,
+      "properties": {
+        "amount_usd": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "pattern": "^(?:0|[1-9][0-9]{0,9})(?:\\.[0-9]{1,2})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Amount Usd"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "const": "USD",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "status": {
+          "enum": [
+            "UNAVAILABLE_EXTERNAL_PROVIDER_INVOICE",
+            "EXTERNALLY_REPORTED"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "currency",
+        "amount_usd"
+      ],
+      "title": "ReceiptInvoiceTruth",
+      "type": "object"
+    },
+    "ReceiptLocalControllerFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_state": {
+          "$ref": "#/$defs/ReceiptCleanupState"
+        },
+        "observation_kind": {
+          "const": "lifecycle_controller_observed",
+          "title": "Observation Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "observation_kind",
+        "cleanup_state"
+      ],
+      "title": "ReceiptLocalControllerFacts",
+      "type": "object"
+    },
+    "ReceiptProviderAttestation": {
+      "additionalProperties": false,
+      "description": "Future provider assertion represented only by a bounded digest.",
+      "properties": {
+        "attestation_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Attestation Digest",
+          "type": "string"
+        },
+        "provider_id": {
+          "enum": [
+            "local",
+            "lambda_cloud",
+            "gcp"
+          ],
+          "title": "Provider Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id",
+        "attestation_digest"
+      ],
+      "title": "ReceiptProviderAttestation",
+      "type": "object"
+    },
+    "ResourceRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_cores": {
+          "maximum": 256,
+          "minimum": 1,
+          "title": "Cpu Cores",
+          "type": "integer"
+        },
+        "ephemeral_storage_gib": {
+          "maximum": 16384,
+          "minimum": 1,
+          "title": "Ephemeral Storage Gib",
+          "type": "integer"
+        },
+        "gpu_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Gpu Count",
+          "type": "integer"
+        },
+        "gpu_model": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,126}[A-Za-z0-9)]$|^[A-Za-z0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Gpu Model"
+        },
+        "memory_mib": {
+          "maximum": 1048576,
+          "minimum": 256,
+          "title": "Memory Mib",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "gpu_count",
+        "gpu_model",
+        "cpu_cores",
+        "memory_mib",
+        "ephemeral_storage_gib"
+      ],
+      "title": "ResourceRequirements",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:deployment-receipt:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Strict receipt with self-verifying non-recursive identity.",
+  "properties": {
+    "declared_configuration": {
+      "$ref": "#/$defs/ReceiptDeclaredConfiguration"
+    },
+    "deployment_spec_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Deployment Spec Digest",
+      "type": "string"
+    },
+    "evidence_anchor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReceiptEvidenceAnchor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidence_eligible": {
+      "title": "Evidence Eligible",
+      "type": "boolean"
+    },
+    "externally_asserted": {
+      "$ref": "#/$defs/ReceiptExternalFacts"
+    },
+    "inferdrome_version": {
+      "maxLength": 64,
+      "minLength": 5,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "title": "Inferdrome Version",
+      "type": "string"
+    },
+    "invoice_truth": {
+      "$ref": "#/$defs/ReceiptInvoiceTruth"
+    },
+    "lifecycle_outcome": {
+      "$ref": "#/$defs/LifecycleOutcome"
+    },
+    "lifecycle_outcome_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Lifecycle Outcome Digest",
+      "type": "string"
+    },
+    "local_controller_facts": {
+      "$ref": "#/$defs/ReceiptLocalControllerFacts"
+    },
+    "provider_adapter": {
+      "$ref": "#/$defs/ReceiptAdapterIdentity"
+    },
+    "receipt_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Receipt Id",
+      "type": "string"
+    },
+    "receipt_kind": {
+      "enum": [
+        "synthetic_local",
+        "executed"
+      ],
+      "title": "Receipt Kind",
+      "type": "string"
+    },
+    "runtime_adapter": {
+      "$ref": "#/$defs/ReceiptAdapterIdentity"
+    },
+    "schema_version": {
+      "const": "inferdrome.deployment-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_repository_commit": {
+      "maxLength": 64,
+      "minLength": 40,
+      "pattern": "^[0-9a-f]{40,64}$",
+      "title": "Source Repository Commit",
+      "type": "string"
+    },
+    "synthetic_only": {
+      "title": "Synthetic Only",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "receipt_kind",
+    "deployment_spec_digest",
+    "lifecycle_outcome_digest",
+    "source_repository_commit",
+    "inferdrome_version",
+    "provider_adapter",
+    "runtime_adapter",
+    "declared_configuration",
+    "local_controller_facts",
+    "externally_asserted",
+    "invoice_truth",
+    "lifecycle_outcome",
+    "evidence_anchor",
+    "synthetic_only",
+    "evidence_eligible",
+    "receipt_id"
+  ],
+  "title": "DeploymentReceipt",
+  "type": "object"
+}

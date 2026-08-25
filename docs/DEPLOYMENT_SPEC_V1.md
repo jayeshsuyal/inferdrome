@@ -1,7 +1,8 @@
 # Deployment specification v1
 
-Status: **Provider-neutral outer deployment contract; PR3 adds interfaces and a
-synthetic local adapter, while cloud/runtime adapters remain unimplemented**
+Status: **Provider-neutral outer deployment contract; PR4 adds a synthetic
+immutable provenance receipt, while cloud/runtime adapters remain
+unimplemented**
 
 The deployment specification is an additive control-plane document for future
 local, Lambda, GCP, Docker, and Kubernetes adapters. It describes deployment
@@ -262,4 +263,5 @@ Compose file, Kubernetes manifest, cloud provider lifecycle implementation,
 runtime image, public API, authentication path, raw evidence publication path,
 or acceptance verdict. PR3's local in-memory lifecycle interfaces and mock
 adapter are the only execution-side additions; PR4 owns the immutable outer
-deployment receipt.
+deployment receipt described in
+[`DEPLOYMENT_RECEIPT_V1.md`](DEPLOYMENT_RECEIPT_V1.md).
