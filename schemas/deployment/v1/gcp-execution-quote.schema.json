@@ -1,0 +1,175 @@
+{
+  "$defs": {
+    "GcpQuoteComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "component_id": {
+          "enum": [
+            "compute",
+            "gpu",
+            "boot_disk",
+            "network"
+          ],
+          "title": "Component Id",
+          "type": "string"
+        },
+        "maximum_microusd": {
+          "maximum": 1000000000000,
+          "minimum": 0,
+          "title": "Maximum Microusd",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "component_id",
+        "maximum_microusd"
+      ],
+      "title": "GcpQuoteComponent",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-execution-quote:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "accelerator_count": {
+      "maximum": 16,
+      "minimum": 1,
+      "title": "Accelerator Count",
+      "type": "integer"
+    },
+    "accelerator_model": {
+      "const": "NVIDIA A100-SXM4-40GB",
+      "title": "Accelerator Model",
+      "type": "string"
+    },
+    "complete": {
+      "const": true,
+      "title": "Complete",
+      "type": "boolean"
+    },
+    "components": {
+      "items": {
+        "$ref": "#/$defs/GcpQuoteComponent"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "title": "Components",
+      "type": "array"
+    },
+    "controller_id": {
+      "pattern": "^ctl-[a-z0-9]{8,24}$",
+      "title": "Controller Id",
+      "type": "string"
+    },
+    "currency": {
+      "const": "USD",
+      "title": "Currency",
+      "type": "string"
+    },
+    "freshness_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Freshness Seconds",
+      "type": "integer"
+    },
+    "invoice_truth": {
+      "const": "unavailable_external_provider_invoice",
+      "title": "Invoice Truth",
+      "type": "string"
+    },
+    "issued_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "machine_type": {
+      "maxLength": 96,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+      "title": "Machine Type",
+      "type": "string"
+    },
+    "plan_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "pricing_proven": {
+      "const": false,
+      "title": "Pricing Proven",
+      "type": "boolean"
+    },
+    "pricing_status": {
+      "const": "operator_supplied_estimate_not_invoice_truth",
+      "title": "Pricing Status",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "quote_id": {
+      "pattern": "^quote-[a-z0-9]{8,32}$",
+      "title": "Quote Id",
+      "type": "string"
+    },
+    "region": {
+      "maxLength": 32,
+      "minLength": 5,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+      "title": "Region",
+      "type": "string"
+    },
+    "safety_margin_microusd": {
+      "maximum": 1000000000000,
+      "minimum": 0,
+      "title": "Safety Margin Microusd",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-execution-quote.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "valid_until": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Valid Until",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "quote_id",
+    "plan_id",
+    "controller_id",
+    "project_id",
+    "region",
+    "zone",
+    "machine_type",
+    "accelerator_model",
+    "accelerator_count",
+    "issued_at",
+    "valid_until",
+    "freshness_seconds",
+    "currency",
+    "components",
+    "safety_margin_microusd",
+    "complete",
+    "pricing_proven",
+    "pricing_status",
+    "invoice_truth"
+  ],
+  "title": "GcpCostQuote",
+  "type": "object"
+}

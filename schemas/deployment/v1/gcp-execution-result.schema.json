@@ -1,0 +1,200 @@
+{
+  "$defs": {
+    "GcpExecutionTraceEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "error_code": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "phase": {
+          "enum": [
+            "VALIDATION",
+            "JOURNAL_PREPARE",
+            "ARM_CONSUME",
+            "CREATE",
+            "OPERATION_WAIT",
+            "OWNERSHIP_VERIFY",
+            "WORK",
+            "DELETE",
+            "FINAL_CONFIRMATION"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "sequence": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "SUCCEEDED",
+            "FAILED",
+            "SKIPPED"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sequence",
+        "phase",
+        "status"
+      ],
+      "title": "GcpExecutionTraceEvent",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-execution-result:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arm_consumed": {
+      "title": "Arm Consumed",
+      "type": "boolean"
+    },
+    "arm_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Arm Id",
+      "type": "string"
+    },
+    "cleanup_confirmed": {
+      "title": "Cleanup Confirmed",
+      "type": "boolean"
+    },
+    "cleanup_error_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cleanup Error Code"
+    },
+    "controller_id": {
+      "pattern": "^ctl-[a-z0-9]{8,24}$",
+      "title": "Controller Id",
+      "type": "string"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "evidence_eligible": {
+      "const": false,
+      "title": "Evidence Eligible",
+      "type": "boolean"
+    },
+    "invoice_truth": {
+      "const": "unavailable_external_provider_invoice",
+      "title": "Invoice Truth",
+      "type": "string"
+    },
+    "journal_state": {
+      "enum": [
+        "PREPARED",
+        "ARM_CONSUMED",
+        "CREATE_SUBMITTED",
+        "OWNED",
+        "CLEANUP_PENDING",
+        "CLEANUP_CONFIRMED",
+        "ORPHANED",
+        "BLOCKED"
+      ],
+      "title": "Journal State",
+      "type": "string"
+    },
+    "orphaned": {
+      "title": "Orphaned",
+      "type": "boolean"
+    },
+    "plan_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "primary_error_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Primary Error Code"
+    },
+    "provider_mutation_attempted": {
+      "title": "Provider Mutation Attempted",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-execution-result.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+        "INTERRUPTED",
+        "BLOCKED"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "trace": {
+      "items": {
+        "$ref": "#/$defs/GcpExecutionTraceEvent"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "title": "Trace",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "plan_id",
+    "controller_id",
+    "arm_id",
+    "arm_consumed",
+    "provider_mutation_attempted",
+    "cleanup_confirmed",
+    "orphaned",
+    "evidence_eligible",
+    "invoice_truth",
+    "journal_state",
+    "trace"
+  ],
+  "title": "GcpExecutionOutcome",
+  "type": "object"
+}

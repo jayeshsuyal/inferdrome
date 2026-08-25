@@ -20,6 +20,9 @@ inferdrome = "inferdrome.cli:entrypoint"
 inferdrome-runner-probe = "inferdrome.runner:main"
 
 [project.optional-dependencies]
+gcp = [
+  "google-cloud-compute>=1.50,<1.51",
+]
 dashboard = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.30,<1",
