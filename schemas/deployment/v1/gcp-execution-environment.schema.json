@@ -1,0 +1,213 @@
+{
+  "$defs": {
+    "GcpExecutionBootImage": {
+      "additionalProperties": false,
+      "description": "Exact image-name selector plus an independently observed provider ID.",
+      "properties": {
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "image_name": {
+          "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "title": "Image Name",
+          "type": "string"
+        },
+        "provider_image_id": {
+          "maximum": 10000000000000000000,
+          "minimum": 1,
+          "title": "Provider Image Id",
+          "type": "integer"
+        },
+        "status": {
+          "const": "READY",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image_name",
+        "provider_image_id",
+        "digest",
+        "status"
+      ],
+      "title": "GcpExecutionBootImage",
+      "type": "object"
+    },
+    "GcpExecutionNetwork": {
+      "additionalProperties": false,
+      "properties": {
+        "external_access_config": {
+          "const": "absent",
+          "title": "External Access Config",
+          "type": "string"
+        },
+        "ip_forwarding": {
+          "const": false,
+          "title": "Ip Forwarding",
+          "type": "boolean"
+        },
+        "network": {
+          "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "title": "Network",
+          "type": "string"
+        },
+        "stack_type": {
+          "const": "IPV4_ONLY",
+          "default": "IPV4_ONLY",
+          "title": "Stack Type",
+          "type": "string"
+        },
+        "subnetwork": {
+          "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "title": "Subnetwork",
+          "type": "string"
+        }
+      },
+      "required": [
+        "network",
+        "subnetwork",
+        "external_access_config",
+        "ip_forwarding"
+      ],
+      "title": "GcpExecutionNetwork",
+      "type": "object"
+    },
+    "GcpPlanImage": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._/-]{0,254}[a-z0-9])?$",
+          "title": "Repository",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "digest"
+      ],
+      "title": "GcpPlanImage",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-execution-environment:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact provider-side environment, with references but no secret values.",
+  "properties": {
+    "accelerator_attachment_mode": {
+      "const": "a2_fixed_gpu",
+      "default": "a2_fixed_gpu",
+      "title": "Accelerator Attachment Mode",
+      "type": "string"
+    },
+    "architecture": {
+      "const": "amd64",
+      "title": "Architecture",
+      "type": "string"
+    },
+    "automatic_restart": {
+      "const": false,
+      "title": "Automatic Restart",
+      "type": "boolean"
+    },
+    "boot_disk_size_gib": {
+      "maximum": 16384,
+      "minimum": 10,
+      "title": "Boot Disk Size Gib",
+      "type": "integer"
+    },
+    "boot_disk_type": {
+      "enum": [
+        "pd-balanced",
+        "pd-ssd"
+      ],
+      "title": "Boot Disk Type",
+      "type": "string"
+    },
+    "boot_image": {
+      "$ref": "#/$defs/GcpExecutionBootImage"
+    },
+    "deletion_protection": {
+      "const": false,
+      "title": "Deletion Protection",
+      "type": "boolean"
+    },
+    "maintenance_policy": {
+      "const": "TERMINATE",
+      "title": "Maintenance Policy",
+      "type": "string"
+    },
+    "network": {
+      "$ref": "#/$defs/GcpExecutionNetwork"
+    },
+    "runner_image": {
+      "$ref": "#/$defs/GcpPlanImage"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-execution-environment.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "service_account": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$",
+      "title": "Service Account",
+      "type": "string"
+    },
+    "service_account_scopes": {
+      "items": {
+        "enum": [
+          "logging.write",
+          "monitoring.write",
+          "trace.append"
+        ],
+        "type": "string"
+      },
+      "maxItems": 3,
+      "minItems": 1,
+      "title": "Service Account Scopes",
+      "type": "array"
+    },
+    "serving_runtime_image": {
+      "$ref": "#/$defs/GcpPlanImage"
+    },
+    "startup_script_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Startup Script Digest"
+    }
+  },
+  "required": [
+    "schema_version",
+    "boot_image",
+    "runner_image",
+    "serving_runtime_image",
+    "network",
+    "service_account",
+    "service_account_scopes",
+    "boot_disk_size_gib",
+    "boot_disk_type",
+    "architecture",
+    "deletion_protection",
+    "automatic_restart",
+    "maintenance_policy",
+    "startup_script_digest"
+  ],
+  "title": "GcpExecutionEnvironment",
+  "type": "object"
+}

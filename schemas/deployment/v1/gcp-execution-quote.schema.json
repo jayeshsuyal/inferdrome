@@ -1,0 +1,280 @@
+{
+  "$defs": {
+    "GcpQuoteComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "component_id": {
+          "enum": [
+            "compute",
+            "gpu",
+            "boot_disk",
+            "network"
+          ],
+          "title": "Component Id",
+          "type": "string"
+        },
+        "maximum_microusd": {
+          "maximum": 1000000000000,
+          "minimum": 0,
+          "title": "Maximum Microusd",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "component_id",
+        "maximum_microusd"
+      ],
+      "title": "GcpQuoteComponent",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-execution-quote:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "accelerator_attachment_mode": {
+      "const": "a2_fixed_gpu",
+      "title": "Accelerator Attachment Mode",
+      "type": "string"
+    },
+    "accelerator_count": {
+      "maximum": 16,
+      "minimum": 1,
+      "title": "Accelerator Count",
+      "type": "integer"
+    },
+    "accelerator_model": {
+      "const": "NVIDIA A100-SXM4-40GB",
+      "title": "Accelerator Model",
+      "type": "string"
+    },
+    "accelerator_provider_type": {
+      "maxLength": 96,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+      "title": "Accelerator Provider Type",
+      "type": "string"
+    },
+    "billable_duration_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Billable Duration Seconds",
+      "type": "integer"
+    },
+    "boot_disk_size_gib": {
+      "maximum": 16384,
+      "minimum": 10,
+      "title": "Boot Disk Size Gib",
+      "type": "integer"
+    },
+    "boot_disk_type": {
+      "enum": [
+        "pd-balanced",
+        "pd-ssd"
+      ],
+      "title": "Boot Disk Type",
+      "type": "string"
+    },
+    "boot_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Boot Image Digest",
+      "type": "string"
+    },
+    "boot_image_name": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Boot Image Name",
+      "type": "string"
+    },
+    "boot_image_provider_id": {
+      "maximum": 10000000000000000000,
+      "minimum": 1,
+      "title": "Boot Image Provider Id",
+      "type": "integer"
+    },
+    "complete": {
+      "const": true,
+      "title": "Complete",
+      "type": "boolean"
+    },
+    "components": {
+      "items": {
+        "$ref": "#/$defs/GcpQuoteComponent"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "title": "Components",
+      "type": "array"
+    },
+    "controller_id": {
+      "pattern": "^ctl-[a-z0-9]{8,24}$",
+      "title": "Controller Id",
+      "type": "string"
+    },
+    "currency": {
+      "const": "USD",
+      "title": "Currency",
+      "type": "string"
+    },
+    "environment_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Environment Digest",
+      "type": "string"
+    },
+    "freshness_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Freshness Seconds",
+      "type": "integer"
+    },
+    "invoice_truth": {
+      "const": "unavailable_external_provider_invoice",
+      "title": "Invoice Truth",
+      "type": "string"
+    },
+    "issued_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "machine_type": {
+      "maxLength": 96,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+      "title": "Machine Type",
+      "type": "string"
+    },
+    "network": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Network",
+      "type": "string"
+    },
+    "plan_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "pricing_proven": {
+      "const": false,
+      "title": "Pricing Proven",
+      "type": "boolean"
+    },
+    "pricing_status": {
+      "const": "operator_supplied_estimate_not_invoice_truth",
+      "title": "Pricing Status",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "provider_max_runtime_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Provider Max Runtime Seconds",
+      "type": "integer"
+    },
+    "quote_id": {
+      "pattern": "^quote-[a-z0-9]{8,32}$",
+      "title": "Quote Id",
+      "type": "string"
+    },
+    "region": {
+      "maxLength": 32,
+      "minLength": 5,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+      "title": "Region",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "runner_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Runner Image Digest",
+      "type": "string"
+    },
+    "safety_margin_microusd": {
+      "maximum": 1000000000000,
+      "minimum": 0,
+      "title": "Safety Margin Microusd",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-execution-quote.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "service_account": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$",
+      "title": "Service Account",
+      "type": "string"
+    },
+    "serving_runtime_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Serving Runtime Image Digest",
+      "type": "string"
+    },
+    "subnetwork": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Subnetwork",
+      "type": "string"
+    },
+    "valid_until": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Valid Until",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "quote_id",
+    "plan_id",
+    "controller_id",
+    "request_digest",
+    "environment_digest",
+    "project_id",
+    "region",
+    "zone",
+    "machine_type",
+    "accelerator_model",
+    "accelerator_provider_type",
+    "accelerator_count",
+    "accelerator_attachment_mode",
+    "network",
+    "subnetwork",
+    "boot_image_name",
+    "boot_image_provider_id",
+    "boot_image_digest",
+    "runner_image_digest",
+    "serving_runtime_image_digest",
+    "boot_disk_size_gib",
+    "boot_disk_type",
+    "service_account",
+    "provider_max_runtime_seconds",
+    "billable_duration_seconds",
+    "issued_at",
+    "valid_until",
+    "freshness_seconds",
+    "currency",
+    "components",
+    "safety_margin_microusd",
+    "complete",
+    "pricing_proven",
+    "pricing_status",
+    "invoice_truth"
+  ],
+  "title": "GcpCostQuote",
+  "type": "object"
+}

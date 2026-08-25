@@ -1,0 +1,272 @@
+{
+  "$defs": {
+    "CostCeiling": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "estimate_basis": {
+          "const": "controller_estimate",
+          "title": "Estimate Basis",
+          "type": "string"
+        },
+        "hard_limit": {
+          "const": true,
+          "title": "Hard Limit",
+          "type": "boolean"
+        },
+        "invoice_truth": {
+          "const": "external_provider_invoice_required",
+          "title": "Invoice Truth",
+          "type": "string"
+        },
+        "max_cost_usd": {
+          "maxLength": 16,
+          "pattern": "^(?:0|[1-9][0-9]{0,9})(?:\\.[0-9]{1,2})?$",
+          "title": "Max Cost Usd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "max_cost_usd",
+        "hard_limit",
+        "estimate_basis",
+        "invoice_truth"
+      ],
+      "title": "CostCeiling",
+      "type": "object"
+    },
+    "GcpPlanProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "accelerator_count": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Accelerator Count",
+          "type": "integer"
+        },
+        "accelerator_model": {
+          "const": "NVIDIA A100-SXM4-40GB",
+          "title": "Accelerator Model",
+          "type": "string"
+        },
+        "accelerator_provider_type": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+          "title": "Accelerator Provider Type",
+          "type": "string"
+        },
+        "architecture": {
+          "const": "amd64",
+          "title": "Architecture",
+          "type": "string"
+        },
+        "catalog_eligibility": {
+          "const": "catalog_eligible",
+          "title": "Catalog Eligibility",
+          "type": "string"
+        },
+        "machine_type": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+          "title": "Machine Type",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+          "title": "Region",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "region",
+        "zone",
+        "machine_type",
+        "architecture",
+        "accelerator_model",
+        "accelerator_provider_type",
+        "accelerator_count",
+        "catalog_eligibility"
+      ],
+      "title": "GcpPlanProvider",
+      "type": "object"
+    },
+    "GcpPlanScope": {
+      "additionalProperties": false,
+      "properties": {
+        "compute_project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Compute Project Id",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+          "title": "Region",
+          "type": "string"
+        }
+      },
+      "required": [
+        "compute_project_id",
+        "region"
+      ],
+      "title": "GcpPlanScope",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-execution-arm:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arm_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Arm Id",
+      "type": "string"
+    },
+    "arm_kind": {
+      "const": "one_shot_operator_capability",
+      "title": "Arm Kind",
+      "type": "string"
+    },
+    "authorization_granted": {
+      "const": true,
+      "title": "Authorization Granted",
+      "type": "boolean"
+    },
+    "controller_id": {
+      "pattern": "^ctl-[a-z0-9]{8,24}$",
+      "title": "Controller Id",
+      "type": "string"
+    },
+    "cost_ceiling": {
+      "$ref": "#/$defs/CostCeiling"
+    },
+    "credentials_resolved": {
+      "const": false,
+      "title": "Credentials Resolved",
+      "type": "boolean"
+    },
+    "deployment_spec_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Deployment Spec Digest",
+      "type": "string"
+    },
+    "evidence_eligible": {
+      "const": false,
+      "title": "Evidence Eligible",
+      "type": "boolean"
+    },
+    "expires_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "inventory_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Inventory Digest",
+      "type": "string"
+    },
+    "invoice_truth": {
+      "const": "unavailable_external_provider_invoice",
+      "title": "Invoice Truth",
+      "type": "string"
+    },
+    "issued_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "max_controller_duration_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Max Controller Duration Seconds",
+      "type": "integer"
+    },
+    "max_provider_lifetime_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Max Provider Lifetime Seconds",
+      "type": "integer"
+    },
+    "nonce": {
+      "pattern": "^[0-9a-f]{32}$",
+      "title": "Nonce",
+      "type": "string"
+    },
+    "plan_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "plan_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Sha256",
+      "type": "string"
+    },
+    "planning_scope": {
+      "$ref": "#/$defs/GcpPlanScope"
+    },
+    "provider_mutation_performed": {
+      "const": false,
+      "title": "Provider Mutation Performed",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-execution-arm.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "selected_provider": {
+      "$ref": "#/$defs/GcpPlanProvider"
+    }
+  },
+  "required": [
+    "schema_version",
+    "arm_kind",
+    "plan_id",
+    "plan_sha256",
+    "deployment_spec_digest",
+    "inventory_digest",
+    "planning_scope",
+    "selected_provider",
+    "controller_id",
+    "nonce",
+    "issued_at",
+    "expires_at",
+    "max_controller_duration_seconds",
+    "max_provider_lifetime_seconds",
+    "cost_ceiling",
+    "authorization_granted",
+    "provider_mutation_performed",
+    "credentials_resolved",
+    "evidence_eligible",
+    "invoice_truth",
+    "arm_id"
+  ],
+  "title": "GcpExecutionArm",
+  "type": "object"
+}

@@ -1,0 +1,31 @@
+{
+  "$id": "urn:inferdrome:gcp-execution-boot-disk-observation:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read-only boot-disk source identity observed after create.",
+  "properties": {
+    "disk_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Disk Name",
+      "type": "string"
+    },
+    "instance_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "source_image_id": {
+      "maximum": 10000000000000000000,
+      "minimum": 1,
+      "title": "Source Image Id",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "instance_name",
+    "disk_name",
+    "source_image_id"
+  ],
+  "title": "GcpBootDiskObservation",
+  "type": "object"
+}
