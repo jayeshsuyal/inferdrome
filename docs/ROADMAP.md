@@ -34,6 +34,25 @@ PR 6 is an independent-consumer integration boundary. Its contract remains in
 this roadmap, but work on that consumer is outside the Inferdrome repository
 and is not an active implementation target here.
 
+## Deployment-layer sequence
+
+The deployment layer is additive to the frozen evidence contracts. Its first
+contract-only slice is `inferdrome.deployment.v1`, documented in
+[DEPLOYMENT_SPEC_V1.md](DEPLOYMENT_SPEC_V1.md). It gives later adapters one
+provider-neutral, closed input shape while preserving the benchmark command,
+methodology references, v0.1 schemas, genuine receipts, and ExitSpec boundary.
+
+The contract intentionally has no execution authority. Local mock is explicit
+and never GPU evidence; Lambda and GCP are dry-run/reference identities; vLLM
+`0.26.0` is the only executable runtime identity represented; SGLang is a
+reserved reference shape. Later slices must be independently reviewed in this
+order: provider/runtime lifecycle interfaces with a local adapter, immutable
+outer deployment receipt, reproducible runner image, pinned vLLM runtime image
+and Compose paths, GCP read-only/dry-run, authorized guarded GCP lifecycle,
+local API authentication, minimal Kubernetes, and finally SGLang execution.
+No slice grants cloud launch, spend, evidence publication, public exposure, or
+release authority by itself.
+
 ## PR 0 — Freeze the foundation
 
 Deliver:

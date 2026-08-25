@@ -1,0 +1,703 @@
+{
+  "$comment": "Cross-field deployment invariants are normative; see docs/DEPLOYMENT_SPEC_V1.md. This contract declares intent only and does not attest to execution or provider billing.",
+  "$defs": {
+    "ArtifactIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "runner_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        },
+        "serving_runtime_image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "runner_image",
+        "serving_runtime_image"
+      ],
+      "title": "ArtifactIdentity",
+      "type": "object"
+    },
+    "BenchmarkMethodologyReference": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "methodology_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^inferdrome\\.[a-z0-9](?:[a-z0-9._-]{0,120}[a-z0-9])?\\.v[0-9]+$",
+          "title": "Methodology Id",
+          "type": "string"
+        },
+        "source": {
+          "const": "registered_manifest",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "methodology_id",
+        "manifest_sha256"
+      ],
+      "title": "BenchmarkMethodologyReference",
+      "type": "object"
+    },
+    "BenchmarkTopology": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_scope": {
+          "enum": [
+            "loopback",
+            "private"
+          ],
+          "title": "Endpoint Scope",
+          "type": "string"
+        },
+        "methodology": {
+          "$ref": "#/$defs/BenchmarkMethodologyReference"
+        },
+        "runner_runtime_colocation": {
+          "const": "colocated",
+          "title": "Runner Runtime Colocation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "methodology",
+        "runner_runtime_colocation",
+        "endpoint_scope"
+      ],
+      "title": "BenchmarkTopology",
+      "type": "object"
+    },
+    "CleanupPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_on_every_exit": {
+          "const": true,
+          "title": "Cleanup On Every Exit",
+          "type": "boolean"
+        },
+        "cleanup_receipt_required": {
+          "const": true,
+          "title": "Cleanup Receipt Required",
+          "type": "boolean"
+        },
+        "max_cleanup_attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Cleanup Attempts",
+          "type": "integer"
+        },
+        "orphan_policy": {
+          "const": "block_next_run",
+          "title": "Orphan Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cleanup_on_every_exit",
+        "cleanup_receipt_required",
+        "orphan_policy",
+        "max_cleanup_attempts"
+      ],
+      "title": "CleanupPolicy",
+      "type": "object"
+    },
+    "CostCeiling": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "estimate_basis": {
+          "const": "controller_estimate",
+          "title": "Estimate Basis",
+          "type": "string"
+        },
+        "hard_limit": {
+          "const": true,
+          "title": "Hard Limit",
+          "type": "boolean"
+        },
+        "invoice_truth": {
+          "const": "external_provider_invoice_required",
+          "title": "Invoice Truth",
+          "type": "string"
+        },
+        "max_cost_usd": {
+          "maxLength": 16,
+          "pattern": "^(?:0|[1-9][0-9]{0,9})(?:\\.[0-9]{1,2})?$",
+          "title": "Max Cost Usd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "max_cost_usd",
+        "hard_limit",
+        "estimate_basis",
+        "invoice_truth"
+      ],
+      "title": "CostCeiling",
+      "type": "object"
+    },
+    "EndpointConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "maxLength": 253,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$|^[A-Za-z0-9]$",
+          "title": "Host",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^/[A-Za-z0-9._/-]*$",
+          "title": "Path",
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "scheme": {
+          "enum": [
+            "http",
+            "https"
+          ],
+          "title": "Scheme",
+          "type": "string"
+        },
+        "visibility": {
+          "enum": [
+            "loopback",
+            "private"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scheme",
+        "host",
+        "port",
+        "path",
+        "visibility"
+      ],
+      "title": "EndpointConfiguration",
+      "type": "object"
+    },
+    "EnvironmentVariableReference": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "environment_variable",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "title": "EnvironmentVariableReference",
+      "type": "object"
+    },
+    "GcpSecretManagerReference": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "gcp_secret_manager",
+          "title": "Kind",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "secret_id": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$",
+          "title": "Secret Id",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "project_id",
+        "secret_id",
+        "version"
+      ],
+      "title": "GcpSecretManagerReference",
+      "type": "object"
+    },
+    "ImageIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Digest"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._/-]{0,254}[a-z0-9])?$",
+          "title": "Repository",
+          "type": "string"
+        },
+        "tag": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]$|^[A-Za-z0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tag"
+        }
+      },
+      "required": [
+        "repository",
+        "digest",
+        "tag"
+      ],
+      "title": "ImageIdentity",
+      "type": "object"
+    },
+    "LifecycleTimeouts": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Cleanup Seconds",
+          "type": "integer"
+        },
+        "request_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Request Seconds",
+          "type": "integer"
+        },
+        "startup_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Startup Seconds",
+          "type": "integer"
+        },
+        "termination_confirmation_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Termination Confirmation Seconds",
+          "type": "integer"
+        },
+        "total_seconds": {
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Total Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "startup_seconds",
+        "request_seconds",
+        "total_seconds",
+        "cleanup_seconds",
+        "termination_confirmation_seconds"
+      ],
+      "title": "LifecycleTimeouts",
+      "type": "object"
+    },
+    "ProviderConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "credential_refs": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "environment_variable": "#/$defs/EnvironmentVariableReference",
+                "gcp_secret_manager": "#/$defs/GcpSecretManagerReference"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EnvironmentVariableReference"
+              },
+              {
+                "$ref": "#/$defs/GcpSecretManagerReference"
+              }
+            ]
+          },
+          "maxItems": 8,
+          "title": "Credential Refs",
+          "type": "array"
+        },
+        "provider_id": {
+          "enum": [
+            "local",
+            "lambda_cloud",
+            "gcp"
+          ],
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Region"
+        }
+      },
+      "required": [
+        "provider_id",
+        "region",
+        "credential_refs"
+      ],
+      "title": "ProviderConfiguration",
+      "type": "object"
+    },
+    "ResourceRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_cores": {
+          "maximum": 256,
+          "minimum": 1,
+          "title": "Cpu Cores",
+          "type": "integer"
+        },
+        "ephemeral_storage_gib": {
+          "maximum": 16384,
+          "minimum": 1,
+          "title": "Ephemeral Storage Gib",
+          "type": "integer"
+        },
+        "gpu_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Gpu Count",
+          "type": "integer"
+        },
+        "gpu_model": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,126}[A-Za-z0-9)]$|^[A-Za-z0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Gpu Model"
+        },
+        "memory_mib": {
+          "maximum": 1048576,
+          "minimum": 256,
+          "title": "Memory Mib",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "gpu_count",
+        "gpu_model",
+        "cpu_cores",
+        "memory_mib",
+        "ephemeral_storage_gib"
+      ],
+      "title": "ResourceRequirements",
+      "type": "object"
+    },
+    "SglangReferenceConfiguration": {
+      "additionalProperties": false,
+      "description": "Reserved v1 shape; lifecycle and measurement adapters are not implemented.",
+      "properties": {
+        "adapter": {
+          "const": "sglang_reference_v1",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/EndpointConfiguration"
+        },
+        "engine": {
+          "const": "sglang",
+          "title": "Engine",
+          "type": "string"
+        },
+        "engine_version": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Engine Version",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}[A-Za-z0-9]$|^[A-Za-z0-9]$",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "registry_secret_refs": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "environment_variable": "#/$defs/EnvironmentVariableReference",
+                "gcp_secret_manager": "#/$defs/GcpSecretManagerReference"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EnvironmentVariableReference"
+              },
+              {
+                "$ref": "#/$defs/GcpSecretManagerReference"
+              }
+            ]
+          },
+          "maxItems": 8,
+          "title": "Registry Secret Refs",
+          "type": "array"
+        },
+        "tokenizer_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "engine",
+        "engine_version",
+        "adapter",
+        "model_id",
+        "model_revision",
+        "tokenizer_revision",
+        "endpoint",
+        "registry_secret_refs"
+      ],
+      "title": "SglangReferenceConfiguration",
+      "type": "object"
+    },
+    "VllmRuntimeConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "const": "vllm_bench_serve",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/EndpointConfiguration"
+        },
+        "engine": {
+          "const": "vllm",
+          "title": "Engine",
+          "type": "string"
+        },
+        "engine_version": {
+          "const": "0.26.0",
+          "title": "Engine Version",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}[A-Za-z0-9]$|^[A-Za-z0-9]$",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "registry_secret_refs": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "environment_variable": "#/$defs/EnvironmentVariableReference",
+                "gcp_secret_manager": "#/$defs/GcpSecretManagerReference"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EnvironmentVariableReference"
+              },
+              {
+                "$ref": "#/$defs/GcpSecretManagerReference"
+              }
+            ]
+          },
+          "maxItems": 8,
+          "title": "Registry Secret Refs",
+          "type": "array"
+        },
+        "tokenizer_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "engine",
+        "engine_version",
+        "adapter",
+        "model_id",
+        "model_revision",
+        "tokenizer_revision",
+        "endpoint",
+        "registry_secret_refs"
+      ],
+      "title": "VllmRuntimeConfiguration",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:deployment:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned deployment intent consumed by later provider/runtime adapters.",
+  "properties": {
+    "artifacts": {
+      "$ref": "#/$defs/ArtifactIdentity"
+    },
+    "cleanup_policy": {
+      "$ref": "#/$defs/CleanupPolicy"
+    },
+    "cost_ceiling": {
+      "$ref": "#/$defs/CostCeiling"
+    },
+    "deployment_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+      "title": "Deployment Id",
+      "type": "string"
+    },
+    "execution_intent": {
+      "enum": [
+        "mock_only",
+        "local_execute",
+        "dry_run_reference"
+      ],
+      "title": "Execution Intent",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "development",
+        "proof"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "provider": {
+      "$ref": "#/$defs/ProviderConfiguration"
+    },
+    "resources": {
+      "$ref": "#/$defs/ResourceRequirements"
+    },
+    "runtime": {
+      "discriminator": {
+        "mapping": {
+          "sglang": "#/$defs/SglangReferenceConfiguration",
+          "vllm": "#/$defs/VllmRuntimeConfiguration"
+        },
+        "propertyName": "engine"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/VllmRuntimeConfiguration"
+        },
+        {
+          "$ref": "#/$defs/SglangReferenceConfiguration"
+        }
+      ],
+      "title": "Runtime"
+    },
+    "schema_version": {
+      "const": "inferdrome.deployment.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "timeouts": {
+      "$ref": "#/$defs/LifecycleTimeouts"
+    },
+    "topology": {
+      "$ref": "#/$defs/BenchmarkTopology"
+    }
+  },
+  "required": [
+    "schema_version",
+    "deployment_id",
+    "mode",
+    "execution_intent",
+    "provider",
+    "runtime",
+    "topology",
+    "artifacts",
+    "resources",
+    "timeouts",
+    "cleanup_policy",
+    "cost_ceiling"
+  ],
+  "title": "DeploymentSpec",
+  "type": "object"
+}

@@ -16,6 +16,7 @@ class DigestDomain(StrEnum):
     TRIAL_SET = "trial-set-v1"
     COMPARISON_PLAN = "comparison-plan-v1"
     COMPARISON_RESULT = "comparison-result-v1"
+    DEPLOYMENT_SPEC = "deployment-spec-v1"
 
 
 def digest_bytes(domain: DigestDomain, payload: bytes) -> str:
