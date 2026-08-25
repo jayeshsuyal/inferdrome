@@ -10,6 +10,7 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/generate_deployment_receipt.py --check
 "$inferdrome_python" scripts/generate_gcp_dry_run_plan.py --check
 "$inferdrome_python" scripts/generate_gcp_execution_contracts.py --check
+"$inferdrome_python" scripts/generate_kubernetes_contract.py --check
 "$inferdrome_python" scripts/runner_smoke.py --check
 "$inferdrome_python" scripts/build_runner_image.py --check
 "$inferdrome_python" scripts/generate_capability_profiles.py --check
@@ -46,9 +47,12 @@ fi
 bash -n scripts/prepare_real_gpu_host.sh
 bash -n scripts/run_real_gpu_capture.sh
 bash -n scripts/dashboard_gate.sh
+bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/generate_deployment_spec.py
 "$inferdrome_python" -m py_compile scripts/generate_deployment_receipt.py
+"$inferdrome_python" -m py_compile scripts/generate_kubernetes_contract.py
+"$inferdrome_python" -m py_compile src/inferdrome/kubernetes.py
 "$inferdrome_python" -m py_compile scripts/gcp_dry_run_plan.py
 "$inferdrome_python" -m py_compile scripts/generate_gcp_dry_run_plan.py
 "$inferdrome_python" -m py_compile scripts/generate_gcp_execution_contracts.py

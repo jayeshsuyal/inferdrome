@@ -1,0 +1,49 @@
+{
+  "benchmark": {
+    "command": "inferdrome run",
+    "methodology": "existing-qwen3-campaign-source-of-truth",
+    "workload_id": "inferdrome.qwen-text-mixed-length.v1",
+    "workload_path": "workloads/qwen-text-mixed-length-v1.jsonl",
+    "workload_sha256": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f"
+  },
+  "claims": {
+    "evidence": "no-eligible-evidence-claim",
+    "gpu_execution": "not-executed",
+    "mock_execution": "synthetic-contract-simulation-only-until-cluster-gate"
+  },
+  "job_shape": "batch/v1-job-native-sidecar",
+  "kubernetes_min_version": "1.33",
+  "model": {
+    "model_id": "Qwen/Qwen3-8B",
+    "model_manifest_sha256": "sha256:ef291a8dd0f21604c8da3025f5112bd6641e891a3401c8550584725eaabe55cc",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+    "snapshot_manifest_sha256": "sha256:588d19e9e489cccdad793718d8c5efbad0738be717369f9eacb94ce514992d2c",
+    "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218"
+  },
+  "profiles": {
+    "gpu": {
+      "evidence_eligible": false,
+      "evidence_persistence": "operator-provided-evidence-pvc-required",
+      "manifest_sha256": "sha256:7c38614f72b0af1295b0e9b5602e3282961895785ef69034f76ebb42f8a31990",
+      "manifest_template": "kubernetes/inferdrome-benchmark-gpu-job.template.yaml",
+      "runner_image": "immutable-digest-required-at-render-time",
+      "synthetic_only": false
+    },
+    "mock": {
+      "evidence_eligible": false,
+      "evidence_persistence": "disposable-emptydir-log-retrieval",
+      "manifest": "kubernetes/inferdrome-benchmark-mock-job.yaml",
+      "manifest_sha256": "sha256:245c98d4c9fa6a0d9f9e8f4d8e76813ff560125bcb415d20e4f76505ba7295ae",
+      "synthetic_only": true
+    }
+  },
+  "runtime": {
+    "endpoint": "http://127.0.0.1:8000",
+    "engine": "vllm",
+    "image_reference": "vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52",
+    "topology": "same-pod-loopback-native-sidecar",
+    "version": "0.26.0"
+  },
+  "schema_version": "inferdrome.kubernetes-job.v1"
+}

@@ -168,6 +168,27 @@ false/unavailable. Publication is a separate additive immutable plan artifact,
 not a PR4 receipt or evidence bundle. A future mutating adapter must consume
 the deployment contract only after its own authorization and lifecycle gates.
 
+### Minimal Kubernetes Job boundary
+
+The additive Kubernetes contract uses one `batch/v1` Job and Kubernetes 1.33
+native sidecars: the mock or pinned vLLM serving process is an
+`initContainers` entry with `restartPolicy: Always`, while the one-shot
+Inferdrome runner is the regular Job container. Both share the Pod's loopback
+namespace, preserving the runner/serving topology without adding a Service.
+The strict offline validator rejects duplicate YAML keys, extra documents,
+unknown shapes, mutable GPU images, public/host resources, shell commands,
+runner GPU requests, and model/runtime/benchmark drift.
+
+The default mock wrapper retrieves exactly one bounded runner stdout payload via
+`kubectl logs`, validates the synthetic/ineligible output, publishes it locally
+with no replacement, and only then deletes its unique namespace and kind
+cluster. It never relies on `kubectl cp` or `kubectl exec` from a completed
+container. The mock Pod's `emptyDir` is disposable. The GPU template instead
+requires explicit operator-provided read-only model/experiment PVCs and a
+writable evidence PVC; without that PVC, real bundle persistence is unresolved.
+This is a contract/simulation boundary, not a Kubernetes platform, live
+execution, evidence receipt, or GPU claim. See [KUBERNETES_V1.md](KUBERNETES_V1.md).
+
 ### Resolver
 
 The resolver validates source input, applies explicit defaults, resolves local

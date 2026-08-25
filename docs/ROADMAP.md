@@ -58,6 +58,14 @@ dry-run planning boundary. Its checked-in inventory and plan are synthetic
 local artifacts only; PR8 remains the separately authorized mutating lifecycle
 slice and may not infer compute scope from credential-reference locations.
 
+PR10 adds the minimal Kubernetes Job contract as a separate execution-layer
+boundary. It is limited to a Kubernetes 1.33 native-sidecar Job, a guarded
+synthetic local wrapper, and a non-executable GPU/vLLM template. The wrapper's
+mock artifact is a locally published synthetic log projection; the Pod
+`emptyDir` is disposable, and real GPU evidence requires an operator-provided
+durable evidence PVC. No cluster execution, GPU run, eligible evidence, or
+platform claim is closed by this slice.
+
 ## PR 0 — Freeze the foundation
 
 Deliver:

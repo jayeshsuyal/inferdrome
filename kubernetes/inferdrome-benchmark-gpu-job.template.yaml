@@ -1,0 +1,161 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inferdrome-benchmark-gpu
+  labels:
+    app: inferdrome-benchmark
+    component: benchmark-job
+    inferdrome.io/evidence-eligible: "false"
+    inferdrome.io/profile: gpu
+    inferdrome.io/synthetic-only: "false"
+    inferdrome.io/topology: colocated-loopback
+  annotations:
+    inferdrome.io/kubernetes-min-version: "1.33"
+    inferdrome.io/evidence-persistence: operator-provided-evidence-pvc-required
+    inferdrome.io/claim-boundary: not-executed
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: inferdrome-benchmark
+        component: benchmark-job
+        inferdrome.io/evidence-eligible: "false"
+        inferdrome.io/profile: gpu
+        inferdrome.io/synthetic-only: "false"
+        inferdrome.io/topology: colocated-loopback
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 2000
+        runAsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: vllm-engine
+          image: vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52
+          imagePullPolicy: IfNotPresent
+          command: [vllm, serve, /models/qwen3-8b]
+          args:
+            - --host
+            - 127.0.0.1
+            - --port
+            - "8000"
+            - --served-model-name
+            - Qwen/Qwen3-8B
+            - --tokenizer
+            - /models/qwen3-8b
+            - --tokenizer-mode
+            - auto
+            - --dtype
+            - bfloat16
+            - --seed
+            - "42"
+            - --load-format
+            - safetensors
+            - --generation-config
+            - vllm
+            - --model-impl
+            - vllm
+            - --max-model-len
+            - "2048"
+            - --gpu-memory-utilization
+            - "0.90"
+            - --tensor-parallel-size
+            - "1"
+            - --no-enable-log-requests
+            - --disable-uvicorn-access-log
+            - --uvicorn-log-level
+            - warning
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 2000
+            runAsGroup: 2000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests: {cpu: 2, memory: 8Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: 4, memory: 16Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: model, mountPath: /models/qwen3-8b, readOnly: true}
+          env:
+            - {name: HF_HUB_OFFLINE, value: "1"}
+            - {name: TRANSFORMERS_OFFLINE, value: "1"}
+            - {name: VLLM_CACHE_ROOT, value: /tmp/vllm-cache}
+            - {name: TRITON_CACHE_DIR, value: /tmp/triton-cache}
+          startupProbe:
+            httpGet: {path: /health, port: 8000, host: 127.0.0.1, scheme: HTTP}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet: {path: /health, port: 8000, host: 127.0.0.1, scheme: HTTP}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /health, port: 8000, host: 127.0.0.1, scheme: HTTP}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          restartPolicy: Always
+      containers:
+        - name: benchmark-runner
+          image: REQUIRED_IMMUTABLE_RUNNER_IMAGE_DIGEST
+          imagePullPolicy: IfNotPresent
+          command: [inferdrome]
+          args:
+            - run
+            - /inputs/experiment.yaml
+            - --runs-root
+            - /evidence/runs
+            - --tokenizer-path
+            - /models/qwen3-8b
+            - --managed-capability-profile
+            - managed-vllm-0.26-qwen3-8b-bf16-v1
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 2000
+            runAsGroup: 2000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests: {cpu: 1, memory: 2Gi}
+            limits: {cpu: 2, memory: 4Gi}
+          volumeMounts:
+            - {name: model, mountPath: /models/qwen3-8b, readOnly: true}
+            - {name: experiment, mountPath: /inputs, readOnly: true}
+            - {name: evidence, mountPath: /evidence}
+          env:
+            - {name: HF_HUB_OFFLINE, value: "1"}
+            - {name: TRANSFORMERS_OFFLINE, value: "1"}
+            - {name: VLLM_CACHE_ROOT, value: /tmp/vllm-cache}
+            - {name: TRITON_CACHE_DIR, value: /tmp/triton-cache}
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: REQUIRED_QWEN3_MODEL_PVC
+            readOnly: true
+        - name: experiment
+          persistentVolumeClaim:
+            claimName: REQUIRED_EXPERIMENT_PVC
+            readOnly: true
+        - name: evidence
+          persistentVolumeClaim:
+            claimName: REQUIRED_EVIDENCE_PVC
+            readOnly: false

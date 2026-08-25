@@ -1,0 +1,111 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inferdrome-benchmark-mock
+  labels:
+    app: inferdrome-benchmark
+    component: benchmark-job
+    inferdrome.io/evidence-eligible: "false"
+    inferdrome.io/profile: mock
+    inferdrome.io/synthetic-only: "true"
+    inferdrome.io/topology: colocated-loopback
+  annotations:
+    inferdrome.io/kubernetes-min-version: "1.33"
+    inferdrome.io/evidence-persistence: disposable-emptydir-log-retrieval
+    inferdrome.io/claim-boundary: synthetic-only
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels:
+        app: inferdrome-benchmark
+        component: benchmark-job
+        inferdrome.io/evidence-eligible: "false"
+        inferdrome.io/profile: mock
+        inferdrome.io/synthetic-only: "true"
+        inferdrome.io/topology: colocated-loopback
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 2000
+        runAsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: mock-engine
+          image: inferdrome/compose-mock:development
+          imagePullPolicy: Never
+          command:
+            - python
+            - /opt/inferdrome/compose_mock.py
+            - --host
+            - 127.0.0.1
+            - --port
+            - "8000"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          startupProbe:
+            httpGet: {path: /health, port: 8000, host: 127.0.0.1, scheme: HTTP}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /health, port: 8000, host: 127.0.0.1, scheme: HTTP}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 8000, host: 127.0.0.1, scheme: HTTP}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          restartPolicy: Always
+      containers:
+        - name: synthetic-runner
+          image: inferdrome/runner:development
+          imagePullPolicy: Never
+          command: [/opt/inferdrome-runtime/bin/inferdrome-runner-probe]
+          args:
+            - --endpoint
+            - http://127.0.0.1:8000/v1/chat/completions
+            - --model
+            - inferdrome/mock-model
+            - --prompt
+            - deterministic Kubernetes mock smoke
+            - --evidence-dir
+            - /evidence
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: evidence, mountPath: /evidence}
+      volumes:
+        - name: evidence
+          emptyDir:
+            sizeLimit: 64Mi
