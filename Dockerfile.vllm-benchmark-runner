@@ -1,0 +1,41 @@
+FROM vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52
+
+ARG SOURCE_REPOSITORY_COMMIT=development-unpinned
+ARG INFERDROME_VERSION=0.1.0.dev0
+ARG BUILD_FLAVOR=development
+
+RUN case "${BUILD_FLAVOR}" in \
+      development) ;; \
+      proof|release) \
+        printf '%s' "${SOURCE_REPOSITORY_COMMIT}" | grep -Eq '^[0-9a-f]{40,64}$' || exit 1; \
+        printf '%s' "${INFERDROME_VERSION}" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$' || exit 1; \
+        ;; \
+      *) exit 1 ;; \
+    esac
+
+WORKDIR /opt/inferdrome-source
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+# This is the benchmark-runner role. It installs the pinned Inferdrome CLI
+# alongside the upstream vLLM client package but deliberately overrides the
+# upstream server entrypoint; only the separate engine service runs `vllm serve`.
+USER root
+RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && test "$(python -c 'from inferdrome import __version__; print(__version__)')" = "${INFERDROME_VERSION}" \
+    && test "$(python -c 'import vllm; print(vllm.__version__.split("+")[0])')" = "0.26.0" \
+    && rm -rf /root/.cache/pip /opt/inferdrome-source
+
+LABEL org.opencontainers.image.source="https://github.com/inferdrome/inferdrome" \
+      org.opencontainers.image.revision="${SOURCE_REPOSITORY_COMMIT}" \
+      org.opencontainers.image.version="${INFERDROME_VERSION}" \
+      com.inferdrome.image-purpose="benchmark-runner-only" \
+      com.inferdrome.vllm-version="0.26.0" \
+      com.inferdrome.engine-entrypoint="separate-vllm-engine-service"
+
+USER 2000:0
+ENV HOME="/home/vllm" \
+    PYTHONDONTWRITEBYTECODE="1" \
+    PYTHONUNBUFFERED="1"
+WORKDIR /workspace
+ENTRYPOINT ["inferdrome"]
