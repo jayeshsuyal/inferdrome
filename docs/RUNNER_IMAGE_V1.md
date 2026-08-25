@@ -36,10 +36,11 @@ or replace the lock. The uv bootstrap is the fixed Linux/amd64 `0.8.17`
 release archive verified by its committed SHA-256 checksum.
 
 For a proof-shaped build, use the clean-context wrapper. It refuses modified,
-deleted, or untracked files in the Docker allowlist (`Dockerfile`,
-`.dockerignore`, `pyproject.toml`, `uv.lock`, `README.md`, and `src`), derives
-the full commit and package version, and passes the canonical GPU target
-platform:
+deleted, staged, untracked, or ignored files in the Docker allowlist
+(`Dockerfile`, `.dockerignore`, `pyproject.toml`, `uv.lock`, `README.md`, and
+`src`) and also checks the wrapper itself (`scripts/build_runner_image.py`) as
+a trust-root input. It derives the full commit and package version and passes
+the canonical GPU target platform:
 
 ```bash
 python scripts/build_runner_image.py \
@@ -47,13 +48,19 @@ python scripts/build_runner_image.py \
   --tag inferdrome-runner:proof
 ```
 
-The source commit in a proof label is locally verified only under this clean
-wrapper. Dockerfile syntax by itself does not bind arbitrary build-context
-bytes to Git. The image's OCI labels record the source repository, verified
-source commit, Inferdrome version, and `runner-only` purpose. The source commit
-is not the image digest, and neither is a deployment receipt. PR5 does not
-issue an executed receipt; a later receipt flow must bind the immutable image
-digest and source revision after independently verified execution.
+The wrapper then materializes a temporary Docker context from a validated
+`git archive HEAD` containing exactly that Docker allowlist. The ambient
+working tree, ignored files, `.git` directory, and the wrapper itself are not
+sent as proof context. Archive members are checked for traversal and links,
+and the temporary context is removed after successful, failed, or interrupted
+build attempts. The source commit in a proof label is locally verified only
+under this clean wrapper; Dockerfile syntax by itself does not bind arbitrary
+build-context bytes to Git. The image's OCI labels record the source
+repository, verified source commit, Inferdrome version, and `runner-only`
+purpose. The source commit is not the image digest, and neither is a
+deployment receipt. PR5 does not issue an executed receipt; a later receipt
+flow must bind the immutable image digest and source revision after
+independently verified execution.
 
 “Reproducible” here means bounded and verified inputs: pinned base digest,
 hash-verified uv bootstrap, frozen lockfile, clean relevant context, and an
@@ -127,6 +134,9 @@ of Docker must be reported as unavailable rather than treated as a passing
 image build.
 
 The `.dockerignore` denies the repository by default and allowlists only the
-Dockerfile, lock/configuration files, README, and source package. Git history,
-virtual environments, credentials, model/cache directories, raw evidence,
-test fixtures, and host artifacts are excluded from the build context.
+Dockerfile, lock/configuration files, README, and source package. It also
+explicitly excludes common editor, cache, bytecode, and package-metadata host
+artifacts as defense in depth. Git history, virtual environments, credentials,
+model/cache directories, raw evidence, test fixtures, and host artifacts are
+excluded from the build context. These patterns are not a substitute for the
+proof wrapper's exact `HEAD` archive.

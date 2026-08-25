@@ -11,6 +11,22 @@
 # Never allow host state or credentials through the allowlist.
 src/**/__pycache__/
 src/**/*.py[cod]
+# Defense in depth for host/editor and Python tooling artifacts. The proof
+# wrapper still constructs the context from a validated git archive; these
+# patterns are not the source-binding proof.
+.DS_Store
+**/.DS_Store
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
 .git/
 .git/**
 .venv/

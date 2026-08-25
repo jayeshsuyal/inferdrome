@@ -4,17 +4,31 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
-from pathlib import Path
+import tarfile
+import tempfile
+from collections.abc import Iterator, Sequence
+from pathlib import Path, PurePosixPath
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_PLATFORM = "linux/amd64"
 RELEVANT_BUILD_INPUTS = (
+    "Dockerfile",
+    ".dockerignore",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "src",
+    # The wrapper is a trust-root input. It is checked for cleanliness but is
+    # deliberately not copied into the Docker build context.
+    "scripts/build_runner_image.py",
+)
+ARCHIVE_BUILD_INPUTS = (
     "Dockerfile",
     ".dockerignore",
     "pyproject.toml",
@@ -59,12 +73,125 @@ def _require_clean_relevant_inputs() -> None:
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
+            "--ignored=matching",
             "--",
             *RELEVANT_BUILD_INPUTS,
         )
     )
     if status:
         raise RunnerImageBuildError("proof/release build inputs are not clean")
+
+
+def _archive_head(archive_path: Path, source_commit: str) -> None:
+    """Materialize allowlisted bytes from the labeled commit into ``archive_path``."""
+
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "archive",
+                "--format=tar",
+                source_commit,
+                "--",
+                *ARCHIVE_BUILD_INPUTS,
+            ],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        raise RunnerImageBuildError(
+            "exact proof build context cannot be created"
+        ) from None
+    if completed.returncode != 0 or not isinstance(completed.stdout, bytes):
+        raise RunnerImageBuildError("exact proof build context cannot be created")
+    try:
+        with archive_path.open("wb") as output:
+            output.write(completed.stdout)
+            output.flush()
+            os.fsync(output.fileno())
+    except OSError:
+        raise RunnerImageBuildError(
+            "exact proof build context cannot be created"
+        ) from None
+
+
+def _safe_archive_member(member: tarfile.TarInfo, context: Path) -> Path:
+    """Return a safe extraction path, rejecting links and traversal."""
+
+    member_path = PurePosixPath(member.name)
+    if (
+        member_path.is_absolute()
+        or not member_path.parts
+        or any(part in {"", ".", ".."} for part in member_path.parts)
+        or member.issym()
+        or member.islnk()
+        or not (member.isdir() or member.isreg())
+    ):
+        raise RunnerImageBuildError("proof build archive contains an unsafe member")
+    destination = (context / Path(*member_path.parts)).resolve()
+    try:
+        if os.path.commonpath((str(context.resolve()), str(destination))) != str(
+            context.resolve()
+        ):
+            raise RunnerImageBuildError("proof build archive contains an unsafe member")
+    except ValueError:
+        raise RunnerImageBuildError(
+            "proof build archive contains an unsafe member"
+        ) from None
+    return destination
+
+
+def _extract_archive(archive_path: Path, context: Path) -> None:
+    context.mkdir()
+    seen: set[Path] = set()
+    try:
+        with tarfile.open(archive_path, mode="r:") as archive:
+            for member in archive:
+                destination = _safe_archive_member(member, context)
+                if destination in seen:
+                    raise RunnerImageBuildError(
+                        "proof build archive contains duplicate members"
+                    )
+                seen.add(destination)
+                if member.isdir():
+                    destination.mkdir()
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("xb") as output:
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise RunnerImageBuildError(
+                            "proof build archive contains an invalid file"
+                        )
+                    with source:
+                        shutil.copyfileobj(source, output)
+    except RunnerImageBuildError:
+        raise
+    except (OSError, tarfile.TarError):
+        raise RunnerImageBuildError(
+            "proof build archive cannot be safely extracted"
+        ) from None
+
+
+@contextlib.contextmanager
+def _materialize_proof_context(source_commit: str) -> Iterator[Path]:
+    """Yield a temporary context containing exact allowlisted labeled-commit bytes."""
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="inferdrome-runner-context-"
+        ) as temporary:
+            temporary_root = Path(temporary)
+            archive_path = temporary_root / "head.tar"
+            context = temporary_root / "context"
+            _archive_head(archive_path, source_commit)
+            _extract_archive(archive_path, context)
+            yield context
+    except RunnerImageBuildError:
+        raise
+    except (OSError, RuntimeError):
+        raise RunnerImageBuildError("proof build context cleanup failed") from None
 
 
 def _source_commit() -> str:
@@ -114,6 +241,15 @@ def _validate_tag(tag: str) -> None:
         raise RunnerImageBuildError("image tag is invalid")
 
 
+def _run_docker_build(command: list[str]) -> None:
+    try:
+        completed = subprocess.run(command, cwd=REPOSITORY_ROOT, check=False)
+    except OSError:
+        raise RunnerImageBuildError("Docker build could not be started") from None
+    if completed.returncode != 0:
+        raise RunnerImageBuildError("Docker build failed")
+
+
 def build_image(
     *,
     flavor: str = "development",
@@ -154,14 +290,16 @@ def build_image(
                 f"INFERDROME_VERSION={package_version}",
             ]
         )
-    command.extend(["-t", tag, "."])
-    try:
-        completed = subprocess.run(command, cwd=REPOSITORY_ROOT, check=False)
-    except OSError:
-        raise RunnerImageBuildError("Docker build could not be started") from None
-    if completed.returncode != 0:
-        raise RunnerImageBuildError("Docker build failed")
-    return tuple(command)
+    command.extend(["-t", tag])
+    if flavor in {"proof", "release"}:
+        with _materialize_proof_context(source_commit) as context:
+            proof_command = [*command, str(context)]
+            _run_docker_build(proof_command)
+            return tuple(proof_command)
+
+    development_command = [*command, str(REPOSITORY_ROOT)]
+    _run_docker_build(development_command)
+    return tuple(development_command)
 
 
 def main(argv: list[str] | None = None) -> int:

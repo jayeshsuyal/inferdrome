@@ -90,6 +90,17 @@ def test_runner_build_context_is_deny_by_default_and_excludes_host_state() -> No
         "**/*.key",
         "**/*credentials*",
         "**/*secret*",
+        ".DS_Store",
+        "**/.DS_Store",
+        ".pytest_cache/",
+        "**/.pytest_cache/",
+        ".mypy_cache/",
+        "**/.mypy_cache/",
+        ".ruff_cache/",
+        "**/.ruff_cache/",
+        "**/*.egg-info/",
+        "**/__pycache__/",
+        "**/*.pyc",
     ):
         assert excluded in dockerignore
     for allowed in ("!Dockerfile", "!pyproject.toml", "!uv.lock", "!src/"):
