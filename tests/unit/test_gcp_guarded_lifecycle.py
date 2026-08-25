@@ -1362,7 +1362,8 @@ def test_journal_cannot_remove_pending_insert_operation_identity(
     armed = record.model_copy(
         update={"state": "ARM_CONSUMED", "arm_consumed": True}
     )
-    journal.reserve(armed)
+    journal.reserve(record)
+    journal.update(armed)
     pending = armed.model_copy(
         update={
             "state": "CREATE_SUBMITTED",
@@ -1401,7 +1402,8 @@ def test_journal_cannot_remove_pending_delete_operation_identity(
     armed = record.model_copy(
         update={"state": "ARM_CONSUMED", "arm_consumed": True}
     )
-    journal.reserve(armed)
+    journal.reserve(record)
+    journal.update(armed)
     insert_pending = armed.model_copy(
         update={
             "state": "CREATE_SUBMITTED",
@@ -1426,11 +1428,19 @@ def test_journal_cannot_remove_pending_delete_operation_identity(
         }
     )
     journal.update(insert_done)
-    delete_pending = insert_done.model_copy(
+    cleanup_pending = insert_done.model_copy(update={"state": "CLEANUP_PENDING"})
+    journal.update(cleanup_pending)
+    delete_intent = cleanup_pending.model_copy(
         update={
             "state": "CLEANUP_PENDING",
             "delete_attempts": 1,
             "provider_mutation_ambiguous": True,
+            "last_error_code": "DELETE_MUTATION_PENDING",
+        }
+    )
+    journal.update(delete_intent)
+    delete_pending = delete_intent.model_copy(
+        update={
             "provider_operation_id": "op-00000002",
             "provider_operation_name": (
                 f"projects/{armed.project_id}/zones/{armed.zone}/operations/op-00000002"
@@ -1453,6 +1463,368 @@ def test_journal_cannot_remove_pending_delete_operation_identity(
     )
     with pytest.raises(GcpJournalError, match="operation identity"):
         journal.update(removed)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "PREPARED",
+        "CREATE_SUBMITTED_AMBIGUOUS",
+        "CREATE_SUBMITTED_PENDING",
+        "OWNED",
+        "CLEANUP_PENDING",
+        "ORPHANED",
+        "CLEANUP_CONFIRMED",
+    ],
+)
+def test_missing_event_authority_never_erases_remaining_lease(
+    tmp_path: Path, state: str
+) -> None:
+    if state == "CLEANUP_CONFIRMED":
+        completed_root = tmp_path / "completed"
+        completed_root.mkdir()
+        outcome, controller = _run(
+            completed_root, FakeGcpComputeTransport(), return_controller=True
+        )
+        assert outcome.status == "SUCCEEDED"
+        record = controller.journal.load("ctl-12345678")
+    else:
+        record = _prepared_record(tmp_path / "seed")
+        root = tmp_path / state
+        root.mkdir()
+        journal = GcpLeaseJournal(root)
+        journal.reserve(record)
+        if state == "PREPARED":
+            pass
+        else:
+            record = record.model_copy(
+                update={
+                    "state": "ARM_CONSUMED",
+                    "arm_consumed": True,
+                }
+            )
+            journal.update(record)
+            if state == "CREATE_SUBMITTED_AMBIGUOUS":
+                updates: dict[str, Any] = {
+                    "state": "CREATE_SUBMITTED",
+                    "provider_mutation_attempted": True,
+                    "provider_mutation_ambiguous": True,
+                    "provider_operation_status": "UNKNOWN",
+                    "last_error_code": "CREATE_MUTATION_PENDING",
+                }
+            elif state in {
+                "CREATE_SUBMITTED_PENDING",
+                "OWNED",
+                "CLEANUP_PENDING",
+                "ORPHANED",
+            }:
+                updates = {
+                    "state": "CREATE_SUBMITTED",
+                    "provider_mutation_attempted": True,
+                    "provider_mutation_ambiguous": True,
+                    "provider_operation_id": "op-00000001",
+                    "provider_operation_name": (
+                        f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000001"
+                    ),
+                    "provider_operation_kind": "insert",
+                    "provider_operation_status": "PENDING",
+                    "last_error_code": "CREATE_MUTATION_PENDING",
+                }
+            record = record.model_copy(update=updates)
+            journal.update(record)
+            if state in {"OWNED", "CLEANUP_PENDING"}:
+                record = record.model_copy(
+                    update={
+                        "state": "OWNED" if state == "OWNED" else "CLEANUP_PENDING",
+                        "provider_mutation_ambiguous": False,
+                        "provider_operation_status": "DONE",
+                        "provider_operation_terminal": True,
+                    }
+                )
+                journal.update(record)
+            elif state == "ORPHANED":
+                record = record.model_copy(
+                    update={
+                        "state": "ORPHANED",
+                        "orphaned": True,
+                        "last_error_code": "AMBIGUOUS_MUTATION_UNRESOLVED",
+                    }
+                )
+                journal.update(record)
+        controller = None
+    root = controller.journal.root if controller is not None else root
+    event_path = root / "ctl-12345678.events.jsonl"
+    anchor_path = root / "ctl-12345678.intent.json"
+    snapshot_path = root / "ctl-12345678.lease.json"
+    event_path.unlink()
+    with pytest.raises(GcpJournalError, match="event authority"):
+        GcpLeaseJournal(root).unresolved_for_plan(record.plan_id)
+    assert anchor_path.exists()
+    assert snapshot_path.exists()
+
+
+def test_anchor_only_reserve_prefix_can_be_discarded_and_retried(
+    tmp_path: Path,
+) -> None:
+    record = _prepared_record(tmp_path)
+    root = tmp_path / "anchor-only"
+    root.mkdir()
+    child = GcpLeaseJournal(
+        root,
+        crash_hook=lambda point: os._exit(77)
+        if point == "reserve_after_anchor_fsync"
+        else None,
+    )
+    pid = os.fork()
+    if pid == 0:
+        child.reserve(record)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 77
+    journal = GcpLeaseJournal(root)
+    journal.reserve(record)
+    assert journal.load(record.controller_id) == record
+
+
+def test_delete_handle_requires_prepared_intent_and_cannot_be_replayed(
+    tmp_path: Path,
+) -> None:
+    completed_root = tmp_path / "completed"
+    completed_root.mkdir()
+    outcome, controller = _run(
+        completed_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    record = controller.journal.load("ctl-12345678")
+    terminal_to_pending = record.model_copy(
+        update={
+            "state": "CLEANUP_PENDING",
+            "cleanup_confirmed": False,
+            "provider_mutation_ambiguous": True,
+            "provider_operation_id": "op-00000003",
+            "provider_operation_name": (
+                f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000003"
+            ),
+            "provider_operation_kind": "delete",
+            "provider_operation_status": "PENDING",
+            "provider_operation_terminal": False,
+        }
+    )
+    with pytest.raises(GcpJournalError):
+        controller.journal.update(terminal_to_pending)
+    with pytest.raises(GcpJournalError):
+        controller.journal.update(
+            record.model_copy(
+                update={
+                    "state": "CLEANUP_PENDING",
+                    "delete_attempts": record.delete_attempts + 1,
+                    "provider_mutation_ambiguous": True,
+                    "provider_operation_id": "op-00000003",
+                    "provider_operation_name": (
+                        f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000003"
+                    ),
+                    "provider_operation_kind": "delete",
+                    "provider_operation_status": "PENDING",
+                    "provider_operation_terminal": False,
+                }
+            )
+        )
+    with pytest.raises(GcpJournalError):
+        controller.journal.update(
+            record.model_copy(
+                update={
+                    "provider_mutation_ambiguous": True,
+                    "provider_operation_id": "op-00000003",
+                    "provider_operation_name": (
+                        f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000003"
+                    ),
+                    "provider_operation_kind": "delete",
+                    "provider_operation_status": "PENDING",
+                    "provider_operation_terminal": False,
+                }
+            )
+        )
+    with pytest.raises(GcpJournalError, match="GCP journal record is invalid"):
+        controller.journal.update(
+            record.model_copy(
+                update={
+                    "provider_mutation_ambiguous": True,
+                    "provider_operation_id": "op-00000003",
+                    "provider_operation_name": (
+                        f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000003"
+                    ),
+                    "provider_operation_kind": "delete",
+                    "provider_operation_status": "PENDING",
+                    "provider_operation_terminal": False,
+                }
+            )
+        )
+
+
+def test_delete_attempt_sequence_rejects_replay_retarget_and_overflow(
+    tmp_path: Path,
+) -> None:
+    record = _prepared_record(tmp_path / "seed")
+    root = tmp_path / "journal"
+    root.mkdir()
+    journal = GcpLeaseJournal(root)
+    armed = record.model_copy(
+        update={"state": "ARM_CONSUMED", "arm_consumed": True}
+    )
+    journal.reserve(record)
+    journal.update(armed)
+    insert_pending = armed.model_copy(
+        update={
+            "state": "CREATE_SUBMITTED",
+            "provider_mutation_attempted": True,
+            "provider_mutation_ambiguous": True,
+            "provider_operation_id": "op-00000001",
+            "provider_operation_name": (
+                f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000001"
+            ),
+            "provider_operation_kind": "insert",
+            "provider_operation_status": "PENDING",
+        }
+    )
+    journal.update(insert_pending)
+    insert_done = insert_pending.model_copy(
+        update={
+            "provider_mutation_ambiguous": False,
+            "provider_operation_status": "DONE",
+            "provider_operation_terminal": True,
+        }
+    )
+    journal.update(insert_done)
+    cleanup_pending = insert_done.model_copy(update={"state": "CLEANUP_PENDING"})
+    journal.update(cleanup_pending)
+    delete_intent = cleanup_pending.model_copy(
+        update={
+            "state": "CLEANUP_PENDING",
+            "delete_attempts": 1,
+            "provider_mutation_ambiguous": True,
+        }
+    )
+    journal.update(delete_intent)
+    delete_pending = delete_intent.model_copy(
+        update={
+            "provider_operation_id": "op-00000002",
+            "provider_operation_name": (
+                f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000002"
+            ),
+            "provider_operation_kind": "delete",
+            "provider_operation_status": "PENDING",
+            "provider_operation_terminal": False,
+        }
+    )
+    journal.update(delete_pending)
+    with pytest.raises(GcpJournalError, match="operation identity"):
+        journal.update(
+            delete_pending.model_copy(
+                update={
+                    "provider_operation_id": "op-00000003",
+                    "provider_operation_name": (
+                        f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000003"
+                    ),
+                }
+            )
+        )
+    delete_done = delete_pending.model_copy(
+        update={
+            "provider_mutation_ambiguous": False,
+            "provider_operation_status": "DONE",
+            "provider_operation_terminal": True,
+        }
+    )
+    journal.update(delete_done)
+    with pytest.raises(GcpJournalError, match="terminal operation"):
+        journal.update(delete_pending)
+    forged_intent = delete_done.model_copy(
+        update={"provider_mutation_ambiguous": True}
+    )
+    with pytest.raises(GcpJournalError, match="did not consume an attempt"):
+        journal.update(forged_intent)
+    forged_handle = delete_done.model_copy(
+        update={
+            "provider_operation_id": "op-00000003",
+            "provider_operation_name": (
+                f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000003"
+            ),
+            "provider_operation_kind": "delete",
+            "provider_operation_status": "PENDING",
+            "provider_operation_terminal": False,
+            "provider_mutation_ambiguous": True,
+        }
+    )
+    with pytest.raises(
+        GcpJournalError, match=r"terminal operation|operation identity"
+    ):
+        journal.update(forged_handle)
+    second_intent = delete_done.model_copy(
+        update={
+            "delete_attempts": 2,
+            "provider_mutation_ambiguous": True,
+        }
+    )
+    journal.update(second_intent)
+    second_pending = second_intent.model_copy(
+        update={
+            "provider_operation_id": "op-00000003",
+            "provider_operation_name": (
+                f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000003"
+            ),
+            "provider_operation_kind": "delete",
+            "provider_operation_status": "PENDING",
+            "provider_operation_terminal": False,
+        }
+    )
+    journal.update(second_pending)
+    with pytest.raises(GcpJournalError, match="record is invalid"):
+        journal.update(record.model_copy(update={"delete_attempts": 4}))
+
+
+def test_delete_attempt_jump_cannot_skip_the_prepared_intent(
+    tmp_path: Path,
+) -> None:
+    record = _prepared_record(tmp_path / "seed")
+    root = tmp_path / "journal"
+    root.mkdir()
+    journal = GcpLeaseJournal(root)
+    armed = record.model_copy(
+        update={"state": "ARM_CONSUMED", "arm_consumed": True}
+    )
+    journal.reserve(record)
+    journal.update(armed)
+    insert_pending = armed.model_copy(
+        update={
+            "state": "CREATE_SUBMITTED",
+            "provider_mutation_attempted": True,
+            "provider_mutation_ambiguous": True,
+            "provider_operation_id": "op-00000001",
+            "provider_operation_name": (
+                f"projects/{record.project_id}/zones/{record.zone}/operations/op-00000001"
+            ),
+            "provider_operation_kind": "insert",
+            "provider_operation_status": "PENDING",
+        }
+    )
+    journal.update(insert_pending)
+    insert_done = insert_pending.model_copy(
+        update={
+            "provider_mutation_ambiguous": False,
+            "provider_operation_status": "DONE",
+            "provider_operation_terminal": True,
+        }
+    )
+    journal.update(insert_done)
+    jumped = insert_done.model_copy(
+        update={
+            "state": "CLEANUP_PENDING",
+            "delete_attempts": 2,
+            "provider_mutation_ambiguous": True,
+        }
+    )
+    with pytest.raises(GcpJournalError, match="changed invalidly"):
+        journal.update(jumped)
 
 
 def test_sigkill_after_durable_insert_intent_recovers_as_orphan(tmp_path: Path) -> None:

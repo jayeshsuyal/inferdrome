@@ -82,6 +82,14 @@ is total across the original process and recovery. A late VM is therefore
 eligible for exact cleanup after the operation becomes terminal. Recovery is an
 explicit exact-lease operation; there is no broad cleanup.
 
+Each delete attempt is a history-bound two-event sequence. First, a durable
+`CLEANUP_PENDING` intent consumes exactly one attempt and preserves the prior
+terminal operation identity, or preserves the exact ambiguous no-operation
+(`UNKNOWN`) tuple. Only the immediately following event may bind the returned
+delete operation at that same attempt count. Same-count ambiguity flips,
+skipped attempt numbers, replayed intents, and handle substitutions are
+rejected during both update and recovery-chain validation.
+
 The additive execution outcome is ephemeral controller state, not a benchmark
 result, deployment receipt, GPU receipt, evidence bundle, or acceptance
 verdict. It always has `evidence_eligible=false` and unavailable invoice truth.

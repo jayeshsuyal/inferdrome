@@ -1056,10 +1056,20 @@ class GcpLeaseRecord(GcpExecutionModel):
             raise ValueError("lease request ownership binding is inconsistent")
         if self.max_cleanup_attempts < self.delete_attempts:
             raise ValueError("lease cleanup attempt bound is inconsistent")
-        if self.state == "CLEANUP_CONFIRMED" and (
-            not self.cleanup_confirmed or self.orphaned
-        ):
-            raise ValueError("confirmed lease state is inconsistent")
+        if self.state == "CLEANUP_CONFIRMED":
+            if (
+                not self.cleanup_confirmed
+                or self.orphaned
+                or self.provider_mutation_ambiguous
+            ):
+                raise ValueError("confirmed lease state is inconsistent")
+            if self.provider_operation_id is not None and (
+                not self.provider_operation_terminal
+                or self.provider_operation_status not in {"DONE", "ERROR"}
+            ):
+                raise ValueError("confirmed lease operation is not terminal")
+        elif self.cleanup_confirmed:
+            raise ValueError("cleanup confirmation requires confirmed lease state")
         if self.orphaned and self.cleanup_confirmed:
             raise ValueError("orphaned lease cannot be confirmed")
         if self.provider_mutation_attempted and not self.arm_consumed:
@@ -1848,6 +1858,126 @@ def _journal_event(
     return GcpLeaseJournalEvent.model_validate_json(canonical_json_bytes(payload))
 
 
+def _same_provider_operation(
+    previous: GcpLeaseRecord, current: GcpLeaseRecord
+) -> bool:
+    return (
+        previous.provider_operation_id,
+        previous.provider_operation_name,
+        previous.provider_operation_kind,
+        previous.provider_operation_status,
+        previous.provider_operation_terminal,
+    ) == (
+        current.provider_operation_id,
+        current.provider_operation_name,
+        current.provider_operation_kind,
+        current.provider_operation_status,
+        current.provider_operation_terminal,
+    )
+
+
+def _is_prepared_delete_intent(
+    previous: GcpLeaseRecord, current: GcpLeaseRecord
+) -> bool:
+    """Recognize the one durable pre-delete budget transition."""
+
+    terminal_operation = (
+        previous.provider_operation_id is not None
+        and previous.provider_operation_kind in {"insert", "delete"}
+        and previous.provider_operation_status in {"DONE", "ERROR"}
+        and previous.provider_operation_terminal
+    )
+    ambiguous_without_operation = (
+        previous.provider_operation_id is None
+        and previous.provider_operation_name is None
+        and previous.provider_operation_kind is None
+        and previous.provider_operation_status == "UNKNOWN"
+        and not previous.provider_operation_terminal
+        and previous.provider_mutation_ambiguous
+    )
+    return (
+        current.delete_attempts == previous.delete_attempts + 1
+        and previous.state == "CLEANUP_PENDING"
+        and current.state == "CLEANUP_PENDING"
+        and (terminal_operation or ambiguous_without_operation)
+        and _same_provider_operation(previous, current)
+        and current.provider_mutation_ambiguous
+        and not current.cleanup_confirmed
+        and not current.orphaned
+    )
+
+
+def _is_bound_delete_operation(
+    previous_previous: GcpLeaseRecord | None,
+    previous: GcpLeaseRecord,
+    current: GcpLeaseRecord,
+) -> bool:
+    """Recognize the only transition that binds a returned delete handle."""
+
+    return (
+        previous_previous is not None
+        and _is_prepared_delete_intent(previous_previous, previous)
+        and current.state == "CLEANUP_PENDING"
+        and current.provider_operation_kind == "delete"
+        and current.provider_operation_status == "PENDING"
+        and current.provider_operation_id is not None
+        and current.provider_operation_id != previous.provider_operation_id
+        and current.delete_attempts == previous.delete_attempts
+        and not current.provider_operation_terminal
+        and current.provider_mutation_ambiguous
+        and not current.cleanup_confirmed
+        and not current.orphaned
+    )
+
+
+def _validate_delete_transition(
+    previous: GcpLeaseRecord,
+    current: GcpLeaseRecord,
+    previous_previous: GcpLeaseRecord | None = None,
+) -> tuple[bool, bool]:
+    """Validate the durable delete budget and return intent/handle markers."""
+
+    delta = current.delete_attempts - previous.delete_attempts
+    if delta not in {0, 1}:
+        raise GcpJournalError("GCP journal cleanup attempts changed invalidly")
+    prepared_intent = _is_prepared_delete_intent(previous, current)
+    bound_operation = _is_bound_delete_operation(
+        previous_previous, previous, current
+    )
+    if delta == 1 and not prepared_intent:
+        raise GcpJournalError("GCP journal delete intent is invalid")
+    if delta == 0 and prepared_intent:
+        raise GcpJournalError("GCP journal delete intent did not consume an attempt")
+    if (
+        delta == 0
+        and previous.provider_operation_terminal
+        and not previous.provider_mutation_ambiguous
+        and current.provider_mutation_ambiguous
+        and _same_provider_operation(previous, current)
+        and current.state == "CLEANUP_PENDING"
+    ):
+        raise GcpJournalError("GCP journal delete intent did not consume an attempt")
+    return prepared_intent, bound_operation
+
+
+def _validate_initial_lease(record: GcpLeaseRecord) -> None:
+    if (
+        record.state != "PREPARED"
+        or record.arm_consumed
+        or record.provider_mutation_attempted
+        or record.cleanup_confirmed
+        or record.orphaned
+        or record.provider_mutation_ambiguous
+        or record.provider_operation_id is not None
+        or record.provider_operation_name is not None
+        or record.provider_operation_kind is not None
+        or record.provider_operation_status is not None
+        or record.provider_operation_terminal
+        or record.delete_attempts != 0
+    ):
+        raise GcpJournalError("GCP journal initial lease state is invalid")
+
+
 class GcpLeaseJournal:
     """Small atomic local lease store; it never stores provider payloads/secrets."""
 
@@ -2221,6 +2351,10 @@ class GcpLeaseJournal:
     ) -> None:
         """Reject a hash-consistent but lifecycle-regressing journal tail."""
 
+        if not entries:
+            raise GcpJournalError("GCP journal event chain is empty")
+        _validate_initial_lease(entries[0].record)
+
         allowed = {
             "PREPARED": {"PREPARED", "ARM_CONSUMED", "CLEANUP_CONFIRMED"},
             "ARM_CONSUMED": {
@@ -2268,13 +2402,16 @@ class GcpLeaseJournal:
             "delete_attempts",
             "last_error_code",
         }
-        for previous_event, current_event in pairwise(entries):
+        for index, (previous_event, current_event) in enumerate(pairwise(entries)):
             previous = previous_event.record
             current = current_event.record
             if current.state not in allowed.get(previous.state, set()):
                 raise GcpJournalError("GCP journal state transition is invalid")
-            if current.delete_attempts < previous.delete_attempts:
-                raise GcpJournalError("GCP journal cleanup attempts regressed")
+            _prepared_intent, bound_operation = _validate_delete_transition(
+                previous,
+                current,
+                entries[index - 1].record if index > 0 else None,
+            )
             for field in (
                 "arm_consumed",
                 "provider_mutation_attempted",
@@ -2285,11 +2422,7 @@ class GcpLeaseJournal:
             if (
                 previous.provider_operation_terminal
                 and not current.provider_operation_terminal
-                and not (
-                    previous.provider_operation_kind in {"insert", "delete"}
-                    and current.provider_operation_kind == "delete"
-                    and current.provider_operation_id != previous.provider_operation_id
-                )
+                and not bound_operation
             ):
                 raise GcpJournalError("GCP journal terminal operation regressed")
             if previous.provider_operation_id is not None:
@@ -2309,15 +2442,7 @@ class GcpLeaseJournal:
                     current.project_id,
                     current.zone,
                 )
-                legal_new_delete = (
-                    previous.provider_operation_terminal
-                    and current.provider_operation_kind == "delete"
-                    and current.provider_operation_status == "PENDING"
-                    and current.provider_operation_id != previous.provider_operation_id
-                    and current.delete_attempts
-                    in {previous.delete_attempts, previous.delete_attempts + 1}
-                )
-                if current_operation != previous_operation and not legal_new_delete:
+                if current_operation != previous_operation and not bound_operation:
                     raise GcpJournalError("GCP journal operation identity changed")
             if (
                 previous.provider_operation_terminal
@@ -2371,26 +2496,52 @@ class GcpLeaseJournal:
             event_path = self._event_path_for(root, controller)
             anchor_path = self._anchor_path_for(root, controller)
             snapshot_path = self._path_for(root, controller)
-            event_exists = event_path.exists()
-            anchor_exists = anchor_path.exists()
+            try:
+                event_path.lstat()
+                event_exists = True
+            except FileNotFoundError:
+                event_exists = False
+            except OSError:
+                raise GcpJournalError(
+                    "GCP journal event authority is unavailable"
+                ) from None
+            try:
+                anchor_path.lstat()
+                anchor_exists = True
+            except FileNotFoundError:
+                anchor_exists = False
+            except OSError:
+                raise GcpJournalError(
+                    "GCP journal intent authority is unavailable"
+                ) from None
+            try:
+                snapshot_path.lstat()
+                snapshot_exists = True
+            except FileNotFoundError:
+                snapshot_exists = False
+            except OSError:
+                raise GcpJournalError("GCP journal snapshot is unavailable") from None
             if not event_exists and anchor_exists:
-                # Anchor/snapshot-only reserve artifacts have no authoritative
-                # event and may be safely abandoned before a retry.  A symlink
-                # or non-regular artifact is still a hard failure.
-                removed = self._remove_regular_locked(anchor_path)
-                removed = self._remove_regular_locked(snapshot_path) or removed
-                if removed:
+                if snapshot_exists:
+                    raise GcpJournalError("GCP journal event authority is missing")
+                # Only an anchor without an event or snapshot is a safe
+                # reserve-after-anchor prefix.  A symlink/non-regular anchor
+                # remains a hard boundary violation.
+                if self._remove_regular_locked(anchor_path):
                     self._fsync_directory()
                 continue
             if event_exists and not anchor_exists:
                 raise GcpJournalError("GCP journal reserve is incomplete")
             if not event_exists:
+                if snapshot_exists:
+                    raise GcpJournalError("GCP journal event authority is missing")
                 raise GcpJournalError("GCP journal reserve is incomplete")
             records.append(self._read_path(self._path_for(root, controller)))
         return records
 
     def reserve(self, record: GcpLeaseRecord) -> None:
         record = _strict_lease(record)
+        _validate_initial_lease(record)
         root = self._checked_root()
         path = self._path_for(root, record.controller_id)
         anchor = self._anchor_for(record)
@@ -2478,9 +2629,10 @@ class GcpLeaseJournal:
                 previous = self._read_path(path)
             except GcpJournalError:
                 raise
-            previous_event = self._read_event_chain(
+            previous_events = self._read_event_chain_entries(
                 self._event_path_for(root, record.controller_id)
             )
+            previous_event = previous_events[-1]
             allowed = {
                 "PREPARED": {"PREPARED", "ARM_CONSUMED", "CLEANUP_CONFIRMED"},
                 "ARM_CONSUMED": {
@@ -2514,8 +2666,11 @@ class GcpLeaseJournal:
             }
             if record.state not in allowed.get(previous.state, set()):
                 raise GcpJournalError("GCP journal state transition is invalid")
-            if record.delete_attempts < previous.delete_attempts:
-                raise GcpJournalError("GCP journal cleanup attempts regressed")
+            _prepared_intent, bound_operation = _validate_delete_transition(
+                previous,
+                record,
+                previous_events[-2].record if len(previous_events) > 1 else None,
+            )
             for field in (
                 "arm_consumed",
                 "provider_mutation_attempted",
@@ -2526,11 +2681,7 @@ class GcpLeaseJournal:
             if (
                 previous.provider_operation_terminal
                 and not record.provider_operation_terminal
-                and not (
-                    previous.provider_operation_kind in {"insert", "delete"}
-                    and record.provider_operation_kind == "delete"
-                    and record.provider_operation_id != previous.provider_operation_id
-                )
+                and not bound_operation
             ):
                 raise GcpJournalError("GCP journal terminal operation regressed")
             if (
@@ -2592,15 +2743,7 @@ class GcpLeaseJournal:
                 # after the previous delete reached a terminal result.  It is
                 # a monotonic, separately budgeted action, not retargeting of
                 # the same in-flight operation.
-                legal_new_delete = (
-                    previous.provider_operation_terminal
-                    and record.provider_operation_kind == "delete"
-                    and record.provider_operation_status == "PENDING"
-                    and record.provider_operation_id != previous.provider_operation_id
-                    and record.delete_attempts
-                    in {previous.delete_attempts, previous.delete_attempts + 1}
-                )
-                if current_operation != previous_operation and not legal_new_delete:
+                if current_operation != previous_operation and not bound_operation:
                     raise GcpJournalError("GCP journal operation identity changed")
                 if (
                     previous.provider_operation_kind == "insert"
