@@ -19,6 +19,8 @@ class DigestDomain(StrEnum):
     DEPLOYMENT_SPEC = "deployment-spec-v1"
     LIFECYCLE_OUTCOME = "lifecycle-outcome-v1"
     DEPLOYMENT_RECEIPT = "deployment-receipt-v1"
+    GCP_INVENTORY = "gcp-inventory-v1"
+    GCP_PLAN = "gcp-dry-run-plan-v1"
 
 
 def digest_bytes(domain: DigestDomain, payload: bytes) -> str:

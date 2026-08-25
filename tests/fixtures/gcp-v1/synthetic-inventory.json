@@ -1,0 +1,36 @@
+{
+  "schema_version": "inferdrome.gcp-inventory.v1",
+  "project_id": "inferdrome-example",
+  "region": "us-central1",
+  "source": {
+    "kind": "synthetic_fixture",
+    "observed_at": null
+  },
+  "zones": [
+    {
+      "name": "us-central1-a",
+      "status": "available"
+    },
+    {
+      "name": "us-central1-b",
+      "status": "available"
+    }
+  ],
+  "machine_types": [
+    {
+      "machine_type": "synthetic-a2-highgpu-1g",
+      "architecture": "amd64",
+      "cpu_cores": 8,
+      "memory_mib": 65536,
+      "ephemeral_storage_gib": 100,
+      "accelerators": [
+        {
+          "accelerator_model": "NVIDIA A100-SXM4-40GB",
+          "provider_type": "synthetic-a100-sxm4-40gb",
+          "max_count": 1,
+          "status": "available"
+        }
+      ]
+    }
+  ]
+}

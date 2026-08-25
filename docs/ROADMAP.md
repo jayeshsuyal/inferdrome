@@ -53,6 +53,11 @@ local API authentication, minimal Kubernetes, and finally SGLang execution.
 No slice grants cloud launch, spend, evidence publication, public exposure, or
 release authority by itself.
 
+PR7 is complete as the read-only GCP inventory and deterministic offline
+dry-run planning boundary. Its checked-in inventory and plan are synthetic
+local artifacts only; PR8 remains the separately authorized mutating lifecycle
+slice and may not infer compute scope from credential-reference locations.
+
 ## PR 0 — Freeze the foundation
 
 Deliver:
