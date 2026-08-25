@@ -120,6 +120,24 @@ the receipt, so there is no recursive self-hash. The receipt is written through
 the existing no-replace, symlink-safe, fsync-backed immutable publication
 primitive and remains outside sealed evidence bundles.
 
+### Runner image boundary
+
+PR5 adds a reproducible packaging boundary in `Dockerfile` and a separate
+`inferdrome-runner` console script. It is a client for one explicitly
+configured inference endpoint, not a serving engine: it does not bundle or
+launch vLLM/SGLang, alter the benchmark command, or produce a frozen evidence
+bundle. Its output is bounded metadata marked synthetic and evidence-ineligible
+and is written only to an explicit `/evidence` mount.
+
+The image uses a pinned Python base-image digest, the committed `uv.lock`, and
+a dedicated non-root UID. Proof/release builds require a supplied source
+revision and version; development builds may use the explicit
+`development-unpinned` label. The final image digest, source commit, and any
+future deployment receipt are distinct identities. The image's read-only-root
+contract permits only the `/evidence` and `/tmp/inferdrome` mounts to be
+writable. See [RUNNER_IMAGE_V1.md](RUNNER_IMAGE_V1.md) for the build, smoke,
+and non-claim boundaries.
+
 ### Resolver
 
 The resolver validates source input, applies explicit defaults, resolves local
