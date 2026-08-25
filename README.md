@@ -91,6 +91,15 @@ The GPU template requires operator-provided model, experiment, and evidence
 PVCs plus an immutable runner digest, but this repository performs no cluster,
 GPU, or evidence execution.
 
+The final producer-capability slice adds a pinned, non-executing SGLang 0.5.18
+adapter and additive normalization envelope in
+[SGLANG_0_5_ADAPTER.md](docs/SGLANG_0_5_ADAPTER.md). It uses the native
+`python -m sglang.benchmark.serving` module and `/generate` semantics, but
+does not alter frozen v0.1 vLLM evidence schemas. Because SGLang persisted
+output lacks request IDs and start offsets, every report is evidence-ineligible
+and leaves request-plan binding unavailable; no SGLang install, server, GPU,
+container, Kubernetes, or cloud execution is claimed.
+
 PR7 adds an offline, read-only GCP inventory and deterministic dry-run plan in
 [GCP_DRY_RUN_V1.md](docs/GCP_DRY_RUN_V1.md). It consumes an explicit compute
 project planning context and a synthetic/local inventory snapshot; it performs
@@ -276,6 +285,7 @@ provider-neutral.
 - [Evidence bundle and offline verification](docs/EVIDENCE_BUNDLE_V1.md)
 - [Pinned vLLM 0.26.0 adapter](docs/VLLM_0_26_ADAPTER.md)
 - [Minimal Kubernetes Job v1](docs/KUBERNETES_V1.md)
+- [SGLang 0.5.18 producer boundary](docs/SGLANG_0_5_ADAPTER.md)
 - [Managed real-GPU proof](docs/REAL_GPU_PROOF.md)
 - [CLI and orchestration](docs/CLI.md)
 - [Local evidence dashboard](docs/DASHBOARD.md)
@@ -302,8 +312,10 @@ post-v0.1 dashboard remains local and read-only. Descriptive Trial Sets and the
 narrow operator-attested controlled-comparison workflow are available.
 Trusted chronology or authorship, additional treatments, confidence or
 significance claims, hosted service, live cloud or Kubernetes orchestration,
-GPU telemetry, router analysis, automatic optimization, and a second serving
-engine remain outside the implemented product. The additive Kubernetes Job
+GPU telemetry, router analysis, automatic optimization, and an executable or
+eligible second serving engine remain outside the implemented product; PR11's
+SGLang slice is a non-executing, evidence-ineligible producer/normalization
+capability boundary. The additive Kubernetes Job
 contract is a guarded static/local simulation boundary, not a platform.
 
 The first release proves the evidence pipeline before expanding the product.

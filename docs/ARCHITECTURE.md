@@ -110,8 +110,12 @@ separate immutable outer receipt boundary in
 spec/outcome inputs, binds declared and locally observed provenance, and never
 assigns an evidence or acceptance verdict. Its only issuer is the synthetic
 local form; executed receipts remain fail-closed until a later slice can bind
-independently verified proof, provider, and invoice facts. Lambda, GCP, SGLang,
-runtime images, and cloud lifecycle remain later slices.
+independently verified proof, provider, and invoice facts. At the PR3/PR4
+boundary Lambda, GCP, SGLang, runtime images, and cloud lifecycle were
+intentionally later slices. The accepted later boundaries are documented below:
+runner/Compose in PR5/PR6, offline and guarded GCP in PR7/PR8, Kubernetes
+static/local simulation in PR10, and additive SGLang normalization in PR11.
+None claims live cloud execution or eligible SGLang evidence.
 
 Receipt identity is a domain-separated digest over the canonical payload
 excluding `receipt_id`. Publication also returns a separate SHA-256 of the
@@ -188,6 +192,27 @@ requires explicit operator-provided read-only model/experiment PVCs and a
 writable evidence PVC; without that PVC, real bundle persistence is unresolved.
 This is a contract/simulation boundary, not a Kubernetes platform, live
 execution, evidence receipt, or GPU claim. See [KUBERNETES_V1.md](KUBERNETES_V1.md).
+
+### SGLang producer-capability boundary
+
+PR11 adds `inferdrome.sglang-normalization.v1` outside the frozen public
+schemas and evidence bundles. Its adapter is pinned to SGLang `0.5.18`, commit
+`71de97b264b04dcd514cf904003028aefe9775c8`, and the canonical
+`python -m sglang.benchmark.serving` module with native `sglang` streaming and
+`/generate` semantics. It builds an argv vector and parses one bounded native
+detailed JSONL object; it does not install/start SGLang or execute a lifecycle.
+
+The report exposes native array indexes, token counts, TTFT/ITL nanoseconds,
+response digests, and a digest-only `server_info` observation. It explicitly
+sets `evidence_eligible=false`, `request_plan_binding=UNAVAILABLE`,
+`request_start_offsets=UNAVAILABLE`, `canonical_request_record_v1=UNSUPPORTED`,
+and `acceptance_verdict=NOT_OWNED`. Upstream persisted output does not retain
+request IDs or start offsets and its custom dataset loader can skip malformed
+rows and shuffle accepted rows, so no v0.1 request records or verdict are
+manufactured. The existing lifecycle continues to reject SGLang before any
+side effect. Closing this boundary needs request identity/start-time capture
+and a future versioned evidence v2 contract; see
+[SGLANG_0_5_ADAPTER.md](SGLANG_0_5_ADAPTER.md).
 
 ### Resolver
 

@@ -1,0 +1,41 @@
+{
+  "claims_boundary": {
+    "acceptance_verdict": "NOT_OWNED",
+    "canonical_request_record_v1": "UNSUPPORTED",
+    "evidence_eligible": false,
+    "request_plan_binding": "UNAVAILABLE",
+    "request_start_offsets": "UNAVAILABLE",
+    "statement": "This is an additive producer capability boundary, not evidence or an acceptance result."
+  },
+  "native_metrics": {
+    "itl": "intervals between later qualifying cumulative chunks, apportioned over newly reported completion tokens",
+    "persisted_fields": [
+      "input_lens",
+      "output_lens",
+      "ttfts",
+      "itls",
+      "generated_texts",
+      "errors"
+    ],
+    "ttft": "request start through first cumulative response chunk with non-empty text"
+  },
+  "producer": {
+    "backend": "sglang",
+    "benchmark_module": "sglang.benchmark.serving",
+    "native_endpoint_semantics": "/generate",
+    "streaming": true
+  },
+  "profile_id": "inferdrome.sglang-0.5.18-normalization-profile.v1",
+  "schema_version": "inferdrome.sglang-normalization.v1",
+  "source": {
+    "commit": "71de97b264b04dcd514cf904003028aefe9775c8",
+    "release": "0.5.18",
+    "repository": "https://github.com/sgl-project/sglang"
+  },
+  "upstream_persisted_output_gaps": [
+    "request IDs are not persisted",
+    "request start times are not persisted",
+    "custom dataset loading can skip malformed rows",
+    "accepted custom dataset rows can be shuffled"
+  ]
+}

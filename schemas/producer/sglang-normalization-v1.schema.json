@@ -1,0 +1,297 @@
+{
+  "$defs": {
+    "SglangCapabilityStates": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_verdict": {
+          "const": "NOT_OWNED",
+          "title": "Acceptance Verdict",
+          "type": "string"
+        },
+        "canonical_request_record_v1": {
+          "const": "UNSUPPORTED",
+          "title": "Canonical Request Record V1",
+          "type": "string"
+        },
+        "native_detailed_metrics": {
+          "const": "SUPPORTED",
+          "title": "Native Detailed Metrics",
+          "type": "string"
+        },
+        "native_response_content": {
+          "const": "OBSERVED_BUT_OMITTED",
+          "title": "Native Response Content",
+          "type": "string"
+        },
+        "request_plan_binding": {
+          "const": "UNAVAILABLE",
+          "title": "Request Plan Binding",
+          "type": "string"
+        },
+        "request_start_offsets": {
+          "const": "UNAVAILABLE",
+          "title": "Request Start Offsets",
+          "type": "string"
+        }
+      },
+      "required": [
+        "native_detailed_metrics",
+        "native_response_content",
+        "request_plan_binding",
+        "request_start_offsets",
+        "canonical_request_record_v1",
+        "acceptance_verdict"
+      ],
+      "title": "SglangCapabilityStates",
+      "type": "object"
+    },
+    "SglangNormalizedRow": {
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": {
+          "maximum": 32768,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "itl_ns": {
+          "items": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Itl Ns",
+          "type": "array"
+        },
+        "native_index": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Native Index",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "maximum": 32768,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "response_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Response Sha256"
+        },
+        "success": {
+          "title": "Success",
+          "type": "boolean"
+        },
+        "ttft_ns": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ttft Ns"
+        }
+      },
+      "required": [
+        "native_index",
+        "success",
+        "input_tokens",
+        "output_tokens",
+        "ttft_ns",
+        "itl_ns",
+        "response_sha256"
+      ],
+      "title": "SglangNormalizedRow",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:sglang-normalization:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Additive report; it is never a v0.1 evidence or acceptance artifact.",
+  "properties": {
+    "acceptance_verdict": {
+      "const": "NOT_OWNED",
+      "title": "Acceptance Verdict",
+      "type": "string"
+    },
+    "attempted_request_count": {
+      "maximum": 10000,
+      "minimum": 1,
+      "title": "Attempted Request Count",
+      "type": "integer"
+    },
+    "backend": {
+      "const": "sglang",
+      "title": "Backend",
+      "type": "string"
+    },
+    "benchmark_module": {
+      "const": "sglang.benchmark.serving",
+      "title": "Benchmark Module",
+      "type": "string"
+    },
+    "canonical_request_record_v1": {
+      "const": "UNSUPPORTED",
+      "title": "Canonical Request Record V1",
+      "type": "string"
+    },
+    "capability_states": {
+      "$ref": "#/$defs/SglangCapabilityStates"
+    },
+    "completed_request_count": {
+      "maximum": 10000,
+      "minimum": 0,
+      "title": "Completed Request Count",
+      "type": "integer"
+    },
+    "evidence_eligible": {
+      "const": false,
+      "title": "Evidence Eligible",
+      "type": "boolean"
+    },
+    "failed_request_count": {
+      "maximum": 10000,
+      "minimum": 0,
+      "title": "Failed Request Count",
+      "type": "integer"
+    },
+    "invocation_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Invocation Sha256",
+      "type": "string"
+    },
+    "native_result_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Native Result Sha256",
+      "type": "string"
+    },
+    "native_schema_fingerprint": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Native Schema Fingerprint",
+      "type": "string"
+    },
+    "producer_name": {
+      "const": "sglang",
+      "title": "Producer Name",
+      "type": "string"
+    },
+    "producer_version": {
+      "const": "0.5.18",
+      "title": "Producer Version",
+      "type": "string"
+    },
+    "release_commit": {
+      "const": "71de97b264b04dcd514cf904003028aefe9775c8",
+      "title": "Release Commit",
+      "type": "string"
+    },
+    "request_plan_binding": {
+      "const": "UNAVAILABLE",
+      "title": "Request Plan Binding",
+      "type": "string"
+    },
+    "request_start_offsets": {
+      "const": "UNAVAILABLE",
+      "title": "Request Start Offsets",
+      "type": "string"
+    },
+    "rows": {
+      "items": {
+        "$ref": "#/$defs/SglangNormalizedRow"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "inferdrome.sglang-normalization.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "server_info_present": {
+      "title": "Server Info Present",
+      "type": "boolean"
+    },
+    "server_info_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Server Info Sha256"
+    },
+    "source_repository": {
+      "const": "https://github.com/sgl-project/sglang",
+      "title": "Source Repository",
+      "type": "string"
+    },
+    "streaming": {
+      "const": true,
+      "title": "Streaming",
+      "type": "boolean"
+    },
+    "synthetic_only": {
+      "title": "Synthetic Only",
+      "type": "boolean"
+    },
+    "total_input_tokens": {
+      "maximum": 327680000,
+      "minimum": 0,
+      "title": "Total Input Tokens",
+      "type": "integer"
+    },
+    "total_output_tokens": {
+      "maximum": 327680000,
+      "minimum": 0,
+      "title": "Total Output Tokens",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "producer_name",
+    "producer_version",
+    "release_commit",
+    "source_repository",
+    "benchmark_module",
+    "backend",
+    "streaming",
+    "invocation_sha256",
+    "native_result_sha256",
+    "native_schema_fingerprint",
+    "server_info_present",
+    "server_info_sha256",
+    "attempted_request_count",
+    "completed_request_count",
+    "failed_request_count",
+    "total_input_tokens",
+    "total_output_tokens",
+    "synthetic_only",
+    "evidence_eligible",
+    "request_plan_binding",
+    "request_start_offsets",
+    "canonical_request_record_v1",
+    "acceptance_verdict",
+    "capability_states",
+    "rows"
+  ],
+  "title": "Inferdrome SGLang 0.5.18 normalization report v1",
+  "type": "object"
+}
