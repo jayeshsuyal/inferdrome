@@ -82,6 +82,12 @@ services; the guarded wrapper loads the separately gated GPU override and
 selects only the benchmark runner as its root service. Its preflight verifies
 the complete frozen Qwen3 snapshot and the versioned private-endpoint binding.
 
+PR7 adds an offline, read-only GCP inventory and deterministic dry-run plan in
+[GCP_DRY_RUN_V1.md](docs/GCP_DRY_RUN_V1.md). It consumes an explicit compute
+project planning context and a synthetic/local inventory snapshot; it performs
+no credential resolution, provider call, mutation, capacity/pricing claim,
+runtime launch, receipt issuance, or evidence publication.
+
 The first v0.2 vertical slice adds an additive ninth public schema for immutable
 same-configuration trial sets. Each set pins 2–100 independently verified runs
 by run ID and bundle digest, keeps every request population separate, and

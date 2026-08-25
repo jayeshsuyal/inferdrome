@@ -1,0 +1,548 @@
+{
+  "$comment": "Non-executing GCP plan; never a lifecycle outcome, receipt, or evidence.",
+  "$defs": {
+    "CleanupPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_on_every_exit": {
+          "const": true,
+          "title": "Cleanup On Every Exit",
+          "type": "boolean"
+        },
+        "cleanup_receipt_required": {
+          "const": true,
+          "title": "Cleanup Receipt Required",
+          "type": "boolean"
+        },
+        "max_cleanup_attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Cleanup Attempts",
+          "type": "integer"
+        },
+        "orphan_policy": {
+          "const": "block_next_run",
+          "title": "Orphan Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cleanup_on_every_exit",
+        "cleanup_receipt_required",
+        "orphan_policy",
+        "max_cleanup_attempts"
+      ],
+      "title": "CleanupPolicy",
+      "type": "object"
+    },
+    "CostCeiling": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "estimate_basis": {
+          "const": "controller_estimate",
+          "title": "Estimate Basis",
+          "type": "string"
+        },
+        "hard_limit": {
+          "const": true,
+          "title": "Hard Limit",
+          "type": "boolean"
+        },
+        "invoice_truth": {
+          "const": "external_provider_invoice_required",
+          "title": "Invoice Truth",
+          "type": "string"
+        },
+        "max_cost_usd": {
+          "maxLength": 16,
+          "pattern": "^(?:0|[1-9][0-9]{0,9})(?:\\.[0-9]{1,2})?$",
+          "title": "Max Cost Usd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "max_cost_usd",
+        "hard_limit",
+        "estimate_basis",
+        "invoice_truth"
+      ],
+      "title": "CostCeiling",
+      "type": "object"
+    },
+    "GcpPlanAdapterIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "const": "inferdrome.provider.gcp.read_only_plan",
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "adapter_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Adapter Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "adapter_version"
+      ],
+      "title": "GcpPlanAdapterIdentity",
+      "type": "object"
+    },
+    "GcpPlanImage": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._/-]{0,254}[a-z0-9])?$",
+          "title": "Repository",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "digest"
+      ],
+      "title": "GcpPlanImage",
+      "type": "object"
+    },
+    "GcpPlanProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "accelerator_count": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Accelerator Count",
+          "type": "integer"
+        },
+        "accelerator_model": {
+          "const": "NVIDIA A100-SXM4-40GB",
+          "title": "Accelerator Model",
+          "type": "string"
+        },
+        "accelerator_provider_type": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+          "title": "Accelerator Provider Type",
+          "type": "string"
+        },
+        "architecture": {
+          "const": "amd64",
+          "title": "Architecture",
+          "type": "string"
+        },
+        "catalog_eligibility": {
+          "const": "catalog_eligible",
+          "title": "Catalog Eligibility",
+          "type": "string"
+        },
+        "machine_type": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+          "title": "Machine Type",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+          "title": "Region",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "region",
+        "zone",
+        "machine_type",
+        "architecture",
+        "accelerator_model",
+        "accelerator_provider_type",
+        "accelerator_count",
+        "catalog_eligibility"
+      ],
+      "title": "GcpPlanProvider",
+      "type": "object"
+    },
+    "GcpPlanRuntime": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "const": "inferdrome.runtime.vllm.bench_serve",
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "adapter_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "endpoint_path": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^/[A-Za-z0-9._/-]*$",
+          "title": "Endpoint Path",
+          "type": "string"
+        },
+        "endpoint_port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Endpoint Port",
+          "type": "integer"
+        },
+        "endpoint_scheme": {
+          "enum": [
+            "http",
+            "https"
+          ],
+          "title": "Endpoint Scheme",
+          "type": "string"
+        },
+        "endpoint_scope": {
+          "const": "private",
+          "title": "Endpoint Scope",
+          "type": "string"
+        },
+        "endpoint_visibility": {
+          "const": "private",
+          "title": "Endpoint Visibility",
+          "type": "string"
+        },
+        "engine": {
+          "const": "vllm",
+          "title": "Engine",
+          "type": "string"
+        },
+        "engine_version": {
+          "const": "0.26.0",
+          "title": "Engine Version",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "runner_runtime_colocation": {
+          "const": "colocated",
+          "title": "Runner Runtime Colocation",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapter_id",
+        "adapter_version",
+        "engine",
+        "engine_version",
+        "model_id",
+        "model_revision",
+        "tokenizer_revision",
+        "endpoint_scheme",
+        "endpoint_port",
+        "endpoint_path",
+        "endpoint_visibility",
+        "endpoint_scope",
+        "runner_runtime_colocation"
+      ],
+      "title": "GcpPlanRuntime",
+      "type": "object"
+    },
+    "GcpPlanScope": {
+      "additionalProperties": false,
+      "properties": {
+        "compute_project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Compute Project Id",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+          "title": "Region",
+          "type": "string"
+        }
+      },
+      "required": [
+        "compute_project_id",
+        "region"
+      ],
+      "title": "GcpPlanScope",
+      "type": "object"
+    },
+    "GcpPlanSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "requested_resources": {
+          "$ref": "#/$defs/ResourceRequirements"
+        },
+        "selected_provider": {
+          "$ref": "#/$defs/GcpPlanProvider"
+        }
+      },
+      "required": [
+        "requested_resources",
+        "selected_provider"
+      ],
+      "title": "GcpPlanSelection",
+      "type": "object"
+    },
+    "LifecycleTimeouts": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Cleanup Seconds",
+          "type": "integer"
+        },
+        "request_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Request Seconds",
+          "type": "integer"
+        },
+        "startup_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Startup Seconds",
+          "type": "integer"
+        },
+        "termination_confirmation_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Termination Confirmation Seconds",
+          "type": "integer"
+        },
+        "total_seconds": {
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Total Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "startup_seconds",
+        "request_seconds",
+        "total_seconds",
+        "cleanup_seconds",
+        "termination_confirmation_seconds"
+      ],
+      "title": "LifecycleTimeouts",
+      "type": "object"
+    },
+    "ResourceRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_cores": {
+          "maximum": 256,
+          "minimum": 1,
+          "title": "Cpu Cores",
+          "type": "integer"
+        },
+        "ephemeral_storage_gib": {
+          "maximum": 16384,
+          "minimum": 1,
+          "title": "Ephemeral Storage Gib",
+          "type": "integer"
+        },
+        "gpu_count": {
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Gpu Count",
+          "type": "integer"
+        },
+        "gpu_model": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,126}[A-Za-z0-9)]$|^[A-Za-z0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Gpu Model"
+        },
+        "memory_mib": {
+          "maximum": 1048576,
+          "minimum": 256,
+          "title": "Memory Mib",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "gpu_count",
+        "gpu_model",
+        "cpu_cores",
+        "memory_mib",
+        "ephemeral_storage_gib"
+      ],
+      "title": "ResourceRequirements",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-dry-run-plan:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "adapter": {
+      "$ref": "#/$defs/GcpPlanAdapterIdentity"
+    },
+    "capacity_proven": {
+      "const": false,
+      "title": "Capacity Proven",
+      "type": "boolean"
+    },
+    "cleanup_policy": {
+      "$ref": "#/$defs/CleanupPolicy"
+    },
+    "cost_ceiling": {
+      "$ref": "#/$defs/CostCeiling"
+    },
+    "credentials_resolved": {
+      "const": false,
+      "title": "Credentials Resolved",
+      "type": "boolean"
+    },
+    "deployment_spec_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Deployment Spec Digest",
+      "type": "string"
+    },
+    "evidence_eligible": {
+      "const": false,
+      "title": "Evidence Eligible",
+      "type": "boolean"
+    },
+    "execution_authorized": {
+      "const": false,
+      "title": "Execution Authorized",
+      "type": "boolean"
+    },
+    "inventory_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Inventory Digest",
+      "type": "string"
+    },
+    "invoice_truth": {
+      "const": "unavailable_external_provider_invoice",
+      "title": "Invoice Truth",
+      "type": "string"
+    },
+    "plan_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "plan_kind": {
+      "const": "gcp_dry_run_reference",
+      "title": "Plan Kind",
+      "type": "string"
+    },
+    "planning_scope": {
+      "$ref": "#/$defs/GcpPlanScope"
+    },
+    "pricing_proven": {
+      "const": false,
+      "title": "Pricing Proven",
+      "type": "boolean"
+    },
+    "pricing_status": {
+      "const": "not_evaluated_pricing_unavailable",
+      "title": "Pricing Status",
+      "type": "string"
+    },
+    "provider_mutation_performed": {
+      "const": false,
+      "title": "Provider Mutation Performed",
+      "type": "boolean"
+    },
+    "runner_image": {
+      "$ref": "#/$defs/GcpPlanImage"
+    },
+    "runtime": {
+      "$ref": "#/$defs/GcpPlanRuntime"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-dry-run-plan.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "selection": {
+      "$ref": "#/$defs/GcpPlanSelection"
+    },
+    "serving_runtime_image": {
+      "$ref": "#/$defs/GcpPlanImage"
+    },
+    "timeouts": {
+      "$ref": "#/$defs/LifecycleTimeouts"
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_kind",
+    "deployment_spec_digest",
+    "inventory_digest",
+    "planning_scope",
+    "adapter",
+    "runtime",
+    "runner_image",
+    "serving_runtime_image",
+    "selection",
+    "timeouts",
+    "cleanup_policy",
+    "cost_ceiling",
+    "execution_authorized",
+    "provider_mutation_performed",
+    "credentials_resolved",
+    "capacity_proven",
+    "pricing_proven",
+    "evidence_eligible",
+    "pricing_status",
+    "invoice_truth",
+    "plan_id"
+  ],
+  "title": "GcpDryRunPlan",
+  "type": "object"
+}

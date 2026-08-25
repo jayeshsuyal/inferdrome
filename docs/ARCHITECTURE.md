@@ -154,6 +154,20 @@ versioned Qwen3 Compose binding reuses the frozen model/workload semantics
 while recording the private Compose DNS endpoint separately from the frozen
 managed-vLLM loopback profile.
 
+PR7 adds the separate offline GCP planning boundary in
+[`src/inferdrome/deployment/gcp.py`](../src/inferdrome/deployment/gcp.py) and
+[`GCP_DRY_RUN_V1.md`](GCP_DRY_RUN_V1.md). It consumes the unchanged GCP
+dry-run deployment shape, a strict local zone-scoped inventory snapshot, and an
+explicit compute project/region context. Every selectable machine/accelerator
+tuple is bound to its exact zone in one offering; the planner never forms a
+Cartesian product. The planner has no cloud transport, SDK,
+credential resolution, subprocess, runtime, or mutation surface. Its stable
+selection is an inventory-derived plan only: capacity, pricing, invoice truth,
+execution authorization, evidence eligibility, and provider attestation remain
+false/unavailable. Publication is a separate additive immutable plan artifact,
+not a PR4 receipt or evidence bundle. A future mutating adapter must consume
+the deployment contract only after its own authorization and lifecycle gates.
+
 ### Resolver
 
 The resolver validates source input, applies explicit defaults, resolves local

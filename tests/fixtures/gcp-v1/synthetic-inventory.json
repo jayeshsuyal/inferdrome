@@ -1,0 +1,35 @@
+{
+  "schema_version": "inferdrome.gcp-inventory.v1",
+  "project_id": "inferdrome-example",
+  "region": "us-central1",
+  "source": {
+    "kind": "synthetic_fixture",
+    "observed_at": null
+  },
+  "offerings": [
+    {
+      "zone": "us-central1-a",
+      "machine_type": "synthetic-a2-highgpu-1g",
+      "architecture": "amd64",
+      "cpu_cores": 8,
+      "memory_mib": 65536,
+      "ephemeral_storage_gib": 100,
+      "accelerator_model": "NVIDIA H100 PCIe",
+      "accelerator_provider_type": "synthetic-h100-pcie",
+      "accelerator_max_count": 1,
+      "catalog_eligibility": "catalog_eligible"
+    },
+    {
+      "zone": "us-central1-b",
+      "machine_type": "synthetic-a2-highgpu-1g",
+      "architecture": "amd64",
+      "cpu_cores": 8,
+      "memory_mib": 65536,
+      "ephemeral_storage_gib": 100,
+      "accelerator_model": "NVIDIA A100-SXM4-40GB",
+      "accelerator_provider_type": "synthetic-a100-sxm4-40gb",
+      "accelerator_max_count": 1,
+      "catalog_eligibility": "catalog_eligible"
+    }
+  ]
+}

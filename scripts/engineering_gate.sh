@@ -8,6 +8,7 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/generate_schemas.py --check
 "$inferdrome_python" scripts/generate_deployment_spec.py --check
 "$inferdrome_python" scripts/generate_deployment_receipt.py --check
+"$inferdrome_python" scripts/generate_gcp_dry_run_plan.py --check
 "$inferdrome_python" scripts/runner_smoke.py --check
 "$inferdrome_python" scripts/build_runner_image.py --check
 "$inferdrome_python" scripts/generate_capability_profiles.py --check
@@ -47,6 +48,8 @@ bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/generate_deployment_spec.py
 "$inferdrome_python" -m py_compile scripts/generate_deployment_receipt.py
+"$inferdrome_python" -m py_compile scripts/gcp_dry_run_plan.py
+"$inferdrome_python" -m py_compile scripts/generate_gcp_dry_run_plan.py
 "$inferdrome_python" -m py_compile scripts/runner_smoke.py
 "$inferdrome_python" -m py_compile scripts/build_runner_image.py
 "$inferdrome_python" -m py_compile scripts/qwen3_gpu_capture.py
