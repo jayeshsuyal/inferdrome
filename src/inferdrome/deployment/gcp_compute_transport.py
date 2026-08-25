@@ -55,9 +55,7 @@ class _InstancesClient(Protocol):
         self, *, project: str, zone: str, instance: str, timeout: int
     ) -> object: ...
 
-    def list(
-        self, *, project: str, zone: str, filter: str, timeout: int
-    ) -> Sequence[Any]: ...
+    def list(self, *, request: object, timeout: int) -> Sequence[Any]: ...
 
     def delete(
         self,
@@ -96,6 +94,61 @@ def _safe_labels(value: object) -> GcpExecutionLabels | None:
         return None
 
 
+def _canonical_resource_ref(
+    value: object, *, kind: str, project: str, region: str, zone: str | None = None
+) -> str:
+    """Canonicalize documented Compute full, partial, and relative references."""
+
+    text = str(value)
+    parts = text.split("/")
+    if parts and parts[0].lower() in {"http:", "https:"}:
+        try:
+            parts = parts[parts.index("projects") :]
+        except ValueError:
+            raise GcpTransportError("INSTANCE_RESOURCE_MALFORMED") from None
+    while parts and parts[0] == "":
+        parts = parts[1:]
+    if kind == "network":
+        if (
+            len(parts) == 4
+            and parts[:2] == ["projects", project]
+            and parts[2:] == ["global", "networks"]
+        ):
+            raise GcpTransportError("INSTANCE_NETWORK_MALFORMED")
+        if (
+            len(parts) == 5
+            and parts[:2] == ["projects", project]
+            and parts[2:4] == ["global", "networks"]
+        ):
+            return "/".join(parts)
+        if len(parts) == 3 and parts[0:2] == ["global", "networks"] and parts[2]:
+            return f"projects/{project}/global/networks/{parts[2]}"
+        if len(parts) == 1 and re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", parts[0]):
+            return f"projects/{project}/global/networks/{parts[0]}"
+        raise GcpTransportError("INSTANCE_NETWORK_MALFORMED")
+    if kind == "subnetwork":
+        if zone is None:
+            raise GcpTransportError("INSTANCE_SUBNETWORK_MALFORMED")
+        if (
+            len(parts) == 6
+            and parts[:2] == ["projects", project]
+            and parts[2:4] == ["regions", region]
+            and parts[4] == "subnetworks"
+        ):
+            return "/".join(parts)
+        if (
+            len(parts) == 3
+            and parts[0] == "regions"
+            and parts[1] == region
+            and parts[2]
+        ):
+            return f"projects/{project}/regions/{region}/subnetworks/{parts[2]}"
+        if len(parts) == 1 and re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", parts[0]):
+            return f"projects/{project}/regions/{region}/subnetworks/{parts[0]}"
+        raise GcpTransportError("INSTANCE_SUBNETWORK_MALFORMED")
+    raise GcpTransportError("INSTANCE_RESOURCE_MALFORMED")
+
+
 def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservation:
     try:
         name = str(value.name)
@@ -104,16 +157,24 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
         self_link = str(getattr(value, "self_link", ""))
         self_link_parts = self_link.split("/")
         if (
-            len(self_link_parts) != 11
+            len(self_link_parts) < 11
             or self_link_parts[0] != "https:"
+            or len(self_link_parts) < 3
             or not self_link_parts[2].endswith(".googleapis.com")
-            or self_link_parts[3:6] != ["compute", "v1", "projects"]
-            or self_link_parts[6] != request.project_id
-            or self_link_parts[7] != "zones"
-            or self_link_parts[8] != request.zone
-            or self_link_parts[9] != "instances"
-            or self_link_parts[10] != request.instance_name
+            or "projects" not in self_link_parts
         ):
+            raise GcpTransportError("INSTANCE_PROJECT_MISMATCH")
+        project_index = self_link_parts.index("projects")
+        if self_link_parts[project_index : project_index + 6] != [
+            "projects",
+            request.project_id,
+            "zones",
+            request.zone,
+            "instances",
+            request.instance_name,
+        ]:
+            raise GcpTransportError("INSTANCE_PROJECT_MISMATCH")
+        if self_link_parts[3:project_index] != ["compute", "v1"]:
             raise GcpTransportError("INSTANCE_PROJECT_MISMATCH")
         status = cast(Literal["RUNNING", "TERMINATED"], str(value.status))
         labels = _safe_labels(getattr(value, "labels", None))
@@ -164,16 +225,30 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
             interface_values = list(interfaces or ())
         except TypeError:
             interface_values = []
-        if len(interface_values) < 1:
+        if len(interface_values) != 1:
             raise GcpTransportError("INSTANCE_NETWORK_INVALID")
         private_ips: list[str] = []
         for interface in interface_values:
+            network = _canonical_resource_ref(
+                getattr(interface, "network", ""),
+                kind="network",
+                project=request.project_id,
+                region=request.region,
+            )
+            subnetwork = _canonical_resource_ref(
+                getattr(interface, "subnetwork", ""),
+                kind="subnetwork",
+                project=request.project_id,
+                region=request.region,
+                zone=request.zone,
+            )
             if (
-                str(getattr(interface, "network", "")) != request.network.network
-                or str(getattr(interface, "subnetwork", ""))
-                != request.network.subnetwork
+                network != request.network.network
+                or subnetwork != request.network.subnetwork
             ):
                 raise GcpTransportError("INSTANCE_NETWORK_MISMATCH")
+            if str(getattr(interface, "stack_type", "")) not in {"IPV4_ONLY", "2"}:
+                raise GcpTransportError("INSTANCE_STACK_TYPE_MISMATCH")
             access_configs = getattr(interface, "access_configs", None)
             ipv6_access_configs = getattr(interface, "ipv6_access_configs", None)
             if (
@@ -221,6 +296,7 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
             network=request.network.network,
             subnetwork=request.network.subnetwork,
             private_ipv4_addresses=tuple(private_ips),
+            stack_type="IPV4_ONLY",
         )
     except GcpTransportError:
         raise
@@ -281,10 +357,24 @@ class GoogleComputeTransport(GcpComputeTransport):
     def _remember(
         self, operation: object, kind: str, request: GcpInsertRequest
     ) -> GcpOperationHandle:
-        name = getattr(operation, "name", None)
-        if not isinstance(name, str) or not name:
+        raw_name = getattr(operation, "name", None)
+        if not isinstance(raw_name, str) or not re.fullmatch(
+            r"[a-z][a-z0-9-]{0,127}", raw_name
+        ):
             raise GcpTransportError("OPERATION_IDENTITY_MISSING", ambiguous=True)
-        operation_id = "op-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:40]
+        name = "/".join(
+            (
+                "projects",
+                request.project_id,
+                "zones",
+                request.zone,
+                "operations",
+                raw_name,
+            )
+        )
+        # Keep the local operation key bounded and distinct from credential
+        # shaped values; the full canonical resource remains in the journal.
+        operation_id = "op-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:32]
         with self._lock:
             self._operations[operation_id] = operation
         return GcpOperationHandle(
@@ -337,7 +427,9 @@ class GoogleComputeTransport(GcpComputeTransport):
                 or operation.project_id is None
                 or operation.zone is None
             ):
-                raise GcpTransportError("OPERATION_UNKNOWN")
+                raise GcpTransportError(
+                    "OPERATION_UNKNOWN", operation=operation, ambiguous=True
+                )
             try:
                 operation_name = operation.operation_name.rsplit("/", 1)[-1]
                 provider_operation = self._operations_client.get(
@@ -347,63 +439,59 @@ class GoogleComputeTransport(GcpComputeTransport):
                     timeout=timeout_seconds,
                 )
             except Exception:
-                raise GcpTransportError("OPERATION_RECONCILIATION_FAILED") from None
+                raise GcpTransportError(
+                    "OPERATION_RECONCILIATION_FAILED",
+                    operation=operation,
+                    ambiguous=True,
+                ) from None
         if provider_operation is None:
-            raise GcpTransportError("OPERATION_UNKNOWN")
+            raise GcpTransportError(
+                "OPERATION_UNKNOWN", operation=operation, ambiguous=True
+            )
+
+        def result_for(
+            status: Literal["DONE", "ERROR", "TIMEOUT"], error_code: str | None = None
+        ) -> GcpOperationResult:
+            return GcpOperationResult(
+                status=status,
+                operation_id=operation.operation_id,
+                operation_name=operation.operation_name,
+                instance_name=None,
+                error_code=error_code,
+            )
+
+        def is_done(status: object) -> bool:
+            enum = getattr(getattr(self._sdk, "Operation", None), "Status", None)
+            done = getattr(enum, "DONE", None)
+            return status == done or getattr(status, "value", object()) == getattr(
+                done, "value", None
+            )
+
         try:
             result_method = getattr(provider_operation, "result", None)
             if callable(result_method):
                 result_method(timeout=timeout_seconds)
-            else:
-                provider_status = str(getattr(provider_operation, "status", ""))
-                if not provider_status.endswith("DONE"):
-                    return GcpOperationResult(
-                        status="TIMEOUT",
-                        operation_id=operation.operation_id,
-                        operation_name=operation.operation_name,
-                        instance_name=None,
-                    )
-                provider_error = getattr(provider_operation, "error", None)
-                if provider_error:
-                    return GcpOperationResult(
-                        status="ERROR",
-                        operation_id=operation.operation_id,
-                        operation_name=operation.operation_name,
-                        instance_name=None,
-                        error_code="PROVIDER_OPERATION_FAILED",
-                    )
+            provider_status = getattr(provider_operation, "status", None)
+            if provider_status is not None and not is_done(provider_status):
+                return result_for("TIMEOUT")
+            provider_error = getattr(provider_operation, "error", None)
+            if provider_error and (provider_status is None or is_done(provider_status)):
+                return result_for("ERROR", "PROVIDER_OPERATION_FAILED")
         except TimeoutError:
-            return GcpOperationResult(
-                status="TIMEOUT",
-                operation_id=operation.operation_id,
-                operation_name=operation.operation_name,
-                instance_name=None,
-            )
+            return result_for("TIMEOUT")
         except Exception as error:
             if type(error).__name__ in {
                 "DeadlineExceeded",
                 "OperationTimedOut",
                 "Timeout",
             }:
-                return GcpOperationResult(
-                    status="TIMEOUT",
-                    operation_id=operation.operation_id,
-                    operation_name=operation.operation_name,
-                    instance_name=None,
-                )
-            return GcpOperationResult(
-                status="ERROR",
-                operation_id=operation.operation_id,
-                operation_name=operation.operation_name,
-                instance_name=None,
-                error_code="PROVIDER_OPERATION_FAILED",
-            )
-        return GcpOperationResult(
-            status="DONE",
-            operation_id=operation.operation_id,
-            operation_name=operation.operation_name,
-            instance_name=None,
-        )
+                return result_for("TIMEOUT")
+            if is_done(getattr(provider_operation, "status", None)):
+                return result_for("ERROR", "PROVIDER_OPERATION_FAILED")
+            # A polling transport error does not prove a provider failure.
+            # Retain the exact handle so a later process can reconcile it.
+            return result_for("TIMEOUT")
+        return result_for("DONE")
 
     def get_instance(
         self, request: GcpInsertRequest, *, timeout_seconds: int
@@ -427,17 +515,26 @@ class GoogleComputeTransport(GcpComputeTransport):
         self, request: GcpInsertRequest, *, timeout_seconds: int
     ) -> tuple[GcpInstanceObservation, ...]:
         try:
-            values = self._client.list(
+            list_request = self._sdk.ListInstancesRequest(
                 project=request.project_id,
                 zone=request.zone,
                 filter=(
                     "labels.inferdrome = inferdrome AND "
                     f"labels.controller_id = {request.labels.controller_id} AND "
-                    f"labels.arm_id = {request.labels.arm_id}"
+                    f"labels.plan_id = {request.labels.plan_id} AND "
+                    f"labels.arm_id = {request.labels.arm_id} AND "
+                    "labels.managed_by = inferdrome_gcp_execution_v1 AND "
+                    "labels.role = provider-envelope"
                 ),
-                timeout=timeout_seconds,
+                max_results=256,
             )
-            return tuple(_observation(value, request) for value in values)
+            values = self._client.list(request=list_request, timeout=timeout_seconds)
+            output: list[GcpInstanceObservation] = []
+            for index, value in enumerate(values):
+                if index >= 256:
+                    raise GcpTransportError("LIST_OWNED_LIMIT")
+                output.append(_observation(value, request))
+            return tuple(output)
         except GcpTransportError:
             raise
         except Exception:
@@ -482,10 +579,7 @@ class GoogleComputeTransport(GcpComputeTransport):
                     boot=True,
                     auto_delete=True,
                     initialize_params=self._sdk.AttachedDiskInitializeParams(
-                        # Numeric Compute image resource IDs are the provider-side
-                        # immutable selector; the accompanying SHA-256 remains an
-                        # Inferdrome provenance binding in the validated request.
-                        source_image=request.boot_image.repository,
+                        source_image=request.boot_image.image_name,
                         disk_size_gb=request.boot_disk_size_gib,
                         disk_type=(
                             f"zones/{request.zone}/diskTypes/{request.boot_disk_type}"
@@ -493,18 +587,23 @@ class GoogleComputeTransport(GcpComputeTransport):
                     ),
                 )
             ],
-            guest_accelerators=[
-                self._sdk.AcceleratorConfig(
-                    accelerator_type=(
-                        f"zones/{request.zone}/acceleratorTypes/{request.accelerator_provider_type}"
-                    ),
-                    accelerator_count=request.accelerator_count,
-                )
-            ],
+            guest_accelerators=(
+                []
+                if request.accelerator_attachment_mode == "a2_fixed_gpu"
+                else [
+                    self._sdk.AcceleratorConfig(
+                        accelerator_type=(
+                            f"zones/{request.zone}/acceleratorTypes/{request.accelerator_provider_type}"
+                        ),
+                        accelerator_count=request.accelerator_count,
+                    )
+                ]
+            ),
             network_interfaces=[
                 self._sdk.NetworkInterface(
                     network=request.network.network,
                     subnetwork=request.network.subnetwork,
+                    stack_type="IPV4_ONLY",
                 )
             ],
             can_ip_forward=False,
@@ -536,7 +635,6 @@ def create_google_compute_transport(
 ) -> GoogleComputeTransport:
     """Explicitly select the live transport; import SDK/ADC only here."""
 
-    client_was_injected = client is not None
     if sdk_module is None:
         try:
             sdk_module = importlib.import_module("google.cloud.compute_v1")
@@ -547,16 +645,18 @@ def create_google_compute_transport(
             client = sdk_module.InstancesClient()
         except Exception:
             raise GcpTransportError("ADC_CLIENT_CONSTRUCTION_FAILED") from None
-    if operations_client is None and not client_was_injected:
+    if operations_client is None:
         try:
             operations_factory = sdk_module.ZoneOperationsClient
             operations_client = operations_factory()
         except AttributeError:
-            operations_client = None
+            raise GcpTransportError("GCP_OPERATION_CLIENT_UNAVAILABLE") from None
         except Exception:
             raise GcpTransportError(
                 "ADC_OPERATION_CLIENT_CONSTRUCTION_FAILED"
             ) from None
+    if operations_client is None:
+        raise GcpTransportError("GCP_OPERATION_CLIENT_UNAVAILABLE")
     return GoogleComputeTransport(
         sdk=sdk_module, client=client, operations_client=operations_client
     )

@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "GcpExecutionBootImage": {
+      "additionalProperties": false,
+      "description": "Exact image-name selector plus an independently observed provider ID.",
+      "properties": {
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "image_name": {
+          "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "title": "Image Name",
+          "type": "string"
+        },
+        "provider_image_id": {
+          "maximum": 10000000000000000000,
+          "minimum": 1,
+          "title": "Provider Image Id",
+          "type": "integer"
+        },
+        "status": {
+          "const": "READY",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image_name",
+        "provider_image_id",
+        "digest",
+        "status"
+      ],
+      "title": "GcpExecutionBootImage",
+      "type": "object"
+    },
     "GcpExecutionLabels": {
       "additionalProperties": false,
       "properties": {
@@ -63,6 +98,12 @@
           "title": "Network",
           "type": "string"
         },
+        "stack_type": {
+          "const": "IPV4_ONLY",
+          "default": "IPV4_ONLY",
+          "title": "Stack Type",
+          "type": "string"
+        },
         "subnetwork": {
           "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
           "title": "Subnetwork",
@@ -81,6 +122,12 @@
     "GcpInsertRequest": {
       "additionalProperties": false,
       "properties": {
+        "accelerator_attachment_mode": {
+          "const": "a2_fixed_gpu",
+          "default": "a2_fixed_gpu",
+          "title": "Accelerator Attachment Mode",
+          "type": "string"
+        },
         "accelerator_count": {
           "maximum": 16,
           "minimum": 1,
@@ -134,7 +181,7 @@
           "type": "string"
         },
         "boot_image": {
-          "$ref": "#/$defs/GcpPlanImage"
+          "$ref": "#/$defs/GcpExecutionBootImage"
         },
         "controller_id": {
           "pattern": "^ctl-[a-z0-9]{8,24}$",

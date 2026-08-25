@@ -32,6 +32,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "accelerator_attachment_mode": {
+      "const": "a2_fixed_gpu",
+      "title": "Accelerator Attachment Mode",
+      "type": "string"
+    },
     "accelerator_count": {
       "maximum": 16,
       "minimum": 1,
@@ -74,6 +79,17 @@
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Boot Image Digest",
       "type": "string"
+    },
+    "boot_image_name": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Boot Image Name",
+      "type": "string"
+    },
+    "boot_image_provider_id": {
+      "maximum": 10000000000000000000,
+      "minimum": 1,
+      "title": "Boot Image Provider Id",
+      "type": "integer"
     },
     "complete": {
       "const": true,
@@ -235,8 +251,11 @@
     "accelerator_model",
     "accelerator_provider_type",
     "accelerator_count",
+    "accelerator_attachment_mode",
     "network",
     "subnetwork",
+    "boot_image_name",
+    "boot_image_provider_id",
     "boot_image_digest",
     "runner_image_digest",
     "serving_runtime_image_digest",

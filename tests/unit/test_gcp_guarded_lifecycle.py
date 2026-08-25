@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,14 +20,15 @@ from inferdrome.deployment import (
     GcpCapacityInput,
     GcpClock,
     GcpCostQuote,
+    GcpExecutionBootImage,
     GcpExecutionEnvironment,
+    GcpExecutionError,
     GcpExecutionNetwork,
     GcpGuardedLifecycleController,
     GcpInsertRequest,
     GcpJournalError,
     GcpLeaseJournal,
     GcpPlanError,
-    GcpPlanImage,
     GcpQuoteComponent,
     InMemoryExecutionArmStore,
     canonical_gcp_execution_arm_bytes,
@@ -83,9 +85,11 @@ def _arm(controller_id: str = "ctl-12345678") -> Any:
 def _environment(plan: Any) -> GcpExecutionEnvironment:
     return GcpExecutionEnvironment(
         schema_version="inferdrome.gcp-execution-environment.v1",
-        boot_image=GcpPlanImage(
-            repository="projects/inferdrome-example/global/images/123456789",
+        boot_image=GcpExecutionBootImage(
+            image_name="projects/inferdrome-example/global/images/inferdrome-base-v1",
+            provider_image_id=123456789,
             digest="sha256:" + "1" * 64,
+            status="READY",
         ),
         runner_image=plan.runner_image,
         serving_runtime_image=plan.serving_runtime_image,
@@ -128,8 +132,11 @@ def _quote_and_capacity(
         accelerator_model=request.accelerator_model,
         accelerator_provider_type=request.accelerator_provider_type,
         accelerator_count=request.accelerator_count,
+        accelerator_attachment_mode=request.accelerator_attachment_mode,
         network=request.network.network,
         subnetwork=request.network.subnetwork,
+        boot_image_name=request.boot_image.image_name,
+        boot_image_provider_id=request.boot_image.provider_image_id,
         boot_image_digest=request.boot_image.digest,
         runner_image_digest=request.runner_image.digest,
         serving_runtime_image_digest=request.serving_runtime_image.digest,
@@ -583,6 +590,7 @@ def test_provider_observation_rejects_identity_and_network_drift() -> None:
             {
                 "network": request.network.network,
                 "subnetwork": request.network.subnetwork,
+                "stack_type": "IPV4_ONLY",
                 "access_configs": [],
                 "ipv6_access_configs": [],
                 "network_i_p": "10.0.0.2",
@@ -607,9 +615,7 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
     class Operation:
         def __init__(self) -> None:
             self.timeout: int | None = None
-            self.name = (
-                "projects/inferdrome-example/zones/us-central1-a/operations/op-1"
-            )
+            self.name = "operation-1"
 
         def result(self, *, timeout: int) -> None:
             self.timeout = timeout
@@ -642,6 +648,11 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
         ServiceAccount = Value
         InsertInstanceRequest = Value
         DeleteInstanceRequest = Value
+        ListInstancesRequest = Value
+
+        @staticmethod
+        def ZoneOperationsClient() -> object:
+            return object()
 
     _, _, _, plan = _inputs()
     arm = _arm()
@@ -651,7 +662,9 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
         plan=plan, arm=arm, environment=_environment(plan)
     )
     client = Client()
-    transport = create_google_compute_transport(sdk_module=Sdk, client=client)
+    transport = create_google_compute_transport(
+        sdk_module=Sdk, client=client, operations_client=object()
+    )
     operation = transport.insert(
         request, timeout_seconds=7, request_id=request.insert_request_id
     )
@@ -724,6 +737,111 @@ def test_network_after_send_is_ambiguous_and_never_confirms_absence(
     assert outcome.error_code == "AMBIGUOUS_MUTATION_UNRESOLVED"
     assert transport.get_calls > 0
     assert transport.delete_calls == 0
+
+
+def test_pre_insert_intent_is_durable_before_provider_call(tmp_path: Path) -> None:
+    transport = FakeGcpComputeTransport(
+        insert_error="INSERT_AMBIGUOUS", insert_error_ambiguous=True
+    )
+    outcome, controller = _run(tmp_path, transport, return_controller=True)
+    assert outcome.orphaned is True
+    assert transport.insert_calls == 1
+    events = (tmp_path / "ctl-12345678.events.jsonl").read_text(encoding="utf-8")
+    assert '"state":"CREATE_SUBMITTED"' in events
+    assert '"provider_mutation_ambiguous":true' in events
+    assert '"provider_operation_status":"UNKNOWN"' in events
+    assert '"provider_mutation_attempted":true' in events
+    assert controller.journal.load("ctl-12345678").orphaned is True
+
+
+def test_pre_insert_journal_failure_blocks_provider_call(tmp_path: Path) -> None:
+    class BrokenJournal(GcpLeaseJournal):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.calls = 0
+
+        def update(self, record: Any) -> None:
+            del record
+            self.calls += 1
+            if self.calls >= 2:
+                raise GcpJournalError("simulated journal failure")
+
+    spec, inventory, context, plan = _inputs()
+    arm = _arm()
+    environment = _environment(plan)
+    request = __import__(
+        "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
+    ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    quote, capacity = _quote_and_capacity(plan, arm, request)
+    transport = FakeGcpComputeTransport()
+    controller = GcpGuardedLifecycleController(
+        transport=transport,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=BrokenJournal(tmp_path),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+    )
+    with pytest.raises(GcpExecutionError, match="provider mutation was not reached"):
+        controller.execute(
+            plan=plan,
+            expected_spec=spec,
+            expected_inventory=inventory,
+            expected_context=context,
+            arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+            environment=environment,
+            quote=quote,
+            capacity=capacity,
+        )
+    assert transport.insert_calls == 0
+
+
+def test_event_chain_recovers_when_snapshot_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outcome, controller = _run(
+        tmp_path, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    record = controller.journal.load("ctl-12345678")
+    changed = record.model_copy(update={"last_error_code": "RECOVERABLE_EVENT"})
+    original_replace = os.replace
+
+    def fail_replace(*_: Any, **__: Any) -> None:
+        raise OSError("simulated snapshot publication crash")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(GcpJournalError):
+        controller.journal.update(changed)
+    monkeypatch.setattr(os, "replace", original_replace)
+    assert (
+        controller.journal.load("ctl-12345678").last_error_code == "RECOVERABLE_EVENT"
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "quote_digest",
+        "environment_digest",
+        "estimated_max_microusd",
+        "max_cleanup_attempts",
+    ],
+)
+def test_journal_freezes_non_lifecycle_intent_fields(
+    tmp_path: Path, field: str
+) -> None:
+    outcome, controller = _run(
+        tmp_path, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    record = controller.journal.load("ctl-12345678")
+    replacement = {
+        "quote_digest": "sha256:" + "f" * 64,
+        "environment_digest": "sha256:" + "e" * 64,
+        "estimated_max_microusd": record.estimated_max_microusd + 1,
+        "max_cleanup_attempts": record.max_cleanup_attempts - 1,
+    }[field]
+    with pytest.raises(GcpJournalError):
+        controller.journal.update(record.model_copy(update={field: replacement}))
 
 
 def test_ambiguous_insert_finds_late_instance_and_deletes_exact_owner(
@@ -820,6 +938,53 @@ def test_provider_labels_and_request_ids_are_provider_safe() -> None:
     assert len(request.delete_request_id) == 36
 
 
+def test_boot_image_requires_name_and_separate_provider_identity() -> None:
+    with pytest.raises(ValidationError):
+        GcpExecutionBootImage(
+            image_name="projects/inferdrome-example/global/images/123456789",
+            provider_image_id=123456789,
+            digest="sha256:" + "1" * 64,
+            status="READY",
+        )
+
+
+def test_lazy_transport_factory_is_not_activated_before_arm_validation(
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    def factory() -> Any:
+        nonlocal called
+        called = True
+        return FakeGcpComputeTransport()
+
+    spec, inventory, context, plan = _inputs()
+    arm = _arm()
+    environment = _environment(plan)
+    request = __import__(
+        "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
+    ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    quote, capacity = _quote_and_capacity(plan, arm, request)
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(tmp_path),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+    )
+    with pytest.raises((GcpPlanError, ValueError)):
+        controller.execute(
+            plan=plan,
+            expected_spec=spec,
+            expected_inventory=inventory,
+            expected_context=context,
+            arm_bytes=b"{}",
+            environment=environment,
+            quote=quote,
+            capacity=capacity,
+        )
+    assert called is False
+
+
 def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> None:
     sdk = pytest.importorskip("google.cloud.compute_v1")
     assert hasattr(sdk, "AttachedDiskInitializeParams")
@@ -834,30 +999,55 @@ def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> 
         plan=plan, arm=arm, environment=_environment(plan)
     )
 
-    class Operation:
-        name = "projects/inferdrome-example/zones/us-central1-a/operations/op-1"
-
-        def result(self, *, timeout: int) -> None:
-            del timeout
+    operation = sdk.Operation(name="operation-1", status=sdk.Operation.Status.DONE)
 
     class Client:
-        def insert(self, **kwargs: Any) -> Operation:
-            self.request = kwargs["request"]
-            return Operation()
+        def insert(self, *, request: Any, timeout: int) -> Any:
+            del timeout
+            self.request = request
+            return operation
 
-        def delete(self, **kwargs: Any) -> Operation:
-            self.delete_request = kwargs["request"]
-            return Operation()
+        def delete(self, *, request: Any, timeout: int) -> Any:
+            del timeout
+            self.delete_request = request
+            return operation
+
+        def list(self, *, request: Any, timeout: int) -> list[Any]:
+            del timeout
+            self.list_request = request
+            return []
 
     client = Client()
-    transport = create_google_compute_transport(sdk_module=sdk, client=client)
-    transport.insert(request, timeout_seconds=7, request_id=request.insert_request_id)
+    transport = create_google_compute_transport(
+        sdk_module=sdk, client=client, operations_client=object()
+    )
+    handle = transport.insert(
+        request, timeout_seconds=7, request_id=request.insert_request_id
+    )
     assert isinstance(client.request, sdk.InsertInstanceRequest)
     assert client.request.request_id == request.insert_request_id
     assert isinstance(
         client.request.instance_resource.disks[0].initialize_params,
         sdk.AttachedDiskInitializeParams,
     )
+    assert (
+        client.request.instance_resource.disks[0].initialize_params.source_image
+        == request.boot_image.image_name
+    )
+    assert client.request.instance_resource.guest_accelerators == []
+    assert (
+        client.request.instance_resource.network_interfaces[0].stack_type == "IPV4_ONLY"
+    )
+    assert client.request.instance_resource.scheduling.max_run_duration.seconds == 600
+    assert (
+        client.request.instance_resource.scheduling.instance_termination_action
+        == "DELETE"
+    )
+    result = transport.wait_operation(handle, timeout_seconds=7)
+    assert result.status == "DONE"
+    transport.list_owned(request, timeout_seconds=7)
+    assert isinstance(client.list_request, sdk.ListInstancesRequest)
+    assert client.list_request.max_results == 256
     transport.delete(request, timeout_seconds=7, request_id=request.delete_request_id)
     assert isinstance(client.delete_request, sdk.DeleteInstanceRequest)
     assert client.delete_request.request_id == request.delete_request_id

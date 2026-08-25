@@ -109,7 +109,7 @@ _SUBNETWORK_RE = re.compile(
     r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$"
 )
 _BOOT_IMAGE_RE = re.compile(
-    r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[0-9]+$"
+    r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$"
 )
 _SERVICE_ACCOUNT_RE = re.compile(
     r"^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$"
@@ -423,13 +423,23 @@ class GcpExecutionNetwork(GcpExecutionModel):
     subnetwork: GcpPrivateSubnetworkRef
     external_access_config: Literal["absent"]
     ip_forwarding: Literal[False]
+    stack_type: Literal["IPV4_ONLY"] = "IPV4_ONLY"
+
+
+class GcpExecutionBootImage(GcpExecutionModel):
+    """Exact image-name selector plus an independently observed provider ID."""
+
+    image_name: Annotated[str, StringConstraints(pattern=_BOOT_IMAGE_RE.pattern)]
+    provider_image_id: int = Field(strict=True, ge=1, le=10**19)
+    digest: Sha256Digest
+    status: Literal["READY"]
 
 
 class GcpExecutionEnvironment(GcpExecutionModel):
     """Exact provider-side environment, with references but no secret values."""
 
     schema_version: Literal["inferdrome.gcp-execution-environment.v1"]
-    boot_image: GcpPlanImage
+    boot_image: GcpExecutionBootImage
     runner_image: GcpPlanImage
     serving_runtime_image: GcpPlanImage
     network: GcpExecutionNetwork
@@ -443,12 +453,11 @@ class GcpExecutionEnvironment(GcpExecutionModel):
     deletion_protection: Literal[False]
     automatic_restart: Literal[False]
     maintenance_policy: Literal["TERMINATE"]
+    accelerator_attachment_mode: Literal["a2_fixed_gpu"] = "a2_fixed_gpu"
     startup_script_digest: Sha256Digest | None
 
     @model_validator(mode="after")
     def validate_environment(self) -> Self:
-        if _BOOT_IMAGE_RE.fullmatch(self.boot_image.repository) is None:
-            raise ValueError("boot image must use an immutable numeric image identity")
         if len(set(self.service_account_scopes)) != len(self.service_account_scopes):
             raise ValueError("service-account scopes must be unique")
         if "cloud-platform" in self.service_account_scopes:
@@ -476,7 +485,7 @@ class GcpInsertRequest(GcpExecutionModel):
     accelerator_model: Literal["NVIDIA A100-SXM4-40GB"]
     accelerator_provider_type: GcpResourceName
     accelerator_count: int = Field(strict=True, ge=1, le=16)
-    boot_image: GcpPlanImage
+    boot_image: GcpExecutionBootImage
     runner_image: GcpPlanImage
     serving_runtime_image: GcpPlanImage
     boot_disk_size_gib: int = Field(strict=True, ge=10, le=16_384)
@@ -504,6 +513,7 @@ class GcpInsertRequest(GcpExecutionModel):
     runtime_version: Literal["0.26.0"]
     endpoint_scope: Literal["private"]
     runner_runtime_colocation: Literal["colocated"]
+    accelerator_attachment_mode: Literal["a2_fixed_gpu"] = "a2_fixed_gpu"
     startup_script_digest: Sha256Digest | None = None
 
     @model_validator(mode="after")
@@ -512,6 +522,8 @@ class GcpInsertRequest(GcpExecutionModel):
             raise ValueError("external access configuration must be absent")
         if self.network.ip_forwarding:
             raise ValueError("IP forwarding must be disabled")
+        if self.network.stack_type != "IPV4_ONLY":
+            raise ValueError("only IPv4-only network interfaces are supported")
         if self.network.network.split("/")[1] != self.project_id:
             raise ValueError("network project must match compute project")
         if self.network.subnetwork.split("/")[1] != self.project_id:
@@ -556,8 +568,11 @@ class GcpCostQuote(GcpExecutionModel):
     accelerator_model: Literal["NVIDIA A100-SXM4-40GB"]
     accelerator_provider_type: GcpResourceName
     accelerator_count: int = Field(strict=True, ge=1, le=16)
+    accelerator_attachment_mode: Literal["a2_fixed_gpu"]
     network: GcpPrivateNetworkRef
     subnetwork: GcpPrivateSubnetworkRef
+    boot_image_name: Annotated[str, StringConstraints(pattern=_BOOT_IMAGE_RE.pattern)]
+    boot_image_provider_id: int = Field(strict=True, ge=1, le=10**19)
     boot_image_digest: Sha256Digest
     runner_image_digest: Sha256Digest
     serving_runtime_image_digest: Sha256Digest
@@ -664,6 +679,7 @@ class GcpInstanceObservation(GcpExecutionModel):
     subnetwork: GcpPrivateSubnetworkRef | None = None
     private_ipv4_addresses: tuple[str, ...] = Field(default=(), max_length=8)
     external_ipv6_present: Literal[False] = False
+    stack_type: Literal["IPV4_ONLY"] = "IPV4_ONLY"
 
     @model_validator(mode="after")
     def validate_observation(self) -> Self:
@@ -675,6 +691,8 @@ class GcpInstanceObservation(GcpExecutionModel):
             raise ValueError("provider observation is incomplete")
         if self.external_ipv6_present or self.ip_forwarding:
             raise ValueError("provider observation is not private")
+        if self.state != "NOT_FOUND" and self.stack_type != "IPV4_ONLY":
+            raise ValueError("provider observation is not IPv4-only")
         return self
 
 
@@ -951,6 +969,27 @@ class GcpLeaseRecord(GcpExecutionModel):
             or self.provider_operation_terminal
         ):
             raise ValueError("provider operation identity is incomplete")
+        if self.provider_operation_id is not None and (
+            self.provider_operation_name is None
+            or self.provider_operation_kind is None
+            or self.provider_operation_status is None
+        ):
+            raise ValueError("provider operation identity is incomplete")
+        if self.provider_operation_name is not None:
+            operation_parts = self.provider_operation_name.split("/")
+            if (
+                len(operation_parts) != 6
+                or operation_parts[:5]
+                != [
+                    "projects",
+                    self.project_id,
+                    "zones",
+                    self.zone,
+                    "operations",
+                ]
+                or re.fullmatch(r"[a-z][a-z0-9-]{0,127}", operation_parts[5]) is None
+            ):
+                raise ValueError("provider operation resource is invalid")
         if (
             self.provider_operation_status == "UNKNOWN"
             and not self.provider_mutation_ambiguous
@@ -1380,7 +1419,17 @@ def build_gcp_insert_request(
         raise GcpExecutionError("request selection does not match arm")
     if environment.architecture != provider.architecture:
         raise GcpExecutionError("execution architecture does not match selected GPU")
-    if environment.boot_image.repository.split("/")[1] != provider.project_id:
+    if environment.accelerator_attachment_mode != "a2_fixed_gpu":
+        raise GcpExecutionError("unsupported accelerator attachment mode")
+    if (
+        not provider.machine_type.startswith(("a2-", "synthetic-a2-"))
+        or provider.accelerator_count != 1
+        or provider.accelerator_model != "NVIDIA A100-SXM4-40GB"
+    ):
+        raise GcpExecutionError(
+            "selected accelerator does not match the closed A2 profile"
+        )
+    if environment.boot_image.image_name.split("/")[1] != provider.project_id:
         raise GcpExecutionError("boot image project does not match selected project")
     if (
         environment.runner_image != plan.runner_image
@@ -1448,6 +1497,7 @@ def build_gcp_insert_request(
         runtime_version=plan.runtime.engine_version,
         endpoint_scope=plan.runtime.endpoint_scope,
         runner_runtime_colocation=plan.runtime.runner_runtime_colocation,
+        accelerator_attachment_mode="a2_fixed_gpu",
         startup_script_digest=environment.startup_script_digest,
     )
 
@@ -1493,12 +1543,15 @@ def validate_cost_and_capacity(
         quote.network != request.network.network
         or quote.subnetwork != request.network.subnetwork
         or quote.boot_image_digest != request.boot_image.digest
+        or quote.boot_image_name != request.boot_image.image_name
+        or quote.boot_image_provider_id != request.boot_image.provider_image_id
         or quote.runner_image_digest != request.runner_image.digest
         or quote.serving_runtime_image_digest != request.serving_runtime_image.digest
         or quote.boot_disk_size_gib != request.boot_disk_size_gib
         or quote.boot_disk_type != request.boot_disk_type
         or quote.service_account != request.service_account
         or quote.provider_max_runtime_seconds != request.provider_max_runtime_seconds
+        or quote.accelerator_attachment_mode != request.accelerator_attachment_mode
     ):
         raise GcpExecutionError("cost quote environment selection does not match")
     required_billable_seconds = (
@@ -1799,6 +1852,10 @@ class GcpLeaseJournal:
                 os.close(descriptor)
 
     def _read_event_chain(self, path: Path) -> GcpLeaseJournalEvent:
+        entries = self._read_event_chain_entries(path)
+        return entries[-1]
+
+    def _read_event_chain_entries(self, path: Path) -> tuple[GcpLeaseJournalEvent, ...]:
         descriptor: int | None = None
         try:
             descriptor = os.open(
@@ -1821,11 +1878,19 @@ class GcpLeaseJournal:
                 or final.st_size != len(raw)
             ):
                 raise GcpJournalError("GCP journal event chain changed during read")
+            # A process can die after writing part of the final JSON line but
+            # before the newline.  The complete newline-delimited prefix is
+            # the authoritative recoverable journal; never trust an incomplete
+            # tail and never make a readable prefix unusable because a stale
+            # snapshot was not replaced.
+            if not raw.endswith(b"\n"):
+                newline = raw.rfind(b"\n")
+                raw = raw[: newline + 1] if newline >= 0 else b""
             lines = raw.splitlines()
             if not lines:
                 raise GcpJournalError("GCP journal event chain is empty")
             previous: Sha256Digest | None = None
-            last: GcpLeaseJournalEvent | None = None
+            entries: list[GcpLeaseJournalEvent] = []
             for sequence, line in enumerate(lines):
                 if not line:
                     raise GcpJournalError("GCP journal event chain is malformed")
@@ -1839,9 +1904,8 @@ class GcpLeaseJournal:
                 ):
                     raise GcpJournalError("GCP journal event chain is not contiguous")
                 previous = event.event_digest
-                last = event
-            assert last is not None
-            return last
+                entries.append(event)
+            return tuple(entries)
         except GcpJournalError:
             raise
         except (OSError, ValueError, ValidationError):
@@ -1851,7 +1915,16 @@ class GcpLeaseJournal:
                 os.close(descriptor)
 
     def _read_path(self, path: Path) -> GcpLeaseRecord:
+        # The hash-chained event log is the recoverable source of truth.  The
+        # snapshot is only a fast, derived view and may legitimately lag when
+        # os.replace fails after the event fsync.  A snapshot that is neither
+        # the current event nor an earlier event is still rejected as tamper.
+        entries = self._read_event_chain_entries(
+            self._event_path_for(path.parent, path.name.removesuffix(".lease.json"))
+        )
+        authoritative = entries[-1].record
         descriptor: int | None = None
+        snapshot: GcpLeaseRecord | None = None
         try:
             descriptor = os.open(
                 path,
@@ -1871,30 +1944,60 @@ class GcpLeaseJournal:
             final = os.fstat(descriptor)
             if final.st_ino != metadata.st_ino or final.st_size != len(raw):
                 raise GcpJournalError("GCP journal changed during read")
-            record = _parse_lease_bytes(raw)
-            anchor = self._read_anchor(
-                self._anchor_path_for(path.parent, record.controller_id)
-            )
+            snapshot = _parse_lease_bytes(raw)
+        except FileNotFoundError:
+            # A valid event chain is sufficient to recover after a snapshot
+            # publication crash; reserve always writes the chain first.
+            pass
+        except GcpJournalError as error:
+            if str(error) in {
+                "GCP journal file is unsafe",
+                "GCP journal exceeds its bound",
+                "GCP journal changed during read",
+            }:
+                raise
+            try:
+                metadata = path.lstat()
+            except OSError:
+                metadata = None
             if (
-                record.intent_anchor_digest != anchor.anchor_digest
-                or record.request_digest != anchor.request_digest
-                or record.request != anchor.request
-                or record.labels != anchor.labels
+                metadata is None
+                or stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
             ):
-                raise GcpJournalError("GCP journal intent binding is invalid")
-            event = self._read_event_chain(
-                self._event_path_for(path.parent, record.controller_id)
-            )
-            if event.record != record:
-                raise GcpJournalError("GCP journal event head does not match lease")
-            return record
-        except GcpJournalError:
-            raise
+                raise GcpJournalError("GCP journal file is unsafe") from None
         except (OSError, ValueError):
-            raise GcpJournalError("GCP journal file is unavailable") from None
+            # A malformed derived snapshot cannot poison an otherwise valid
+            # authoritative chain, but a symlink/non-regular target remains a
+            # hard boundary violation.
+            try:
+                metadata = path.lstat()
+            except OSError:
+                metadata = None
+            if (
+                metadata is None
+                or stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+            ):
+                raise GcpJournalError("GCP journal file is unsafe") from None
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+        if snapshot is not None and snapshot not in tuple(
+            entry.record for entry in entries
+        ):
+            raise GcpJournalError("GCP journal event head does not match lease")
+        anchor = self._read_anchor(
+            self._anchor_path_for(path.parent, authoritative.controller_id)
+        )
+        if (
+            authoritative.intent_anchor_digest != anchor.anchor_digest
+            or authoritative.request_digest != anchor.request_digest
+            or authoritative.request != anchor.request
+            or authoritative.labels != anchor.labels
+        ):
+            raise GcpJournalError("GCP journal intent binding is invalid")
+        return authoritative
 
     def _scan(self) -> list[GcpLeaseRecord]:
         root = self._checked_root()
@@ -2042,17 +2145,75 @@ class GcpLeaseJournal:
                 raise GcpJournalError("GCP journal state transition is invalid")
             if record.delete_attempts < previous.delete_attempts:
                 raise GcpJournalError("GCP journal cleanup attempts regressed")
-            for field in (
-                "controller_id",
-                "arm_id",
-                "plan_id",
-                "request",
-                "request_digest",
-                "labels",
-                "intent_anchor_digest",
+            if _parse_timestamp(record.updated_at) < _parse_timestamp(
+                previous.updated_at
             ):
+                raise GcpJournalError("GCP journal update timestamp regressed")
+            mutable_fields = {
+                "state",
+                "updated_at",
+                "provider_operation_id",
+                "provider_operation_name",
+                "provider_operation_kind",
+                "provider_operation_status",
+                "provider_operation_terminal",
+                "provider_mutation_ambiguous",
+                "arm_consumed",
+                "provider_mutation_attempted",
+                "cleanup_confirmed",
+                "orphaned",
+                "delete_attempts",
+                "last_error_code",
+            }
+            for field in GcpLeaseRecord.model_fields:
+                if field in mutable_fields:
+                    continue
                 if getattr(record, field) != getattr(previous, field):
                     raise GcpJournalError("GCP journal immutable binding changed")
+            previous_operation = (
+                previous.provider_operation_id,
+                previous.provider_operation_name,
+                previous.provider_operation_kind,
+                previous.project_id,
+                previous.zone,
+            )
+            current_operation = (
+                record.provider_operation_id,
+                record.provider_operation_name,
+                record.provider_operation_kind,
+                record.project_id,
+                record.zone,
+            )
+            if previous.provider_operation_id is not None:
+                # A new delete attempt may receive a new provider operation
+                # after the previous delete reached a terminal result.  It is
+                # a monotonic, separately budgeted action, not retargeting of
+                # the same in-flight operation.
+                if (
+                    previous.provider_operation_kind == "delete"
+                    and current_operation != previous_operation
+                    and not (
+                        previous.provider_operation_terminal
+                        and record.provider_operation_kind == "delete"
+                        and record.provider_operation_status == "PENDING"
+                        and record.delete_attempts == previous.delete_attempts
+                    )
+                ):
+                    raise GcpJournalError("GCP journal operation identity changed")
+                if (
+                    previous.provider_operation_kind == "insert"
+                    and record.provider_operation_kind == "insert"
+                    and current_operation != previous_operation
+                ):
+                    raise GcpJournalError("GCP journal operation identity changed")
+                if (
+                    previous.provider_operation_kind == "insert"
+                    and record.provider_operation_kind == "delete"
+                    and not previous.provider_operation_terminal
+                ):
+                    raise GcpJournalError(
+                        "GCP journal delete operation transition is invalid"
+                    )
             event_raw = (
                 canonical_json_bytes(
                     _json_value(
@@ -2343,15 +2504,40 @@ class GcpGuardedLifecycleController:
     def __init__(
         self,
         *,
-        transport: GcpComputeTransport,
+        transport: GcpComputeTransport | None = None,
+        transport_factory: Callable[[], GcpComputeTransport] | None = None,
         arm_store: ExecutionArmStore,
         journal: GcpLeaseJournal,
         clock: GcpClock | None = None,
     ) -> None:
-        self.transport = transport
+        if (transport is None) == (transport_factory is None):
+            raise GcpExecutionError(
+                "provide exactly one injected transport or lazy transport factory"
+            )
+        self._transport = transport
+        self._transport_factory = transport_factory
         self.arm_store = arm_store
         self.journal = journal
         self.clock = clock or system_gcp_clock()
+
+    @property
+    def transport(self) -> GcpComputeTransport:
+        if self._transport is None:
+            raise GcpExecutionError("GCP transport has not passed the lazy gate")
+        return self._transport
+
+    def _activate_transport(self) -> GcpComputeTransport:
+        if self._transport is None:
+            factory = self._transport_factory
+            if factory is None:
+                raise GcpExecutionError("GCP transport factory is unavailable")
+            try:
+                self._transport = factory()
+            except GcpExecutionError:
+                raise
+            except BaseException:
+                raise GcpExecutionError("GCP transport activation failed") from None
+        return self._transport
 
     def _trace(
         self,
@@ -2493,9 +2679,15 @@ class GcpGuardedLifecycleController:
         terminal = status in {"DONE", "ERROR"}
         now = _timestamp(self.clock.now())
         prior_journal_error: str | None = None
+        journal_state: GcpLeaseState = (
+            "CREATE_SUBMITTED"
+            if operation.operation_kind == "insert"
+            and record.state in {"ARM_CONSUMED", "CREATE_SUBMITTED"}
+            else "CLEANUP_PENDING"
+        )
         updated, journal_error = self._record_resilient(
             record,
-            state="CLEANUP_PENDING",
+            state=journal_state,
             now=now,
             provider_operation_id=operation.operation_id,
             provider_operation_name=operation.operation_name,
@@ -2590,9 +2782,6 @@ class GcpGuardedLifecycleController:
                 current,
                 state="CLEANUP_PENDING",
                 now=now,
-                provider_operation_id=None,
-                provider_operation_name=None,
-                provider_operation_kind=None,
                 provider_operation_status="UNKNOWN",
                 provider_operation_terminal=False,
                 provider_mutation_ambiguous=True,
@@ -2685,12 +2874,32 @@ class GcpGuardedLifecycleController:
                 break
             # Persist/increment before the mutation.  Recovery sees the
             # consumed attempt even if the delete call raises or is canceled.
-            current, write_error = self._record_resilient(
-                current,
-                state="CLEANUP_PENDING",
-                now=now,
-                delete_attempts=current.delete_attempts + 1,
-            )
+            try:
+                current = self._record(
+                    current,
+                    state="CLEANUP_PENDING",
+                    now=_timestamp(self.clock.now()),
+                    delete_attempts=current.delete_attempts + 1,
+                    provider_mutation_ambiguous=True,
+                    provider_operation_status=(
+                        "UNKNOWN"
+                        if current.provider_operation_id is None
+                        else current.provider_operation_status
+                    ),
+                    provider_operation_terminal=(
+                        current.provider_operation_terminal
+                        if current.provider_operation_id is not None
+                        else False
+                    ),
+                )
+                write_error = None
+            except BaseException:
+                # The delete budget and ambiguous intent must be durable before
+                # invoking a provider mutation.  Continuing would permit a
+                # recovery process to exceed the configured total.
+                write_error = "JOURNAL_UPDATE_FAILED"
+                cleanup_error = write_error
+                break
             if write_error is not None:
                 cleanup_error = write_error
             try:
@@ -2721,6 +2930,15 @@ class GcpGuardedLifecycleController:
                     mark_cleanup_ambiguous(error.code)
                 else:
                     cleanup_error = error.code
+                    try:
+                        current = self._record(
+                            current,
+                            state="CLEANUP_PENDING",
+                            now=_timestamp(self.clock.now()),
+                            provider_mutation_ambiguous=False,
+                        )
+                    except BaseException:
+                        cleanup_error = "JOURNAL_UPDATE_FAILED"
                 pending_operation = error.operation
                 continue
             except KeyboardInterrupt:
@@ -2840,6 +3058,26 @@ class GcpGuardedLifecycleController:
             )
         record = self._record(record, state="ARM_CONSUMED", now=now, arm_consumed=True)
         self._trace(trace, "ARM_CONSUME", "SUCCEEDED")
+        try:
+            self._activate_transport()
+        except BaseException:
+            activation_error = "TRANSPORT_ACTIVATION_FAILED"
+            self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", activation_error)
+            record = self._record(
+                record,
+                state="CLEANUP_CONFIRMED",
+                now=now,
+                cleanup_confirmed=True,
+                orphaned=False,
+                last_error_code=activation_error,
+            )
+            return _outcome(
+                record,
+                trace,
+                status="FAILED",
+                error_code=activation_error,
+                primary_error_code=activation_error,
+            )
         provider_attempted = False
         primary_error: str | None = None
         ambiguous_mutation = False
@@ -2936,15 +3174,21 @@ class GcpGuardedLifecycleController:
                 primary_error = primary_error or journal_error
 
         try:
-            provider_attempted = True
-            record, journal_error = self._record_resilient(
+            # Persist the mutation intent before calling the provider.  A
+            # process death after the provider accepts insert but before its
+            # operation handle is returned is therefore recovered as UNKNOWN,
+            # never as a false absence.
+            record = self._record(
                 record,
                 state="CREATE_SUBMITTED",
                 now=now,
                 provider_mutation_attempted=True,
+                provider_mutation_ambiguous=True,
+                provider_operation_status="UNKNOWN",
+                provider_operation_terminal=False,
+                last_error_code="CREATE_MUTATION_PENDING",
             )
-            if journal_error is not None:
-                primary_error = journal_error
+            provider_attempted = True
             operation = self._validate_operation_handle(
                 self.transport.insert(
                     request,
@@ -2968,26 +3212,16 @@ class GcpGuardedLifecycleController:
             if journal_error is not None:
                 primary_error = primary_error or journal_error
             self._trace(trace, "CREATE", "SUCCEEDED")
-            result = self.transport.wait_operation(
-                operation, timeout_seconds=controller_timeout()
-            )
-            terminal = result.status in {"DONE", "ERROR"}
-            record, journal_error = self._record_resilient(
+            record, pending_operation, result, wait_error = self._reconcile_operation(
                 record,
-                state="CREATE_SUBMITTED",
-                now=now,
-                provider_operation_status=result.status,
-                provider_operation_terminal=terminal,
-                last_error_code=(
-                    result.error_code if result.status == "ERROR" else None
-                ),
+                trace,
+                timeout_seconds=controller_timeout(),
+                pending_operation=operation,
             )
-            if journal_error is not None:
-                primary_error = primary_error or journal_error
-            if result.status != "DONE":
-                primary_error = result.error_code or (
+            if wait_error is not None or result is None or result.status != "DONE":
+                primary_error = (result.error_code if result is not None else None) or (
                     "CREATE_OPERATION_TIMEOUT_AMBIGUOUS"
-                    if result.status == "TIMEOUT"
+                    if result is None or result.status == "TIMEOUT"
                     else "CREATE_OPERATION_FAILED"
                 )
                 self._trace(trace, "OPERATION_WAIT", "FAILED", primary_error)
@@ -3029,6 +3263,20 @@ class GcpGuardedLifecycleController:
             elif not isinstance(error, GcpTransportError) or error.ambiguous:
                 if pending_operation is None:
                     mark_ambiguous_mutation()
+            elif isinstance(error, GcpTransportError) and pending_operation is None:
+                # A provider rejection before accepting the mutation is known
+                # non-ambiguous; clear only the conservative pre-call marker.
+                try:
+                    record = self._record(
+                        record,
+                        state="CREATE_SUBMITTED",
+                        now=now,
+                        provider_mutation_ambiguous=False,
+                        provider_operation_status=None,
+                        last_error_code=error.code,
+                    )
+                except BaseException:
+                    primary_error = primary_error or "JOURNAL_UPDATE_FAILED"
             if primary_error is None:
                 if isinstance(error, GcpTransportError):
                     primary_error = error.code
@@ -3092,6 +3340,10 @@ class GcpGuardedLifecycleController:
             or gcp_execution_request_digest(request) != record.request_digest
         ):
             raise GcpJournalError("GCP lease request binding is invalid")
+        try:
+            self._activate_transport()
+        except BaseException:
+            raise GcpExecutionError("GCP transport activation failed") from None
         trace: list[GcpExecutionTraceEvent] = []
         self._trace(trace, "VALIDATION", "SUCCEEDED")
         record, cleanup_error = self._cleanup(

@@ -23,14 +23,17 @@ replay, altered input, expired arm, copied/constructed
 invalid model, or ceiling substitution fails before the Compute transport is
 called.
 
-The execution environment and request contracts require an immutable numeric
-Compute image resource identity (never an image family or floating tag) plus its
-Inferdrome digest, runner, and serving image identities; an explicit private
+The execution environment and request contracts require an immutable RFC1035
+Compute image name plus a separately observed provider image ID and
+Inferdrome digest (never an image family or floating tag), runner, and serving
+image identities; an explicit private
 VPC/subnetwork; no
 external access configuration; no IP forwarding; automatic restart disabled;
 boot-disk auto-delete; `TERMINATE` GPU maintenance behavior; bounded disk and
 service-account scope references; and local ownership bindings containing the
-exact controller, arm, and plan IDs. Provider labels contain only compact
+exact controller, arm, and plan IDs. The pinned A100 profile uses the closed A2
+fixed-GPU attachment mode; it does not project an N1-style guest-accelerator
+attachment. Provider labels contain only compact
 lowercase ownership keys; full IDs remain in the local request/lease and are
 compared before deletion. The runner and vLLM serving runtime remain separate
 boundaries. A startup-script digest may bind an external bootstrap artifact,
@@ -48,9 +51,14 @@ the exact request and reports zero matching owned resources; it is not a
 capacity proof. Pricing and invoice truth remain unavailable.
 
 The controller writes an immutable no-replace intent anchor and an atomic local
-lease before insert, under a cross-process journal lock. Every lease transition
-is also appended as a bounded, canonical, domain-separated hash-chain event;
-the lease head must match that chain before recovery. The controller then calls
+lease before insert, under a cross-process journal lock. Immediately before the
+first provider insert it durably records `CREATE_SUBMITTED` with the stable
+insert UUID, `provider_mutation_ambiguous=true`, and an `UNKNOWN` operation
+status; if that write fails, insert is not called. Every lease transition is
+also appended as a bounded, canonical, domain-separated hash-chain event. The
+event chain is the authoritative recoverable state; the JSON lease is a derived
+snapshot that may lag after a replace/fsync crash, but a tampered snapshot that
+is not an event prefix is rejected. The controller then calls
 only the injected `GcpComputeTransport`. Insert and delete operation identities
 and statuses are persisted. A post-send operation timeout is ambiguous: the
 controller must first reconcile the exact zonal operation to terminal before
@@ -73,14 +81,20 @@ primary error separately.
 Core/local installs do not import a Google package. The optional `gcp` extra
 pins `google-cloud-compute==1.50.0` and its transitive dependencies in
 `uv.lock`. `create_google_compute_transport()` is the only factory that imports
-the SDK and constructs its client; it must be selected only after the pure
-preflight and local lease gates. With the extra absent it fails with the bounded
+the SDK and constructs the `InstancesClient` and restart-safe
+`ZoneOperationsClient`; it must be selected only after pure preflight, local
+lease reservation, and one-shot arm-consumption gates. With the extra absent it
+fails with the bounded
 `GCP optional dependency unavailable` error. Engineering-gate tests inject SDK
 modules, clients, and extended-operation fakes; they do not discover ADC,
 metadata, sockets, subprocesses, or a provider.
 
-The concrete client follows Google's Compute Engine `instances.insert`,
-`get`, list, and `delete` operation model and bounded extended-operation waits.
+The concrete client follows Google's Compute Engine `instances.insert`, `get`,
+`list(request=ListInstancesRequest(...))`, and `delete` operation model and
+bounded extended-operation waits. Raw provider operation names are normalized
+to the exact zonal operation resource before they enter the journal. Polling
+transport errors remain pending/unknown; only a provider-confirmed terminal DONE
+operation may carry a provider error.
 Application Default Credentials are an external operator setup, never an
 Inferdrome API key or serialized receipt field. See Google's primary
 documentation for [Compute Engine insert](https://cloud.google.com/compute/docs/reference/rest/v1/instances/insert),
