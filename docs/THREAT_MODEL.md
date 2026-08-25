@@ -71,6 +71,19 @@ path-safe isolated extraction, bounded full-member content review, an explicit
 three-state publication decision, and separate owner approval. Review metadata
 never authorizes rewriting a sealed archive.
 
+### Kubernetes local orchestration boundary
+
+The Kubernetes contract and wrapper are untrusted-cluster orchestration
+inputs, not an execution attestation. The validator is offline and rejects
+duplicate/unknown YAML shapes, public or host resources, mutable GPU images,
+credential-bearing environment forms, and runner/engine topology drift. The
+mock wrapper owns one unique local namespace and cluster, captures one bounded
+completed-runner log before cleanup, and publishes the synthetic output outside
+the disposable Pod. A Kubernetes log or `emptyDir` is not treated as durable
+real evidence. The GPU template requires an operator-provided evidence PVC;
+without independent PVC and retrieval verification, persistence and evidence
+eligibility remain unknown.
+
 ### ExitSpec importer
 
 The importer processes an attacker-controlled directory or transport package.

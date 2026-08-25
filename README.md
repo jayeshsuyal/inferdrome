@@ -82,6 +82,15 @@ services; the guarded wrapper loads the separately gated GPU override and
 selects only the benchmark runner as its root service. Its preflight verifies
 the complete frozen Qwen3 snapshot and the versioned private-endpoint binding.
 
+The minimal Kubernetes boundary is documented in
+[KUBERNETES_V1.md](docs/KUBERNETES_V1.md). It is one guarded batch Job with a
+native serving sidecar and a colocated runner. The local mock wrapper retrieves
+one bounded synthetic runner log before deleting its disposable Pod; it never
+uses `kubectl cp`/`exec` after completion and never claims Kubernetes evidence.
+The GPU template requires operator-provided model, experiment, and evidence
+PVCs plus an immutable runner digest, but this repository performs no cluster,
+GPU, or evidence execution.
+
 PR7 adds an offline, read-only GCP inventory and deterministic dry-run plan in
 [GCP_DRY_RUN_V1.md](docs/GCP_DRY_RUN_V1.md). It consumes an explicit compute
 project planning context and a synthetic/local inventory snapshot; it performs
@@ -266,6 +275,7 @@ provider-neutral.
 - [Deterministic reduction and fake adapter](docs/DETERMINISTIC_REDUCTION.md)
 - [Evidence bundle and offline verification](docs/EVIDENCE_BUNDLE_V1.md)
 - [Pinned vLLM 0.26.0 adapter](docs/VLLM_0_26_ADAPTER.md)
+- [Minimal Kubernetes Job v1](docs/KUBERNETES_V1.md)
 - [Managed real-GPU proof](docs/REAL_GPU_PROOF.md)
 - [CLI and orchestration](docs/CLI.md)
 - [Local evidence dashboard](docs/DASHBOARD.md)
@@ -291,8 +301,9 @@ Inferdrome v0.1 does not include the dashboard in its release gate. The accepted
 post-v0.1 dashboard remains local and read-only. Descriptive Trial Sets and the
 narrow operator-attested controlled-comparison workflow are available.
 Trusted chronology or authorship, additional treatments, confidence or
-significance claims, hosted service, cloud or Kubernetes orchestration, GPU
-telemetry, router analysis, automatic optimization, and a second serving engine
-remain outside the implemented product.
+significance claims, hosted service, live cloud or Kubernetes orchestration,
+GPU telemetry, router analysis, automatic optimization, and a second serving
+engine remain outside the implemented product. The additive Kubernetes Job
+contract is a guarded static/local simulation boundary, not a platform.
 
 The first release proves the evidence pipeline before expanding the product.
