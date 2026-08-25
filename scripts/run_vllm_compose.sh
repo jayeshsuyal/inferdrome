@@ -33,6 +33,41 @@ validate_identity_component() {
   (( value_number >= 1 && value_number <= 65534 )) || fail "$label identity is invalid"
 }
 
+python_candidate_works() {
+  candidate=$1
+  [[ -x "$candidate" ]] || return 1
+  "$candidate" -c \
+    'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' \
+    >/dev/null 2>&1 || return 1
+  PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+    "$candidate" -c \
+    'import inferdrome.vllm_compose, jsonschema, pydantic, yaml, rfc8785' \
+    >/dev/null 2>&1 || return 1
+  return 0
+}
+
+select_gpu_python() {
+  if [[ -n "${INFERDROME_PYTHON:-}" ]]; then
+    python_candidate_works "$INFERDROME_PYTHON" || \
+      fail "GPU preflight requires a compatible Inferdrome Python 3.12 interpreter"
+    inferdrome_python=$INFERDROME_PYTHON
+    return
+  fi
+
+  repository_python="$repository_root/.venv/bin/python"
+  if python_candidate_works "$repository_python"; then
+    inferdrome_python=$repository_python
+    return
+  fi
+
+  python3_candidate=$(command -v python3 2>/dev/null || true)
+  if [[ -n "$python3_candidate" ]] && python_candidate_works "$python3_candidate"; then
+    inferdrome_python=$python3_candidate
+    return
+  fi
+  fail "GPU preflight requires a compatible Inferdrome Python 3.12 interpreter"
+}
+
 while (($# > 0)); do
   case "$1" in
     --confirm-gpu)
@@ -92,24 +127,8 @@ export INFERDROME_COMPOSE_GID="$compose_gid"
 mkdir -p -- "$evidence_dir" || fail "evidence output cannot be created"
 [[ -d "$evidence_dir" && ! -L "$evidence_dir" && -w "$evidence_dir" ]] || fail "evidence output is not writable"
 
-inferdrome_python=${INFERDROME_PYTHON:-python3}
-identity_args=(
-  -m inferdrome.vllm_compose identity-preflight
-  --uid "$compose_uid"
-  --gid "$compose_gid"
-  --evidence-dir "$evidence_dir"
-)
 if [[ "$mode" == "gpu" ]]; then
-  identity_args+=(
-    --model-path "$INFERDROME_QWEN3_MODEL_PATH"
-    --experiment-dir "$INFERDROME_EXPERIMENT_DIR"
-  )
-fi
-PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" "$inferdrome_python" \
-  "${identity_args[@]}" || exit $?
-
-preflight_args=()
-if [[ "$mode" == "gpu" ]]; then
+  select_gpu_python
   preflight_args=(
     -m inferdrome.vllm_compose gpu-preflight
     --confirmation "$confirmation"

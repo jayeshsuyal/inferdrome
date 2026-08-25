@@ -160,7 +160,13 @@ The wrapper derives and exports `INFERDROME_COMPOSE_UID` and
 `INFERDROME_COMPOSE_GID`; operators do not need to set those variables for the
 armed command. They are shown in the structural example only because Compose
 must resolve the required `user` fields even when the wrapper is not being
-used.
+used. Mock mode remains Docker-only after those shell checks and does not
+import Inferdrome or depend on a host Python installation. GPU mode performs
+the semantic preflight with a compatible Python 3.12 interpreter: it uses an
+explicit `INFERDROME_PYTHON` first, then the repository
+`.venv/bin/python`, then `python3` from `PATH`. Each candidate is checked for
+Python `>=3.12,<3.13` and the required locked modules with output suppressed;
+if none is compatible, the wrapper exits with one bounded preflight error.
 
 The placeholder runner digest above is intentionally not executable. Build the
 distinct runner artifact first, then obtain and verify its immutable image

@@ -6,7 +6,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -459,7 +458,13 @@ def test_compose_wrapper_mock_targets_only_synthetic_runner_and_cleans_up(
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
     environment["INFERDROME_TEST_DOCKER_LOG"] = str(log_path)
     environment["INFERDROME_COMPOSE_EVIDENCE_DIR"] = str(tmp_path / "evidence")
-    environment["INFERDROME_PYTHON"] = sys.executable
+    incompatible_python = fake_bin / "python3"
+    python_log = tmp_path / "python.log"
+    incompatible_python.write_text(
+        f"#!/bin/sh\nprintf called > '{python_log}'\nexit 1\n",
+        encoding="utf-8",
+    )
+    incompatible_python.chmod(0o755)
     completed = subprocess.run(
         ["bash", "scripts/run_vllm_compose.sh", "mock"],
         cwd=REPOSITORY_ROOT,
@@ -477,6 +482,9 @@ def test_compose_wrapper_mock_targets_only_synthetic_runner_and_cleans_up(
     assert "vllm-benchmark-runner" not in up_line
     assert down_line.endswith("down --remove-orphans --volumes")
     assert f"identity={os.getuid()}:{os.getgid()}" in lines
+    assert not python_log.exists()
+    assert "Traceback" not in completed.stderr
+    assert str(tmp_path) not in completed.stderr
 
 
 def test_compose_wrapper_gpu_targets_only_benchmark_runner_and_cleans_up(
@@ -486,7 +494,11 @@ def test_compose_wrapper_gpu_targets_only_benchmark_runner_and_cleans_up(
     (fake_bin / "uname").write_text("#!/bin/sh\nprintf 'Linux\\n'\n", encoding="utf-8")
     (fake_bin / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     fake_python = fake_bin / "python"
-    fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python_log = tmp_path / "python.log"
+    fake_python.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{python_log}'\nexit 0\n",
+        encoding="utf-8",
+    )
     for path in (fake_bin / "uname", fake_bin / "nvidia-smi", fake_python):
         path.chmod(0o755)
     model = tmp_path / "model"
@@ -528,6 +540,64 @@ def test_compose_wrapper_gpu_targets_only_benchmark_runner_and_cleans_up(
     assert "synthetic-smoke" not in up_line
     assert down_line.endswith("down --remove-orphans --volumes")
     assert f"identity={os.getuid()}:{os.getgid()}" in lines
+    assert python_log.exists()
+
+
+def test_compose_wrapper_gpu_rejects_incompatible_python_without_traceback(
+    tmp_path: Path,
+) -> None:
+    fake_bin, log_path = _fake_docker_bin(tmp_path)
+    (fake_bin / "uname").write_text("#!/bin/sh\nprintf 'Linux\\n'\n", encoding="utf-8")
+    (fake_bin / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    incompatible_python = fake_bin / "incompatible-python"
+    incompatible_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    for path in (fake_bin / "uname", fake_bin / "nvidia-smi", incompatible_python):
+        path.chmod(0o755)
+    model = tmp_path / "model"
+    experiment = tmp_path / "experiment"
+    evidence = tmp_path / "evidence"
+    model.mkdir()
+    experiment.mkdir()
+    evidence.mkdir()
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+    environment["INFERDROME_PYTHON"] = str(incompatible_python)
+    environment["INFERDROME_VLLM_RUNNER_IMAGE"] = (
+        "registry.example.invalid/inferdrome-runner@sha256:" + "a" * 64
+    )
+    environment["INFERDROME_VLLM_RUNTIME_IMAGE"] = VLLM_RUNTIME_IMAGE_REFERENCE
+    environment["INFERDROME_QWEN3_PROFILE_ID"] = QWEN3_8B_PROFILE_ID
+    environment["INFERDROME_QWEN3_MODEL_ID"] = QWEN3_8B_MODEL_ID
+    environment["INFERDROME_QWEN3_MODEL_REVISION"] = QWEN3_8B_REVISION
+    environment["INFERDROME_QWEN3_TOKENIZER_REVISION"] = QWEN3_8B_REVISION
+    environment["INFERDROME_QWEN3_MODEL_PATH"] = str(model)
+    environment["INFERDROME_EXPERIMENT_DIR"] = str(experiment)
+    environment["INFERDROME_COMPOSE_EVIDENCE_DIR"] = str(evidence)
+    completed = subprocess.run(
+        ["bash", "scripts/run_vllm_compose.sh", "gpu", "--confirm-gpu"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert "compatible Inferdrome Python 3.12 interpreter" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert str(incompatible_python) not in completed.stderr
+    assert not log_path.exists()
+
+
+def test_compose_wrapper_documents_gpu_python_resolution_order() -> None:
+    script = (REPOSITORY_ROOT / "scripts" / "run_vllm_compose.sh").read_text(
+        encoding="utf-8"
+    )
+    assert script.index("INFERDROME_PYTHON:-") < script.index(
+        'repository_python="$repository_root/.venv/bin/python"'
+    )
+    assert script.index('repository_python="$repository_root/.venv/bin/python"') < (
+        script.index("command -v python3")
+    )
 
 
 def test_build_context_defense_in_depth_excludes_host_state() -> None:
