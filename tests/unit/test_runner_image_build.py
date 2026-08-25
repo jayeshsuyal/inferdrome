@@ -64,6 +64,10 @@ def test_packaged_version_mismatch_is_bounded_and_non_disclosing() -> None:
     assert submitted not in str(exc_info.value)
 
 
+def test_repository_development_version_is_accepted() -> None:
+    assert builder._package_version() == "0.1.0.dev0"
+
+
 def test_wrapper_rejects_noncanonical_platform_without_docker() -> None:
     with pytest.raises(builder.RunnerImageBuildError) as exc_info:
         builder.build_image(platform="linux/arm64")
