@@ -486,6 +486,18 @@ def test_no_sglang_literals_enter_frozen_public_schema_files() -> None:
     assert SGLANG_RELEASE_COMMIT.startswith("71de97")
 
 
+def test_deployment_spec_docs_reflect_sglang_normalizer_boundary() -> None:
+    deployment_doc = REPOSITORY_ROOT / "docs" / "DEPLOYMENT_SPEC_V1.md"
+    text = deployment_doc.read_text(encoding="utf-8")
+
+    assert "The additive SGLang 0.5.18" in text
+    assert "normalization adapter is evidence-ineligible" in text
+    assert (
+        "No SGLang lifecycle, serving, normalization, or evidence adapter is present."
+        not in text
+    )
+
+
 def test_output_destination_is_not_created_by_builder(tmp_path: Path) -> None:
     output = tmp_path / "native.jsonl"
     _invocation(tmp_path)

@@ -1,14 +1,22 @@
 # Deployment specification v1
 
-Status: **Provider-neutral outer deployment contract; PR4 adds a synthetic
-immutable provenance receipt, while cloud/runtime adapters remain
-unimplemented**
+Status: **Provider-neutral outer deployment contract; the repository now has
+local mock, container, offline/guarded provider, Kubernetes simulation, and
+evidence-ineligible SGLang boundaries built on this contract**
 
-The deployment specification is an additive control-plane document for future
-local, Lambda, GCP, Docker, and Kubernetes adapters. It describes deployment
-intent and bounded safety requirements. It does not launch a resource, contact a
-provider, resolve a credential, build a container, execute vLLM, or produce an
-evidence receipt.
+The deployment specification is an additive control-plane document for local,
+Lambda, GCP, Docker, and Kubernetes adapters. It describes deployment intent
+and bounded safety requirements; the contract itself does not launch a
+resource, contact a provider, resolve a credential, build a container, execute
+vLLM, or produce an evidence receipt. Later slices consume it through separate
+adapters and orchestration boundaries.
+
+The accepted repository boundaries are deliberately narrower than a live cloud
+platform: local mock lifecycle, the reproducible runner and Compose contracts,
+offline GCP planning plus a separately guarded GCP lifecycle envelope,
+Kubernetes static/local simulation, and additive SGLang 0.5.18 normalization
+are present. No live cloud runtime, provider spend, or eligible SGLang evidence
+is claimed here.
 
 Inferdrome remains the measurement owner. vLLM or SGLang remains the serving
 runtime owner. The deployment contract changes where those components run; it
@@ -85,8 +93,9 @@ The provider/runtime combinations are intentionally narrow:
 - `vllm` is pinned to the repository's supported `0.26.0`
   `vllm_bench_serve` shape.
 - `sglang` has a versioned `sglang_reference_v1` shape, but validation permits
-  it only as a development dry-run reference. No SGLang lifecycle, serving,
-  normalization, or evidence adapter is present.
+  it only as a development dry-run reference. The additive SGLang 0.5.18
+  normalization adapter is evidence-ineligible and does not provide SGLang
+  lifecycle or serving execution.
 - Other providers, engines, versions, and adapters fail closed.
 
 ## Lifecycle interfaces and local mock
@@ -258,10 +267,15 @@ timeouts and cost ceiling, attempt cleanup on every exit, and emit an immutable
 outer deployment receipt. It must not change the benchmark command or frozen
 evidence schemas.
 
-This v1 contract intentionally includes no cloud SDK, network call, Dockerfile,
-Compose file, Kubernetes manifest, cloud provider lifecycle implementation,
-runtime image, public API, authentication path, raw evidence publication path,
-or acceptance verdict. PR3's local in-memory lifecycle interfaces and mock
-adapter are the only execution-side additions; PR4 owns the immutable outer
-deployment receipt described in
-[`DEPLOYMENT_RECEIPT_V1.md`](DEPLOYMENT_RECEIPT_V1.md).
+At the v1 contract slice, this contract itself intentionally included no cloud
+SDK, network call, Dockerfile, Compose file, Kubernetes manifest, cloud provider
+lifecycle implementation, runtime image, public API, authentication path, raw
+evidence publication path, or acceptance verdict. In that historical slice,
+PR3's local in-memory lifecycle interfaces and mock adapter were the execution
+addition and PR4 owned the immutable outer deployment receipt described in
+[`DEPLOYMENT_RECEIPT_V1.md`](DEPLOYMENT_RECEIPT_V1.md). Accepted later slices
+add the reproducible runner/Compose boundaries (PR5/PR6), offline and guarded
+GCP boundaries (PR7/PR8), Kubernetes static/local simulation (PR10), and the
+evidence-ineligible SGLang producer/normalization boundary (PR11). None of
+those later boundaries changes this contract or claims live cloud execution or
+eligible SGLang evidence.

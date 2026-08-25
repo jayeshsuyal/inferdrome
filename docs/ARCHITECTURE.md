@@ -110,8 +110,12 @@ separate immutable outer receipt boundary in
 spec/outcome inputs, binds declared and locally observed provenance, and never
 assigns an evidence or acceptance verdict. Its only issuer is the synthetic
 local form; executed receipts remain fail-closed until a later slice can bind
-independently verified proof, provider, and invoice facts. Lambda, GCP, SGLang,
-runtime images, and cloud lifecycle remain later slices.
+independently verified proof, provider, and invoice facts. At the PR3/PR4
+boundary Lambda, GCP, SGLang, runtime images, and cloud lifecycle were
+intentionally later slices. The accepted later boundaries are documented below:
+runner/Compose in PR5/PR6, offline and guarded GCP in PR7/PR8, Kubernetes
+static/local simulation in PR10, and additive SGLang normalization in PR11.
+None claims live cloud execution or eligible SGLang evidence.
 
 Receipt identity is a domain-separated digest over the canonical payload
 excluding `receipt_id`. Publication also returns a separate SHA-256 of the

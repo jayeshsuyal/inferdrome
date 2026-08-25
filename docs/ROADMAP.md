@@ -42,21 +42,24 @@ contract-only slice is `inferdrome.deployment.v1`, documented in
 provider-neutral, closed input shape while preserving the benchmark command,
 methodology references, v0.1 schemas, genuine receipts, and ExitSpec boundary.
 
-The contract intentionally has no execution authority. Local mock is explicit
-and never GPU evidence; Lambda and GCP are dry-run/reference identities; vLLM
-`0.26.0` is the only executable runtime identity represented; SGLang is a
-reserved reference shape. Later slices must be independently reviewed in this
-order: provider/runtime lifecycle interfaces with a local adapter, immutable
-outer deployment receipt, reproducible runner image, pinned vLLM runtime image
-and Compose paths, GCP read-only/dry-run, authorized guarded GCP lifecycle,
-local API authentication, minimal Kubernetes, and finally SGLang execution.
-No slice grants cloud launch, spend, evidence publication, public exposure, or
-release authority by itself.
+At the PR2 contract slice, the specification intentionally had no execution
+authority. Local mock was explicit and never GPU evidence; Lambda and GCP were
+dry-run/reference identities; vLLM `0.26.0` was the only executable runtime
+identity represented; and SGLang was only a reserved reference shape. That
+slice's review order is now complete through PR11: local lifecycle and receipt,
+runner/Compose paths, offline and guarded GCP boundaries, dashboard
+authentication, Kubernetes simulation, and the additive SGLang normalization
+boundary. No slice grants cloud launch, spend, evidence publication, public
+exposure, or release authority by itself.
 
 PR7 is complete as the read-only GCP inventory and deterministic offline
 dry-run planning boundary. Its checked-in inventory and plan are synthetic
-local artifacts only; PR8 remains the separately authorized mutating lifecycle
-slice and may not infer compute scope from credential-reference locations.
+local artifacts only. PR8 is complete as the separately authorized guarded
+lifecycle boundary: it consumes the unchanged plan through one-shot
+authorization, exact request projection, durable journal/recovery, and
+cleanup machinery with injected transports/fakes. It does not provide live
+pricing, capacity, runtime, or provider execution, and it may not infer compute
+scope from credential-reference locations.
 
 PR10 adds the minimal Kubernetes Job contract as a separate execution-layer
 boundary. It is limited to a Kubernetes 1.33 native-sidecar Job, a guarded
@@ -65,6 +68,11 @@ mock artifact is a locally published synthetic log projection; the Pod
 `emptyDir` is disposable, and real GPU evidence requires an operator-provided
 durable evidence PVC. No cluster execution, GPU run, eligible evidence, or
 platform claim is closed by this slice.
+
+PR11 is complete as the pinned SGLang 0.5.18 producer-capability and
+evidence-ineligible normalization boundary. SGLang serving, a live producer
+run, request-identity/start-offset capture, and a future evidence v2 contract
+remain open; no eligible SGLang evidence is claimed.
 
 ## PR 0 — Freeze the foundation
 

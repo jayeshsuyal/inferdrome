@@ -98,8 +98,10 @@ PYTHONPATH=src .venv/bin/python scripts/generate_gcp_dry_run_plan.py --check
 ## Deferred boundary
 
 IAM/authentication, live read-only inventory collection, official provider
-resource mappings, pricing snapshots, capacity truth, resource acquisition,
-runtime launch, teardown, and provider receipts remain deferred. PR8 may
-consume the unchanged deployment-spec/resource/image contract only after a
-separate explicit authorization gate and a new mutating adapter review. PR8
-must not reinterpret this plan as authorization or a provider attestation.
+resource mappings, live pricing snapshots, capacity truth, runtime launch, and
+provider execution remain deferred or unexecuted. The accepted PR8 boundary
+consumes this unchanged plan only through its separate one-shot authorization
+arm, exact request projection, durable journal, injected transport/fake, and
+crash-aware cleanup/recovery machinery. It does not turn the plan into
+authorization, a provider attestation, a live canary, or a spend claim; there
+is no live execute command in this slice.

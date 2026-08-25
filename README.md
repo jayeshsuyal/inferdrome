@@ -312,8 +312,10 @@ post-v0.1 dashboard remains local and read-only. Descriptive Trial Sets and the
 narrow operator-attested controlled-comparison workflow are available.
 Trusted chronology or authorship, additional treatments, confidence or
 significance claims, hosted service, live cloud or Kubernetes orchestration,
-GPU telemetry, router analysis, automatic optimization, and a second serving
-engine remain outside the implemented product. The additive Kubernetes Job
+GPU telemetry, router analysis, automatic optimization, and an executable or
+eligible second serving engine remain outside the implemented product; PR11's
+SGLang slice is a non-executing, evidence-ineligible producer/normalization
+capability boundary. The additive Kubernetes Job
 contract is a guarded static/local simulation boundary, not a platform.
 
 The first release proves the evidence pipeline before expanding the product.
