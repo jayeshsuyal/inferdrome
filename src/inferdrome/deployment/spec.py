@@ -212,6 +212,14 @@ class EnvironmentVariableReference(DeploymentModel):
     kind: Literal["environment_variable"]
     name: EnvVarName
 
+    @model_validator(mode="after")
+    def reject_credential_shaped_name(self) -> Self:
+        if _looks_like_credential(self.name):
+            raise ValueError(
+                "environment-variable references cannot contain credential values"
+            )
+        return self
+
 
 class GcpSecretManagerReference(DeploymentModel):
     kind: Literal["gcp_secret_manager"]

@@ -304,24 +304,37 @@ def test_secret_values_have_no_serializable_model_boundary() -> None:
 
 
 @pytest.mark.parametrize(
-    "credential_shape",
+    ("source", "field", "credential_shape"),
     [
-        "sk-" + "A" * 40,
-        "ghp_" + "A" * 40,
-        "github_pat_" + "A" * 40,
-        "AKIA" + "A" * 16,
-        "-----BEGIN RSA PRIVATE KEY-----",
-        "a" * 48,
+        ("gcp", "secret_id", "sk-" + "A" * 40),
+        ("gcp", "secret_id", "ghp_" + "A" * 40),
+        ("gcp", "secret_id", "github_pat_" + "A" * 40),
+        ("gcp", "secret_id", "AKIA" + "A" * 16),
+        ("gcp", "secret_id", "-----BEGIN RSA PRIVATE KEY-----"),
+        ("gcp", "secret_id", "a" * 48),
+        ("environment", "name", "A" * 48),
+        ("environment", "name", "AKIA" + "A" * 16),
     ],
 )
 def test_structured_secret_reference_rejects_credential_shaped_components(
+    source: str,
+    field: str,
     credential_shape: str,
 ) -> None:
-    payload = _payload("gcp-dry-run-reference.json")
-    payload["provider"]["credential_refs"][0]["secret_id"] = credential_shape
-    with pytest.raises((ValidationError, ValueError)) as exc_info:
-        _spec(payload)
-    assert credential_shape not in str(exc_info.value)
+    if source == "gcp":
+        payload = _payload("gcp-dry-run-reference.json")
+        payload["provider"]["credential_refs"][0][field] = credential_shape
+    else:
+        payload = _payload("local-mock.json")
+        payload["provider"]["credential_refs"] = [
+            {"kind": "environment_variable", field: credential_shape}
+        ]
+
+    raw = json.dumps(payload, allow_nan=False)
+    for parser in (parse_deployment_spec_json, DeploymentSpec.model_validate_json):
+        with pytest.raises((ValidationError, ValueError)) as exc_info:
+            parser(raw)
+        assert credential_shape not in str(exc_info.value)
 
 
 def test_gcp_secret_reference_serializes_only_structured_resource_identity() -> None:
