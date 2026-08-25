@@ -206,6 +206,60 @@
       "title": "EndpointConfiguration",
       "type": "object"
     },
+    "EnvironmentVariableReference": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "environment_variable",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "title": "EnvironmentVariableReference",
+      "type": "object"
+    },
+    "GcpSecretManagerReference": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "gcp_secret_manager",
+          "title": "Kind",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "secret_id": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$",
+          "title": "Secret Id",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "project_id",
+        "secret_id",
+        "version"
+      ],
+      "title": "GcpSecretManagerReference",
+      "type": "object"
+    },
     "ImageIdentity": {
       "additionalProperties": false,
       "properties": {
@@ -300,7 +354,21 @@
       "properties": {
         "credential_refs": {
           "items": {
-            "$ref": "#/$defs/SecretReference"
+            "discriminator": {
+              "mapping": {
+                "environment_variable": "#/$defs/EnvironmentVariableReference",
+                "gcp_secret_manager": "#/$defs/GcpSecretManagerReference"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EnvironmentVariableReference"
+              },
+              {
+                "$ref": "#/$defs/GcpSecretManagerReference"
+              }
+            ]
           },
           "maxItems": 8,
           "title": "Credential Refs",
@@ -390,33 +458,6 @@
       "title": "ResourceRequirements",
       "type": "object"
     },
-    "SecretReference": {
-      "additionalProperties": false,
-      "description": "A name from an external secret source, never the secret value.",
-      "properties": {
-        "kind": {
-          "enum": [
-            "environment_variable",
-            "secret_manager"
-          ],
-          "title": "Kind",
-          "type": "string"
-        },
-        "name": {
-          "maxLength": 256,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/_-]{0,254}[A-Za-z0-9]$|^[A-Za-z0-9]$",
-          "title": "Name",
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "name"
-      ],
-      "title": "SecretReference",
-      "type": "object"
-    },
     "SglangReferenceConfiguration": {
       "additionalProperties": false,
       "description": "Reserved v1 shape; lifecycle and measurement adapters are not implemented.",
@@ -455,7 +496,21 @@
         },
         "registry_secret_refs": {
           "items": {
-            "$ref": "#/$defs/SecretReference"
+            "discriminator": {
+              "mapping": {
+                "environment_variable": "#/$defs/EnvironmentVariableReference",
+                "gcp_secret_manager": "#/$defs/GcpSecretManagerReference"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EnvironmentVariableReference"
+              },
+              {
+                "$ref": "#/$defs/GcpSecretManagerReference"
+              }
+            ]
           },
           "maxItems": 8,
           "title": "Registry Secret Refs",
@@ -515,7 +570,21 @@
         },
         "registry_secret_refs": {
           "items": {
-            "$ref": "#/$defs/SecretReference"
+            "discriminator": {
+              "mapping": {
+                "environment_variable": "#/$defs/EnvironmentVariableReference",
+                "gcp_secret_manager": "#/$defs/GcpSecretManagerReference"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EnvironmentVariableReference"
+              },
+              {
+                "$ref": "#/$defs/GcpSecretManagerReference"
+              }
+            ]
           },
           "maxItems": 8,
           "title": "Registry Secret Refs",

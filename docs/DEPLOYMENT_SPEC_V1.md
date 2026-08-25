@@ -35,7 +35,9 @@ inferdrome:deployment-spec-v1\0 + RFC 8785 canonical JSON bytes
 Use `canonical_deployment_spec_bytes()` and `deployment_spec_digest()` from the
 reference module. Reordering object keys or changing JSON whitespace cannot
 change the digest. A future incompatible contract is `v2`; readers reject it
-rather than silently upgrading it.
+rather than silently upgrading it. The JSON preflight rejects duplicate object
+keys at every nesting level before Pydantic validation, so no parser can select
+a different last-key-wins interpretation of the deployment.
 
 ## Top-level contract
 
@@ -107,8 +109,10 @@ serving runtime must share the declared execution boundary for valid latency
 topology. `endpoint_scope` must equal the runtime endpoint visibility:
 
 - `loopback` uses exactly `127.0.0.1`;
-- `private` uses an RFC1918 private address or an explicitly private DNS suffix
-  (`.internal`, `.local`, or `.private`);
+- `private` uses an explicit RFC1918 IPv4 address or an explicitly private DNS
+  suffix (`.internal`, `.local`, or `.private`); all other IPv4 literals,
+  including documentation, benchmark, carrier-grade NAT, reserved, multicast,
+  unspecified, link-local, and broadcast ranges, are rejected;
 - public addresses, link-local metadata addresses, `0.0.0.0`, user-info URLs,
   query strings, fragments, unsafe path segments, and public DNS are not
   representable by the structured endpoint contract.
@@ -148,17 +152,31 @@ must be recorded in a later provider receipt if that adapter is authorized.
 ## Secret boundary
 
 The schema contains no secret-value field. Credential and model-registry access
-use `SecretReference` objects with only:
+use a discriminated reference union. An environment-variable reference has
+only:
 
 ```json
 {"kind": "environment_variable", "name": "INFERDROME_PROVIDER_TOKEN"}
 ```
 
-or a bounded secret-manager identifier. The reference is not resolved by this
-module. Credential-shaped keys such as `api_key`, `access_token`, `password`,
-`private_key`, and `secret_value` are rejected by the non-disclosing JSON
-loader. Unknown fields are rejected by the model as well. Neither the reference
-model nor its canonical output can serialize the secret value.
+A GCP Secret Manager reference has only bounded resource components:
+
+```json
+{
+  "kind": "gcp_secret_manager",
+  "project_id": "inferdrome-example",
+  "secret_id": "provider-token",
+  "version": "1"
+}
+```
+
+The reference is not resolved by this module. Credential-shaped keys such as
+`api_key`, `access_token`, `password`, `private_key`, and `secret_value` are
+rejected by the non-disclosing JSON loader. Common Lambda/OpenAI, GitHub,
+private-key, and high-entropy credential-shaped components are also rejected
+at the structured reference boundary. Unknown fields are rejected by the model
+as well. Neither reference variant nor its canonical output can serialize a
+secret value.
 
 Never put a credential, prompt, generated response, operational identifier, or
 raw provider response in a deployment example. Examples are privacy-safe

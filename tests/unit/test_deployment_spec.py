@@ -101,6 +101,76 @@ def test_canonical_bytes_and_digest_ignore_mapping_order_and_whitespace() -> Non
     )
 
 
+def test_parser_rejects_duplicate_keys_at_top_level_and_nested_boundaries() -> None:
+    raw = (EXAMPLE_ROOT / "local-mock.json").read_text(encoding="utf-8")
+    top_level_duplicate = raw.replace(
+        '"schema_version": "inferdrome.deployment.v1"',
+        '"schema_version": "inferdrome.deployment.v2",\n'
+        '  "schema_version": "inferdrome.deployment.v1"',
+        1,
+    )
+    nested_duplicate = raw.replace(
+        '"region": null,\n    "credential_refs"',
+        '"region": null,\n    "region": null,\n    "credential_refs"',
+        1,
+    )
+
+    for duplicate in (top_level_duplicate, nested_duplicate):
+        with pytest.raises(ValueError, match="keys must be unique"):
+            parse_deployment_spec_json(duplicate)
+        with pytest.raises(ValueError, match="keys must be unique"):
+            DeploymentSpec.model_validate_json(duplicate)
+
+
+def test_parser_differential_has_one_canonical_object_and_digest() -> None:
+    raw = (EXAMPLE_ROOT / "local-mock.json").read_bytes()
+    first = DeploymentSpec.model_validate_json(raw)
+    second = parse_deployment_spec_json(first.model_dump_json())
+    assert canonical_deployment_spec_bytes(first) == canonical_deployment_spec_bytes(
+        second
+    )
+    assert deployment_spec_digest(first) == deployment_spec_digest(second)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "10.0.0.1",
+        "10.255.255.254",
+        "172.16.0.1",
+        "172.31.255.254",
+        "192.168.0.1",
+        "192.168.255.254",
+    ],
+)
+def test_private_endpoint_accepts_only_rfc1918_ipv4_literals(host: str) -> None:
+    payload = _payload("lambda-dry-run-reference.json")
+    payload["runtime"]["endpoint"]["host"] = host
+    assert _spec(payload).runtime.endpoint.host == host
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "0.0.0.0",
+        "8.8.8.8",
+        "127.0.0.1",
+        "100.64.0.1",
+        "169.254.169.254",
+        "192.0.2.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "255.255.255.255",
+    ],
+)
+def test_private_endpoint_rejects_non_rfc1918_ipv4_literals(host: str) -> None:
+    payload = _payload("lambda-dry-run-reference.json")
+    payload["runtime"]["endpoint"]["host"] = host
+    _invalid(payload)
+
+
 @pytest.mark.parametrize(
     "field", ["unexpected", "provider.unexpected", "runtime.endpoint.unexpected"]
 )
@@ -233,6 +303,42 @@ def test_secret_values_have_no_serializable_model_boundary() -> None:
     assert "api_key" not in json.dumps(serialized)
 
 
+@pytest.mark.parametrize(
+    "credential_shape",
+    [
+        "sk-" + "A" * 40,
+        "ghp_" + "A" * 40,
+        "github_pat_" + "A" * 40,
+        "AKIA" + "A" * 16,
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "a" * 48,
+    ],
+)
+def test_structured_secret_reference_rejects_credential_shaped_components(
+    credential_shape: str,
+) -> None:
+    payload = _payload("gcp-dry-run-reference.json")
+    payload["provider"]["credential_refs"][0]["secret_id"] = credential_shape
+    with pytest.raises((ValidationError, ValueError)) as exc_info:
+        _spec(payload)
+    assert credential_shape not in str(exc_info.value)
+
+
+def test_gcp_secret_reference_serializes_only_structured_resource_identity() -> None:
+    spec = _spec(_payload("gcp-dry-run-reference.json"))
+    refs = spec.model_dump(mode="json")["provider"]["credential_refs"]
+    assert refs == [
+        {
+            "kind": "gcp_secret_manager",
+            "project_id": "inferdrome-example",
+            "secret_id": "provider-token",
+            "version": "1",
+        }
+    ]
+    assert "value" not in json.dumps(refs)
+    assert "sk-" not in json.dumps(refs)
+
+
 def test_methodology_is_a_reference_not_an_embedded_workload() -> None:
     payload = _payload("local-mock.json")
     methodology = payload["topology"]["methodology"]
@@ -250,6 +356,6 @@ def test_spec_models_are_immutable_after_validation() -> None:
 def test_direct_model_validation_still_rejects_unknown_secret_fields() -> None:
     payload = _payload("local-mock.json")
     payload["password"] = "not-returned-in-error"
-    with pytest.raises(ValidationError) as exc_info:
+    with pytest.raises((ValidationError, ValueError)) as exc_info:
         DeploymentSpec.model_validate_json(json.dumps(payload))
     assert "not-returned-in-error" not in str(exc_info.value)

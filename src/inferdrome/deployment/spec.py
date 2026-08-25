@@ -12,9 +12,10 @@ import re
 from collections.abc import Mapping
 from copy import deepcopy
 from decimal import Decimal
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, Self
 
 from pydantic import ConfigDict, Field, StringConstraints, model_validator
+from pydantic.config import ExtraValues
 
 from inferdrome.domain.base import FrozenModel
 from inferdrome.domain.digests import (
@@ -46,10 +47,30 @@ _SENSITIVE_FIELD_NAMES_NORMALIZED = frozenset(
     name.replace("_", "") for name in _SENSITIVE_FIELD_NAMES
 )
 _SENSITIVE_FIELD_NORMALIZATION = re.compile(r"[^a-z0-9]+")
+_CREDENTIAL_VALUE_PATTERNS = (
+    re.compile(r"^(?:sk|rk)-[A-Za-z0-9_-]{16,}$"),
+    re.compile(r"^(?:gh[pousr]_)[A-Za-z0-9_]{16,}$"),
+    re.compile(r"^github_pat_[A-Za-z0-9_]{16,}$"),
+    re.compile(r"^AKIA[0-9A-Z]{16}$"),
+    re.compile(r"^-----BEGIN [A-Z0-9 ]+ PRIVATE KEY-----$"),
+    re.compile(r"^[A-Za-z0-9_-]{40,}$"),
+)
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
 
 
 def _cost_is_zero(value: str) -> bool:
     return Decimal(value) == Decimal("0")
+
+
+def _looks_like_credential(value: str) -> bool:
+    return any(
+        pattern.fullmatch(value) is not None
+        for pattern in _CREDENTIAL_VALUE_PATTERNS
+    )
 
 DeploymentId = Annotated[
     str,
@@ -169,31 +190,51 @@ class DeploymentModel(FrozenModel):
     )
 
 
-class SecretReference(DeploymentModel):
-    """A name from an external secret source, never the secret value."""
+EnvVarName = Annotated[
+    str,
+    StringConstraints(pattern=r"^[A-Z][A-Z0-9_]{0,127}$"),
+]
+GcpProjectId = Annotated[
+    str,
+    StringConstraints(pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"),
+]
+GcpSecretId = Annotated[
+    str,
+    StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$"),
+]
+GcpSecretVersion = Annotated[
+    str,
+    StringConstraints(pattern=r"^[1-9][0-9]{0,19}$"),
+]
 
-    kind: Literal["environment_variable", "secret_manager"]
-    name: Annotated[
-        str,
-        StringConstraints(
-            min_length=1,
-            max_length=256,
-            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/_-]{0,254}[A-Za-z0-9]$|^[A-Za-z0-9]$",
-        ),
-    ]
+
+class EnvironmentVariableReference(DeploymentModel):
+    kind: Literal["environment_variable"]
+    name: EnvVarName
+
+
+class GcpSecretManagerReference(DeploymentModel):
+    kind: Literal["gcp_secret_manager"]
+    project_id: GcpProjectId
+    secret_id: GcpSecretId
+    version: GcpSecretVersion
 
     @model_validator(mode="after")
-    def validate_reference_name(self) -> SecretReference:
-        if self.kind == "environment_variable":
-            if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", self.name) is None:
-                raise ValueError(
-                    "environment-variable secret references need an uppercase name"
-                )
-        elif self.name.startswith(("/", "-")) or "//" in self.name:
+    def reject_credential_shaped_components(self) -> Self:
+        if any(
+            _looks_like_credential(value)
+            for value in (self.project_id, self.secret_id, self.version)
+        ):
             raise ValueError(
-                "secret-manager references must be safe non-empty identifiers"
+                "secret-manager identifiers cannot contain credential values"
             )
         return self
+
+
+SecretReference = Annotated[
+    EnvironmentVariableReference | GcpSecretManagerReference,
+    Field(discriminator="kind"),
+]
 
 
 class ProviderConfiguration(DeploymentModel):
@@ -225,9 +266,11 @@ class EndpointConfiguration(DeploymentModel):
                 raise ValueError("loopback endpoints must use 127.0.0.1")
         else:
             if parsed is not None:
-                if not parsed.is_private or parsed.is_link_local or parsed.is_loopback:
+                if parsed.version != 4 or not any(
+                    parsed in network for network in _RFC1918_NETWORKS
+                ):
                     raise ValueError(
-                        "private endpoints must use a non-loopback private address"
+                        "private endpoints must use an RFC1918 IPv4 address"
                     )
             elif not self.host.endswith((".internal", ".local", ".private")):
                 raise ValueError(
@@ -360,6 +403,27 @@ class DeploymentSpec(DeploymentModel):
     cleanup_policy: CleanupPolicy
     cost_ceiling: CostCeiling
 
+    @classmethod
+    def model_validate_json(
+        cls,
+        json_data: str | bytes | bytearray,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        _preflight_deployment_json(json_data)
+        return super().model_validate_json(
+            json_data,
+            strict=strict,
+            extra=extra,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
+
     @model_validator(mode="after")
     def validate_deployment_combinations(self) -> DeploymentSpec:
         provider_id = self.provider.provider_id
@@ -433,14 +497,30 @@ def deployment_spec_json_value(spec: DeploymentSpec) -> dict[str, Any]:
     return value
 
 
-def parse_deployment_spec_json(payload: str | bytes) -> DeploymentSpec:
-    """Parse JSON after a non-disclosing secret-key boundary check."""
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, child in pairs:
+        if key in value:
+            raise ValueError("deployment JSON object keys must be unique")
+        value[key] = child
+    return value
+
+
+def _preflight_deployment_json(payload: str | bytes | bytearray) -> object:
+    """Parse once with duplicate-key detection and a non-disclosing scan."""
 
     try:
-        decoded = json.loads(payload)
-    except (TypeError, json.JSONDecodeError) as exc:
+        decoded = json.loads(payload, object_pairs_hook=_unique_json_object)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("deployment specification is not valid JSON") from exc
     _reject_secret_shaped_fields(decoded)
+    return decoded
+
+
+def parse_deployment_spec_json(payload: str | bytes) -> DeploymentSpec:
+    """Parse one unambiguous JSON deployment document."""
+
+    _preflight_deployment_json(payload)
     return DeploymentSpec.model_validate_json(payload)
 
 

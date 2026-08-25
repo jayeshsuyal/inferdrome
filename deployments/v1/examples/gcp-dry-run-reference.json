@@ -8,8 +8,10 @@
     "region": "us-central1",
     "credential_refs": [
       {
-        "kind": "secret_manager",
-        "name": "projects/example/secrets/inferdrome-provider-token"
+        "kind": "gcp_secret_manager",
+        "project_id": "inferdrome-example",
+        "secret_id": "provider-token",
+        "version": "1"
       }
     ]
   },
