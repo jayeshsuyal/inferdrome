@@ -19,6 +19,8 @@ from inferdrome.domain.experiment import AttachedVllmTarget
 from inferdrome.kubernetes import (
     GPU_MANIFEST_RELATIVE_PATH,
     KIND_NODE_IMAGE_REFERENCE,
+    KIND_VERSION,
+    KIND_VERSION_MAX_BYTES,
     KUBERNETES_MAX_MANIFEST_BYTES,
     KUBERNETES_MAX_YAML_TOKENS,
     MOCK_MANIFEST_RELATIVE_PATH,
@@ -26,6 +28,7 @@ from inferdrome.kubernetes import (
     kubernetes_contract,
     parse_kubernetes_yaml,
     publish_synthetic_output,
+    validate_kind_version,
     validate_kubernetes_experiment,
     validate_kubernetes_job,
     validate_kubernetes_manifest,
@@ -77,6 +80,10 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
         "\"${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}\" "
         ">> \"$INFERDROME_K8S_TEST_LOG\"\n"
         "if [ \"$1\" = --kubeconfig ]; then exit 91; fi\n"
+        "if [ \"$1\" = version ]; then "
+        "printf '%s\\n' "
+        "\"${INFERDROME_K8S_KIND_VERSION:-kind v0.29.0 go1.24.2 darwin/arm64}\"; "
+        "exit \"${INFERDROME_K8S_FAIL_KIND_VERSION:-0}\"; fi\n"
         "case \"$1 $2\" in\n"
         "  'create cluster')\n"
         "    for arg in \"$@\"; do\n"
@@ -147,6 +154,8 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
     source.write_bytes(canonical_json_bytes(_synthetic_output()) + b"\n")
     bin_dir, log_path = _fake_cluster_bins(tmp_path, source=source)
     output = tmp_path / "evidence"
+    private_tmp = tmp_path / "private-tmp"
+    private_tmp.mkdir()
     environment = os.environ.copy()
     environment.update(
         {
@@ -159,12 +168,15 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
             "INFERDROME_KUBERNETES_TEST_MODE": "1",
             "INFERDROME_KIND_NODE_IMAGE": KIND_NODE_IMAGE_REFERENCE,
+            "INFERDROME_K8S_KIND_VERSION":
+            "kind v0.29.0 go1.24.2 darwin/arm64",
             "INFERDROME_K8S_SERVER_VERSION_JSON":
             '{"clientVersion":{"major":"1","minor":"33"},'
             '"kustomizeVersion":"v5.6.0",'
             '"serverVersion":{"major":"1","minor":"33",'
             '"gitVersion":"v1.33.1"}}',
             "INFERDROME_K8S_VERSION_CAPTURE": str(tmp_path / "version.capture"),
+            "TMPDIR": str(private_tmp),
         }
     )
     environment.update(extra)
@@ -552,6 +564,30 @@ def test_kubernetes_server_version_rejects_old_malformed_and_duplicate(
         validate_kubernetes_server_version(raw)
 
 
+def test_kind_version_accepts_exact_real_output() -> None:
+    raw = b"kind v0.29.0 go1.24.2 darwin/arm64\n"
+    assert validate_kind_version(raw) == KIND_VERSION
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"kind v0.28.0 go1.24.2 darwin/arm64\n",
+        b"kind v0.30.0 go1.24.2 darwin/arm64\n",
+        b"kind v0.31.0 go1.24.2 darwin/arm64\n",
+        b"kind v0.29.0\n",
+        b"kind v0.29.0 go1.24.2 darwin/arm64\nextra\n",
+        b"kind v0.29.0 go1.24.2 darwin/arm64\x00\n",
+        b"kind v0.29.0 go1.24.2 darwin/arm64" + b"x" * KIND_VERSION_MAX_BYTES,
+    ],
+)
+def test_kind_version_rejects_wrong_malformed_multiline_control_and_oversized(
+    raw: bytes,
+) -> None:
+    with pytest.raises(KubernetesContractError):
+        validate_kind_version(raw)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -606,6 +642,7 @@ def test_synthetic_publication_is_no_replace_and_readback_verified(
 def test_fake_kind_wrapper_retrieves_logs_verifies_and_cleans_exact_resources(
     tmp_path: Path,
 ) -> None:
+    private_tmp = tmp_path / "private-tmp"
     result = _run_fake_wrapper(tmp_path)
     assert result.returncode == 0, result.stderr
     artifact = tmp_path / "evidence/runner-output.json"
@@ -630,6 +667,7 @@ def test_fake_kind_wrapper_retrieves_logs_verifies_and_cleans_exact_resources(
     assert "kubeconfig=" in create_line
     assert all("provider=docker" in line for line in kind_lines)
     assert all("network=attacker-selected-network" not in line for line in kind_lines)
+    assert list(private_tmp.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -668,6 +706,40 @@ def test_fake_wrapper_forces_docker_kind_provider_and_clears_network_override(
     assert kind_lines
     assert all("provider=docker" in line for line in kind_lines)
     assert all("attacker-selected-network" not in line for line in kind_lines)
+
+
+@pytest.mark.parametrize(
+    "kind_version",
+    [
+        "kind v0.28.0 go1.24.2 darwin/arm64",
+        "kind v0.30.0 go1.24.2 darwin/arm64",
+        "kind v0.31.0 go1.24.2 darwin/arm64",
+        "not kind version",
+        "kind v0.29.0 go1.24.2 darwin/arm64\nextra",
+        "kind v0.29.0 go1.24.2 darwin/arm64\t",
+        "kind v0.29.0 go1.24.2 darwin/arm64" + "x" * KIND_VERSION_MAX_BYTES,
+    ],
+)
+def test_fake_wrapper_rejects_kind_version_before_inventory_or_create(
+    tmp_path: Path, kind_version: str
+) -> None:
+    result = _run_fake_wrapper(tmp_path, INFERDROME_K8S_KIND_VERSION=kind_version)
+    assert result.returncode == 2
+    log = (tmp_path / "commands.log").read_text()
+    assert "kind version" in log
+    assert "kind get clusters" not in log
+    assert "kind create cluster" not in log
+
+
+def test_fake_wrapper_rejects_kind_version_command_failure_before_inventory(
+    tmp_path: Path,
+) -> None:
+    result = _run_fake_wrapper(tmp_path, INFERDROME_K8S_FAIL_KIND_VERSION="17")
+    assert result.returncode == 2
+    log = (tmp_path / "commands.log").read_text()
+    assert "kind version" in log
+    assert "kind get clusters" not in log
+    assert "kind create cluster" not in log
 
 
 @pytest.mark.parametrize(

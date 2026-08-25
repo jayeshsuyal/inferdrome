@@ -115,6 +115,7 @@ fi
 stage=""
 state_dir=""
 kubeconfig=""
+kind_version_file=""
 server_version_file=""
 cluster_create_attempted=0
 cluster_owned=0
@@ -145,7 +146,7 @@ cleanup() {
     result=1
   fi
   if [[ -n "$kubeconfig" ]]; then
-    rm -f -- "$kubeconfig" "$server_version_file" || result=1
+    rm -f -- "$kubeconfig" "$kind_version_file" "$server_version_file" || result=1
   fi
   if [[ -n "$state_dir" ]]; then
     rmdir -- "$state_dir" || result=1
@@ -176,6 +177,7 @@ state_dir=$(mktemp -d "$temp_root/inferdrome-k8s.XXXXXX") || \
 [[ "$state_dir" = /* && -d "$state_dir" && ! -L "$state_dir" ]] || \
   fail "private Kubernetes state directory is unsafe"
 kubeconfig="$state_dir/kubeconfig"
+kind_version_file="$state_dir/kind-version.txt"
 server_version_file="$state_dir/server-version.json"
 (umask 077 && : >"$kubeconfig") || fail "private kubeconfig could not be created"
 chmod 600 "$kubeconfig" || fail "private kubeconfig could not be secured"
@@ -187,6 +189,22 @@ unset KIND_EXPERIMENTAL_DOCKER_NETWORK
 
 kind=("$kind_bin")
 kubectl=("$kubectl_bin" --kubeconfig "$kubeconfig" --context "$context")
+
+# Capture only a bounded prefix before validating the executable.  A version
+# command that fails, emits too much data, or emits an invalid line cannot
+# reach kind inventory or cluster creation.
+set +e
+"$kind_bin" version 2>/dev/null | head -c 513 >"$kind_version_file"
+kind_statuses=("${PIPESTATUS[@]}")
+kind_version_status=${kind_statuses[0]}
+head_status=${kind_statuses[1]}
+set -e
+if ((kind_version_status != 0 || head_status != 0)); then
+  fail "kind version could not be read"
+fi
+PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+  "$inferdrome_python" -m inferdrome.kubernetes kind-version \
+  "$kind_version_file" >/dev/null 2>&1 || fail "kind version is unsupported"
 
 cluster_list=$("${kind[@]}" get clusters 2>/dev/null) || \
   fail "kind cluster inventory could not be read"

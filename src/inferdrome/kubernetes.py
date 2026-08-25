@@ -61,6 +61,7 @@ MOCK_OUTPUT_NAME: Final = "runner-output.json"
 KUBERNETES_MAX_MANIFEST_BYTES: Final = 512 * 1024
 KUBERNETES_MAX_OUTPUT_BYTES: Final = 64 * 1024
 KUBERNETES_MAX_VERSION_BYTES: Final = 16 * 1024
+KIND_VERSION_MAX_BYTES: Final = 512
 KUBERNETES_MAX_YAML_DEPTH: Final = 64
 KUBERNETES_MAX_YAML_TOKENS: Final = 20_000
 KUBERNETES_LOOPBACK_ENDPOINT: Final = "http://127.0.0.1:8000"
@@ -69,6 +70,7 @@ KIND_NODE_IMAGE_REFERENCE: Final = (
     "kindest/node:v1.33.1@sha256:"
     "050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f"
 )
+KIND_VERSION: Final = "0.29.0"
 KUBERNETES_HEALTH_EXEC_COMMAND: Final = [
     "python",
     "-c",
@@ -78,6 +80,11 @@ KUBERNETES_HEALTH_EXEC_COMMAND: Final = [
     "c.close(); raise SystemExit(0 if 200 <= r.status < 300 else 1)",
 ]
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_KIND_VERSION_RE = re.compile(
+    r"^kind v(?P<version>[0-9]+\.[0-9]+\.[0-9]+) "
+    r"go[0-9]+(?:\.[0-9]+){1,3}(?:[a-z0-9.-]+)? "
+    r"[a-z][a-z0-9.-]{0,31}/[a-z][a-z0-9_.-]{0,31}\n?$"
+)
 _VERSION_COMPONENT_RE = re.compile(r"^[0-9]{1,3}\+?$")
 
 
@@ -1083,6 +1090,21 @@ def validate_kubernetes_server_version(raw: bytes) -> tuple[int, int]:
     return major, minor
 
 
+def validate_kind_version(raw: bytes) -> str:
+    """Validate the bounded one-line output of ``kind version``."""
+
+    if len(raw) > KIND_VERSION_MAX_BYTES:
+        raise KubernetesContractError("kind version exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        raise KubernetesContractError("kind version is invalid") from None
+    match = _KIND_VERSION_RE.fullmatch(text)
+    if match is None or match.group("version") != KIND_VERSION:
+        raise KubernetesContractError("kind version is unsupported")
+    return KIND_VERSION
+
+
 def _manifest_path(relative: str) -> Path:
     return Path(__file__).resolve().parents[2] / relative
 
@@ -1101,7 +1123,7 @@ def kubernetes_contract() -> dict[str, object]:
         "local_cluster": {
             "provider": "docker",
             "kind_node_image": KIND_NODE_IMAGE_REFERENCE,
-            "kind_version": "0.29.0",
+            "kind_version": KIND_VERSION,
             "kubernetes_version": "1.33.1",
         },
         "profiles": {
@@ -1359,6 +1381,8 @@ def main(argv: list[str] | None = None) -> int:
     preflight_output_directory.add_argument("path", type=Path)
     server_version = subparsers.add_parser("server-version")
     server_version.add_argument("path", type=Path)
+    kind_version = subparsers.add_parser("kind-version")
+    kind_version.add_argument("path", type=Path)
     subparsers.add_parser("contract")
     try:
         if arguments := parser.parse_args(argv):
@@ -1390,6 +1414,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 major, minor = validate_kubernetes_server_version(raw)
                 print(f"Kubernetes server version: {major}.{minor}")
+            elif arguments.command == "kind-version":
+                raw = _bounded_bytes(
+                    arguments.path,
+                    maximum=KIND_VERSION_MAX_BYTES,
+                    label="kind version",
+                )
+                print(f"kind version: {validate_kind_version(raw)}")
             else:
                 sys.stdout.buffer.write(_pretty(kubernetes_contract()))
     except KubernetesContractError as error:
@@ -1402,6 +1433,8 @@ __all__ = [
     "GPU_MANIFEST_RELATIVE_PATH",
     "GPU_RUNNER_IMAGE_PLACEHOLDER",
     "KIND_NODE_IMAGE_REFERENCE",
+    "KIND_VERSION",
+    "KIND_VERSION_MAX_BYTES",
     "KUBERNETES_CONTRACT_SCHEMA_VERSION",
     "KUBERNETES_FROZEN_CAMPAIGN_ENDPOINT",
     "KUBERNETES_HEALTH_EXEC_COMMAND",
@@ -1420,6 +1453,7 @@ __all__ = [
     "kubernetes_contract",
     "parse_kubernetes_yaml",
     "publish_synthetic_output",
+    "validate_kind_version",
     "validate_kubernetes_experiment",
     "validate_kubernetes_job",
     "validate_kubernetes_manifest",

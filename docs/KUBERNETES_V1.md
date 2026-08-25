@@ -71,7 +71,9 @@ The wrapper requires the exact official kind v0.29.0 Kubernetes 1.33.1 node
 image `kindest/node:v1.33.1@sha256:050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f`.
 An `INFERDROME_KIND_NODE_IMAGE` override, if supplied, must equal that exact
 reference. It verifies the image with local Docker before creating a cluster
-and checks the actual server version after creation. It forces kind's Docker
+and validates the executable's bounded `kind version` output as exactly
+`kind v0.29.0` before reading inventory or allocating a cluster. It also
+checks the actual server version after creation. It forces kind's Docker
 provider and removes the ambient Docker-network override, so the inspected
 image/provider cannot diverge. It uses a private temporary
 `KUBECONFIG`; `kind get`, `kind load`, and `kind delete` use the exported
