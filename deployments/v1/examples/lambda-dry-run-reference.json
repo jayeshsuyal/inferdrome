@@ -1,0 +1,80 @@
+{
+  "schema_version": "inferdrome.deployment.v1",
+  "deployment_id": "lambda-a100-dry-run-reference",
+  "mode": "proof",
+  "execution_intent": "dry_run_reference",
+  "provider": {
+    "provider_id": "lambda_cloud",
+    "region": "us-east-1",
+    "credential_refs": [
+      {
+        "kind": "environment_variable",
+        "name": "INFERDROME_LAMBDA_API_KEY"
+      }
+    ]
+  },
+  "runtime": {
+    "engine": "vllm",
+    "engine_version": "0.26.0",
+    "adapter": "vllm_bench_serve",
+    "model_id": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "endpoint": {
+      "scheme": "http",
+      "host": "10.0.0.4",
+      "port": 8000,
+      "path": "/v1",
+      "visibility": "private"
+    },
+    "registry_secret_refs": []
+  },
+  "topology": {
+    "methodology": {
+      "source": "registered_manifest",
+      "methodology_id": "inferdrome.qwen-text-mixed-length.v1",
+      "manifest_sha256": "sha256:297cd52871a00c62914a61f6a4417fe6f97c813b0421e02c6097897af0ed792b"
+    },
+    "runner_runtime_colocation": "colocated",
+    "endpoint_scope": "private"
+  },
+  "artifacts": {
+    "runner_image": {
+      "repository": "registry.example.invalid/inferdrome/runner",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "tag": "v0.1.0"
+    },
+    "serving_runtime_image": {
+      "repository": "registry.example.invalid/inferdrome/vllm-runtime",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "tag": "v0.26.0"
+    }
+  },
+  "resources": {
+    "gpu_count": 1,
+    "gpu_model": "NVIDIA A100-SXM4-40GB",
+    "cpu_cores": 8,
+    "memory_mib": 65536,
+    "ephemeral_storage_gib": 100
+  },
+  "timeouts": {
+    "startup_seconds": 600,
+    "request_seconds": 300,
+    "total_seconds": 2400,
+    "cleanup_seconds": 120,
+    "termination_confirmation_seconds": 180
+  },
+  "cleanup_policy": {
+    "cleanup_on_every_exit": true,
+    "cleanup_receipt_required": true,
+    "orphan_policy": "block_next_run",
+    "max_cleanup_attempts": 3
+  },
+  "cost_ceiling": {
+    "currency": "USD",
+    "max_cost_usd": "1.25",
+    "hard_limit": true,
+    "estimate_basis": "controller_estimate",
+    "invoice_truth": "external_provider_invoice_required"
+  }
+}

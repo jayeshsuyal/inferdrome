@@ -6,6 +6,7 @@ repository_root=$(cd "$(dirname "$0")/.." && pwd)
 export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 
 "$inferdrome_python" scripts/generate_schemas.py --check
+"$inferdrome_python" scripts/generate_deployment_spec.py --check
 "$inferdrome_python" scripts/generate_capability_profiles.py --check
 "$inferdrome_python" scripts/generate_gpu_campaign.py --check
 "$inferdrome_python" scripts/generate_qwen3_launch_profile.py --check
@@ -41,6 +42,7 @@ bash -n scripts/prepare_real_gpu_host.sh
 bash -n scripts/run_real_gpu_capture.sh
 bash -n scripts/dashboard_gate.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
+"$inferdrome_python" -m py_compile scripts/generate_deployment_spec.py
 "$inferdrome_python" -m py_compile scripts/qwen3_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/generate_capability_profiles.py
 "$inferdrome_python" -m py_compile scripts/generate_gpu_campaign.py

@@ -42,6 +42,27 @@ flowchart LR
 
 ## Architectural layers
 
+### Deployment specification boundary
+
+The additive `inferdrome.deployment.v1` contract is an outer control-plane
+boundary around the measurement pipeline. It separates provider configuration,
+serving-runtime identity, benchmark topology, runner/runtime image identities,
+resource requirements, lifecycle budgets, cleanup policy, and cost ceiling.
+The specification contains deployment intent only: it does not launch a
+provider, resolve credentials, build containers, execute a runtime, or assign
+an evidence or acceptance verdict.
+
+The contract is closed and bounded at every object boundary. It uses structured
+loopback/private endpoint semantics, references a registered benchmark
+methodology by digest instead of copying it, requires colocated runner/runtime
+topology, and keeps secret values structurally outside the model. Proof mode
+requires immutable runner and serving-runtime image digests, pinned model and
+runtime identity, mandatory cleanup policy, and a positive paid-provider cost
+ceiling. Development mock and cloud dry-run/reference intents are explicit and
+cannot be mistaken for executed GPU evidence. See
+[DEPLOYMENT_SPEC_V1.md](DEPLOYMENT_SPEC_V1.md) for the exact schema and later
+adapter obligations.
+
 ### Resolver
 
 The resolver validates source input, applies explicit defaults, resolves local

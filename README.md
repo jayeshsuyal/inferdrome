@@ -57,6 +57,14 @@ It presents Runs, Run detail, Compare, and Evidence views over the same bounded
 verification and deterministic recalculation path. It remains read-only,
 loopback-only, database-free, and outside the v0.1 release gate.
 
+The provider-neutral deployment layer begins with a strict, non-executing
+[`inferdrome.deployment.v1` contract](docs/DEPLOYMENT_SPEC_V1.md). It pins
+deployment intent, runtime/model identity, benchmark topology, image digests,
+resource and cleanup limits, and a controller cost ceiling without changing
+the benchmark methodology or frozen evidence schemas. Local mock, Lambda
+dry-run/reference, and GCP dry-run/reference examples are non-executing; no
+cloud resource or evidence publication is implied.
+
 The first v0.2 vertical slice adds an additive ninth public schema for immutable
 same-configuration trial sets. Each set pins 2–100 independently verified runs
 by run ID and bundle digest, keeps every request population separate, and
