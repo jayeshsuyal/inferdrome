@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -121,6 +122,8 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
         "  *' create namespace '*) exit \"${INFERDROME_K8S_FAIL_NAMESPACE:-0}\" ;;\n"
         "  *' apply '*) exit \"${INFERDROME_K8S_FAIL_APPLY:-0}\" ;;\n"
         "  *' wait '*)\n"
+        "    if [ -n \"${INFERDROME_K8S_WAIT_MARKER:-}\" ]; then "
+        ": > \"$INFERDROME_K8S_WAIT_MARKER\"; fi\n"
         "    if [ \"${INFERDROME_K8S_INTERRUPT_WAIT:-0}\" = 1 ]; then sleep 30; fi\n"
         "    exit \"${INFERDROME_K8S_FAIL_WAIT:-0}\"\n"
         "    ;;\n"
@@ -915,6 +918,9 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
     source.write_bytes(canonical_json_bytes(_synthetic_output()) + b"\n")
     bin_dir, log_path = _fake_cluster_bins(tmp_path, source=source)
     output = tmp_path / "evidence"
+    private_tmp = tmp_path / "private-tmp"
+    private_tmp.mkdir()
+    wait_marker = tmp_path / "wait.started"
     environment = os.environ.copy()
     environment.update(
         {
@@ -927,12 +933,14 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
             "INFERDROME_KIND_NODE_IMAGE": KIND_NODE_IMAGE_REFERENCE,
             "INFERDROME_K8S_INTERRUPT_WAIT": "1",
+            "INFERDROME_K8S_WAIT_MARKER": str(wait_marker),
             "INFERDROME_K8S_SERVER_VERSION_JSON":
             '{"clientVersion":{"major":"1","minor":"33"},'
             '"kustomizeVersion":"v5.6.0",'
             '"serverVersion":{"major":"1","minor":"33",'
             '"gitVersion":"v1.33.1"}}',
             "INFERDROME_K8S_VERSION_CAPTURE": str(tmp_path / "version.capture"),
+            "TMPDIR": str(private_tmp),
         }
     )
     process = subprocess.Popen(
@@ -945,15 +953,48 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
         start_new_session=True,
     )
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if "create namespace" in log_path.read_text():
-            break
+    while not wait_marker.exists() and time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate(timeout=5)
+            pytest.fail(
+                f"wrapper exited before wait: returncode={process.returncode}; "
+                f"log={log_path.read_text()[-2000:]!r}; "
+                f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
+            )
         time.sleep(0.05)
-    os.killpg(os.getpgid(process.pid), signal.SIGINT)
-    stdout, stderr = process.communicate(timeout=10)
+    if not wait_marker.exists():
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=5)
+        pytest.fail(
+            f"wrapper did not reach wait: returncode={process.returncode}; "
+            f"log={log_path.read_text()[-2000:]!r}; "
+            f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
+        )
+    assert wait_marker.exists()
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=5)
+        pytest.fail(
+            "wrapper did not terminate after interrupt: "
+            f"returncode={process.returncode}; log={log_path.read_text()[-2000:]!r}; "
+            f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
+        )
+    finally:
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            process.communicate(timeout=5)
     assert process.returncode in {2, 130}
     log = (tmp_path / "commands.log").read_text()
     assert "delete namespace" in log
     assert "delete cluster" in log
     assert "Traceback" not in stderr
     assert stdout == ""
+    assert list(private_tmp.iterdir()) == []
