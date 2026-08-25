@@ -69,29 +69,38 @@ def test_proof_build_derives_commit_version_and_canonical_platform(
 
     docker_commands: list[list[str]] = []
     context_existed_during_build: list[bool] = []
+    dockerfile_bytes_during_build: list[bytes] = []
+    ambient_checkout = tmp_path / "ambient-checkout"
+    ambient_checkout.mkdir()
+    (ambient_checkout / "Dockerfile").write_text(
+        "dirty ambient Dockerfile", encoding="utf-8"
+    )
 
     @contextmanager
     def materialized_context(_source_commit: str):
         context = tmp_path / "proof-context"
         context.mkdir()
+        (context / "Dockerfile").write_text("archived Dockerfile", encoding="utf-8")
         try:
             yield context
         finally:
+            (context / "Dockerfile").unlink()
             context.rmdir()
 
     monkeypatch.setattr(builder, "_capture", capture)
+    monkeypatch.setattr(builder, "REPOSITORY_ROOT", ambient_checkout)
     monkeypatch.setattr(builder, "_package_version", lambda: "0.1.0.dev0")
     monkeypatch.setattr(builder.shutil, "which", lambda _name: "/usr/bin/docker")
     monkeypatch.setattr(builder, "_materialize_proof_context", materialized_context)
-    monkeypatch.setattr(
-        builder.subprocess,
-        "run",
-        lambda command, **_kwargs: (
-            docker_commands.append(list(command))
-            or context_existed_during_build.append(Path(command[-1]).exists())
-            or SimpleNamespace(returncode=0)
-        ),
-    )
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        docker_commands.append(list(command))
+        context_existed_during_build.append(Path(command[-1]).exists())
+        dockerfile_path = Path(command[command.index("--file") + 1])
+        dockerfile_bytes_during_build.append(dockerfile_path.read_bytes())
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
 
     command = builder.build_image(flavor="proof", tag="inferdrome-runner:test")
 
@@ -103,6 +112,11 @@ def test_proof_build_derives_commit_version_and_canonical_platform(
     assert context_existed_during_build == [True]
     assert command[-1] != "."
     assert not Path(command[-1]).exists()
+    dockerfile_index = command.index("--file") + 1
+    assert Path(command[dockerfile_index]).parent == Path(command[-1])
+    assert Path(command[dockerfile_index]).name == "Dockerfile"
+    assert dockerfile_bytes_during_build == [b"archived Dockerfile"]
+    assert Path(command[dockerfile_index]) != ambient_checkout / "Dockerfile"
     assert captures[0][0:2] == ("git", "status")
 
 
@@ -139,10 +153,12 @@ def test_proof_context_is_removed_after_docker_failure(
     def materialized_context(_source_commit: str):
         context = tmp_path / "failed-proof-context"
         context.mkdir()
+        (context / "Dockerfile").write_text("archived Dockerfile", encoding="utf-8")
         created.append(context)
         try:
             yield context
         finally:
+            (context / "Dockerfile").unlink()
             context.rmdir()
 
     monkeypatch.setattr(
@@ -175,10 +191,12 @@ def test_proof_context_is_removed_after_keyboard_interrupt(
     def materialized_context(_source_commit: str):
         context = tmp_path / "interrupted-proof-context"
         context.mkdir()
+        (context / "Dockerfile").write_text("archived Dockerfile", encoding="utf-8")
         created.append(context)
         try:
             yield context
         finally:
+            (context / "Dockerfile").unlink()
             context.rmdir()
 
     monkeypatch.setattr(
@@ -220,3 +238,76 @@ def test_wrapper_rejects_noncanonical_platform_without_docker() -> None:
         builder.build_image(platform="linux/arm64")
 
     assert "linux/amd64" in str(exc_info.value)
+
+
+def test_vllm_runner_proof_build_uses_specialized_archive_and_dockerfile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_commit = "b" * 40
+    captures: list[tuple[str, ...]] = []
+
+    def capture(command: tuple[str, ...]) -> str:
+        captures.append(command)
+        return "" if command[1] == "status" else source_commit
+
+    @contextmanager
+    def materialized_context(
+        _source_commit: str,
+        *,
+        archive_inputs: tuple[str, ...] | None = None,
+    ):
+        assert archive_inputs == builder.VLLM_ARCHIVE_BUILD_INPUTS
+        context = tmp_path / "vllm-proof-context"
+        context.mkdir()
+        (context / "Dockerfile.vllm-benchmark-runner").write_text(
+            "archived Dockerfile", encoding="utf-8"
+        )
+        try:
+            yield context
+        finally:
+            (context / "Dockerfile.vllm-benchmark-runner").unlink()
+            context.rmdir()
+
+    docker_commands: list[list[str]] = []
+    dockerfile_bytes_during_build: list[bytes] = []
+    monkeypatch.setattr(builder, "_capture", capture)
+    monkeypatch.setattr(builder, "_package_version", lambda: "0.1.0.dev0")
+    monkeypatch.setattr(builder.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(builder, "_materialize_proof_context", materialized_context)
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        docker_commands.append(list(command))
+        dockerfile_path = Path(command[command.index("--file") + 1])
+        dockerfile_bytes_during_build.append(dockerfile_path.read_bytes())
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+
+    command = builder.build_image(
+        flavor="proof",
+        image_kind="vllm-benchmark-runner",
+        tag="inferdrome-vllm-runner:test",
+    )
+
+    assert "--file" in command
+    dockerfile_path = Path(command[command.index("--file") + 1])
+    assert dockerfile_path.name == "Dockerfile.vllm-benchmark-runner"
+    assert dockerfile_path.parent == Path(command[-1])
+    assert dockerfile_bytes_during_build == [b"archived Dockerfile"]
+    assert f"SOURCE_REPOSITORY_COMMIT={source_commit}" in command
+    assert docker_commands == [list(command)]
+    assert captures[0][0:2] == ("git", "status")
+
+
+def test_specialized_proof_context_is_exact_allowlist() -> None:
+    with builder._materialize_proof_context(
+        builder._source_commit(),
+        archive_inputs=builder.VLLM_ARCHIVE_BUILD_INPUTS,
+    ) as context:
+        assert (context / "Dockerfile.vllm-benchmark-runner").is_file()
+        assert not (context / "Dockerfile").exists()
+        assert (context / "uv.lock").is_file()
+        assert (context / "src").is_dir()
+        assert not (context / "scripts").exists()
+        assert not any(path.is_symlink() for path in context.rglob("*"))

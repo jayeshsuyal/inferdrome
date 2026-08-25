@@ -1,0 +1,81 @@
+name: inferdrome-vllm
+
+services:
+  mock-engine:
+    image: inferdrome/compose-mock:development
+    build:
+      context: .
+      dockerfile: Dockerfile.compose-mock
+      args:
+        BUILD_FLAVOR: development
+        SOURCE_REPOSITORY_COMMIT: development-unpinned
+        INFERDROME_VERSION: 0.1.0.dev0
+    command: ["--host", "0.0.0.0", "--port", "8000"]
+    user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    restart: "no"
+    expose: ["8000"]
+    networks:
+      inferdrome-internal:
+        aliases: ["mock-engine.internal"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read(32)",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 1s
+
+  synthetic-smoke:
+    image: inferdrome/runner:development
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_FLAVOR: development
+        SOURCE_REPOSITORY_COMMIT: development-unpinned
+        INFERDROME_VERSION: 0.1.0.dev0
+    entrypoint: ["/opt/inferdrome-runtime/bin/inferdrome-runner-probe"]
+    user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
+    command:
+      [
+        "--endpoint",
+        "http://mock-engine.internal:8000/v1/chat/completions",
+        "--model",
+        "inferdrome/mock-model",
+        "--prompt",
+        "deterministic local Compose smoke",
+        "--evidence-dir",
+        "/evidence",
+      ]
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    restart: "no"
+    depends_on:
+      mock-engine:
+        condition: service_healthy
+    networks: [inferdrome-internal]
+    tmpfs:
+      - /tmp/inferdrome:rw,noexec,nosuid,size=16m
+    volumes:
+      - type: bind
+        source: ${INFERDROME_COMPOSE_EVIDENCE_DIR:-./.inferdrome-compose/evidence}
+        target: /evidence
+
+networks:
+  inferdrome-internal:
+    internal: true

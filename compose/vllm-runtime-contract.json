@@ -1,0 +1,29 @@
+{
+  "schema_version": "inferdrome.vllm-runtime-image.v1",
+  "engine": "vllm",
+  "engine_version": "0.26.0",
+  "image": {
+    "repository": "vllm/vllm-openai",
+    "tag_reference_only": "v0.26.0",
+    "digest": "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52",
+    "reference": "vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52",
+    "platform": "linux/amd64"
+  },
+  "source": {
+    "repository": "https://github.com/vllm-project/vllm",
+    "commit": "568afb3a13806beb53bb2e6bd518269357b237c0",
+    "release_tag": "v0.26.0",
+    "license": "Apache-2.0"
+  },
+  "role": "serving-engine",
+  "entrypoint": ["vllm", "serve"],
+  "network": "internal-only",
+  "model": {
+    "model_id": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "capability_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+    "model_manifest_sha256": "sha256:ef291a8dd0f21604c8da3025f5112bd6641e891a3401c8550584725eaabe55cc",
+    "snapshot_manifest_sha256": "sha256:588d19e9e489cccdad793718d8c5efbad0738be717369f9eacb94ce514992d2c"
+  }
+}

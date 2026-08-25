@@ -1,0 +1,83 @@
+{
+  "schema_version": "inferdrome.vllm-compose.v1",
+  "modes": {
+    "mock": {
+      "profile": "default",
+      "intent": "synthetic_only",
+      "evidence_eligible": false,
+      "engine_role": "deterministic-openai-compatible-mock",
+      "runner_role": "synthetic-endpoint-probe"
+    },
+    "gpu": {
+      "profile": "gpu",
+      "intent": "armed_linux_nvidia_runtime",
+      "evidence_eligible": false,
+      "engine_role": "vllm-serving-engine",
+      "runner_role": "canonical-inferdrome-benchmark-runner",
+      "confirmation_required": true,
+      "platform": "linux/amd64"
+    }
+  },
+  "engine": {
+    "image_reference": "vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52",
+    "entrypoint": ["vllm", "serve"],
+    "version": "0.26.0",
+    "endpoint": "http://vllm-engine.internal:8000",
+    "network_scope": "internal_only"
+  },
+  "runner": {
+    "image_reference_env": "INFERDROME_VLLM_RUNNER_IMAGE",
+    "proof_identity": "immutable_digest_required",
+    "entrypoint": ["inferdrome"],
+    "producer": "vllm_bench_serve",
+    "producer_version": "0.26.0"
+  },
+  "model": {
+    "capability_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+    "model_id": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "model_manifest_sha256": "sha256:ef291a8dd0f21604c8da3025f5112bd6641e891a3401c8550584725eaabe55cc",
+    "snapshot_manifest_sha256": "sha256:588d19e9e489cccdad793718d8c5efbad0738be717369f9eacb94ce514992d2c"
+  },
+  "compose_binding": {
+    "schema_version": "inferdrome.qwen3-compose-binding.v1",
+    "source_profile_id": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+    "endpoint": "http://vllm-engine.internal:8000",
+    "topology": "private_compose_dns",
+    "methodology": "frozen_qwen3_campaign_v1_except_endpoint_topology",
+    "execution": {
+      "adapter": "vllm_bench_serve",
+      "adapter_version": "1.0.0",
+      "producer_name": "vllm",
+      "producer_version": "0.26.0",
+      "max_runtime_seconds": 1800,
+      "max_measured_requests": 96
+    },
+    "workload": {
+      "id": "inferdrome.qwen-text-mixed-length.v1",
+      "path": "workloads/qwen-text-mixed-length-v1.jsonl",
+      "sha256": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f",
+      "requested_output_tokens": 128,
+      "temperature": "0.7",
+      "seed": 42
+    },
+    "traffic": {
+      "kind": "concurrent",
+      "allowed_concurrency": [1, 4, 16],
+      "warmup_requests": 12,
+      "measured_requests": 96
+    },
+    "measurement": {
+      "streaming": true,
+      "ttft_definition": "vllm_first_choices_event_v0_26",
+      "choices_span_definition": "last_choices_event_span_v1",
+      "metric_definitions_version": "1.0.0",
+      "reducer_version": "1.0.0"
+    }
+  },
+  "cleanup": {
+    "command": ["docker", "compose", "down", "--remove-orphans", "--volumes"],
+    "evidence_bind_preserved": true
+  }
+}

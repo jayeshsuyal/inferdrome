@@ -12,6 +12,7 @@ dist/
 # The local demo stores evidence under ~/.inferdrome by default. Ignore an
 # explicit in-repository workspace as a safety net.
 .inferdrome-demo/
+.inferdrome-compose/
 
 # Opt-in real-GPU host state and generated proof runs are local evidence until
 # a reviewed bundle is promoted deliberately.

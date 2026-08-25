@@ -1,6 +1,8 @@
 # Deny the entire repository, then allow only the reproducible runner inputs.
 **
 !Dockerfile
+!Dockerfile.compose-mock
+!Dockerfile.vllm-benchmark-runner
 !.dockerignore
 !pyproject.toml
 !uv.lock

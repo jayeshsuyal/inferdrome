@@ -140,6 +140,20 @@ contract permits only the `/evidence` and `/tmp/inferdrome` mounts to be
 writable. See [RUNNER_IMAGE_V1.md](RUNNER_IMAGE_V1.md) for the build, smoke,
 and non-claim boundaries.
 
+PR6 adds the separate pinned vLLM runtime and Compose boundary documented in
+[VLLM_COMPOSE_V1.md](VLLM_COMPOSE_V1.md). The GPU profile has two services:
+the official immutable-digest `vllm serve` engine and a distinct benchmark
+runner whose canonical `inferdrome run` command invokes the existing
+`vllm bench serve` adapter. The default Compose services are only a bounded
+synthetic mock and explicitly named synthetic probe. No Compose path changes
+the benchmark methodology, mutates frozen evidence schemas, exposes a public
+listener, or issues an execution receipt. GPU services are in a separately
+loaded, interpolation-gated override; the wrapper selects an explicit root
+service and runs cleanup with `down --remove-orphans --volumes`. Its
+versioned Qwen3 Compose binding reuses the frozen model/workload semantics
+while recording the private Compose DNS endpoint separately from the frozen
+managed-vLLM loopback profile.
+
 ### Resolver
 
 The resolver validates source input, applies explicit defaults, resolves local

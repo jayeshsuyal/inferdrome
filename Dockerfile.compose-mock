@@ -1,0 +1,21 @@
+FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+
+ARG SOURCE_REPOSITORY_COMMIT=development-unpinned
+ARG INFERDROME_VERSION=0.1.0.dev0
+
+LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome" \
+      org.opencontainers.image.revision="${SOURCE_REPOSITORY_COMMIT}" \
+      org.opencontainers.image.version="${INFERDROME_VERSION}" \
+      com.inferdrome.image-purpose="synthetic-compose-mock" \
+      com.inferdrome.evidence-eligible="false"
+
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin inferdrome
+COPY src/inferdrome/compose_mock.py /opt/inferdrome/compose_mock.py
+RUN chown -R 10001:10001 /opt/inferdrome /home/inferdrome
+
+USER 10001:10001
+ENV HOME="/home/inferdrome" \
+    PYTHONDONTWRITEBYTECODE="1" \
+    PYTHONUNBUFFERED="1"
+WORKDIR /home/inferdrome
+ENTRYPOINT ["python", "/opt/inferdrome/compose_mock.py"]

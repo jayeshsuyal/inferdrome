@@ -72,6 +72,16 @@ remain separate. The explicitly named endpoint probe is synthetic and
 evidence-ineligible, and a Docker build or image digest is never presented as
 an executed receipt.
 
+The pinned vLLM 0.26.0 runtime and local Compose mock/GPU boundary is documented
+in [VLLM_COMPOSE_V1.md](docs/VLLM_COMPOSE_V1.md). The mock path is synthetic
+only. The opt-in Linux/NVIDIA profile keeps `vllm serve` in a separate engine
+service and runs the canonical `inferdrome run` plus its existing `vllm bench
+serve` producer in a distinct runner service; Docker/GPU execution remains an
+explicit environment gate. The safe base Compose file contains no GPU
+services; the guarded wrapper loads the separately gated GPU override and
+selects only the benchmark runner as its root service. Its preflight verifies
+the complete frozen Qwen3 snapshot and the versioned private-endpoint binding.
+
 The first v0.2 vertical slice adds an additive ninth public schema for immutable
 same-configuration trial sets. Each set pins 2–100 independently verified runs
 by run ID and bundle digest, keeps every request population separate, and

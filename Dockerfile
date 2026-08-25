@@ -3,7 +3,8 @@ FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134
 WORKDIR /build
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
@@ -56,7 +57,7 @@ RUN useradd --uid 10001 --create-home --home-dir /home/inferdrome \
     && mkdir -p /evidence /tmp/inferdrome \
     && chown -R 10001:10001 /evidence /tmp/inferdrome /home/inferdrome
 
-COPY --from=builder --chown=10001:10001 /build/.venv /opt/inferdrome-runtime
+COPY --from=builder --chown=10001:10001 /opt/inferdrome-runtime /opt/inferdrome-runtime
 
 # Proof/release labels must describe the package actually copied into the
 # image, not merely a caller-supplied string.
@@ -68,7 +69,10 @@ RUN case "${BUILD_FLAVOR}" in \
           = "${INFERDROME_VERSION}" \
           || { echo 'packaged Inferdrome version does not match build identity' >&2; exit 1; } \
         ;; \
-    esac
+    esac \
+    && test "$(/opt/inferdrome-runtime/bin/inferdrome --version)" = \
+      "${INFERDROME_VERSION}" \
+    || { echo 'final Inferdrome entrypoint does not match build identity' >&2; exit 1; }
 
 USER 10001:10001
 WORKDIR /home/inferdrome
