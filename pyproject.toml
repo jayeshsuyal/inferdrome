@@ -17,7 +17,7 @@ dependencies = [
 
 [project.scripts]
 inferdrome = "inferdrome.cli:entrypoint"
-inferdrome-runner = "inferdrome.runner:main"
+inferdrome-runner-probe = "inferdrome.runner:main"
 
 [project.optional-dependencies]
 dashboard = [

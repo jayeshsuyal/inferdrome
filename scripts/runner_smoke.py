@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mac-safe host smoke for the runner CLI; never claims GPU or serving proof."""
+"""Mac-safe synthetic probe smoke; never claims benchmark or GPU proof."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def main() -> int:
         return 0
     _host_smoke()
     print(
-        "runner host smoke: PASS (synthetic CLI/config/output only; "
+        "runner probe smoke: PASS (synthetic CLI/config/output only; "
         "no CUDA, GPU, vLLM, or SGLang claim)"
     )
     return 0

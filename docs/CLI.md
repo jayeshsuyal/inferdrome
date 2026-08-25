@@ -25,11 +25,12 @@ The implementation uses the standard-library argument parser so the executable
 surface does not expand the v0.1 dependency or supply-chain budget. The
 post-v0.1 dashboard uses a separate optional dependency group.
 
-The separate `inferdrome-runner` entry point is a narrow container-client
-smoke boundary. It calls one existing endpoint and writes synthetic,
-evidence-ineligible metadata to an explicit output directory; it does not
-launch a serving engine or replace the `inferdrome run` benchmark workflow.
-See [RUNNER_IMAGE_V1.md](RUNNER_IMAGE_V1.md).
+The runner image's default entry point is the existing `inferdrome` command,
+so container execution keeps the same benchmark command and arguments as local
+execution. The separately named `inferdrome-runner-probe` entry point calls one
+existing endpoint and writes synthetic, evidence-ineligible metadata to an
+explicit output directory; it does not launch a serving engine or replace the
+`inferdrome run` benchmark workflow. See [RUNNER_IMAGE_V1.md](RUNNER_IMAGE_V1.md).
 
 ## Validate and resolve
 

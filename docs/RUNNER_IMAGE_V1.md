@@ -3,13 +3,13 @@
 Status: **implemented as a local packaging boundary; no container execution is
 claimed in this environment**
 
-The repository's `Dockerfile` packages the Inferdrome runner only. The image
-contains a narrow `inferdrome-runner` client that makes one configured request
-to an already-running inference endpoint and writes bounded, synthetic,
-evidence-ineligible metadata to `/evidence`. It does not contain or launch
-vLLM or SGLang, implement benchmark methodology, expose a listener, or create
-an Inferdrome evidence bundle. The existing `inferdrome` command and local
-non-container execution path are unchanged.
+The repository's `Dockerfile` packages the Inferdrome runner only. The image's
+normal entrypoint is the existing canonical `inferdrome` CLI, so its argument
+surface and benchmark methodology remain the same as local execution. It does
+not contain or launch vLLM or SGLang, expose a listener, or create a serving
+runtime. The separate `inferdrome-runner-probe` command is an explicitly named
+one-request synthetic smoke utility; it is not the benchmark runner and cannot
+produce eligible evidence.
 
 ## Image identity and build modes
 
@@ -19,7 +19,8 @@ the final built image must still be recorded by its own immutable image digest
 when a future proof run uses it. A tag such as `inferdrome-runner:dev` is only
 a mutable local alias.
 
-The build accepts these explicit arguments:
+The build accepts these explicit arguments. The proof/release wrapper derives
+the source revision and package version; callers cannot override either.
 
 | Argument | Development default | Proof/release requirement |
 | --- | --- | --- |
@@ -28,28 +29,36 @@ The build accepts these explicit arguments:
 | `BUILD_FLAVOR` | `development` | `proof` or `release` requires both identities |
 
 Proof and release builds fail closed when the source commit or version is
-missing or malformed. Development builds are explicitly not proof identities.
-The committed `uv.lock` is installed with `uv sync --frozen --no-dev
---no-editable`; dependency resolution cannot rewrite or replace the lock.
+missing, malformed, or inconsistent with the packaged code. Development builds
+are explicitly not proof identities. The committed `uv.lock` is installed with
+`uv sync --frozen --no-dev --no-editable`; dependency resolution cannot rewrite
+or replace the lock. The uv bootstrap is the fixed Linux/amd64 `0.8.17`
+release archive verified by its committed SHA-256 checksum.
 
-For a proof-shaped build, supply the exact source revision and use a local
-tag only as a convenience:
+For a proof-shaped build, use the clean-context wrapper. It refuses modified,
+deleted, or untracked files in the Docker allowlist (`Dockerfile`,
+`.dockerignore`, `pyproject.toml`, `uv.lock`, `README.md`, and `src`), derives
+the full commit and package version, and passes the canonical GPU target
+platform:
 
 ```bash
-SOURCE_COMMIT="$(git rev-parse HEAD)"
-INFERDROME_VERSION="$(PYTHONPATH=src python -c 'from inferdrome import __version__; print(__version__)')"
-docker build --pull=false \
-  --build-arg SOURCE_REPOSITORY_COMMIT="$SOURCE_COMMIT" \
-  --build-arg INFERDROME_VERSION="$INFERDROME_VERSION" \
-  --build-arg BUILD_FLAVOR=proof \
-  -t inferdrome-runner:proof .
+python scripts/build_runner_image.py \
+  --flavor proof \
+  --tag inferdrome-runner:proof
 ```
 
-The image's OCI labels record the source repository, supplied source commit,
-Inferdrome version, and `runner-only` purpose. The source commit is not the
-image digest, and neither is a deployment receipt. PR5 does not issue an
-executed receipt; a later receipt flow must bind the immutable image digest
-and source revision after independently verified execution.
+The source commit in a proof label is locally verified only under this clean
+wrapper. Dockerfile syntax by itself does not bind arbitrary build-context
+bytes to Git. The image's OCI labels record the source repository, verified
+source commit, Inferdrome version, and `runner-only` purpose. The source commit
+is not the image digest, and neither is a deployment receipt. PR5 does not
+issue an executed receipt; a later receipt flow must bind the immutable image
+digest and source revision after independently verified execution.
+
+“Reproducible” here means bounded and verified inputs: pinned base digest,
+hash-verified uv bootstrap, frozen lockfile, clean relevant context, and an
+explicit target platform. This slice does not claim bit-for-bit repeatability
+of final image digests.
 
 ## Local, non-GPU smoke
 
@@ -76,16 +85,35 @@ evidence verdict, acceptance verdict, or provider attestation.
 The final image runs as UID/GID `10001:10001`, has no serving process, and
 expects a read-only root filesystem. The only intended writable locations are
 the explicitly mounted `/evidence` directory and `/tmp/inferdrome` temporary
-directory. The runner refuses to create an absent evidence directory and
-publishes a new output file without replacing an existing file.
+directory. The canonical command writes its normal run workspace/output under
+the explicit mounted path supplied by the caller.
 
-Example invocation against an already-running local endpoint:
+Example canonical invocation with an operator-supplied experiment/config mount:
 
 ```bash
-mkdir -p runner-output
+mkdir -p runner-input runner-output
+docker run --rm --read-only \
+  --tmpfs /tmp/inferdrome:rw,noexec,nosuid,size=64m \
+  --mount type=bind,src="$PWD/runner-input",dst=/inputs,readonly \
+  --mount type=bind,src="$PWD/runner-output",dst=/evidence \
+  inferdrome-runner:proof \
+  run /inputs/experiment.yaml --runs-root /evidence/runs
+```
+
+The canonical command remains responsible for resolving the experiment,
+invoking the configured producer, reducing measurements, and sealing/verifying
+outputs. A real attached-endpoint run still requires its producer dependency
+and endpoint; this image does not bundle vLLM, so that dependency boundary is
+not claimed executable until the later runtime-image slice.
+
+To run the explicitly synthetic endpoint probe instead, override the image
+entrypoint and use a mounted directory:
+
+```bash
 docker run --rm --read-only \
   --tmpfs /tmp/inferdrome:rw,noexec,nosuid,size=64m \
   --mount type=bind,src="$PWD/runner-output",dst=/evidence \
+  --entrypoint /opt/inferdrome-runtime/bin/inferdrome-runner-probe \
   inferdrome-runner:proof \
   --endpoint http://host.docker.internal:8000/v1/chat/completions \
   --model inferdrome/mock-model \
@@ -93,10 +121,10 @@ docker run --rm --read-only \
   --evidence-dir /evidence
 ```
 
-This is a one-request client smoke, not the benchmark command and not a
-serving-runtime deployment. Docker execution is an environment-dependent
-gate; absence of Docker must be reported as unavailable rather than treated as
-a passing image build.
+The probe output is synthetic and ineligible, not a benchmark result or
+evidence bundle. Docker execution is an environment-dependent gate; absence
+of Docker must be reported as unavailable rather than treated as a passing
+image build.
 
 The `.dockerignore` denies the repository by default and allowlists only the
 Dockerfile, lock/configuration files, README, and source package. Git history,
