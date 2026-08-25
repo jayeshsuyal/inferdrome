@@ -563,8 +563,15 @@ why latency changed.
 
 ### v0.4 — Second serving engine
 
-- SGLang producer and normalizer;
-- engine-specific capability declaration; and
-- proof that the evidence model tolerates genuinely different native outputs.
+- SGLang producer and normalizer capability boundary (PR11, additive and
+  evidence-ineligible);
+- engine-specific capability declaration for the persisted native fields; and
+- a synthetic fixture proving strict parsing and normalization without changing
+  the frozen evidence model.
 
-Unsupported observations remain unavailable rather than becoming zero.
+The v0.4 capability boundary does not claim SGLang execution or evidence:
+upstream persisted output lacks request identity and request start offsets, and
+its custom dataset loader can skip malformed rows and shuffle accepted rows.
+Those gaps require a future native capture plus a versioned evidence v2
+contract. Unsupported observations remain unavailable rather than becoming
+zero.
