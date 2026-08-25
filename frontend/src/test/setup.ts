@@ -2,9 +2,14 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
 
+import { setDashboardToken } from "../lib/api";
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  window.sessionStorage.clear();
+  document.cookie = "";
+  setDashboardToken(null);
 });
 
 Object.defineProperty(window, "matchMedia", {

@@ -6,7 +6,8 @@ Decision records:
 [ADR 0006](adr/0006-local-read-only-evidence-dashboard.md),
 [ADR 0007](adr/0007-add-immutable-descriptive-trial-sets.md),
 [ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md), and
-[ADR 0009](adr/0009-add-fail-closed-comparison-execution.md)
+[ADR 0009](adr/0009-add-fail-closed-comparison-execution.md), and
+[ADR 0012](adr/0012-opt-in-local-dashboard-authentication.md)
 
 Release scope: **Post-v0.1 product slices**
 
@@ -83,7 +84,9 @@ The initial dashboard is local and single-user:
 - It requires no database.
 - It requires no network access to verify or recalculate a bundle.
 - It does not upload bundles or send telemetry.
-- It does not expose a hosted, multi-user, or authenticated service.
+- It does not expose a hosted, multi-user, or public service. An explicitly
+  configured local keyring can add read-only bearer authentication for one
+  loopback operator session; this is not TLS, tenancy, or SaaS authorization.
 
 An in-memory or on-disk derivative cache is permitted only when it is outside
 sealed bundles, disposable, and keyed by immutable bundle digest plus projection
@@ -93,6 +96,30 @@ Non-loopback binding must be an explicit operator action and is not a supported
 security boundary for the initial product. A supported remote deployment needs
 a later ADR covering authentication, authorization, transport security,
 tenancy, privacy, and resource isolation.
+
+### Optional local bearer authentication
+
+Authentication is disabled unless the server receives `--keyring PATH`. The
+keyring must already exist, be a regular `0600` file with at least one active
+read key, and pass the strict canonical parser before the server starts. Use
+the CLI-only `dashboard-keyring create`, `list`, `revoke`, and `rotate`
+commands; there is no HTTP key-management endpoint. Create and rotate print a
+new token exactly once. Store it outside the repository and evidence roots.
+
+With authentication enabled, `/api/v1/health` and the static SPA shell/assets
+remain unauthenticated. Every evidence-bearing API route requires exactly one
+`Authorization: Bearer TOKEN` header with scope `dashboard:read`. Invalid,
+unknown, revoked, duplicate, query-string, cookie, Basic, oversized, and
+malformed credentials receive the same bounded `401` response. Keyring
+corruption is a generic `503` and fails closed. The server reloads keyring state
+for each protected request, so a CLI revoke or rotate takes effect without a
+restart.
+
+The frontend keeps the token only in JavaScript memory and sends it only as a
+same-origin Authorization header. Reloading forgets it; the Lock action clears
+it. It is not stored in browser storage, cookies, URLs, analytics, console
+output, or server logs. This local mode is not a public hosting, TLS,
+multi-user, or credential-management solution.
 
 ## Read-only evidence handling
 

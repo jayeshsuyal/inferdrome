@@ -19,6 +19,7 @@ def run_dashboard(
     comparison_results_root: Path | None = None,
     port: int = 8787,
     open_browser: bool = False,
+    keyring_path: Path | None = None,
 ) -> None:
     if isinstance(port, bool) or port < 1 or port > 65_535:
         raise DashboardError("dashboard port must be between 1 and 65535")
@@ -37,7 +38,8 @@ def run_dashboard(
             trial_sets_root=trial_sets_root,
             comparison_plans_root=comparison_plans_root,
             comparison_results_root=comparison_results_root,
-        )
+        ),
+        keyring_path=keyring_path,
     )
     url = f"http://{_LOOPBACK_HOST}:{port}"
     if open_browser:

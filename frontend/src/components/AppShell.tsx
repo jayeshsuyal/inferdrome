@@ -12,6 +12,7 @@ import type { PropsWithChildren } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useRuns } from "../context/RunsContext";
+import { useDashboardAuth } from "../context/DashboardAuthContext";
 import { formatDateTime } from "../lib/format";
 import { NavLink, useLocation } from "../lib/router";
 
@@ -55,6 +56,7 @@ interface NavigationItem {
 export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
   const { runs, rejected, generatedAt, status } = useRuns();
+  const { authRequired, token, clear } = useDashboardAuth();
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const mainRef = useRef<HTMLElement>(null);
   const previousPath = useRef(location.pathname);
@@ -157,6 +159,11 @@ export function AppShell({ children }: PropsWithChildren) {
           <span className="topline-path">{pathLabel(location.pathname)}</span>
           <div className="topline-actions">
             {generatedAt ? <span className="index-time">Indexed {formatDateTime(generatedAt)}</span> : null}
+            {authRequired && token !== null ? (
+              <button className="button button-secondary lock-button" type="button" onClick={clear}>
+                Lock dashboard
+              </button>
+            ) : null}
             <button
               className="icon-button"
               type="button"

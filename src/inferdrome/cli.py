@@ -668,6 +668,78 @@ def _command_dashboard(namespace: argparse.Namespace) -> int:
         comparison_results_root=_path(namespace, "comparison_results_root"),
         port=cast(int, namespace.port),
         open_browser=cast(bool, namespace.open_browser),
+        keyring_path=_optional_path(namespace, "keyring"),
+    )
+    return 0
+
+
+def _keyring_path(namespace: argparse.Namespace) -> Path:
+    return _path(namespace, "keyring")
+
+
+def _command_dashboard_keyring_create(namespace: argparse.Namespace) -> int:
+    from inferdrome.dashboard.auth import DashboardKeyringStore
+
+    token, record = DashboardKeyringStore(_keyring_path(namespace)).create(
+        cast(str, namespace.label)
+    )
+    _json_output(
+        {
+            "created_at": record.created_at,
+            "key_id": record.key_id,
+            "label": record.label,
+            "scope": record.scope,
+            "status": record.status,
+            "token": token,
+        }
+    )
+    return 0
+
+
+def _command_dashboard_keyring_list(namespace: argparse.Namespace) -> int:
+    from inferdrome.dashboard.auth import DashboardKeyringStore
+
+    _json_output(
+        {
+            "keys": DashboardKeyringStore(_keyring_path(namespace)).list_public()
+        }
+    )
+    return 0
+
+
+def _command_dashboard_keyring_revoke(namespace: argparse.Namespace) -> int:
+    from inferdrome.dashboard.auth import DashboardKeyringStore
+
+    record = DashboardKeyringStore(_keyring_path(namespace)).revoke(
+        cast(str, namespace.key_id)
+    )
+    _json_output(
+        {
+            "key_id": record.key_id,
+            "status": "revoked",
+            "revoked": True,
+        }
+    )
+    return 0
+
+
+def _command_dashboard_keyring_rotate(namespace: argparse.Namespace) -> int:
+    from inferdrome.dashboard.auth import DashboardKeyringStore
+
+    token, record = DashboardKeyringStore(_keyring_path(namespace)).rotate(
+        cast(str, namespace.revoke_key_id),
+        cast(str, namespace.label),
+    )
+    _json_output(
+        {
+            "created_at": record.created_at,
+            "key_id": record.key_id,
+            "label": record.label,
+            "revoked_key_id": namespace.revoke_key_id,
+            "scope": record.scope,
+            "status": record.status,
+            "token": token,
+        }
     )
     return 0
 
@@ -1047,7 +1119,47 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="open the dashboard in the default browser",
     )
+    dashboard.add_argument(
+        "--keyring",
+        help="opt into local bearer auth using this 0600 keyring file",
+    )
     dashboard.set_defaults(handler=_command_dashboard)
+
+    keyring = commands.add_parser(
+        "dashboard-keyring",
+        help="manage local dashboard bearer keys without an HTTP endpoint",
+    )
+    keyring_commands = keyring.add_subparsers(
+        dest="dashboard_keyring_command",
+        required=True,
+    )
+    keyring_create = keyring_commands.add_parser(
+        "create", help="create a read-only dashboard key"
+    )
+    keyring_create.add_argument("--keyring", required=True)
+    keyring_create.add_argument("--label", default="local-dashboard")
+    keyring_create.set_defaults(handler=_command_dashboard_keyring_create)
+
+    keyring_list = keyring_commands.add_parser(
+        "list", help="list public dashboard key metadata"
+    )
+    keyring_list.add_argument("--keyring", required=True)
+    keyring_list.set_defaults(handler=_command_dashboard_keyring_list)
+
+    keyring_revoke = keyring_commands.add_parser(
+        "revoke", help="revoke one dashboard key id"
+    )
+    keyring_revoke.add_argument("--keyring", required=True)
+    keyring_revoke.add_argument("key_id")
+    keyring_revoke.set_defaults(handler=_command_dashboard_keyring_revoke)
+
+    keyring_rotate = keyring_commands.add_parser(
+        "rotate", help="atomically revoke one key and create its replacement"
+    )
+    keyring_rotate.add_argument("--keyring", required=True)
+    keyring_rotate.add_argument("--revoke-key-id", required=True)
+    keyring_rotate.add_argument("--label", default="local-dashboard")
+    keyring_rotate.set_defaults(handler=_command_dashboard_keyring_rotate)
     return parser
 
 

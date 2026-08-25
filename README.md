@@ -164,6 +164,22 @@ uv run inferdrome dashboard \
   --comparison-results-root comparison-results --open
 ```
 
+Authentication is opt-in for a local loopback session. Create a `0600`
+keyring with the CLI (the bearer secret is printed exactly once), then pass it
+to the server:
+
+```bash
+uv run inferdrome dashboard-keyring create \
+  --keyring .local/dashboard-keyring.json --label workstation
+uv run inferdrome dashboard --keyring .local/dashboard-keyring.json \
+  --runs-root runs --trial-sets-root trial-sets
+```
+
+`list`, `revoke`, and `rotate` are CLI-only and never print stored secrets.
+This is not public hosting, TLS, or multi-user SaaS; the server remains
+loopback-only. See [the authentication ADR](docs/adr/0012-opt-in-local-dashboard-authentication.md)
+for the exact token and browser-memory boundary.
+
 For a recording-ready Mac walkthrough, one command prepares an exact four-run
 synthetic comparison, independently reverifies it, and opens the populated
 dashboard:
