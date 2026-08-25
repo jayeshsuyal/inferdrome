@@ -218,6 +218,8 @@ class LifecycleOutcome(FrozenModel):
     evidence_eligible: Literal[False]
     terminal_phase: LifecyclePhase
     error_code: LifecycleErrorCode | None
+    primary_error_code: LifecycleErrorCode | None
+    cleanup_error_code: LifecycleErrorCode | None
     trace: tuple[LifecycleTraceEvent, ...] = Field(min_length=1, max_length=16)
     runtime_stop_attempted: bool
     runtime_stop_confirmed: bool
@@ -441,7 +443,13 @@ def _require_cleanup_result(
         LifecycleErrorCode,
     ):
         raise _LifecycleFailure(fallback)
-    return value
+    if value.confirmed:
+        if value.orphaned or value.error_code is not None:
+            raise _LifecycleFailure(fallback)
+        return value
+    if value.error_code not in {fallback, LifecycleErrorCode.CLEANUP_UNCONFIRMED}:
+        raise _LifecycleFailure(fallback)
+    raise _LifecycleFailure(value.error_code)
 
 
 class LifecycleCoordinator:
@@ -499,8 +507,8 @@ class LifecycleCoordinator:
         provider_cleanup_confirmed = True
         provider_final_confirmation = True
         orphaned = False
-        lifecycle_error: LifecycleErrorCode | None = None
-        status = LifecycleStatus.SUCCEEDED
+        primary_error_code: LifecycleErrorCode | None = None
+        cleanup_error_code: LifecycleErrorCode | None = None
         current_phase = LifecyclePhase.VALIDATION
 
         def record(
@@ -554,7 +562,7 @@ class LifecycleCoordinator:
             return handle
 
         def start_runtime() -> RuntimeHandle:
-            nonlocal runtime_start_attempted
+            nonlocal runtime_handle, runtime_start_attempted
             check_cancellation()
             if provider_handle is None:
                 raise _LifecycleFailure(LifecycleErrorCode.RUNTIME_START_FAILED)
@@ -565,6 +573,17 @@ class LifecycleCoordinator:
                 process_control=self._process_control,
             )
             if not isinstance(handle, RuntimeHandle):
+                raise _LifecycleFailure(LifecycleErrorCode.RUNTIME_START_FAILED)
+            # Retain the returned handle before checking its postcondition so
+            # cleanup can stop exactly the runtime the adapter actually made.
+            runtime_handle = handle
+            expected_endpoint = RuntimeEndpoint(
+                scheme=spec.runtime.endpoint.scheme,
+                host=spec.runtime.endpoint.host,
+                port=spec.runtime.endpoint.port,
+                path=spec.runtime.endpoint.path,
+            )
+            if handle.endpoint != expected_endpoint:
                 raise _LifecycleFailure(LifecycleErrorCode.RUNTIME_START_FAILED)
             return handle
 
@@ -602,14 +621,13 @@ class LifecycleCoordinator:
             phase(LifecyclePhase.RUNTIME_READINESS, wait_for_readiness)
             phase(LifecyclePhase.BENCHMARK, run_benchmark)
         except BaseException as exc:
-            lifecycle_error = _error_code(
+            primary_error_code = _error_code(
                 exc,
                 _PHASE_DEFAULT_ERRORS.get(
                     current_phase,
                     LifecycleErrorCode.BASE_EXCEPTION,
                 ),
             )
-            status = _status_for_error(lifecycle_error)
         finally:
             if runtime_start_attempted or runtime_handle is not None:
                 runtime_stop_attempted = True
@@ -627,17 +645,12 @@ class LifecycleCoordinator:
                     )
                     runtime_stop_confirmed = result.confirmed and not result.orphaned
                     orphaned = orphaned or result.orphaned
-                    if not runtime_stop_confirmed and lifecycle_error is None:
-                        lifecycle_error = (
-                            result.error_code or LifecycleErrorCode.RUNTIME_STOP_FAILED
-                        )
                 except BaseException as exc:
                     runtime_stop_confirmed = False
                     orphaned = True
                     code = _error_code(exc, LifecycleErrorCode.RUNTIME_STOP_FAILED)
-                    if lifecycle_error is None:
-                        lifecycle_error = code
-                    status = LifecycleStatus.FAILED
+                    if cleanup_error_code is None:
+                        cleanup_error_code = code
 
             if provider_attempted or provider_handle is not None:
                 provider_cleanup_attempted = True
@@ -653,18 +666,12 @@ class LifecycleCoordinator:
                         result.confirmed and not result.orphaned
                     )
                     orphaned = orphaned or result.orphaned
-                    if not provider_cleanup_confirmed and lifecycle_error is None:
-                        lifecycle_error = (
-                            result.error_code
-                            or LifecycleErrorCode.PROVIDER_CLEANUP_FAILED
-                        )
                 except BaseException as exc:
                     provider_cleanup_confirmed = False
                     orphaned = True
                     code = _error_code(exc, LifecycleErrorCode.PROVIDER_CLEANUP_FAILED)
-                    if lifecycle_error is None:
-                        lifecycle_error = code
-                    status = LifecycleStatus.FAILED
+                    if cleanup_error_code is None:
+                        cleanup_error_code = code
 
                 provider_final_confirmation_attempted = True
                 try:
@@ -682,29 +689,28 @@ class LifecycleCoordinator:
                         result.confirmed and not result.orphaned
                     )
                     orphaned = orphaned or result.orphaned
-                    if not provider_final_confirmation and lifecycle_error is None:
-                        lifecycle_error = (
-                            result.error_code or LifecycleErrorCode.CLEANUP_UNCONFIRMED
-                        )
                 except BaseException as exc:
                     provider_final_confirmation = False
                     orphaned = True
                     code = _error_code(exc, LifecycleErrorCode.CLEANUP_UNCONFIRMED)
-                    if lifecycle_error is None:
-                        lifecycle_error = code
-                    status = LifecycleStatus.FAILED
+                    if cleanup_error_code is None:
+                        cleanup_error_code = code
 
             cleanup_confirmed = (
                 runtime_stop_confirmed
                 and provider_cleanup_confirmed
                 and provider_final_confirmation
             )
-            if not cleanup_confirmed:
-                status = LifecycleStatus.FAILED
-                if lifecycle_error is None:
-                    lifecycle_error = LifecycleErrorCode.CLEANUP_UNCONFIRMED
-            if status is LifecycleStatus.SUCCEEDED and lifecycle_error is not None:
-                status = _status_for_error(lifecycle_error)
+            if not cleanup_confirmed and cleanup_error_code is None:
+                cleanup_error_code = LifecycleErrorCode.CLEANUP_UNCONFIRMED
+
+        effective_error_code = cleanup_error_code or primary_error_code
+        if cleanup_error_code is not None:
+            status = LifecycleStatus.FAILED
+        elif primary_error_code is not None:
+            status = _status_for_error(primary_error_code)
+        else:
+            status = LifecycleStatus.SUCCEEDED
 
         terminal_phase = trace[-1].phase if trace else LifecyclePhase.VALIDATION
         return LifecycleOutcome(
@@ -713,7 +719,9 @@ class LifecycleCoordinator:
             synthetic_only=True,
             evidence_eligible=False,
             terminal_phase=terminal_phase,
-            error_code=lifecycle_error,
+            error_code=effective_error_code,
+            primary_error_code=primary_error_code,
+            cleanup_error_code=cleanup_error_code,
             trace=tuple(trace),
             runtime_stop_attempted=runtime_stop_attempted,
             runtime_stop_confirmed=runtime_stop_confirmed,

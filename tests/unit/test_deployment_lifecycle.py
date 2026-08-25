@@ -12,12 +12,15 @@ from inferdrome.deployment import (
     CleanupResult,
     LifecycleCoordinator,
     LifecycleErrorCode,
+    LifecycleEventResult,
     LifecycleOutcome,
     LifecyclePhase,
     LifecycleStatus,
     LifecycleValidationError,
     LocalMockRuntimeAdapter,
     LocalProviderAdapter,
+    RuntimeEndpoint,
+    RuntimeHandle,
     canonical_lifecycle_outcome_bytes,
     parse_deployment_spec_json,
 )
@@ -152,10 +155,18 @@ def test_sglang_is_rejected_by_runtime_capability_before_execution() -> None:
 
 
 class _FaultProvider(LocalProviderAdapter):
-    def __init__(self, fault: str | None, token: CancellationToken | None = None):
+    def __init__(
+        self,
+        fault: str | None,
+        token: CancellationToken | None = None,
+        cleanup_result: CleanupResult | None = None,
+        final_result: CleanupResult | None = None,
+    ):
         super().__init__()
         self.fault = fault
         self.token = token
+        self.cleanup_result = cleanup_result
+        self.final_result = final_result
 
     def validate(self, spec):
         if self.fault == "validation":
@@ -172,6 +183,9 @@ class _FaultProvider(LocalProviderAdapter):
         return handle
 
     def cleanup(self, spec, handle):
+        if self.cleanup_result is not None:
+            self.cleanup_count += 1
+            return self.cleanup_result
         if self.fault == "provider_cleanup":
             self.cleanup_count += 1
             raise RuntimeError("cleanup payload ghp_SECRET-MUST-NOT-APPEAR")
@@ -185,6 +199,9 @@ class _FaultProvider(LocalProviderAdapter):
         return super().cleanup(spec, handle)
 
     def confirm_cleanup(self, spec, handle):
+        if self.final_result is not None:
+            self.confirmation_count += 1
+            return self.final_result
         if self.fault == "provider_final_confirmation":
             self.confirmation_count += 1
             raise RuntimeError("confirmation payload AKIASECRET")
@@ -192,9 +209,14 @@ class _FaultProvider(LocalProviderAdapter):
 
 
 class _FaultRuntime(LocalMockRuntimeAdapter):
-    def __init__(self, fault: str | None):
+    def __init__(
+        self,
+        fault: str | None,
+        stop_result: CleanupResult | None = None,
+    ):
         super().__init__()
         self.fault = fault
+        self.stop_result = stop_result
 
     def start(self, spec, provider, *, process_control):
         if self.fault == "runtime_start":
@@ -214,10 +236,86 @@ class _FaultRuntime(LocalMockRuntimeAdapter):
         )
 
     def stop(self, spec, runtime, *, process_control):
+        if self.stop_result is not None:
+            self.stop_count += 1
+            return self.stop_result
         if self.fault == "runtime_stop":
             self.stop_count += 1
             raise RuntimeError("stop payload github_pat_SECRET")
         return super().stop(spec, runtime, process_control=process_control)
+
+
+class _DriftRuntime(LocalMockRuntimeAdapter):
+    def __init__(self, field: str):
+        super().__init__()
+        self.field = field
+        self.returned_handle: RuntimeHandle | None = None
+        self.stopped_handles: list[RuntimeHandle | None] = []
+
+    def start(self, spec, provider, *, process_control):
+        handle = super().start(spec, provider, process_control=process_control)
+        endpoint_values = {
+            "scheme": handle.endpoint.scheme,
+            "host": handle.endpoint.host,
+            "port": handle.endpoint.port,
+            "path": handle.endpoint.path,
+        }
+        endpoint_values[self.field] = {
+            "scheme": "https",
+            "host": "8.8.8.8",
+            "port": 80,
+            "path": "/drifted",
+        }[self.field]
+        self.returned_handle = RuntimeHandle(
+            handle_id=handle.handle_id,
+            endpoint=RuntimeEndpoint(**endpoint_values),
+            process=handle.process,
+        )
+        return self.returned_handle
+
+    def stop(self, spec, runtime, *, process_control):
+        self.stopped_handles.append(runtime)
+        return super().stop(spec, runtime, process_control=process_control)
+
+
+@pytest.mark.parametrize("field", ["host", "scheme", "port", "path"])
+def test_runtime_endpoint_drift_fails_before_readiness_and_benchmark(
+    field: str,
+) -> None:
+    provider = LocalProviderAdapter()
+    runtime = _DriftRuntime(field)
+    benchmark_calls = 0
+
+    def benchmark(endpoint):
+        nonlocal benchmark_calls
+        benchmark_calls += 1
+
+    outcome = LifecycleCoordinator(provider, runtime).run(_spec(), benchmark)
+
+    assert outcome.status is LifecycleStatus.FAILED
+    assert outcome.error_code is LifecycleErrorCode.RUNTIME_START_FAILED
+    assert outcome.primary_error_code is LifecycleErrorCode.RUNTIME_START_FAILED
+    assert outcome.cleanup_error_code is None
+    assert benchmark_calls == 0
+    assert runtime.returned_handle is not None
+    assert runtime.stopped_handles == [runtime.returned_handle]
+    assert runtime.stopped_handles[0] is runtime.returned_handle
+    assert provider.cleanup_count == 1
+    assert provider.confirmation_count == 1
+    assert _phases(outcome) == (
+        LifecyclePhase.VALIDATION,
+        LifecyclePhase.PROVIDER_ACQUISITION,
+        LifecyclePhase.RUNTIME_START,
+        LifecyclePhase.RUNTIME_STOP,
+        LifecyclePhase.PROVIDER_CLEANUP,
+        LifecyclePhase.PROVIDER_FINAL_CONFIRMATION,
+    )
+    assert all(
+        event.result is LifecycleEventResult.SUCCEEDED
+        for event in outcome.trace[:2]
+    )
+    assert outcome.trace[2].result is LifecycleEventResult.FAILED
+    assert "8.8.8.8" not in canonical_lifecycle_outcome_bytes(outcome).decode()
 
 
 @pytest.mark.parametrize(
@@ -261,6 +359,200 @@ def test_fault_injection_attempts_applicable_cleanup_once(
     assert outcome.runtime_stop_attempted is (runtime_stop == 1)
     assert outcome.provider_cleanup_attempted is (provider_cleanup == 1)
     assert "SECRET" not in canonical_lifecycle_outcome_bytes(outcome).decode()
+
+
+@pytest.mark.parametrize(
+    ("target", "result", "expected_error"),
+    [
+        (
+            "runtime",
+            CleanupResult(
+                confirmed=False,
+                orphaned=True,
+                error_code=LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+            ),
+            LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+        ),
+        (
+            "runtime",
+            CleanupResult(confirmed=True, orphaned=True),
+            LifecycleErrorCode.RUNTIME_STOP_FAILED,
+        ),
+        (
+            "runtime",
+            CleanupResult(
+                confirmed=True,
+                error_code=LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+            ),
+            LifecycleErrorCode.RUNTIME_STOP_FAILED,
+        ),
+        (
+            "runtime",
+            CleanupResult(confirmed=False),
+            LifecycleErrorCode.RUNTIME_STOP_FAILED,
+        ),
+        (
+            "provider",
+            CleanupResult(
+                confirmed=False,
+                orphaned=True,
+                error_code=LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+            ),
+            LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+        ),
+        (
+            "provider",
+            CleanupResult(confirmed=True, orphaned=True),
+            LifecycleErrorCode.PROVIDER_CLEANUP_FAILED,
+        ),
+        (
+            "provider",
+            CleanupResult(
+                confirmed=True,
+                error_code=LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+            ),
+            LifecycleErrorCode.PROVIDER_CLEANUP_FAILED,
+        ),
+        (
+            "provider",
+            CleanupResult(confirmed=False),
+            LifecycleErrorCode.PROVIDER_CLEANUP_FAILED,
+        ),
+        (
+            "final",
+            CleanupResult(
+                confirmed=False,
+                orphaned=True,
+                error_code=LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+            ),
+            LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+        ),
+        (
+            "final",
+            CleanupResult(confirmed=True, orphaned=True),
+            LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+        ),
+        (
+            "final",
+            CleanupResult(
+                confirmed=True,
+                error_code=LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+            ),
+            LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+        ),
+        (
+            "final",
+            CleanupResult(confirmed=False),
+            LifecycleErrorCode.CLEANUP_UNCONFIRMED,
+        ),
+    ],
+)
+def test_cleanup_return_values_fail_closed_and_trace_failed_phase(
+    target: str,
+    result: CleanupResult,
+    expected_error: LifecycleErrorCode,
+) -> None:
+    provider = _FaultProvider(
+        None,
+        cleanup_result=result if target == "provider" else None,
+        final_result=result if target == "final" else None,
+    )
+    runtime = _FaultRuntime(
+        None,
+        stop_result=result if target == "runtime" else None,
+    )
+
+    outcome = LifecycleCoordinator(provider, runtime).run(
+        _spec(), lambda endpoint: None
+    )
+
+    phase_for_target = {
+        "runtime": LifecyclePhase.RUNTIME_STOP,
+        "provider": LifecyclePhase.PROVIDER_CLEANUP,
+        "final": LifecyclePhase.PROVIDER_FINAL_CONFIRMATION,
+    }[target]
+    failed = next(event for event in outcome.trace if event.phase is phase_for_target)
+    assert failed.result is LifecycleEventResult.FAILED
+    assert failed.error_code is expected_error
+    assert outcome.status is LifecycleStatus.FAILED
+    assert outcome.error_code is expected_error
+    assert outcome.cleanup_error_code is expected_error
+    assert outcome.primary_error_code is None
+    assert provider.cleanup_count == 1
+    assert provider.confirmation_count == 1
+    assert runtime.stop_count == 1
+
+
+def test_cleanup_error_dominates_while_preserving_primary_cause() -> None:
+    cancellation = CancellationToken()
+    provider = _FaultProvider("provider_cleanup", cancellation)
+    runtime = LocalMockRuntimeAdapter()
+    cancelled = LifecycleCoordinator(provider, runtime).run(
+        _spec(), lambda endpoint: None, cancellation=cancellation
+    )
+
+    assert cancelled.status is LifecycleStatus.FAILED
+    assert cancelled.error_code is LifecycleErrorCode.PROVIDER_CLEANUP_FAILED
+    assert cancelled.primary_error_code is LifecycleErrorCode.CANCELLED
+    assert cancelled.cleanup_error_code is LifecycleErrorCode.PROVIDER_CLEANUP_FAILED
+    assert any(
+        event.phase is LifecyclePhase.PROVIDER_CLEANUP
+        and event.result is LifecycleEventResult.FAILED
+        for event in cancelled.trace
+    )
+
+    provider = _FaultProvider("provider_cleanup")
+    benchmark_failed = LifecycleCoordinator(provider, LocalMockRuntimeAdapter()).run(
+        _spec(),
+        lambda endpoint: (_ for _ in ()).throw(RuntimeError("benchmark secret")),
+    )
+    assert benchmark_failed.status is LifecycleStatus.FAILED
+    assert benchmark_failed.error_code is LifecycleErrorCode.PROVIDER_CLEANUP_FAILED
+    assert benchmark_failed.primary_error_code is LifecycleErrorCode.BENCHMARK_FAILED
+    assert (
+        benchmark_failed.cleanup_error_code
+        is LifecycleErrorCode.PROVIDER_CLEANUP_FAILED
+    )
+
+    provider = _FaultProvider("provider_final_confirmation")
+    interrupted = LifecycleCoordinator(provider, LocalMockRuntimeAdapter()).run(
+        _spec(), lambda endpoint: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+    assert interrupted.status is LifecycleStatus.FAILED
+    assert interrupted.error_code is LifecycleErrorCode.CLEANUP_UNCONFIRMED
+    assert interrupted.primary_error_code is LifecycleErrorCode.INTERRUPTED
+    assert interrupted.cleanup_error_code is LifecycleErrorCode.CLEANUP_UNCONFIRMED
+
+
+def test_multiple_cleanup_failures_keep_all_failed_phases_and_first_cleanup_code(
+) -> None:
+    provider = _FaultProvider("provider_cleanup")
+    runtime = _FaultRuntime("runtime_stop")
+    outcome = LifecycleCoordinator(provider, runtime).run(
+        _spec(), lambda endpoint: None
+    )
+
+    assert outcome.status is LifecycleStatus.FAILED
+    assert outcome.error_code is LifecycleErrorCode.RUNTIME_STOP_FAILED
+    assert outcome.primary_error_code is None
+    assert outcome.cleanup_error_code is LifecycleErrorCode.RUNTIME_STOP_FAILED
+    assert [
+        (event.phase, event.result, event.error_code)
+        for event in outcome.trace
+        if event.result is LifecycleEventResult.FAILED
+    ] == [
+        (
+            LifecyclePhase.RUNTIME_STOP,
+            LifecycleEventResult.FAILED,
+            LifecycleErrorCode.RUNTIME_STOP_FAILED,
+        ),
+        (
+            LifecyclePhase.PROVIDER_CLEANUP,
+            LifecycleEventResult.FAILED,
+            LifecycleErrorCode.PROVIDER_CLEANUP_FAILED,
+        ),
+    ]
+    assert provider.confirmation_count == 1
 
 
 def test_keyboard_interrupt_and_base_exception_are_cleaned_without_payloads() -> None:

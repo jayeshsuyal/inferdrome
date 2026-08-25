@@ -115,6 +115,19 @@ it remains responsible for invoking the existing benchmark methodology. The
 coordinator injects process control, readiness probing, a monotonic clock, and
 the callback so tests do not require CUDA, a subprocess, or a network.
 
+The runtime adapter's returned endpoint must exactly match the spec's scheme,
+host, port, and path before readiness or benchmark. If it drifts, the actual
+returned handle is retained and stopped, then provider cleanup and final
+confirmation still run. A stop, cleanup, or confirmation result is successful
+only when `confirmed` is true, `orphaned` is false, and `error_code` is null;
+unconfirmed, orphaned, or contradictory results produce a failed phase.
+
+The ephemeral outcome has separate bounded `primary_error_code` and
+`cleanup_error_code` fields. Its effective `error_code` is the cleanup error
+when cleanup is unconfirmed, and the terminal status is `FAILED`; this keeps a
+cancellation, interrupt, benchmark, or runtime-start cause without allowing a
+safety-critical cleanup failure to appear successful or merely cancelled.
+
 PR3 rejects Lambda/GCP provider execution and SGLang execution before any
 provider or runtime side effect. The committed local adapter accepts only
 `local` + `mock_only` + pinned vLLM-shaped development specifications. It

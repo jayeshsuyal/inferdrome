@@ -88,6 +88,18 @@ boundary, including benchmark exceptions, cancellation, `KeyboardInterrupt`,
 and safely catchable `BaseException` paths. An unconfirmed or orphaned result
 cannot be successful. Errors are reduced to bounded lifecycle codes; adapter
 payloads, credentials, and raw exception text are never placed in the outcome.
+The ephemeral outcome exposes `primary_error_code` and
+`cleanup_error_code`; its effective `error_code` is the cleanup code whenever
+cleanup is unconfirmed, so safety failures deterministically dominate while
+the original cancellation, interrupt, benchmark, or start cause remains
+available.
+
+A runtime adapter's returned endpoint must exactly equal the validated spec
+endpoint before readiness or benchmark. The returned runtime handle is still
+retained for stop when this postcondition fails. A stop, cleanup, or final
+confirmation result is successful only when `confirmed=true`,
+`orphaned=false`, and `error_code=null`; all other combinations record a
+failed cleanup phase with a bounded phase-appropriate error.
 
 PR3 provides only `LocalProviderAdapter` and
 `LocalMockRuntimeAdapter`. They perform no cloud, CUDA, subprocess, or network
