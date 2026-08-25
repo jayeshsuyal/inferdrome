@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Protocol, Self, cast
 
@@ -103,8 +104,21 @@ _UUID_RE = re.compile(
 )
 _LABEL_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _A2_GPU_PROFILES: Final = {
-    "a2-highgpu-1g": ("NVIDIA A100-SXM4-40GB", 1, "provider"),
-    "synthetic-a2-highgpu-1g": ("NVIDIA A100-SXM4-40GB", 1, "synthetic"),
+    # A2 fixed-GPU machine types are deliberately closed here.  The provider
+    # accelerator type is part of the binding even though Compute does not
+    # project it as a guest_accelerator for this machine family.
+    "a2-highgpu-1g": (
+        "NVIDIA A100-SXM4-40GB",
+        "nvidia-tesla-a100",
+        1,
+        "provider",
+    ),
+    "synthetic-a2-highgpu-1g": (
+        "NVIDIA A100-SXM4-40GB",
+        "synthetic-a100-sxm4-40gb",
+        1,
+        "synthetic",
+    ),
 }
 _NETWORK_RE = re.compile(
     r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$"
@@ -201,16 +215,23 @@ class GcpTransportError(GcpExecutionError):
 
 
 def validate_gcp_a2_profile(
-    machine_type: str, accelerator_model: str, accelerator_count: int
+    machine_type: str,
+    accelerator_model: str,
+    accelerator_provider_type: str,
+    accelerator_count: int,
 ) -> Literal["provider", "synthetic"]:
     """Validate the one closed A2 mapping used by every execution boundary."""
 
     expected = _A2_GPU_PROFILES.get(machine_type)
-    if expected is None or expected[:2] != (accelerator_model, accelerator_count):
+    if expected is None or expected[:3] != (
+        accelerator_model,
+        accelerator_provider_type,
+        accelerator_count,
+    ):
         raise GcpExecutionError(
             "selected accelerator does not match the closed A2 profile"
         )
-    return cast(Literal["provider", "synthetic"], expected[2])
+    return cast(Literal["provider", "synthetic"], expected[3])
 
 
 def _normalized_key(value: str) -> str:
@@ -583,7 +604,10 @@ class GcpInsertRequest(GcpExecutionModel):
     @model_validator(mode="after")
     def validate_private_request(self) -> Self:
         validate_gcp_a2_profile(
-            self.machine_type, self.accelerator_model, self.accelerator_count
+            self.machine_type,
+            self.accelerator_model,
+            self.accelerator_provider_type,
+            self.accelerator_count,
         )
         if self.network.external_access_config != "absent":
             raise ValueError("external access configuration must be absent")
@@ -757,6 +781,13 @@ class GcpInstanceObservation(GcpExecutionModel):
             or self.subnetwork is None
         ):
             raise ValueError("provider observation is incomplete")
+        if self.state != "NOT_FOUND":
+            validate_gcp_a2_profile(
+                self.machine_type,
+                self.accelerator_model,
+                self.accelerator_provider_type or "",
+                self.accelerator_count,
+            )
         if self.external_ipv6_present or self.ip_forwarding:
             raise ValueError("provider observation is not private")
         if self.state != "NOT_FOUND" and self.stack_type != "IPV4_ONLY":
@@ -1038,6 +1069,11 @@ class GcpLeaseRecord(GcpExecutionModel):
             "ERROR",
         }:
             raise ValueError("terminal provider operation status is inconsistent")
+        if self.provider_operation_status in {
+            "DONE",
+            "ERROR",
+        } and not self.provider_operation_terminal:
+            raise ValueError("completed provider operation must be terminal")
         if self.provider_operation_id is None and (
             self.provider_operation_name is not None
             or self.provider_operation_kind is not None
@@ -1498,7 +1534,10 @@ def build_gcp_insert_request(
     if environment.accelerator_attachment_mode != "a2_fixed_gpu":
         raise GcpExecutionError("unsupported accelerator attachment mode")
     validate_gcp_a2_profile(
-        provider.machine_type, provider.accelerator_model, provider.accelerator_count
+        provider.machine_type,
+        provider.accelerator_model,
+        provider.accelerator_provider_type,
+        provider.accelerator_count,
     )
     if environment.boot_image.image_name.split("/")[1] != provider.project_id:
         raise GcpExecutionError("boot image project does not match selected project")
@@ -1605,7 +1644,10 @@ def validate_cost_and_capacity(
     ):
         raise GcpExecutionError("cost quote selection does not match the request")
     validate_gcp_a2_profile(
-        request.machine_type, request.accelerator_model, request.accelerator_count
+        request.machine_type,
+        request.accelerator_model,
+        request.accelerator_provider_type,
+        request.accelerator_count,
     )
     if (
         quote.accelerator_model != request.accelerator_model
@@ -2046,6 +2088,47 @@ class GcpLeaseJournal:
         finally:
             os.close(directory)
 
+    def _remove_regular_locked(self, path: Path) -> bool:
+        """Remove one exact recovery artifact after a no-follow type check."""
+
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise GcpJournalError(
+                "GCP journal recovery artifact is unavailable"
+            ) from None
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise GcpJournalError("GCP journal recovery artifact is unsafe")
+        try:
+            path.unlink()
+        except OSError:
+            raise GcpJournalError(
+                "GCP journal recovery artifact cleanup failed"
+            ) from None
+        return True
+
+    def _cleanup_stage_files_locked(self, controller_id: str | None = None) -> None:
+        """Discard only stale private stages, never a public lease/snapshot."""
+
+        root = self._checked_root()
+        try:
+            entries = sorted(root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            raise GcpJournalError("GCP journal directory is unavailable") from None
+        removed = False
+        prefix = f".{controller_id}." if controller_id is not None else None
+        for entry in entries:
+            if not entry.name.endswith(".stage") or not entry.name.startswith("."):
+                continue
+            if prefix is not None and not entry.name.startswith(prefix):
+                continue
+            if self._remove_regular_locked(entry):
+                removed = True
+        if removed:
+            self._fsync_directory()
+
     def _read_path(self, path: Path) -> GcpLeaseRecord:
         # The hash-chained event log is the recoverable source of truth.  The
         # snapshot is only a fast, derived view and may legitimately lag when
@@ -2054,6 +2137,7 @@ class GcpLeaseJournal:
         entries = self._read_event_chain_entries(
             self._event_path_for(path.parent, path.name.removesuffix(".lease.json"))
         )
+        self._validate_chain_transitions(entries)
         authoritative = entries[-1].record
         descriptor: int | None = None
         snapshot: GcpLeaseRecord | None = None
@@ -2131,9 +2215,137 @@ class GcpLeaseJournal:
             raise GcpJournalError("GCP journal intent binding is invalid")
         return authoritative
 
+    @staticmethod
+    def _validate_chain_transitions(
+        entries: Sequence[GcpLeaseJournalEvent],
+    ) -> None:
+        """Reject a hash-consistent but lifecycle-regressing journal tail."""
+
+        allowed = {
+            "PREPARED": {"PREPARED", "ARM_CONSUMED", "CLEANUP_CONFIRMED"},
+            "ARM_CONSUMED": {
+                "ARM_CONSUMED",
+                "CREATE_SUBMITTED",
+                "CLEANUP_PENDING",
+                "CLEANUP_CONFIRMED",
+            },
+            "CREATE_SUBMITTED": {
+                "CREATE_SUBMITTED",
+                "OWNED",
+                "CLEANUP_PENDING",
+                "ORPHANED",
+                "BLOCKED",
+            },
+            "OWNED": {"OWNED", "CLEANUP_PENDING"},
+            "CLEANUP_PENDING": {
+                "CLEANUP_PENDING",
+                "CLEANUP_CONFIRMED",
+                "ORPHANED",
+                "BLOCKED",
+            },
+            "ORPHANED": {
+                "ORPHANED",
+                "CLEANUP_PENDING",
+                "CLEANUP_CONFIRMED",
+                "BLOCKED",
+            },
+            "BLOCKED": {"BLOCKED", "CLEANUP_PENDING", "ORPHANED"},
+            "CLEANUP_CONFIRMED": {"CLEANUP_CONFIRMED"},
+        }
+        mutable_fields = {
+            "state",
+            "updated_at",
+            "provider_operation_id",
+            "provider_operation_name",
+            "provider_operation_kind",
+            "provider_operation_status",
+            "provider_operation_terminal",
+            "provider_mutation_ambiguous",
+            "arm_consumed",
+            "provider_mutation_attempted",
+            "cleanup_confirmed",
+            "orphaned",
+            "delete_attempts",
+            "last_error_code",
+        }
+        for previous_event, current_event in pairwise(entries):
+            previous = previous_event.record
+            current = current_event.record
+            if current.state not in allowed.get(previous.state, set()):
+                raise GcpJournalError("GCP journal state transition is invalid")
+            if current.delete_attempts < previous.delete_attempts:
+                raise GcpJournalError("GCP journal cleanup attempts regressed")
+            for field in (
+                "arm_consumed",
+                "provider_mutation_attempted",
+                "cleanup_confirmed",
+            ):
+                if getattr(previous, field) and not getattr(current, field):
+                    raise GcpJournalError("GCP journal lifecycle flag regressed")
+            if (
+                previous.provider_operation_terminal
+                and not current.provider_operation_terminal
+                and not (
+                    previous.provider_operation_kind in {"insert", "delete"}
+                    and current.provider_operation_kind == "delete"
+                    and current.provider_operation_id != previous.provider_operation_id
+                )
+            ):
+                raise GcpJournalError("GCP journal terminal operation regressed")
+            if previous.provider_operation_id is not None:
+                if current.provider_operation_id is None:
+                    raise GcpJournalError("GCP journal operation identity was removed")
+                previous_operation = (
+                    previous.provider_operation_id,
+                    previous.provider_operation_name,
+                    previous.provider_operation_kind,
+                    previous.project_id,
+                    previous.zone,
+                )
+                current_operation = (
+                    current.provider_operation_id,
+                    current.provider_operation_name,
+                    current.provider_operation_kind,
+                    current.project_id,
+                    current.zone,
+                )
+                legal_new_delete = (
+                    previous.provider_operation_terminal
+                    and current.provider_operation_kind == "delete"
+                    and current.provider_operation_status == "PENDING"
+                    and current.provider_operation_id != previous.provider_operation_id
+                    and current.delete_attempts
+                    in {previous.delete_attempts, previous.delete_attempts + 1}
+                )
+                if current_operation != previous_operation and not legal_new_delete:
+                    raise GcpJournalError("GCP journal operation identity changed")
+            if (
+                previous.provider_operation_terminal
+                and current.provider_operation_id == previous.provider_operation_id
+                and current.provider_operation_status
+                != previous.provider_operation_status
+            ):
+                raise GcpJournalError("GCP journal terminal operation changed")
+            if (
+                previous.orphaned
+                and not current.orphaned
+                and current.state != "CLEANUP_CONFIRMED"
+            ):
+                raise GcpJournalError("GCP journal orphan state regressed")
+            if _parse_timestamp(current.updated_at) < _parse_timestamp(
+                previous.updated_at
+            ):
+                raise GcpJournalError("GCP journal update timestamp regressed")
+            for field in GcpLeaseRecord.model_fields:
+                if field not in mutable_fields and getattr(current, field) != getattr(
+                    previous, field
+                ):
+                    raise GcpJournalError("GCP journal immutable binding changed")
+
     def _scan(self) -> list[GcpLeaseRecord]:
         root = self._checked_root()
         records: list[GcpLeaseRecord] = []
+        self._cleanup_stage_files_locked()
         try:
             entries = sorted(root.iterdir(), key=lambda path: path.name)
         except OSError:
@@ -2143,17 +2355,6 @@ class GcpLeaseJournal:
             if entry.name == ".journal.lock":
                 continue
             if entry.name.startswith(".") and entry.name.endswith(".stage"):
-                try:
-                    metadata = entry.lstat()
-                    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(
-                        metadata.st_mode
-                    ):
-                        raise GcpJournalError("GCP journal stage is unsafe")
-                    entry.unlink()
-                except GcpJournalError:
-                    raise
-                except OSError:
-                    raise GcpJournalError("GCP journal stage cleanup failed") from None
                 continue
             if entry.name.endswith(".lease.json"):
                 controller = entry.name.removesuffix(".lease.json")
@@ -2169,7 +2370,21 @@ class GcpLeaseJournal:
         for controller in sorted(controllers):
             event_path = self._event_path_for(root, controller)
             anchor_path = self._anchor_path_for(root, controller)
-            if not event_path.exists() or not anchor_path.exists():
+            snapshot_path = self._path_for(root, controller)
+            event_exists = event_path.exists()
+            anchor_exists = anchor_path.exists()
+            if not event_exists and anchor_exists:
+                # Anchor/snapshot-only reserve artifacts have no authoritative
+                # event and may be safely abandoned before a retry.  A symlink
+                # or non-regular artifact is still a hard failure.
+                removed = self._remove_regular_locked(anchor_path)
+                removed = self._remove_regular_locked(snapshot_path) or removed
+                if removed:
+                    self._fsync_directory()
+                continue
+            if event_exists and not anchor_exists:
+                raise GcpJournalError("GCP journal reserve is incomplete")
+            if not event_exists:
                 raise GcpJournalError("GCP journal reserve is incomplete")
             records.append(self._read_path(self._path_for(root, controller)))
         return records
@@ -2256,6 +2471,7 @@ class GcpLeaseJournal:
         stage = root / f".{record.controller_id}.{threading.get_ident()}.stage"
         raw = canonical_json_bytes(_json_value(record))
         with self._exclusive():
+            self._cleanup_stage_files_locked(record.controller_id)
             try:
                 event_path = self._event_path_for(root, record.controller_id)
                 self._repair_event_tail_locked(event_path)
@@ -2370,26 +2586,21 @@ class GcpLeaseJournal:
                 record.zone,
             )
             if previous.provider_operation_id is not None:
+                if record.provider_operation_id is None:
+                    raise GcpJournalError("GCP journal operation identity was removed")
                 # A new delete attempt may receive a new provider operation
                 # after the previous delete reached a terminal result.  It is
                 # a monotonic, separately budgeted action, not retargeting of
                 # the same in-flight operation.
-                if (
-                    previous.provider_operation_kind == "delete"
-                    and current_operation != previous_operation
-                    and not (
-                        previous.provider_operation_terminal
-                        and record.provider_operation_kind == "delete"
-                        and record.provider_operation_status == "PENDING"
-                        and record.delete_attempts == previous.delete_attempts
-                    )
-                ):
-                    raise GcpJournalError("GCP journal operation identity changed")
-                if (
-                    previous.provider_operation_kind == "insert"
-                    and record.provider_operation_kind == "insert"
-                    and current_operation != previous_operation
-                ):
+                legal_new_delete = (
+                    previous.provider_operation_terminal
+                    and record.provider_operation_kind == "delete"
+                    and record.provider_operation_status == "PENDING"
+                    and record.provider_operation_id != previous.provider_operation_id
+                    and record.delete_attempts
+                    in {previous.delete_attempts, previous.delete_attempts + 1}
+                )
+                if current_operation != previous_operation and not legal_new_delete:
                     raise GcpJournalError("GCP journal operation identity changed")
                 if (
                     previous.provider_operation_kind == "insert"
@@ -2443,8 +2654,13 @@ class GcpLeaseJournal:
                 finally:
                     os.close(event_descriptor)
                 self._crash_point("update_after_event_fsync")
-                metadata = path.lstat()
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                try:
+                    metadata = path.lstat()
+                except FileNotFoundError:
+                    metadata = None
+                if metadata is not None and (
+                    stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode)
+                ):
                     raise GcpJournalError("GCP journal target is a symlink")
                 os.replace(stage, path)
                 self._crash_point("update_after_replace")
@@ -2706,6 +2922,7 @@ def _owned(observation: GcpInstanceObservation, request: GcpInsertRequest) -> bo
         validate_gcp_a2_profile(
             observation.machine_type,
             observation.accelerator_model,
+            observation.accelerator_provider_type or "",
             observation.accelerator_count,
         )
     except GcpExecutionError:

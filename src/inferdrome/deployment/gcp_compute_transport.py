@@ -17,6 +17,7 @@ import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Protocol, cast
+from urllib.parse import urlsplit
 
 from inferdrome.deployment.gcp_lifecycle import (
     GcpBootDiskObservation,
@@ -37,6 +38,8 @@ _GOOGLE_SCOPE_URLS = {
     "monitoring.write": "https://www.googleapis.com/auth/monitoring.write",
     "trace.append": "https://www.googleapis.com/auth/trace.append",
 }
+_SUPPORTED_COMPUTE_HOSTS = frozenset({"www.googleapis.com", "compute.googleapis.com"})
+_RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 
 
 class GcpOptionalDependencyUnavailable(GcpExecutionError):
@@ -110,31 +113,29 @@ def _canonical_resource_ref(
 ) -> str:
     """Canonicalize documented Compute full, partial, and relative references."""
 
-    text = str(value)
-    parts = text.split("/")
-    if parts and parts[0].lower() in {"http:", "https:"}:
-        try:
-            parts = parts[parts.index("projects") :]
-        except ValueError:
-            raise GcpTransportError("INSTANCE_RESOURCE_MALFORMED") from None
-    while parts and parts[0] == "":
-        parts = parts[1:]
+    malformed_code = (
+        "INSTANCE_NETWORK_MALFORMED"
+        if kind == "network"
+        else "INSTANCE_SUBNETWORK_MALFORMED"
+        if kind == "subnetwork"
+        else "INSTANCE_RESOURCE_MALFORMED"
+    )
+    parts = _compute_resource_parts(value, code=malformed_code)
     if kind == "network":
-        if (
-            len(parts) == 4
-            and parts[:2] == ["projects", project]
-            and parts[2:] == ["global", "networks"]
-        ):
-            raise GcpTransportError("INSTANCE_NETWORK_MALFORMED")
         if (
             len(parts) == 5
             and parts[:2] == ["projects", project]
             and parts[2:4] == ["global", "networks"]
+            and _RESOURCE_NAME_RE.fullmatch(parts[4])
         ):
             return "/".join(parts)
-        if len(parts) == 3 and parts[0:2] == ["global", "networks"] and parts[2]:
+        if (
+            len(parts) == 3
+            and parts[0:2] == ["global", "networks"]
+            and _RESOURCE_NAME_RE.fullmatch(parts[2])
+        ):
             return f"projects/{project}/global/networks/{parts[2]}"
-        if len(parts) == 1 and re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", parts[0]):
+        if len(parts) == 1 and _RESOURCE_NAME_RE.fullmatch(parts[0]):
             return f"projects/{project}/global/networks/{parts[0]}"
         raise GcpTransportError("INSTANCE_NETWORK_MALFORMED")
     if kind == "subnetwork":
@@ -145,20 +146,125 @@ def _canonical_resource_ref(
             and parts[:2] == ["projects", project]
             and parts[2:4] == ["regions", region]
             and parts[4] == "subnetworks"
+            and _RESOURCE_NAME_RE.fullmatch(parts[5])
         ):
             return "/".join(parts)
         if (
             len(parts) == 4
             and parts[:3] == ["regions", region, "subnetworks"]
-            and parts[3]
+            and _RESOURCE_NAME_RE.fullmatch(parts[3])
         ):
             return f"projects/{project}/regions/{region}/subnetworks/{parts[3]}"
-        if len(parts) == 2 and parts[0] == "subnetworks" and parts[1]:
+        if (
+            len(parts) == 2
+            and parts[0] == "subnetworks"
+            and _RESOURCE_NAME_RE.fullmatch(parts[1])
+        ):
             return f"projects/{project}/regions/{region}/subnetworks/{parts[1]}"
-        if len(parts) == 1 and re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", parts[0]):
+        if len(parts) == 1 and _RESOURCE_NAME_RE.fullmatch(parts[0]):
             return f"projects/{project}/regions/{region}/subnetworks/{parts[0]}"
         raise GcpTransportError("INSTANCE_SUBNETWORK_MALFORMED")
     raise GcpTransportError("INSTANCE_RESOURCE_MALFORMED")
+
+
+def _compute_resource_parts(
+    value: object, *, code: str, require_full: bool = False
+) -> list[str]:
+    """Parse only relative Compute refs or exact Google Compute URLs.
+
+    In particular, do not search for a ``projects`` segment: doing so would
+    accept arbitrary hosts, insecure URLs, and path prefixes while appearing
+    to normalize an official resource.
+    """
+
+    text = value if isinstance(value, str) else ""
+    if not text or len(text) > 512 or any(char.isspace() for char in text):
+        raise GcpTransportError(code)
+    if "://" in text:
+        try:
+            parsed = urlsplit(text)
+            port = parsed.port
+        except ValueError:
+            raise GcpTransportError(code) from None
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in _SUPPORTED_COMPUTE_HOSTS
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.startswith("/compute/v1/")
+            or parsed.path.startswith("/compute/v1//")
+            or parsed.path.endswith("/")
+        ):
+            raise GcpTransportError(code)
+        raw = parsed.path[len("/compute/v1/") :]
+    else:
+        if require_full or text.startswith("/") or text.startswith("//"):
+            raise GcpTransportError(code)
+        raw = text
+    parts = raw.split("/")
+    if (
+        not parts
+        or any(
+            not part
+            or part in {".", ".."}
+            or any(char in part for char in "?#%")
+            for part in parts
+        )
+        or parts.count("projects") > 1
+    ):
+        raise GcpTransportError(code)
+    return parts
+
+
+def _canonical_expected_ref(
+    value: object,
+    *,
+    kind: Literal["instance", "zone", "machine", "accelerator"],
+    project: str,
+    zone: str,
+    instance_name: str | None = None,
+    require_full: bool = False,
+) -> str:
+    parts = _compute_resource_parts(
+        value, code="INSTANCE_RESOURCE_MALFORMED", require_full=require_full
+    )
+    expected: list[str]
+    if kind == "instance":
+        expected = [
+            "projects",
+            project,
+            "zones",
+            zone,
+            "instances",
+            instance_name or "",
+        ]
+    elif kind == "zone":
+        expected = ["projects", project, "zones", zone]
+    elif kind == "machine":
+        expected = [
+            "projects",
+            project,
+            "zones",
+            zone,
+            "machineTypes",
+            instance_name or "",
+        ]
+    else:
+        expected = [
+            "projects",
+            project,
+            "zones",
+            zone,
+            "acceleratorTypes",
+            instance_name or "",
+        ]
+    partial = expected[2:]
+    if parts not in (expected, partial):
+        raise GcpTransportError("INSTANCE_RESOURCE_MISMATCH")
+    return "/".join(expected)
 
 
 def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservation:
@@ -167,26 +273,18 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
         if name != request.instance_name:
             raise GcpTransportError("INSTANCE_IDENTITY_MISMATCH")
         self_link = str(getattr(value, "self_link", ""))
-        self_link_parts = self_link.split("/")
-        if (
-            len(self_link_parts) < 11
-            or self_link_parts[0] != "https:"
-            or len(self_link_parts) < 3
-            or not self_link_parts[2].endswith(".googleapis.com")
-            or "projects" not in self_link_parts
-        ):
-            raise GcpTransportError("INSTANCE_PROJECT_MISMATCH")
-        project_index = self_link_parts.index("projects")
-        if self_link_parts[project_index : project_index + 6] != [
+        self_link_parts = _compute_resource_parts(
+            self_link, code="INSTANCE_PROJECT_MISMATCH", require_full=True
+        )
+        expected_instance = [
             "projects",
             request.project_id,
             "zones",
             request.zone,
             "instances",
             request.instance_name,
-        ]:
-            raise GcpTransportError("INSTANCE_PROJECT_MISMATCH")
-        if self_link_parts[3:project_index] != ["compute", "v1"]:
+        ]
+        if self_link_parts != expected_instance:
             raise GcpTransportError("INSTANCE_PROJECT_MISMATCH")
         status = cast(Literal["RUNNING", "TERMINATED"], str(value.status))
         labels = _safe_labels(getattr(value, "labels", None))
@@ -194,22 +292,37 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
             raise GcpTransportError("INSTANCE_OWNERSHIP_LABEL_MISMATCH")
         if status not in {"RUNNING", "TERMINATED"}:
             raise GcpTransportError("INSTANCE_STATE_UNSUPPORTED")
-        zone_ref = str(getattr(value, "zone", ""))
-        if "/zones/" not in zone_ref:
-            raise GcpTransportError("INSTANCE_ZONE_MALFORMED")
-        zone = zone_ref.rsplit("/zones/", 1)[-1]
-        if not re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", zone):
-            raise GcpTransportError("INSTANCE_ZONE_MALFORMED")
-        if zone != request.zone:
-            raise GcpTransportError("INSTANCE_ZONE_MISMATCH")
+        zone_ref = getattr(value, "zone", "")
+        try:
+            _canonical_expected_ref(
+                zone_ref,
+                kind="zone",
+                project=request.project_id,
+                zone=request.zone,
+            )
+        except GcpTransportError as error:
+            raise GcpTransportError(
+                "INSTANCE_ZONE_MISMATCH"
+                if str(error) == "INSTANCE_RESOURCE_MISMATCH"
+                else "INSTANCE_ZONE_MALFORMED"
+            ) from None
+        zone = request.zone
         machine_ref = str(getattr(value, "machine_type", ""))
-        if "/machineTypes/" not in machine_ref:
-            raise GcpTransportError("INSTANCE_MACHINE_TYPE_MALFORMED")
-        machine_type = machine_ref.rsplit("/machineTypes/", 1)[-1]
-        if not re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", machine_type):
-            raise GcpTransportError("INSTANCE_MACHINE_TYPE_MALFORMED")
-        if machine_type != request.machine_type:
-            raise GcpTransportError("INSTANCE_MACHINE_TYPE_MISMATCH")
+        try:
+            _canonical_expected_ref(
+                machine_ref,
+                kind="machine",
+                project=request.project_id,
+                zone=request.zone,
+                instance_name=request.machine_type,
+            )
+        except GcpTransportError as error:
+            raise GcpTransportError(
+                "INSTANCE_MACHINE_TYPE_MISMATCH"
+                if str(error) == "INSTANCE_RESOURCE_MISMATCH"
+                else "INSTANCE_MACHINE_TYPE_MALFORMED"
+            ) from None
+        machine_type = request.machine_type
         accelerators = getattr(value, "guest_accelerators", None)
         try:
             accelerator_values = list(accelerators or ())
@@ -218,6 +331,7 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
         validate_gcp_a2_profile(
             request.machine_type,
             request.accelerator_model,
+            request.accelerator_provider_type,
             request.accelerator_count,
         )
         if len(accelerator_values) == 0 and (
@@ -228,11 +342,17 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
         elif len(accelerator_values) == 1:
             accelerator = accelerator_values[0]
             accelerator_ref = str(getattr(accelerator, "accelerator_type", ""))
-            if "/acceleratorTypes/" not in accelerator_ref:
-                raise GcpTransportError("INSTANCE_ACCELERATOR_MALFORMED")
-            accelerator_type = accelerator_ref.rsplit("/acceleratorTypes/", 1)[-1]
-            if not re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", accelerator_type):
-                raise GcpTransportError("INSTANCE_ACCELERATOR_MALFORMED")
+            try:
+                _canonical_expected_ref(
+                    accelerator_ref,
+                    kind="accelerator",
+                    project=request.project_id,
+                    zone=request.zone,
+                    instance_name=request.accelerator_provider_type,
+                )
+            except GcpTransportError:
+                raise GcpTransportError("INSTANCE_ACCELERATOR_MALFORMED") from None
+            accelerator_type = request.accelerator_provider_type
             accelerator_count = int(getattr(accelerator, "accelerator_count", 0))
         else:
             raise GcpTransportError("INSTANCE_ACCELERATOR_MISMATCH")
@@ -306,7 +426,7 @@ def _observation(value: Any, request: GcpInsertRequest) -> GcpInstanceObservatio
                 raise GcpTransportError("INSTANCE_PRIVATE_IP_INVALID")
         return GcpInstanceObservation(
             instance_name=name,
-            project_id=self_link_parts[self_link_parts.index("projects") + 1],
+            project_id=request.project_id,
             zone=zone,
             machine_type=machine_type,
             accelerator_model=request.accelerator_model,
@@ -436,6 +556,7 @@ class GoogleComputeTransport(GcpComputeTransport):
             if validate_gcp_a2_profile(
                 request.machine_type,
                 request.accelerator_model,
+                request.accelerator_provider_type,
                 request.accelerator_count,
             ) == "synthetic":
                 raise GcpTransportError("SYNTHETIC_PROFILE_NOT_LIVE")
@@ -516,56 +637,62 @@ class GoogleComputeTransport(GcpComputeTransport):
             ("zone_id", operation.zone),
         ):
             observed = getattr(provider_operation, field, None)
-            normalized_observed = (
-                str(observed) if observed not in (None, "") else observed
+            if observed in (None, ""):
+                continue
+            normalized_observed = str(observed)
+            accepted = normalized_observed == expected
+            if not accepted:
+                try:
+                    parts = _compute_resource_parts(
+                        normalized_observed, code="OPERATION_RESPONSE_MISMATCH"
+                    )
+                except GcpTransportError:
+                    parts = []
+                if field in {"project", "project_id"}:
+                    accepted = parts == ["projects", str(expected)]
+                else:
+                    accepted = parts in (
+                        ["zones", str(expected)],
+                        ["projects", str(operation.project_id), "zones", str(expected)],
+                    )
+            if not accepted:
+                raise GcpTransportError(
+                    "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
+                )
+        operation_type = getattr(provider_operation, "operation_type", None)
+        if (
+            not isinstance(operation_type, str)
+            or operation_type != operation.operation_kind
+        ):
+            raise GcpTransportError(
+                "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
             )
-            if field in {"project", "project_id"} and normalized_observed not in (
-                None,
-                "",
-                expected,
-            ):
-                parts = (
-                    normalized_observed.split("/")
-                    if isinstance(normalized_observed, str)
-                    else []
-                )
-                if "projects" in parts:
-                    index = parts.index("projects")
-                    normalized_observed = (
-                        parts[index + 1]
-                        if len(parts) > index + 1
-                        else normalized_observed
-                    )
-            if field in {"zone", "zone_id"} and normalized_observed not in (
-                None,
-                "",
-                expected,
-            ):
-                parts = (
-                    normalized_observed.split("/")
-                    if isinstance(normalized_observed, str)
-                    else []
-                )
-                if "zones" in parts:
-                    index = parts.index("zones")
-                    normalized_observed = (
-                        parts[index + 1]
-                        if len(parts) > index + 1
-                        else normalized_observed
-                    )
-            if normalized_observed not in (None, "", expected):
-                raise GcpTransportError(
-                    "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
-                )
         target_link = getattr(provider_operation, "target_link", None)
-        if target_link and operation.instance_name:
-            target_text = str(target_link)
-            if "/instances/" not in target_text or not target_text.endswith(
-                "/instances/" + operation.instance_name
-            ):
-                raise GcpTransportError(
-                    "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
-                )
+        if not operation.instance_name or not target_link:
+            raise GcpTransportError(
+                "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
+            )
+        try:
+            target_parts = _compute_resource_parts(
+                target_link,
+                code="OPERATION_RESPONSE_MISMATCH",
+                require_full=True,
+            )
+        except GcpTransportError:
+            raise GcpTransportError(
+                "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
+            ) from None
+        if target_parts != [
+            "projects",
+            operation.project_id,
+            "zones",
+            operation.zone,
+            "instances",
+            operation.instance_name,
+        ]:
+            raise GcpTransportError(
+                "OPERATION_RESPONSE_MISMATCH", operation=operation, ambiguous=True
+            )
 
         def result_for(
             status: Literal["DONE", "ERROR", "TIMEOUT"], error_code: str | None = None
@@ -574,46 +701,46 @@ class GoogleComputeTransport(GcpComputeTransport):
                 status=status,
                 operation_id=operation.operation_id,
                 operation_name=operation.operation_name,
-                instance_name=None,
+                instance_name=operation.instance_name,
                 error_code=error_code,
             )
 
-        def is_done(status: object) -> bool:
+        def status_name(status: object) -> Literal["PENDING", "RUNNING", "DONE"] | None:
             enum = getattr(getattr(self._sdk, "Operation", None), "Status", None)
-            done = getattr(enum, "DONE", None)
-            return status == done or getattr(status, "value", object()) == getattr(
-                done, "value", None
-            )
+            for name in ("PENDING", "RUNNING", "DONE"):
+                expected = getattr(enum, name, None)
+                if expected is not None and (
+                    status in (name, name.lower(), expected)
+                    or getattr(status, "value", object())
+                    == getattr(expected, "value", None)
+                ):
+                    return name
+            return None
 
+        polling_error = False
         try:
             result_method = getattr(provider_operation, "result", None)
             if callable(result_method):
                 result_method(timeout=timeout_seconds)
-            provider_status = getattr(provider_operation, "status", None)
-            if provider_status is not None and not is_done(provider_status):
-                return result_for("TIMEOUT")
-            provider_error = getattr(provider_operation, "error", None)
-            if (
-                _provider_error_present(provider_error)
-                and provider_status is not None
-                and is_done(provider_status)
-            ):
-                return result_for("ERROR", "PROVIDER_OPERATION_FAILED")
         except TimeoutError:
+            polling_error = True
+        except Exception:
+            # A local result/polling exception never proves a provider
+            # terminal error.  The exact operation handle remains durable for
+            # later ZoneOperations reconciliation.
+            polling_error = True
+        provider_status = getattr(provider_operation, "status", None)
+        observed_status = status_name(provider_status)
+        if observed_status is None:
+            raise GcpTransportError(
+                "OPERATION_RESPONSE_INVALID", operation=operation, ambiguous=True
+            )
+        if observed_status != "DONE":
             return result_for("TIMEOUT")
-        except Exception as error:
-            if type(error).__name__ in {
-                "DeadlineExceeded",
-                "OperationTimedOut",
-                "Timeout",
-            }:
-                return result_for("TIMEOUT")
-            if is_done(getattr(provider_operation, "status", None)) and (
-                _provider_error_present(getattr(provider_operation, "error", None))
-            ):
-                return result_for("ERROR", "PROVIDER_OPERATION_FAILED")
-            # A polling transport error does not prove a provider failure.
-            # Retain the exact handle so a later process can reconcile it.
+        provider_error = getattr(provider_operation, "error", None)
+        if _provider_error_present(provider_error):
+            return result_for("ERROR", "PROVIDER_OPERATION_FAILED")
+        if polling_error:
             return result_for("TIMEOUT")
         return result_for("DONE")
 
@@ -706,6 +833,22 @@ class GoogleComputeTransport(GcpComputeTransport):
                 timeout=timeout_seconds,
             )
             disk_value = cast(Any, disk)
+            disk_self_link = getattr(disk_value, "self_link", None)
+            if disk_self_link not in (None, ""):
+                disk_parts = _compute_resource_parts(
+                    disk_self_link,
+                    code="BOOT_DISK_IDENTITY_MISMATCH",
+                    require_full=True,
+                )
+                if disk_parts != [
+                    "projects",
+                    request.project_id,
+                    "zones",
+                    request.zone,
+                    "disks",
+                    request.instance_name,
+                ]:
+                    raise GcpTransportError("BOOT_DISK_IDENTITY_MISMATCH")
             return GcpBootDiskObservation(
                 instance_name=request.instance_name,
                 disk_name=str(disk_value.name),

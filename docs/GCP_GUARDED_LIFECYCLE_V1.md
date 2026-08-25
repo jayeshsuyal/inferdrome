@@ -39,7 +39,12 @@ compared before deletion. The only live A2 mapping is
 `a2-highgpu-1g -> NVIDIA A100-SXM4-40GB x1`; every other A2 size and invented
 machine name is rejected. `synthetic-a2-highgpu-1g` is accepted only by the
 offline deterministic fake and is rejected by the concrete live transport. The
-runner and vLLM serving runtime remain separate boundaries. A startup-script
+provider mapping is exact: `a2-highgpu-1g` requires provider type
+`nvidia-tesla-a100`; the synthetic profile requires
+`synthetic-a100-sxm4-40gb`. That provider type remains bound in request,
+quote/capacity, and observed-instance validation even though fixed A2 requests
+do not carry an N1-style guest-accelerator list. The runner and vLLM serving
+runtime remain separate boundaries. A startup-script
 digest may bind an external bootstrap artifact, but startup bytes and
 credential values are never part of this contract; PR8 does not launch either
 runtime.
@@ -103,10 +108,19 @@ The concrete client follows Google's Compute Engine `instances.insert`, `get`,
 `list(request=ListInstancesRequest(...))`, and `delete` operation model and
 bounded extended-operation waits. Raw provider operation names are normalized
 to the exact zonal operation resource before they enter the journal; a fresh
-reconciliation response must match its persisted name, project, zone, and
-owned-instance target. Polling transport/result errors remain pending/unknown;
+reconciliation response must match its persisted name, operation type, project,
+zone, and full owned-instance target. Real operation status enums are validated
+before any terminal interpretation. Polling transport/result errors remain
+pending/unknown;
 only a provider-confirmed terminal DONE operation with a non-empty provider
 error may be reported as provider failure.
+
+Observed Compute resource references are accepted only in documented relative
+or partial forms, or HTTPS URLs using the exact supported Google Compute hosts
+and `/compute/v1/` prefix. HTTP, arbitrary hosts, path prefixes, query or
+fragment components, userinfo, ports, and duplicate resource scopes are
+rejected; the same rule applies to instance, zone, machine, accelerator,
+operation, image, and optional disk self-links.
 Application Default Credentials are an external operator setup, never an
 Inferdrome API key or serialized receipt field. See Google's primary
 documentation for [Compute Engine insert](https://cloud.google.com/compute/docs/reference/rest/v1/instances/insert),

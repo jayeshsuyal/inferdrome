@@ -52,6 +52,7 @@ from inferdrome.deployment import (
 )
 from inferdrome.deployment.gcp_compute_transport import (
     GcpOptionalDependencyUnavailable,
+    _canonical_resource_ref,
     _observation,
     create_google_compute_transport,
 )
@@ -746,22 +747,38 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
         images_client=object(),
         disks_client=object(),
     )
+    target_link = (
+        "https://www.googleapis.com/compute/v1/projects/inferdrome-example/"
+        "zones/us-central1-b/instances/inferdrome-ctl-12345678"
+    )
     for status in (sdk.Operation.Status.PENDING, sdk.Operation.Status.RUNNING):
-        client.operation = sdk.Operation(name="operation-1", status=status)
+        client.operation = sdk.Operation(
+            name="operation-1",
+            status=status,
+            operation_type="insert",
+            target_link=target_link,
+        )
         handle = transport.insert(
             request, timeout_seconds=5, request_id=request.insert_request_id
         )
         assert transport.wait_operation(handle, timeout_seconds=5).status == "TIMEOUT"
     client.operation = sdk.Operation(
-        name="operation-1", status=sdk.Operation.Status.DONE
+        name="operation-1",
+        status=sdk.Operation.Status.DONE,
+        operation_type="insert",
+        target_link=target_link,
     )
     handle = transport.insert(
         request, timeout_seconds=5, request_id=request.insert_request_id
     )
-    assert transport.wait_operation(handle, timeout_seconds=5).status == "DONE"
+    done_result = transport.wait_operation(handle, timeout_seconds=5)
+    assert done_result.status == "DONE"
+    assert done_result.instance_name == request.instance_name
     client.operation = sdk.Operation(
         name="operation-1",
         status=sdk.Operation.Status.DONE,
+        operation_type="insert",
+        target_link=target_link,
         error=sdk.Error(errors=[{"code": "FAILED", "message": "provider"}]),
     )
     handle = transport.insert(
@@ -772,6 +789,11 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
     class PollFailure:
         name = "operation-1"
         status = sdk.Operation.Status.DONE
+        operation_type = "insert"
+        target_link = (
+            "https://www.googleapis.com/compute/v1/projects/inferdrome-example/"
+            "zones/us-central1-b/instances/inferdrome-ctl-12345678"
+        )
         error = sdk.Error()
 
         @staticmethod
@@ -788,11 +810,17 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
     class Operations:
         def get(self, **_: Any) -> Any:
             return sdk.Operation(
-                name="different-operation", status=sdk.Operation.Status.DONE
+                name="different-operation",
+                status=sdk.Operation.Status.DONE,
+                operation_type="insert",
+                target_link=target_link,
             )
 
     client.operation = sdk.Operation(
-        name="operation-1", status=sdk.Operation.Status.DONE
+        name="operation-1",
+        status=sdk.Operation.Status.DONE,
+        operation_type="insert",
+        target_link=target_link,
     )
     handle = transport.insert(
         request, timeout_seconds=5, request_id=request.insert_request_id
@@ -800,7 +828,10 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
     class FreshOperations:
         def get(self, **_: Any) -> Any:
             return sdk.Operation(
-                name="operation-1", status=sdk.Operation.Status.DONE
+                name="operation-1",
+                status=sdk.Operation.Status.DONE,
+                operation_type="insert",
+                target_link=target_link,
             )
 
     fresh = create_google_compute_transport(
@@ -817,6 +848,75 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
         transport.wait_operation(handle, timeout_seconds=5)
 
 
+def test_real_sdk_operation_binds_kind_and_full_target() -> None:
+    sdk = pytest.importorskip("google.cloud.compute_v1")
+    _spec, _inventory, _context, plan = _inputs()
+    arm = _arm()
+    from inferdrome.deployment import build_gcp_insert_request
+
+    request = build_gcp_insert_request(
+        plan=plan, arm=arm, environment=_environment(plan)
+    ).model_copy(
+        update={
+            "machine_type": "a2-highgpu-1g",
+            "accelerator_provider_type": "nvidia-tesla-a100",
+        }
+    )
+    expected_target = (
+        "https://www.googleapis.com/compute/v1/projects/inferdrome-example/"
+        "zones/us-central1-b/instances/inferdrome-ctl-12345678"
+    )
+
+    class Client:
+        operation: Any
+
+        def insert(self, *, request: Any, timeout: int) -> Any:
+            del request, timeout
+            return self.operation
+
+    client = Client()
+    transport = create_google_compute_transport(
+        sdk_module=sdk,
+        client=client,
+        operations_client=object(),
+        images_client=object(),
+        disks_client=object(),
+    )
+    vectors = [
+        {"operation_type": "delete", "target_link": expected_target},
+        {
+            "operation_type": "insert",
+            "target_link": expected_target.replace(
+                "inferdrome-example", "evil-project"
+            ),
+        },
+        {
+            "operation_type": "insert",
+            "target_link": expected_target.replace("us-central1-b", "us-east1-b"),
+        },
+        {
+            "operation_type": "insert",
+            "target_link": expected_target.replace("inferdrome-ctl-12345678", "other"),
+        },
+        {"operation_type": "insert", "target_link": None},
+        {"operation_type": "insert", "target_link": expected_target, "status": 999},
+    ]
+    for vector in vectors:
+        client.operation = sdk.Operation(
+            name="operation-1",
+            status=vector.get("status", sdk.Operation.Status.DONE),
+            operation_type=vector["operation_type"],
+            target_link=vector["target_link"],
+        )
+        handle = transport.insert(
+            request, timeout_seconds=5, request_id=request.insert_request_id
+        )
+        with pytest.raises(
+            GcpTransportError, match=r"OPERATION_RESPONSE_(?:MISMATCH|INVALID)"
+        ):
+            transport.wait_operation(handle, timeout_seconds=5)
+
+
 def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
     class Value:
         def __init__(self, **kwargs: Any) -> None:
@@ -826,6 +926,13 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
         def __init__(self) -> None:
             self.timeout: int | None = None
             self.name = "operation-1"
+            self.operation_type = "insert"
+            self.target_link = (
+                "https://www.googleapis.com/compute/v1/projects/inferdrome-example/"
+                "zones/us-central1-b/instances/inferdrome-ctl-12345678"
+            )
+            self.status = "DONE"
+            self.error = None
 
         def result(self, *, timeout: int) -> None:
             self.timeout = timeout
@@ -859,6 +966,12 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
         InsertInstanceRequest = Value
         DeleteInstanceRequest = Value
         ListInstancesRequest = Value
+
+        class Operation:
+            class Status:
+                DONE = "DONE"
+                PENDING = "PENDING"
+                RUNNING = "RUNNING"
 
         @staticmethod
         def ZoneOperationsClient() -> object:
@@ -923,6 +1036,41 @@ def test_default_clock_is_canonical_second_precision() -> None:
     value = system_gcp_clock().now()
     assert value.tzinfo == UTC
     assert value.microsecond == 0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://evil.example/compute/v1/projects/inferdrome-example/global/networks/private",
+        "https://evil.example/anything/projects/inferdrome-example/global/networks/private",
+        "https://www.googleapis.com/compute/v1/projects/inferdrome-example/global/networks/private?x=1",
+        "https://user:password@www.googleapis.com/compute/v1/projects/inferdrome-example/global/networks/private",
+        "https://www.googleapis.com:443/compute/v1/projects/inferdrome-example/global/networks/private",
+        "https://www.googleapis.com/compute/v1/projects/inferdrome-example/projects/other/global/networks/private",
+    ],
+)
+def test_resource_reference_rejects_insecure_host_prefix_and_ambiguity(
+    value: str,
+) -> None:
+    with pytest.raises(GcpTransportError, match="NETWORK"):
+        _canonical_resource_ref(
+            value,
+            kind="network",
+            project="inferdrome-example",
+            region="us-central1",
+        )
+
+
+def test_resource_reference_accepts_only_exact_supported_compute_urls() -> None:
+    assert (
+        _canonical_resource_ref(
+            "https://compute.googleapis.com/compute/v1/projects/inferdrome-example/global/networks/private",
+            kind="network",
+            project="inferdrome-example",
+            region="us-central1",
+        )
+        == "projects/inferdrome-example/global/networks/private"
+    )
 
 
 def test_timeout_reconciles_late_instance_before_delete(tmp_path: Path) -> None:
@@ -1136,8 +1284,14 @@ def test_subprocess_reserve_death_leaves_conservative_authority(
     if label == "reserve_after_anchor_fsync":
         with pytest.raises(GcpJournalError):
             journal.load(record.controller_id)
-    else:
+        journal.reserve(record)
         assert journal.load(record.controller_id) == record
+    else:
+        loaded = journal.load(record.controller_id)
+        assert loaded == record
+        advanced = loaded.model_copy(update={"last_error_code": "RESERVE_ADVANCED"})
+        journal.update(advanced)
+        assert journal.load(record.controller_id).last_error_code == "RESERVE_ADVANCED"
         with pytest.raises(GcpJournalError):
             journal.reserve(record)
 
@@ -1193,6 +1347,112 @@ def test_subprocess_update_death_leaves_readable_prefix(
         assert loaded == record
     else:
         assert loaded.last_error_code == "CRASH_BOUNDARY"
+    advanced = loaded.model_copy(update={"last_error_code": "ADVANCED"})
+    journal.update(advanced)
+    assert journal.load(record.controller_id).last_error_code == "ADVANCED"
+
+
+def test_journal_cannot_remove_pending_insert_operation_identity(
+    tmp_path: Path,
+) -> None:
+    record = _prepared_record(tmp_path)
+    root = tmp_path / "pending-insert"
+    root.mkdir()
+    journal = GcpLeaseJournal(root)
+    armed = record.model_copy(
+        update={"state": "ARM_CONSUMED", "arm_consumed": True}
+    )
+    journal.reserve(armed)
+    pending = armed.model_copy(
+        update={
+            "state": "CREATE_SUBMITTED",
+            "provider_mutation_attempted": True,
+            "provider_mutation_ambiguous": True,
+            "provider_operation_id": "op-00000001",
+            "provider_operation_name": (
+                f"projects/{armed.project_id}/zones/{armed.zone}/operations/op-00000001"
+            ),
+            "provider_operation_kind": "insert",
+            "provider_operation_status": "PENDING",
+            "last_error_code": "CREATE_MUTATION_PENDING",
+        }
+    )
+    journal.update(pending)
+    removed = pending.model_copy(
+        update={
+            "provider_operation_id": None,
+            "provider_operation_name": None,
+            "provider_operation_kind": None,
+            "provider_operation_status": "UNKNOWN",
+            "provider_operation_terminal": False,
+        }
+    )
+    with pytest.raises(GcpJournalError, match="operation identity"):
+        journal.update(removed)
+
+
+def test_journal_cannot_remove_pending_delete_operation_identity(
+    tmp_path: Path,
+) -> None:
+    record = _prepared_record(tmp_path)
+    root = tmp_path / "pending-delete"
+    root.mkdir()
+    journal = GcpLeaseJournal(root)
+    armed = record.model_copy(
+        update={"state": "ARM_CONSUMED", "arm_consumed": True}
+    )
+    journal.reserve(armed)
+    insert_pending = armed.model_copy(
+        update={
+            "state": "CREATE_SUBMITTED",
+            "provider_mutation_attempted": True,
+            "provider_mutation_ambiguous": True,
+            "provider_operation_id": "op-00000001",
+            "provider_operation_name": (
+                f"projects/{armed.project_id}/zones/{armed.zone}/operations/op-00000001"
+            ),
+            "provider_operation_kind": "insert",
+            "provider_operation_status": "PENDING",
+            "last_error_code": "CREATE_MUTATION_PENDING",
+        }
+    )
+    journal.update(insert_pending)
+    insert_done = insert_pending.model_copy(
+        update={
+            "provider_mutation_ambiguous": False,
+            "provider_operation_status": "DONE",
+            "provider_operation_terminal": True,
+            "last_error_code": None,
+        }
+    )
+    journal.update(insert_done)
+    delete_pending = insert_done.model_copy(
+        update={
+            "state": "CLEANUP_PENDING",
+            "delete_attempts": 1,
+            "provider_mutation_ambiguous": True,
+            "provider_operation_id": "op-00000002",
+            "provider_operation_name": (
+                f"projects/{armed.project_id}/zones/{armed.zone}/operations/op-00000002"
+            ),
+            "provider_operation_kind": "delete",
+            "provider_operation_status": "PENDING",
+            "provider_operation_terminal": False,
+            "last_error_code": "DELETE_MUTATION_PENDING",
+        }
+    )
+    journal.update(delete_pending)
+    removed = delete_pending.model_copy(
+        update={
+            "provider_operation_id": None,
+            "provider_operation_name": None,
+            "provider_operation_kind": None,
+            "provider_operation_status": "UNKNOWN",
+            "provider_operation_terminal": False,
+        }
+    )
+    with pytest.raises(GcpJournalError, match="operation identity"):
+        journal.update(removed)
 
 
 def test_sigkill_after_durable_insert_intent_recovers_as_orphan(tmp_path: Path) -> None:
@@ -1393,13 +1653,22 @@ def test_provider_labels_and_request_ids_are_provider_safe() -> None:
 )
 def test_a2_mapping_rejects_every_non_closed_machine(machine_type: str) -> None:
     with pytest.raises(GcpExecutionError, match="closed A2 profile"):
-        validate_gcp_a2_profile(machine_type, "NVIDIA A100-SXM4-40GB", 1)
+        validate_gcp_a2_profile(
+            machine_type, "NVIDIA A100-SXM4-40GB", "nvidia-tesla-a100", 1
+        )
     assert validate_gcp_a2_profile(
-        "a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", 1
+        "a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", "nvidia-tesla-a100", 1
     ) == "provider"
     assert validate_gcp_a2_profile(
-        "synthetic-a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", 1
+        "synthetic-a2-highgpu-1g",
+        "NVIDIA A100-SXM4-40GB",
+        "synthetic-a100-sxm4-40gb",
+        1,
     ) == "synthetic"
+    with pytest.raises(GcpExecutionError, match="closed A2 profile"):
+        validate_gcp_a2_profile(
+            "a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", "nvidia-h100-80gb", 1
+        )
 
 
 def test_boot_image_requires_name_and_separate_provider_identity() -> None:
@@ -1642,7 +1911,15 @@ def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> 
         }
     )
 
-    operation = sdk.Operation(name="operation-1", status=sdk.Operation.Status.DONE)
+    operation = sdk.Operation(
+        name="operation-1",
+        status=sdk.Operation.Status.DONE,
+        operation_type="insert",
+        target_link=(
+            "https://www.googleapis.com/compute/v1/projects/inferdrome-example/"
+            "zones/us-central1-b/instances/inferdrome-ctl-12345678"
+        ),
+    )
 
     class Client:
         def insert(self, *, request: Any, timeout: int) -> Any:
