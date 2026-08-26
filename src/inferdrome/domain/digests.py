@@ -28,6 +28,7 @@ class DigestDomain(StrEnum):
     GCP_EXECUTION_QUOTE = "gcp-execution-quote-v1"
     GCP_EXECUTION_RESULT = "gcp-execution-result-v1"
     GCP_EXECUTION_JOURNAL = "gcp-execution-journal-v1"
+    DEPLOYMENT_QUALIFICATION = "deployment-qualification-v1"
 
 
 def digest_bytes(domain: DigestDomain, payload: bytes) -> str:

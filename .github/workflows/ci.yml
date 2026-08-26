@@ -45,6 +45,41 @@ jobs:
           INFERDROME_PYTHON: python
         run: ./scripts/engineering_gate.sh
 
+  deployment-qualification:
+    name: Deployment qualification gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install qualification dependencies
+        run: python -m pip install --editable ".[dev]"
+
+      - name: Run the deployment qualification gate
+        env:
+          INFERDROME_PYTHON: python
+          INFERDROME_QUALIFICATION_OUTPUT_ROOT: ${{ runner.temp }}/inferdrome-qualification-output
+        run: ./scripts/deployment_qualification_gate.sh
+
+      - name: Upload qualification report
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-qualification-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inferdrome-qualification-output
+          if-no-files-found: error
+          retention-days: 14
+
   dashboard:
     name: Dashboard gate
     runs-on: ubuntu-24.04

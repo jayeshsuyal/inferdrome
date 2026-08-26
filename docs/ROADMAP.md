@@ -74,6 +74,27 @@ evidence-ineligible normalization boundary. SGLang serving, a live producer
 run, request-identity/start-offset capture, and a future evidence v2 contract
 remain open; no eligible SGLang evidence is claimed.
 
+### Deployment Qualification v1 — zero-spend local orchestration
+
+Status: implementation slice; the qualification report is additive and outside
+the frozen public evidence schemas.
+
+This slice adds one explicitly confirmed Docker Compose command for the
+accepted local mock. It executes the existing runner and mock-engine as
+separate services, verifies one bounded canonical synthetic output, scopes
+cleanup and residual inspection to one validated generated Compose project,
+and publishes a no-replace immutable qualification report only after complete
+cleanup and independent read-back verification. It records source, contract,
+specification, output, and genuinely available image identities.
+
+The report is permanently `SYNTHETIC_ONLY` and evidence-ineligible. It issues
+no deployment receipt, acceptance verdict, hardware claim, cloud call, GPU
+observation, CUDA/vLLM claim, or model-download result. The dedicated gate
+runs injected failure/cleanup tests and a real Docker E2E on CI; a Docker-less
+local host runs only the non-Docker portion and reports the E2E unavailable.
+The focused procedure is documented in
+[DEPLOYMENT_QUALIFICATION_V1.md](DEPLOYMENT_QUALIFICATION_V1.md).
+
 ## PR 0 — Freeze the foundation
 
 Deliver:
