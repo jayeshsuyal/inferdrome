@@ -71,12 +71,25 @@ jobs:
           INFERDROME_QUALIFICATION_OUTPUT_ROOT: ${{ runner.temp }}/inferdrome-qualification-output
         run: ./scripts/deployment_qualification_gate.sh
 
+      - name: Stage verified qualification report for artifact upload
+        if: ${{ success() }}
+        run: |
+          output_root="${{ runner.temp }}/inferdrome-qualification-output"
+          upload_root="${{ runner.temp }}/inferdrome-qualification-report"
+          report_files=("$output_root"/*/qualification.json)
+          if [[ "${#report_files[@]}" -ne 1 ]]; then
+            echo "expected exactly one verified qualification report" >&2
+            exit 1
+          fi
+          mkdir -p -- "$upload_root"
+          cp -- "${report_files[0]}" "$upload_root/qualification.json"
+
       - name: Upload qualification report
         if: ${{ success() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deployment-qualification-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/inferdrome-qualification-output
+          path: ${{ runner.temp }}/inferdrome-qualification-report
           if-no-files-found: error
           retention-days: 14
 
