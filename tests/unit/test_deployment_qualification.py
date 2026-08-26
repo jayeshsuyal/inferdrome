@@ -46,6 +46,8 @@ class FakeProcessRunner:
         up_status: int = 0,
         cleanup_statuses: list[int] | None = None,
         output: bytes | None = None,
+        up_stdout: bytes = b"",
+        up_stderr: bytes = b"",
         context_host: str = "unix:///var/run/docker.sock",
         image_output: bytes | None = None,
         on_up: Callable[[dict[str, str]], None] | None = None,
@@ -53,10 +55,13 @@ class FakeProcessRunner:
         self.up_status = up_status
         self.cleanup_statuses = list(cleanup_statuses or [0])
         self.output = output if output is not None else expected_compose_output_bytes()
+        self.up_stdout = up_stdout
+        self.up_stderr = up_stderr
         self.context_host = context_host
         self.image_output = image_output
         self.on_up = on_up
         self.calls: list[tuple[str, ...]] = []
+        self.compose_override_content: bytes | None = None
 
     def run(
         self,
@@ -80,13 +85,15 @@ class FakeProcessRunner:
         if command[0:3] == ("docker", "compose", "version"):
             return ProcessResult(0, b"2.39.1\n")
         if command[0:2] == ("docker", "compose") and "config" in command:
+            self._capture_compose_override(command)
             return ProcessResult(0)
         if command[0:2] == ("docker", "compose") and "up" in command:
+            self._capture_compose_override(command)
             evidence = Path(env["INFERDROME_COMPOSE_EVIDENCE_DIR"])
             (evidence / "runner-output.json").write_bytes(self.output)
             if self.on_up is not None:
                 self.on_up(env)
-            return ProcessResult(self.up_status)
+            return ProcessResult(self.up_status, self.up_stdout, self.up_stderr)
         if command[0:3] == ("docker", "image", "inspect"):
             if self.image_output is not None:
                 return ProcessResult(0, self.image_output)
@@ -104,6 +111,13 @@ class FakeProcessRunner:
         }:
             return ProcessResult(0, b"")
         raise AssertionError(f"unexpected argv: {command}")
+
+    def _capture_compose_override(self, command: tuple[str, ...]) -> None:
+        file_indexes = [index for index, item in enumerate(command) if item == "-f"]
+        assert len(file_indexes) == 2
+        self.compose_override_content = Path(
+            command[file_indexes[-1] + 1]
+        ).read_bytes()
 
 
 def _root(tmp_path: Path) -> Path:
@@ -160,6 +174,21 @@ def test_success_binds_exact_inputs_output_images_and_scoped_cleanup(
     assert report.output_observation.sha256 == sha256_digest(
         expected_compose_output_bytes()
     )
+    assert report.image_observations[0].image_reference == (
+        f"inferdrome/compose-mock:{PROJECT}"
+    )
+    assert report.image_observations[1].image_reference == (
+        f"inferdrome/runner:{PROJECT}"
+    )
+    assert fake.compose_override_content is not None
+    assert (
+        f"inferdrome/compose-mock:{PROJECT}".encode()
+        in fake.compose_override_content
+    )
+    assert f"inferdrome/runner:{PROJECT}".encode() in fake.compose_override_content
+    assert report.compose_override_sha256 == sha256_digest(
+        fake.compose_override_content
+    )
     assert report.cleanup.action == QUALIFICATION_CLEANUP_ACTION
     assert report.cleanup.project_name == PROJECT
     assert report.cleanup.residual_container_count == 0
@@ -177,6 +206,7 @@ def test_success_binds_exact_inputs_output_images_and_scoped_cleanup(
         expected_source_revision=SOURCE_REVISION,
         expected_deployment_spec_digest=report.deployment_spec_digest,
         expected_compose_file_sha256=report.compose_file_sha256,
+        expected_compose_override_sha256=report.compose_override_sha256,
         expected_compose_contract_sha256=report.compose_contract_sha256,
         expected_runtime_contract_sha256=report.runtime_contract_sha256,
         expected_output_sha256=report.output_observation.sha256,
@@ -184,17 +214,17 @@ def test_success_binds_exact_inputs_output_images_and_scoped_cleanup(
 
     down = _cleanup_calls(fake)
     assert len(down) == 1
-    assert down[0] == (
+    assert down[0][:7] == (
         "docker",
         "compose",
         "-p",
         PROJECT,
         "-f",
         str(REPOSITORY_ROOT / "compose.yaml"),
-        "down",
-        "--remove-orphans",
-        "--volumes",
+        "-f",
     )
+    assert Path(down[0][7]).name == ".qualification-compose.override.yaml"
+    assert down[0][8:] == ("down", "--remove-orphans", "--volumes")
     residual_queries = [
         call
         for call in fake.calls
@@ -231,6 +261,32 @@ def test_malformed_output_is_rejected_and_cleanup_still_runs(tmp_path: Path) -> 
     assert error.value.code == "OUTPUT_INVALID"
     assert len(_cleanup_calls(fake)) == 1
     assert list(report_root.iterdir()) == []
+
+
+def test_compose_failure_exposes_bounded_redacted_diagnostics(tmp_path: Path) -> None:
+    secret = b"secret-token-value"
+    fake = FakeProcessRunner(
+        up_status=17,
+        up_stdout=b"compose output\x1b[31m\n",
+        up_stderr=b"permission denied token=" + secret + b"\n",
+    )
+    report_root = _root(tmp_path)
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=report_root,
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "COMPOSE_RUN_FAILED"
+    assert error.value.diagnostic is not None
+    assert "compose output" in error.value.diagnostic
+    assert "[REDACTED]" in error.value.diagnostic
+    assert secret.decode() not in error.value.diagnostic
+    assert len(error.value.diagnostic.encode()) <= 8 * 1024
+    assert len(_cleanup_calls(fake)) == 1
+    assert not list(report_root.iterdir())
 
 
 def test_cleanup_failure_dominates_compose_failure_and_retries(tmp_path: Path) -> None:

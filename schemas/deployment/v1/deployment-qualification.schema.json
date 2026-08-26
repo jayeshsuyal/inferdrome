@@ -86,6 +86,13 @@
           "default": null,
           "title": "Image Id"
         },
+        "image_reference": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^inferdrome/(?:compose-mock|runner):[a-z0-9](?:[a-z0-9_.-]{0,126}[a-z0-9])?$",
+          "title": "Image Reference",
+          "type": "string"
+        },
         "observation_status": {
           "enum": [
             "OBSERVED",
@@ -115,6 +122,7 @@
       },
       "required": [
         "service",
+        "image_reference",
         "observation_status"
       ],
       "title": "QualificationImageObservation",
@@ -184,6 +192,11 @@
     "compose_file_sha256": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Compose File Sha256",
+      "type": "string"
+    },
+    "compose_override_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Compose Override Sha256",
       "type": "string"
     },
     "compose_project": {
@@ -323,6 +336,7 @@
     "inferdrome_version",
     "deployment_spec_digest",
     "compose_file_sha256",
+    "compose_override_sha256",
     "compose_contract_sha256",
     "runtime_contract_sha256",
     "compose_project",

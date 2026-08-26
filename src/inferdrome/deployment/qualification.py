@@ -53,6 +53,7 @@ from inferdrome.vllm_compose import (
 QUALIFICATION_SCHEMA_VERSION: Final = "inferdrome.deployment-qualification.v1"
 QUALIFICATION_SCHEMA_ID: Final = "urn:inferdrome:deployment-qualification:v1"
 QUALIFICATION_FILENAME: Final = "qualification.json"
+QUALIFICATION_OVERRIDE_FILENAME: Final = ".qualification-compose.override.yaml"
 QUALIFICATION_PROJECT_PREFIX: Final = "inferdrome-qual-"
 QUALIFICATION_OUTPUT_SCHEMA_VERSION: Final = "inferdrome.runner-probe-output.v1"
 QUALIFICATION_CLEANUP_ACTION: Final = "docker compose down --remove-orphans --volumes"
@@ -60,6 +61,7 @@ QUALIFICATION_SCOPE_LABEL: Final = "com.docker.compose.project"
 QUALIFICATION_MAX_BYTES: Final = 262_144
 QUALIFICATION_MAX_OUTPUT_BYTES: Final = 64 * 1024
 QUALIFICATION_MAX_DIAGNOSTIC_BYTES: Final = 64 * 1024
+QUALIFICATION_MAX_FAILURE_DIAGNOSTIC_BYTES: Final = 8 * 1024
 QUALIFICATION_MAX_RESIDUAL_RESOURCES: Final = 100
 QUALIFICATION_TIMEOUT_SECONDS: Final = 1_800.0
 QUALIFICATION_PROJECT_PATTERN: Final = re.compile(
@@ -67,12 +69,23 @@ QUALIFICATION_PROJECT_PATTERN: Final = re.compile(
 )
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
+_IMAGE_REFERENCE_PATTERN = re.compile(
+    r"^inferdrome/(?:compose-mock|runner):[a-z0-9](?:[a-z0-9_.-]{0,126}[a-z0-9])?$"
+)
 _VERSION_PATTERN = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:[.-][0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
 )
 _RESOURCE_ID_PATTERN = re.compile(r"^[0-9a-f]{12,64}$")
 _REPOSITORY_DIGEST_PATTERN = re.compile(r"^.+@(?P<digest>sha256:[0-9a-f]{64})$")
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_DIAGNOSTIC_SECRET_PATTERN = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|api[_ -]?key|access[_ -]?key|"
+    r"secret|password|passwd|credential|token|bearer)\b\s*(?:[:=]|is)\s*[^\s,;]+"
+)
+_DIAGNOSTIC_URL_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"
+)
 _SENSITIVE_KEYS = frozenset(
     {
         "accesskey",
@@ -113,9 +126,71 @@ _EXPECTED_COMPOSE_SHAPE = {"mock-engine", "synthetic-smoke"}
 class QualificationError(Exception):
     """A bounded qualification failure with no command or secret payload."""
 
-    def __init__(self, message: str, *, code: str = "QUALIFICATION_FAILED") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "QUALIFICATION_FAILED",
+        diagnostic: str | None = None,
+    ) -> None:
         self.code = code
+        self.diagnostic = (
+            _sanitize_diagnostic_bytes(label="diagnostic", raw=diagnostic.encode())
+            if diagnostic
+            else None
+        )
         super().__init__(message)
+
+
+def _sanitize_diagnostic_bytes(*, label: str, raw: bytes) -> str:
+    """Keep failure context useful while excluding control bytes and secrets."""
+
+    bounded = raw[:QUALIFICATION_MAX_DIAGNOSTIC_BYTES]
+    text = bounded.decode("utf-8", errors="replace")
+    text = _ANSI_ESCAPE_PATTERN.sub("", text)
+    safe_lines: list[str] = []
+    for line in text.splitlines():
+        safe = "".join(
+            character
+            if character in "\t" or ord(character) >= 0x20
+            else "?"
+            for character in line
+        )
+        safe = _DIAGNOSTIC_URL_CREDENTIAL_PATTERN.sub(r"\1[REDACTED]@", safe)
+        safe = _DIAGNOSTIC_SECRET_PATTERN.sub(
+            lambda match: f"{match.group(1)}=[REDACTED]",
+            safe,
+        )
+        safe_lines.append(safe)
+    result = f"{label}:\n" + "\n".join(safe_lines)
+    encoded = result.encode("utf-8")
+    if len(encoded) > QUALIFICATION_MAX_FAILURE_DIAGNOSTIC_BYTES:
+        encoded = encoded[:QUALIFICATION_MAX_FAILURE_DIAGNOSTIC_BYTES]
+        result = encoded.decode("utf-8", errors="ignore") + "\n[truncated]"
+    return result
+
+
+def _process_diagnostic(label: str, result: ProcessResult) -> str:
+    sections = [f"{label} exit_code={result.returncode}"]
+    if result.stdout:
+        sections.append(
+            _sanitize_diagnostic_bytes(label="stdout", raw=result.stdout)
+        )
+    if result.stderr:
+        sections.append(
+            _sanitize_diagnostic_bytes(label="stderr", raw=result.stderr)
+        )
+    if not result.stdout and not result.stderr:
+        sections.append("no diagnostics returned")
+    return _sanitize_diagnostic_bytes(label=label, raw="\n".join(sections).encode())
+
+
+def _bounded_diagnostic_text(values: Sequence[str]) -> str | None:
+    if not values:
+        return None
+    return _sanitize_diagnostic_bytes(
+        label="qualification", raw="\n".join(values).encode()
+    )
 
 
 class QualificationPublicationError(QualificationError):
@@ -146,12 +221,21 @@ QualificationVersion = StringConstraints(
         r"(?:[.-][0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
     ),
 )
+ImageReference = StringConstraints(
+    min_length=1,
+    max_length=128,
+    pattern=(
+        r"^inferdrome/(?:compose-mock|runner):[a-z0-9]"
+        r"(?:[a-z0-9_.-]{0,126}[a-z0-9])?$"
+    ),
+)
 
 
 class QualificationImageObservation(QualificationModel):
     """Image identity returned by Docker, never copied from Compose config."""
 
     service: Literal["mock-engine", "synthetic-smoke"]
+    image_reference: Annotated[str, ImageReference]
     observation_status: Literal["OBSERVED", "UNAVAILABLE"]
     image_id: Sha256Digest | None = None
     repository_digests: tuple[Sha256Digest, ...] = Field(default=(), max_length=8)
@@ -212,6 +296,7 @@ class QualificationPayload(QualificationModel):
     inferdrome_version: Annotated[str, QualificationVersion]
     deployment_spec_digest: Sha256Digest
     compose_file_sha256: Sha256Digest
+    compose_override_sha256: Sha256Digest
     compose_contract_sha256: Sha256Digest
     runtime_contract_sha256: Sha256Digest
     compose_project: Annotated[str, ProjectName]
@@ -230,6 +315,17 @@ class QualificationPayload(QualificationModel):
             "synthetic-smoke",
         ):
             raise ValueError("qualification image observations are not ordered")
+        expected_references = (
+            f"inferdrome/compose-mock:{self.compose_project}",
+            f"inferdrome/runner:{self.compose_project}",
+        )
+        if (
+            tuple(item.image_reference for item in self.image_observations)
+            != expected_references
+        ):
+            raise ValueError(
+                "qualification image references are not unique to project"
+            )
         if self.cleanup.project_name != self.compose_project:
             raise ValueError("qualification cleanup project disagrees")
         if (
@@ -437,6 +533,7 @@ class _CleanupObservation:
     residual: _ResidualResources | None
     confirmed: bool
     failure_code: str
+    diagnostic: str | None = None
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -550,6 +647,7 @@ def verify_qualification_report_bytes(
     expected_source_revision: str | None = None,
     expected_deployment_spec_digest: str | None = None,
     expected_compose_file_sha256: str | None = None,
+    expected_compose_override_sha256: str | None = None,
     expected_compose_contract_sha256: str | None = None,
     expected_runtime_contract_sha256: str | None = None,
     expected_output_sha256: str | None = None,
@@ -563,6 +661,7 @@ def verify_qualification_report_bytes(
         (expected_source_revision, report.source_revision),
         (expected_deployment_spec_digest, report.deployment_spec_digest),
         (expected_compose_file_sha256, report.compose_file_sha256),
+        (expected_compose_override_sha256, report.compose_override_sha256),
         (expected_compose_contract_sha256, report.compose_contract_sha256),
         (expected_runtime_contract_sha256, report.runtime_contract_sha256),
         (expected_output_sha256, report.output_observation.sha256),
@@ -693,6 +792,70 @@ def _validate_project(value: str) -> str:
 
 def _new_project() -> str:
     return _validate_project(QUALIFICATION_PROJECT_PREFIX + secrets.token_hex(16))
+
+
+def _image_references(project: str) -> tuple[str, str]:
+    references = (
+        f"inferdrome/compose-mock:{project}",
+        f"inferdrome/runner:{project}",
+    )
+    if any(
+        _IMAGE_REFERENCE_PATTERN.fullmatch(reference) is None
+        for reference in references
+    ):
+        raise QualificationError(
+            "qualification image identity is invalid", code="PROJECT_INVALID"
+        )
+    return references
+
+
+def _write_compose_override(
+    work: Path, project: str
+) -> tuple[Path, Sha256Digest, tuple[str, str]]:
+    references = _image_references(project)
+    content = (
+        "services:\n"
+        f"  mock-engine:\n    image: {references[0]}\n"
+        f"  synthetic-smoke:\n    image: {references[1]}\n"
+    ).encode("ascii")
+    path = work / QUALIFICATION_OVERRIDE_FILENAME
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError
+            view = view[written:]
+        os.fsync(descriptor)
+    except OSError:
+        raise QualificationError(
+            "qualification Compose override could not be created", code="PATH_INVALID"
+        ) from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    return path, sha256_digest(content), references
+
+
+def _compose_argv(
+    project: str,
+    compose_files: Sequence[Path],
+    *arguments: str,
+) -> list[str]:
+    argv = ["docker", "compose", "-p", project]
+    for compose_file in compose_files:
+        argv.extend(("-f", str(compose_file)))
+    argv.extend(arguments)
+    return argv
 
 
 def _safe_environment(*, uid: int, gid: int, evidence_dir: Path) -> dict[str, str]:
@@ -1171,38 +1334,43 @@ def _inspect_residuals(
 def _cleanup_compose(
     runner: ProcessRunner,
     *,
-    compose_file: Path,
+    compose_files: Sequence[Path],
     project: str,
     env: Mapping[str, str],
     attempts_allowed: int,
 ) -> _CleanupObservation:
-    cleanup_argv = [
-        "docker",
-        "compose",
-        "-p",
+    cleanup_argv = _compose_argv(
         project,
-        "-f",
-        str(compose_file),
+        compose_files,
         "down",
         "--remove-orphans",
         "--volumes",
-    ]
+    )
     attempts = 0
     exit_code = 125
+    diagnostics: list[str] = []
     for _ in range(attempts_allowed):
         attempts += 1
         try:
             result = _result(runner, cleanup_argv, env, 120.0)
             exit_code = result.returncode if 0 <= result.returncode <= 255 else 125
+            if exit_code != 0:
+                diagnostics.append(_process_diagnostic("compose cleanup", result))
         except BaseException:
             exit_code = 125
+            diagnostics.append("compose cleanup: subprocess raised a bounded failure")
         if exit_code == 0:
             break
     try:
         residual = _inspect_residuals(runner, project=project, env=env)
     except BaseException:
         return _CleanupObservation(
-            attempts, exit_code, None, False, "RESIDUAL_INSPECTION_FAILED"
+            attempts,
+            exit_code,
+            None,
+            False,
+            "RESIDUAL_INSPECTION_FAILED",
+            _bounded_diagnostic_text(diagnostics),
         )
     confirmed = exit_code == 0 and (
         residual.containers,
@@ -1217,20 +1385,22 @@ def _cleanup_compose(
         ""
         if confirmed
         else ("RESIDUAL_RESOURCES" if exit_code == 0 else "CLEANUP_FAILED"),
+        _bounded_diagnostic_text(diagnostics),
     )
 
 
 def _observe_images(
     runner: ProcessRunner,
     *,
+    image_references: tuple[str, str],
     env: Mapping[str, str],
 ) -> tuple[QualificationImageObservation, ...]:
     observations: list[QualificationImageObservation] = []
     image_specs: tuple[
         tuple[Literal["mock-engine", "synthetic-smoke"], str], ...
     ] = (
-        ("mock-engine", _MOCK_ENGINE_IMAGE),
-        ("synthetic-smoke", _RUNNER_IMAGE),
+        ("mock-engine", image_references[0]),
+        ("synthetic-smoke", image_references[1]),
     )
     for service, image in image_specs:
         try:
@@ -1291,6 +1461,7 @@ def _observe_images(
             observations.append(
                 QualificationImageObservation(
                     service=service,
+                    image_reference=image,
                     observation_status="OBSERVED",
                     image_id=image_id,
                     repository_digests=tuple(parsed_digests),
@@ -1300,6 +1471,7 @@ def _observe_images(
             observations.append(
                 QualificationImageObservation(
                     service=service,
+                    image_reference=image,
                     observation_status="UNAVAILABLE",
                     image_id=None,
                     repository_digests=(),
@@ -1337,6 +1509,7 @@ def _publish_report(
             expected_source_revision=report.source_revision,
             expected_deployment_spec_digest=report.deployment_spec_digest,
             expected_compose_file_sha256=report.compose_file_sha256,
+            expected_compose_override_sha256=report.compose_override_sha256,
             expected_compose_contract_sha256=report.compose_contract_sha256,
             expected_runtime_contract_sha256=report.runtime_contract_sha256,
             expected_output_sha256=report.output_observation.sha256,
@@ -1369,6 +1542,7 @@ def _build_report(
     project: str,
     deployment_digest: Sha256Digest,
     compose_file_digest: Sha256Digest,
+    compose_override_digest: Sha256Digest,
     compose_contract_digest: Sha256Digest,
     runtime_contract_digest: Sha256Digest,
     image_observations: tuple[QualificationImageObservation, ...],
@@ -1406,6 +1580,7 @@ def _build_report(
         inferdrome_version=__version__,
         deployment_spec_digest=deployment_digest,
         compose_file_sha256=compose_file_digest,
+        compose_override_sha256=compose_override_digest,
         compose_contract_sha256=compose_contract_digest,
         runtime_contract_sha256=runtime_contract_digest,
         compose_project=project,
@@ -1502,6 +1677,9 @@ def qualify_compose_mock(
     host_cleanup_failure: QualificationError | None = None
     output_observation: QualificationOutputObservation | None = None
     image_observations: tuple[QualificationImageObservation, ...] = ()
+    image_references: tuple[str, str] = _image_references(project)
+    compose_override_digest: Sha256Digest | None = None
+    compose_files: tuple[Path, ...] = (COMPOSE_FILE,)
     env: Mapping[str, str] = {}
     try:
         evidence = work / "evidence"
@@ -1509,6 +1687,10 @@ def qualify_compose_mock(
         env = _safe_environment(
             uid=selected_uid, gid=selected_gid, evidence_dir=evidence
         )
+        override_file, compose_override_digest, image_references = (
+            _write_compose_override(work, project)
+        )
+        compose_files = (COMPOSE_FILE, override_file)
         observed_revision = _observe_source_revision(
             process_runner,
             repository_root=REPOSITORY_ROOT,
@@ -1525,7 +1707,9 @@ def qualify_compose_mock(
         )
         if version.returncode != 0:
             raise QualificationError(
-                "Docker Compose v2 is unavailable", code="DOCKER_UNAVAILABLE"
+                "Docker Compose v2 is unavailable",
+                code="DOCKER_UNAVAILABLE",
+                diagnostic=_process_diagnostic("docker compose version", version),
             )
         preexisting = _inspect_residuals(process_runner, project=project, env=env)
         if (preexisting.containers, preexisting.networks, preexisting.volumes) != (
@@ -1539,34 +1723,23 @@ def qualify_compose_mock(
             )
         config = _result(
             process_runner,
-            [
-                "docker",
-                "compose",
-                "-p",
-                project,
-                "-f",
-                str(COMPOSE_FILE),
-                "config",
-                "--quiet",
-            ],
+            _compose_argv(project, compose_files, "config", "--quiet"),
             env,
             60.0,
         )
         if config.returncode != 0:
             raise QualificationError(
-                "accepted Compose file failed configuration", code="CONTRACT_INVALID"
+                "accepted Compose file failed configuration",
+                code="CONTRACT_INVALID",
+                diagnostic=_process_diagnostic("docker compose config", config),
             )
         _check_cancellation(cancellation)
         workflow_started = True
         up = _result(
             process_runner,
-            [
-                "docker",
-                "compose",
-                "-p",
+            _compose_argv(
                 project,
-                "-f",
-                str(COMPOSE_FILE),
+                compose_files,
                 "up",
                 "--build",
                 "--no-color",
@@ -1574,13 +1747,15 @@ def qualify_compose_mock(
                 "--exit-code-from",
                 "synthetic-smoke",
                 "synthetic-smoke",
-            ],
+            ),
             env,
             QUALIFICATION_TIMEOUT_SECONDS,
         )
         if up.returncode != 0:
             raise QualificationError(
-                "Compose mock workflow failed", code="COMPOSE_RUN_FAILED"
+                "Compose mock workflow failed",
+                code="COMPOSE_RUN_FAILED",
+                diagnostic=_process_diagnostic("docker compose up", up),
             )
         _check_cancellation(cancellation)
         output_raw = _regular_file(
@@ -1598,7 +1773,9 @@ def qualify_compose_mock(
                 raise QualificationError(
                     "synthetic output identity did not match", code="OUTPUT_MISMATCH"
                 )
-        image_observations = _observe_images(process_runner, env=env)
+        image_observations = _observe_images(
+            process_runner, image_references=image_references, env=env
+        )
     except CancellationRequested:
         primary_failure = QualificationError(
             "qualification was cancelled", code="CANCELLED"
@@ -1617,7 +1794,7 @@ def qualify_compose_mock(
         if workflow_started:
             cleanup_observation = _cleanup_compose(
                 process_runner,
-                compose_file=COMPOSE_FILE,
+                compose_files=compose_files,
                 project=project,
                 env=env,
                 attempts_allowed=spec.cleanup_policy.max_cleanup_attempts,
@@ -1636,6 +1813,7 @@ def qualify_compose_mock(
         raise QualificationError(
             "Compose cleanup or scoped residual confirmation failed",
             code=cleanup_observation.failure_code or "CLEANUP_FAILED",
+            diagnostic=cleanup_observation.diagnostic,
         )
     if host_cleanup_failure is not None:
         raise host_cleanup_failure
@@ -1645,11 +1823,17 @@ def qualify_compose_mock(
         raise QualificationError(
             "qualification observations are incomplete", code="OBSERVATION_INVALID"
         )
+    if compose_override_digest is None:
+        raise QualificationError(
+            "qualification Compose override observation is incomplete",
+            code="OBSERVATION_INVALID",
+        )
     report = _build_report(
         source_revision=observed_revision,
         project=project,
         deployment_digest=deployment_digest,
         compose_file_digest=compose_file_digest,
+        compose_override_digest=compose_override_digest,
         compose_contract_digest=compose_contract_digest,
         runtime_contract_digest=runtime_contract_digest,
         image_observations=image_observations,
@@ -1703,6 +1887,8 @@ def main(argv: list[str] | None = None) -> int:
             else (130 if error.code == "INTERRUPTED" else 2)
         )
         print(f"deployment qualification failed: {error.code}", file=sys.stderr)
+        if error.diagnostic:
+            print(error.diagnostic, file=sys.stderr)
         return exit_code
     except (OSError, ValueError):
         print(
