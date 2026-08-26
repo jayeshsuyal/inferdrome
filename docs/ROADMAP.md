@@ -83,9 +83,11 @@ This slice adds one explicitly confirmed Docker Compose command for the
 accepted local mock. It executes the existing runner and mock-engine as
 separate services, verifies one bounded canonical synthetic output, scopes
 cleanup and residual inspection to one validated generated Compose project,
-and publishes a no-replace immutable qualification report only after complete
-cleanup and independent read-back verification. It records source, contract,
-specification, output, and genuinely available image identities.
+uses project-derived image references with exact-tag cleanup, and publishes a
+no-replace immutable qualification report only after complete cleanup,
+post-cleanup source re-observation, and independent read-back verification. It
+records source, contract, specification, output, and genuinely available image
+identities.
 
 The report is permanently `SYNTHETIC_ONLY` and evidence-ineligible. It issues
 no deployment receipt, acceptance verdict, hardware claim, cloud call, GPU

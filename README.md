@@ -85,7 +85,9 @@ the complete frozen Qwen3 snapshot and the versioned private-endpoint binding.
 The guarded [Deployment Qualification v1 runbook](docs/DEPLOYMENT_QUALIFICATION_V1.md)
 executes the accepted local Compose mock as two separate services, verifies one
 bounded deterministic synthetic output, performs exact-project cleanup, proves
-zero scoped residue, and publishes a no-replace immutable qualification report.
+zero scoped residue, removes and verifies only its two project-derived image
+tags, and publishes a no-replace immutable qualification report. It rechecks
+source cleanliness and revision after cleanup before publication.
 It never launches cloud/GPU work, issues a receipt, publishes evidence, or
 claims vLLM/NVIDIA behavior.
 

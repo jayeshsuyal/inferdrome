@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -12,11 +13,12 @@ from jsonschema import Draft202012Validator
 
 from inferdrome.deployment import (
     QUALIFICATION_CLEANUP_ACTION,
+    BoundedSubprocessRunner,
     ProcessResult,
     QualificationError,
     canonical_qualification_bytes,
     expected_compose_output_bytes,
-    main,
+    qualification_main,
     qualification_schema,
     qualify_compose_mock,
     verify_qualification_report_bytes,
@@ -51,6 +53,13 @@ class FakeProcessRunner:
         context_host: str = "unix:///var/run/docker.sock",
         image_output: bytes | None = None,
         on_up: Callable[[dict[str, str]], None] | None = None,
+        source_revisions: list[str] | None = None,
+        status_outputs: list[bytes] | None = None,
+        post_cleanup_residual_ids: dict[str, bytes] | None = None,
+        post_cleanup_labels: dict[str, bytes] | None = None,
+        post_cleanup_label_status: dict[str, int] | None = None,
+        image_cleanup_status: int = 0,
+        post_cleanup_image_references: set[str] | None = None,
     ) -> None:
         self.up_status = up_status
         self.cleanup_statuses = list(cleanup_statuses or [0])
@@ -60,14 +69,28 @@ class FakeProcessRunner:
         self.context_host = context_host
         self.image_output = image_output
         self.on_up = on_up
+        self.source_revisions = list(source_revisions or [SOURCE_REVISION])
+        self.status_outputs = list(status_outputs or [b""])
+        self.post_cleanup_residual_ids = dict(post_cleanup_residual_ids or {})
+        self.post_cleanup_labels = dict(post_cleanup_labels or {})
+        self.post_cleanup_label_status = dict(post_cleanup_label_status or {})
+        self.image_cleanup_status = image_cleanup_status
+        self.post_cleanup_image_references = set(
+            post_cleanup_image_references or set()
+        )
         self.calls: list[tuple[str, ...]] = []
         self.compose_override_content: bytes | None = None
+        self.removed_image_references: tuple[str, ...] = ()
+        self.image_rm_called = False
+        self.source_head_calls = 0
+        self.source_status_calls = 0
+        self.cleanup_seen = False
 
     def run(
         self,
-        argv: list[str] | tuple[str, ...],
+        argv: Sequence[str],
         *,
-        env: dict[str, str],
+        env: Mapping[str, str],
         timeout_seconds: float,
     ) -> ProcessResult:
         del timeout_seconds
@@ -77,13 +100,36 @@ class FakeProcessRunner:
         assert "DOCKER_HOST" not in env
         assert "DOCKER_CONTEXT" not in env
         if command[:5] == ("git", "-C", str(REPOSITORY_ROOT), "rev-parse", "--verify"):
-            return ProcessResult(0, (SOURCE_REVISION + "\n").encode())
+            revision = self.source_revisions[
+                min(self.source_head_calls, len(self.source_revisions) - 1)
+            ]
+            self.source_head_calls += 1
+            return ProcessResult(0, (revision + "\n").encode())
         if command[:4] == ("git", "-C", str(REPOSITORY_ROOT), "status"):
-            return ProcessResult(0, b"")
+            status_bytes = self.status_outputs[
+                min(self.source_status_calls, len(self.status_outputs) - 1)
+            ]
+            self.source_status_calls += 1
+            return ProcessResult(0, status_bytes)
         if command[0:3] == ("docker", "context", "inspect"):
             return ProcessResult(0, json.dumps(self.context_host).encode() + b"\n")
         if command[0:3] == ("docker", "compose", "version"):
             return ProcessResult(0, b"2.39.1\n")
+        if command[0:3] == ("docker", "image", "ls"):
+            reference = command[-1].split("=", 1)[-1]
+            if self.cleanup_seen:
+                if not self.image_rm_called or (
+                    self.image_cleanup_status != 0
+                    and reference in self.removed_image_references
+                ):
+                    return ProcessResult(0, (reference + "\n").encode())
+                if reference in self.post_cleanup_image_references:
+                    return ProcessResult(0, (reference + "\n").encode())
+            return ProcessResult(0, b"")
+        if command[:4] == ("docker", "image", "rm", "--no-prune"):
+            self.removed_image_references = tuple(command[4:])
+            self.image_rm_called = True
+            return ProcessResult(self.image_cleanup_status)
         if command[0:2] == ("docker", "compose") and "config" in command:
             self._capture_compose_override(command)
             return ProcessResult(0)
@@ -101,15 +147,39 @@ class FakeProcessRunner:
             if any("RepoDigests" in item for item in command):
                 return ProcessResult(0, b"[]\n")
             return ProcessResult(0, json.dumps(digest).encode() + b"\n")
+        if command[0:3] in {
+            ("docker", "container", "inspect"),
+            ("docker", "network", "inspect"),
+            ("docker", "volume", "inspect"),
+        }:
+            kind = command[1]
+            return ProcessResult(
+                self.post_cleanup_label_status.get(kind, 0),
+                self.post_cleanup_labels.get(kind, b'{}\n'),
+            )
         if command[0:2] == ("docker", "compose") and "down" in command:
-            status = self.cleanup_statuses.pop(0) if self.cleanup_statuses else 0
-            return ProcessResult(status)
+            cleanup_status = (
+                self.cleanup_statuses.pop(0) if self.cleanup_statuses else 0
+            )
+            self.cleanup_seen = True
+            return ProcessResult(cleanup_status)
         if command[0:2] in {
             ("docker", "ps"),
             ("docker", "network"),
             ("docker", "volume"),
         }:
-            return ProcessResult(0, b"")
+            if command[0:2] == ("docker", "ps"):
+                kind = "container"
+            elif command[0:2] == ("docker", "network"):
+                kind = "network"
+            else:
+                kind = "volume"
+            output = (
+                self.post_cleanup_residual_ids.get(kind, b"")
+                if self.cleanup_seen
+                else b""
+            )
+            return ProcessResult(0, output)
         raise AssertionError(f"unexpected argv: {command}")
 
     def _capture_compose_override(self, command: tuple[str, ...]) -> None:
@@ -194,6 +264,12 @@ def test_success_binds_exact_inputs_output_images_and_scoped_cleanup(
     assert report.cleanup.residual_container_count == 0
     assert report.cleanup.residual_network_count == 0
     assert report.cleanup.residual_volume_count == 0
+    assert report.cleanup.image_tag_cleanup_confirmed is True
+    assert report.cleanup.image_tag_references == (
+        f"inferdrome/compose-mock:{PROJECT}",
+        f"inferdrome/runner:{PROJECT}",
+    )
+    assert fake.removed_image_references == report.cleanup.image_tag_references
     assert all(
         item.observation_status == "OBSERVED" for item in report.image_observations
     )
@@ -239,11 +315,32 @@ def test_success_binds_exact_inputs_output_images_and_scoped_cleanup(
         call[-2:] == ("--filter", f"label=com.docker.compose.project={PROJECT}")
         for call in residual_queries
     )
+    image_ls = [
+        call for call in fake.calls if call[:3] == ("docker", "image", "ls")
+    ]
+    assert len(image_ls) == 6
+    assert all(
+        call[-2:] == ("--filter", f"reference={reference}")
+        for call, reference in zip(
+            image_ls,
+            (
+                f"inferdrome/compose-mock:{PROJECT}",
+                f"inferdrome/runner:{PROJECT}",
+                f"inferdrome/compose-mock:{PROJECT}",
+                f"inferdrome/runner:{PROJECT}",
+                f"inferdrome/compose-mock:{PROJECT}",
+                f"inferdrome/runner:{PROJECT}",
+            ),
+            strict=True,
+        )
+    )
 
 
-def test_cli_requires_explicit_synthetic_confirmation(tmp_path: Path, capsys) -> None:
+def test_cli_requires_explicit_synthetic_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     report_root = _root(tmp_path)
-    assert main(["--output-root", str(report_root)]) == 2
+    assert qualification_main(["--output-root", str(report_root)]) == 2
     assert "--confirm-synthetic-compose" in capsys.readouterr().err
 
 
@@ -305,6 +402,128 @@ def test_cleanup_failure_dominates_compose_failure_and_retries(tmp_path: Path) -
     assert not list(report_root.iterdir())
 
 
+def test_image_tag_cleanup_failure_dominates_and_never_publishes(
+    tmp_path: Path,
+) -> None:
+    fake = FakeProcessRunner(image_cleanup_status=17)
+    report_root = _root(tmp_path)
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=report_root,
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "IMAGE_TAG_CLEANUP_FAILED"
+    assert fake.removed_image_references == (
+        f"inferdrome/compose-mock:{PROJECT}",
+        f"inferdrome/runner:{PROJECT}",
+    )
+    assert len(_cleanup_calls(fake)) == 1
+    assert not list(report_root.iterdir())
+
+
+def test_image_tag_residual_after_down_dominates_and_never_publishes(
+    tmp_path: Path,
+) -> None:
+    fake = FakeProcessRunner(
+        post_cleanup_image_references={f"inferdrome/runner:{PROJECT}"},
+    )
+    report_root = _root(tmp_path)
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=report_root,
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "IMAGE_TAG_RESIDUAL"
+    assert not list(report_root.iterdir())
+
+
+def test_residual_ids_after_down_and_label_mismatch_block_publication(
+    tmp_path: Path,
+) -> None:
+    fake = FakeProcessRunner(
+        post_cleanup_residual_ids={"container": ("a" * 64 + "\n").encode()},
+        post_cleanup_labels={
+            "container": b'{"com.docker.compose.project":"other-project"}\n'
+        },
+    )
+    report_root = _root(tmp_path)
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=report_root,
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "RESIDUAL_INSPECTION_FAILED"
+    assert not list(report_root.iterdir())
+
+
+def test_residual_label_inspection_failure_blocks_publication(tmp_path: Path) -> None:
+    fake = FakeProcessRunner(
+        post_cleanup_residual_ids={"container": ("a" * 64 + "\n").encode()},
+        post_cleanup_label_status={"container": 17},
+    )
+    report_root = _root(tmp_path)
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=report_root,
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "RESIDUAL_INSPECTION_FAILED"
+    assert not list(report_root.iterdir())
+
+
+def test_post_workflow_source_revision_drift_is_not_published(tmp_path: Path) -> None:
+    fake = FakeProcessRunner(source_revisions=[SOURCE_REVISION, "a" * 40])
+    report_root = _root(tmp_path)
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=report_root,
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "SOURCE_DRIFT"
+    assert fake.source_head_calls == 2
+    assert fake.source_status_calls == 2
+    assert not list(report_root.iterdir())
+
+
+def test_post_workflow_dirty_checkout_is_not_published(tmp_path: Path) -> None:
+    fake = FakeProcessRunner(status_outputs=[b"", b" M changed.py\n"])
+    report_root = _root(tmp_path)
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=report_root,
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "SOURCE_DIRTY"
+    assert not list(report_root.iterdir())
+
+
+def test_bounded_subprocess_terminates_timed_out_process() -> None:
+    result = BoundedSubprocessRunner().run(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        env={},
+        timeout_seconds=0.1,
+    )
+    assert result.returncode == 124
+
+
 def test_cancellation_after_up_is_cleaned_and_not_published(tmp_path: Path) -> None:
     token = CancellationToken()
     report_root = _root(tmp_path)
@@ -357,6 +576,36 @@ def test_project_collision_is_rejected_without_cleanup(tmp_path: Path) -> None:
             gid=os.getgid(),
         )
     assert error.value.code == "PROJECT_NOT_UNIQUE"
+    assert not _cleanup_calls(fake)
+
+
+def test_image_reference_collision_is_rejected_without_cleanup(tmp_path: Path) -> None:
+    fake = FakeProcessRunner()
+    original = fake.run
+
+    def collision(
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> ProcessResult:
+        command = tuple(argv)
+        if command[:3] == ("docker", "image", "ls"):
+            reference = command[-1].split("=", 1)[-1]
+            if reference == f"inferdrome/runner:{PROJECT}":
+                return ProcessResult(0, (reference + "\n").encode())
+        return original(argv, env=env, timeout_seconds=timeout_seconds)
+
+    fake.run = collision  # type: ignore[method-assign]
+    with pytest.raises(QualificationError) as error:
+        qualify_compose_mock(
+            output_root=_root(tmp_path),
+            runner=fake,
+            project_name=PROJECT,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert error.value.code == "IMAGE_REFERENCE_NOT_UNIQUE"
     assert not _cleanup_calls(fake)
 
 

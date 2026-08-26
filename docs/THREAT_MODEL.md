@@ -96,14 +96,19 @@ subprocess interface is an argv vector with a small allowlisted environment,
 bounded output/diagnostics, no shell, and bounded timeout termination.
 
 Every started workflow has one generated project identity. Cleanup uses that
-identity and fixed Compose file only; residual lists are filtered by the exact
-Compose project label and every returned resource is independently label
-checked. A collision fails before workflow start, cleanup/residual/temporary-
+identity, fixed Compose file, and a private project-derived image override;
+residual lists are filtered by the exact Compose project label and every
+returned resource is independently label checked. The two project-derived image
+tags are checked for collision before start, removed only by exact tag reference
+with `docker image rm --no-prune`, and independently verified absent; no image
+ID, shared layer, unrelated tag, or broad prune is accepted as a cleanup target.
+A collision fails before workflow start, cleanup/image-tag/residual/temporary-
 workspace failure dominates any primary result, and interrupted workflows do
-not publish. The report publisher uses canonical bytes, strict closed parsing,
-read-back verification, and no-replace publication under the report's
-domain-separated identity. Image configuration is never substituted for an
-observed Docker image identity.
+not publish. The source revision and clean-worktree observation is repeated
+after cleanup, so drift blocks publication. The report publisher uses canonical
+bytes, strict closed parsing, read-back verification, and no-replace publication
+under the report's domain-separated identity. Image configuration is never
+substituted for an observed Docker image identity.
 
 ### ExitSpec importer
 

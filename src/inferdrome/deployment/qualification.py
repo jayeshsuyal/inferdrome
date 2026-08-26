@@ -152,7 +152,7 @@ def _sanitize_diagnostic_bytes(*, label: str, raw: bytes) -> str:
     for line in text.splitlines():
         safe = "".join(
             character
-            if character in "\t" or ord(character) >= 0x20
+            if character in "\t" or (ord(character) >= 0x20 and ord(character) != 0x7F)
             else "?"
             for character in line
         )
@@ -274,6 +274,22 @@ class QualificationCleanup(QualificationModel):
     residual_network_count: Literal[0]
     residual_volume_count: Literal[0]
     cleanup_confirmed: Literal[True]
+    image_tag_cleanup_action: Literal["docker image rm --no-prune"]
+    image_tag_references: tuple[Annotated[str, ImageReference], ...] = Field(
+        min_length=2,
+        max_length=2,
+    )
+    image_tag_cleanup_confirmed: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_image_tag_cleanup(self) -> Self:
+        expected = (
+            f"inferdrome/compose-mock:{self.project_name}",
+            f"inferdrome/runner:{self.project_name}",
+        )
+        if self.image_tag_references != expected:
+            raise ValueError("qualification image tag cleanup is not project-scoped")
+        return self
 
 
 class QualificationPayload(QualificationModel):
@@ -527,12 +543,19 @@ class _ResidualResources:
 
 
 @dataclass(frozen=True)
+class _SourceObservation:
+    revision: str
+    worktree_clean: Literal[True]
+
+
+@dataclass(frozen=True)
 class _CleanupObservation:
     attempts: int
     exit_code: int
     residual: _ResidualResources | None
     confirmed: bool
     failure_code: str
+    image_tag_references: tuple[str, str]
     diagnostic: str | None = None
 
 
@@ -930,7 +953,7 @@ def _observe_source_revision(
     *,
     repository_root: Path,
     env: Mapping[str, str],
-) -> str:
+) -> _SourceObservation:
     head = _result(
         runner,
         ["git", "-C", str(repository_root), "rev-parse", "--verify", "HEAD"],
@@ -959,7 +982,7 @@ def _observe_source_revision(
         raise QualificationError(
             "source revision is invalid", code="OBSERVATION_INVALID"
         )
-    return value
+    return _SourceObservation(revision=value, worktree_clean=True)
 
 
 def _validate_local_docker_context(
@@ -1331,6 +1354,103 @@ def _inspect_residuals(
     )
 
 
+def _image_reference_listing(
+    runner: ProcessRunner,
+    *,
+    reference: str,
+    env: Mapping[str, str],
+) -> list[str]:
+    if _IMAGE_REFERENCE_PATTERN.fullmatch(reference) is None:
+        raise QualificationError(
+            "qualification image reference is invalid",
+            code="IMAGE_REFERENCE_INVALID",
+        )
+    result = _result(
+        runner,
+        [
+            "docker",
+            "image",
+            "ls",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+            "--filter",
+            f"reference={reference}",
+        ],
+        env,
+        30.0,
+    )
+    if result.returncode != 0:
+        raise QualificationError(
+            "qualification image reference could not be inspected",
+            code="IMAGE_REFERENCE_INSPECTION_FAILED",
+            diagnostic=_process_diagnostic("docker image ls", result),
+        )
+    try:
+        lines = [line for line in result.stdout.decode("ascii").splitlines() if line]
+    except UnicodeDecodeError:
+        raise QualificationError(
+            "qualification image reference listing is invalid",
+            code="IMAGE_REFERENCE_INSPECTION_FAILED",
+        ) from None
+    if len(result.stdout) > QUALIFICATION_MAX_DIAGNOSTIC_BYTES or len(lines) > 8:
+        raise QualificationError(
+            "qualification image reference listing is unbounded",
+            code="IMAGE_REFERENCE_INSPECTION_FAILED",
+        )
+    if any(_IMAGE_REFERENCE_PATTERN.fullmatch(line) is None for line in lines):
+        raise QualificationError(
+            "qualification image reference listing is invalid",
+            code="IMAGE_REFERENCE_INSPECTION_FAILED",
+        )
+    return lines
+
+
+def _assert_image_references_unclaimed(
+    runner: ProcessRunner,
+    *,
+    image_references: tuple[str, str],
+    env: Mapping[str, str],
+) -> None:
+    for reference in image_references:
+        if _image_reference_listing(runner, reference=reference, env=env):
+            raise QualificationError(
+                "generated qualification image reference is not unique",
+                code="IMAGE_REFERENCE_NOT_UNIQUE",
+            )
+
+
+def _remove_image_references(
+    runner: ProcessRunner,
+    *,
+    image_references: tuple[str, str],
+    env: Mapping[str, str],
+) -> None:
+    present_references = tuple(
+        reference
+        for reference in image_references
+        if _image_reference_listing(runner, reference=reference, env=env)
+    )
+    if present_references:
+        result = _result(
+            runner,
+            ["docker", "image", "rm", "--no-prune", *present_references],
+            env,
+            120.0,
+        )
+        if result.returncode != 0:
+            raise QualificationError(
+                "qualification image tag cleanup failed",
+                code="IMAGE_TAG_CLEANUP_FAILED",
+                diagnostic=_process_diagnostic("docker image rm", result),
+            )
+    for reference in image_references:
+        if _image_reference_listing(runner, reference=reference, env=env):
+            raise QualificationError(
+                "qualification image tag cleanup was not confirmed",
+                code="IMAGE_TAG_RESIDUAL",
+            )
+
+
 def _cleanup_compose(
     runner: ProcessRunner,
     *,
@@ -1339,6 +1459,7 @@ def _cleanup_compose(
     env: Mapping[str, str],
     attempts_allowed: int,
 ) -> _CleanupObservation:
+    image_references = _image_references(project)
     cleanup_argv = _compose_argv(
         project,
         compose_files,
@@ -1361,6 +1482,23 @@ def _cleanup_compose(
             diagnostics.append("compose cleanup: subprocess raised a bounded failure")
         if exit_code == 0:
             break
+    image_cleanup_failure: QualificationError | None = None
+    try:
+        _remove_image_references(
+            runner,
+            image_references=image_references,
+            env=env,
+        )
+    except QualificationError as error:
+        image_cleanup_failure = error
+        if error.diagnostic:
+            diagnostics.append(error.diagnostic)
+    except BaseException:
+        image_cleanup_failure = QualificationError(
+            "qualification image tag cleanup failed",
+            code="IMAGE_TAG_CLEANUP_FAILED",
+        )
+        diagnostics.append("image tag cleanup: subprocess raised a bounded failure")
     try:
         residual = _inspect_residuals(runner, project=project, env=env)
     except BaseException:
@@ -1369,7 +1507,16 @@ def _cleanup_compose(
             exit_code,
             None,
             False,
-            "RESIDUAL_INSPECTION_FAILED",
+            (
+                "CLEANUP_FAILED"
+                if exit_code != 0
+                else (
+                    image_cleanup_failure.code
+                    if image_cleanup_failure is not None
+                    else "RESIDUAL_INSPECTION_FAILED"
+                )
+            ),
+            image_references,
             _bounded_diagnostic_text(diagnostics),
         )
     confirmed = exit_code == 0 and (
@@ -1377,6 +1524,8 @@ def _cleanup_compose(
         residual.networks,
         residual.volumes,
     ) == (0, 0, 0)
+    if image_cleanup_failure is not None:
+        confirmed = False
     return _CleanupObservation(
         attempts,
         exit_code,
@@ -1384,7 +1533,16 @@ def _cleanup_compose(
         confirmed,
         ""
         if confirmed
-        else ("RESIDUAL_RESOURCES" if exit_code == 0 else "CLEANUP_FAILED"),
+        else (
+            "CLEANUP_FAILED"
+            if exit_code != 0
+            else (
+                image_cleanup_failure.code
+                if image_cleanup_failure is not None
+                else "RESIDUAL_RESOURCES"
+            )
+        ),
+        image_references,
         _bounded_diagnostic_text(diagnostics),
     )
 
@@ -1538,7 +1696,7 @@ def _publish_report(
 
 def _build_report(
     *,
-    source_revision: str,
+    source_observation: _SourceObservation,
     project: str,
     deployment_digest: Sha256Digest,
     compose_file_digest: Sha256Digest,
@@ -1550,7 +1708,8 @@ def _build_report(
     cleanup: _CleanupObservation,
 ) -> QualificationReport:
     if (
-        not _COMMIT_PATTERN.fullmatch(source_revision)
+        not _COMMIT_PATTERN.fullmatch(source_observation.revision)
+        or source_observation.worktree_clean is not True
         or not cleanup.confirmed
         or cleanup.residual is None
     ):
@@ -1575,8 +1734,8 @@ def _build_report(
         deployment_receipt_issued=False,
         evidence_published=False,
         source_repository=SOURCE_REPOSITORY_URL,
-        source_revision=source_revision,
-        source_worktree_clean=True,
+        source_revision=source_observation.revision,
+        source_worktree_clean=source_observation.worktree_clean,
         inferdrome_version=__version__,
         deployment_spec_digest=deployment_digest,
         compose_file_sha256=compose_file_digest,
@@ -1600,6 +1759,9 @@ def _build_report(
             residual_network_count=0,
             residual_volume_count=0,
             cleanup_confirmed=True,
+            image_tag_cleanup_action="docker image rm --no-prune",
+            image_tag_references=cleanup.image_tag_references,
+            image_tag_cleanup_confirmed=True,
         ),
     )
     return QualificationReport(
@@ -1681,6 +1843,7 @@ def qualify_compose_mock(
     compose_override_digest: Sha256Digest | None = None
     compose_files: tuple[Path, ...] = (COMPOSE_FILE,)
     env: Mapping[str, str] = {}
+    observed_source: _SourceObservation | None = None
     try:
         evidence = work / "evidence"
         evidence.mkdir(mode=0o700)
@@ -1691,12 +1854,15 @@ def qualify_compose_mock(
             _write_compose_override(work, project)
         )
         compose_files = (COMPOSE_FILE, override_file)
-        observed_revision = _observe_source_revision(
+        observed_source = _observe_source_revision(
             process_runner,
             repository_root=REPOSITORY_ROOT,
             env=env,
         )
-        if source_revision is not None and source_revision != observed_revision:
+        if (
+            source_revision is not None
+            and source_revision != observed_source.revision
+        ):
             raise QualificationError(
                 "source revision binding failed", code="OBSERVATION_INVALID"
             )
@@ -1721,6 +1887,11 @@ def qualify_compose_mock(
                 "generated Compose project name is not unique",
                 code="PROJECT_NOT_UNIQUE",
             )
+        _assert_image_references_unclaimed(
+            process_runner,
+            image_references=image_references,
+            env=env,
+        )
         config = _result(
             process_runner,
             _compose_argv(project, compose_files, "config", "--quiet"),
@@ -1823,13 +1994,28 @@ def qualify_compose_mock(
         raise QualificationError(
             "qualification observations are incomplete", code="OBSERVATION_INVALID"
         )
+    if observed_source is None:
+        raise QualificationError(
+            "qualification source observation is incomplete",
+            code="OBSERVATION_INVALID",
+        )
     if compose_override_digest is None:
         raise QualificationError(
             "qualification Compose override observation is incomplete",
             code="OBSERVATION_INVALID",
         )
+    final_source = _observe_source_revision(
+        process_runner,
+        repository_root=REPOSITORY_ROOT,
+        env=env,
+    )
+    if final_source.revision != observed_source.revision:
+        raise QualificationError(
+            "source revision changed during qualification",
+            code="SOURCE_DRIFT",
+        )
     report = _build_report(
-        source_revision=observed_revision,
+        source_observation=final_source,
         project=project,
         deployment_digest=deployment_digest,
         compose_file_digest=compose_file_digest,
@@ -1860,7 +2046,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def qualification_main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if not arguments.confirm_synthetic_compose:
         print(
@@ -1883,6 +2069,9 @@ def main(argv: list[str] | None = None) -> int:
                 "RESIDUAL_RESOURCES",
                 "RESIDUAL_INSPECTION_FAILED",
                 "CLEANUP_UNCONFIRMED",
+                "IMAGE_TAG_CLEANUP_FAILED",
+                "IMAGE_TAG_RESIDUAL",
+                "IMAGE_REFERENCE_INSPECTION_FAILED",
             }
             else (130 if error.code == "INTERRUPTED" else 2)
         )
@@ -1926,9 +2115,9 @@ __all__ = [
     "canonical_qualification_bytes",
     "canonical_qualification_payload_bytes",
     "expected_compose_output_bytes",
-    "main",
     "parse_qualification_json",
     "qualification_id",
+    "qualification_main",
     "qualification_payload_json_value",
     "qualification_schema",
     "qualification_sha256",
@@ -1938,4 +2127,4 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(qualification_main())

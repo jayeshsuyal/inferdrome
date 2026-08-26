@@ -27,6 +27,28 @@
           "title": "Exit Code",
           "type": "integer"
         },
+        "image_tag_cleanup_action": {
+          "const": "docker image rm --no-prune",
+          "title": "Image Tag Cleanup Action",
+          "type": "string"
+        },
+        "image_tag_cleanup_confirmed": {
+          "const": true,
+          "title": "Image Tag Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "image_tag_references": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^inferdrome/(?:compose-mock|runner):[a-z0-9](?:[a-z0-9_.-]{0,126}[a-z0-9])?$",
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Image Tag References",
+          "type": "array"
+        },
         "project_name": {
           "maxLength": 63,
           "minLength": 1,
@@ -64,7 +86,10 @@
         "residual_container_count",
         "residual_network_count",
         "residual_volume_count",
-        "cleanup_confirmed"
+        "cleanup_confirmed",
+        "image_tag_cleanup_action",
+        "image_tag_references",
+        "image_tag_cleanup_confirmed"
       ],
       "title": "QualificationCleanup",
       "type": "object"

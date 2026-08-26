@@ -24,7 +24,12 @@ contracts, then verifies their exact digests before starting anything.
 The command selects one validated unique project name of the form
 `inferdrome-qual-<random-hex>`. It runs only the `synthetic-smoke` root service;
 Compose starts the separate `mock-engine` service required by its healthcheck.
-The runner writes one bounded JSON payload to the private evidence mount. The
+Before Compose starts, it writes a private, mode-0600 override containing only
+the qualification-owned image references
+`inferdrome/compose-mock:<project>` and `inferdrome/runner:<project>`. Those
+exact references are checked for pre-existing tags and are used for both the
+build and subsequent image observations; fixed global development tags are not
+used. The runner writes one bounded JSON payload to the private evidence mount.
 qualification code compares canonical bytes and the complete deterministic
 mock vector, including endpoint, model, request, response, status, and runner
 version identities.
@@ -33,26 +38,34 @@ version identities.
 
 After a workflow has started, every success, expected failure, cancellation,
 and interrupt attempts this exact command, using the generated project and
-fixed Compose file:
+fixed Compose file plus its private override:
 
 ```text
-docker compose -p <validated-project> -f <repository>/compose.yaml down --remove-orphans --volumes
+docker compose -p <validated-project> -f <repository>/compose.yaml -f <private-override> down --remove-orphans --volumes
 ```
 
 Cleanup is retried only within the local deployment policy. The command then
 lists containers, networks, and volumes using the exact
 `com.docker.compose.project=<project>` label and verifies each returned
 resource's label before declaring zero residuals. A cleanup, residual, or
-temporary-directory failure overrides a workflow failure or success. A
-project collision is rejected before workflow start, so it cannot trigger a
-cleanup of an existing project.
+temporary-directory failure overrides a workflow failure or success. It then
+removes only the two exact project-derived image tags with
+`docker image rm --no-prune` and verifies both exact references are absent. It
+never removes an image ID, uses a broad prune, or targets another tag sharing
+an image ID. Image-tag cleanup failure also dominates publication. A project or
+image-reference collision is rejected before workflow start, so it cannot
+trigger cleanup of an existing project or tag.
 
 On complete success, the command publishes one canonical `qualification.json`
 under a versioned digest directory using the repository's no-replace immutable
 publisher. It reads the bytes back and independently verifies canonical form,
 strict closed parsing, the domain-separated qualification identity, source
 revision, specification/contract/file digests, output digest, cleanup project,
-and zero residual counts. Failed or interrupted attempts publish no report.
+exact image references, image-tag cleanup confirmation, and zero residual
+counts. Immediately before report construction, it re-observes a clean source
+checkout and requires the exact same revision observed before the workflow.
+Failed, drifted, or interrupted attempts publish no report. Docker failure
+diagnostics are bounded and redacted before they are printed.
 
 The report is always `SYNTHETIC_ONLY` with `evidence_eligible=false`,
 `provider_execution=NOT_PERFORMED`, `gpu_execution=NOT_PERFORMED`,

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from inferdrome.deployment.qualification import main
+from inferdrome.deployment.qualification import qualification_main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(qualification_main())
