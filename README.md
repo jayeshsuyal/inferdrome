@@ -82,6 +82,15 @@ services; the guarded wrapper loads the separately gated GPU override and
 selects only the benchmark runner as its root service. Its preflight verifies
 the complete frozen Qwen3 snapshot and the versioned private-endpoint binding.
 
+The guarded [Deployment Qualification v1 runbook](docs/DEPLOYMENT_QUALIFICATION_V1.md)
+executes the accepted local Compose mock as two separate services, verifies one
+bounded deterministic synthetic output, performs exact-project cleanup, proves
+zero scoped residue, removes and verifies only its two project-derived image
+tags, and publishes a no-replace immutable qualification report. It rechecks
+source cleanliness and revision after cleanup before publication.
+It never launches cloud/GPU work, issues a receipt, publishes evidence, or
+claims vLLM/NVIDIA behavior.
+
 The minimal Kubernetes boundary is documented in
 [KUBERNETES_V1.md](docs/KUBERNETES_V1.md). It is one guarded batch Job with a
 native serving sidecar and a colocated runner. The local mock wrapper retrieves

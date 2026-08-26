@@ -13,8 +13,34 @@ MOCK_RESPONSE_TEXT: Final = "synthetic mock response"
 
 
 def _json_bytes(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode(
-        "utf-8"
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def mock_response_json_bytes() -> bytes:
+    """Return the exact bounded response body served by the mock."""
+
+    return _json_bytes(
+        {
+            "id": "inferdrome-compose-mock-response",
+            "object": "chat.completion",
+            "model": MOCK_MODEL_ID,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": MOCK_RESPONSE_TEXT,
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "completion_tokens": 4,
+                "prompt_tokens": 1,
+                "total_tokens": 5,
+            },
+            "synthetic_only": True,
+        }
     )
 
 
@@ -74,30 +100,7 @@ class _MockHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict) or payload.get("model") != MOCK_MODEL_ID:
             self._write(400, {"error": {"message": "unsupported mock request"}})
             return
-        self._write(
-            200,
-            {
-                "id": "inferdrome-compose-mock-response",
-                "object": "chat.completion",
-                "model": MOCK_MODEL_ID,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": MOCK_RESPONSE_TEXT,
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "completion_tokens": 4,
-                    "prompt_tokens": 1,
-                    "total_tokens": 5,
-                },
-                "synthetic_only": True,
-            },
-        )
+        self._write(200, json.loads(mock_response_json_bytes()))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -117,7 +120,12 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["MOCK_MODEL_ID", "MOCK_RESPONSE_TEXT", "main"]
+__all__ = [
+    "MOCK_MODEL_ID",
+    "MOCK_RESPONSE_TEXT",
+    "main",
+    "mock_response_json_bytes",
+]
 
 
 if __name__ == "__main__":

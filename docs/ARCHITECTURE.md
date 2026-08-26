@@ -193,6 +193,36 @@ writable evidence PVC; without that PVC, real bundle persistence is unresolved.
 This is a contract/simulation boundary, not a Kubernetes platform, live
 execution, evidence receipt, or GPU claim. See [KUBERNETES_V1.md](KUBERNETES_V1.md).
 
+### Deployment Qualification v1 boundary
+
+Deployment Qualification v1 is the narrow real-container check for the
+accepted local Compose mock. Its one guarded command loads the existing local
+mock deployment spec, `compose.yaml`, and the checked-in Compose/runtime
+contracts, observes their exact source revision and digests, validates the
+closed two-service shape, and runs the separate `mock-engine` and
+`synthetic-smoke` services under one generated, validated Compose project.
+The runner's bounded output is compared against the repository mock's exact
+canonical response vector. No benchmark methodology, public schema, lifecycle
+receipt, evidence path, cloud provider, GPU, CUDA, model download, or serving
+engine is added to this boundary.
+
+The workflow starts cleanup before any success decision. It invokes
+`docker compose down --remove-orphans --volumes` with the exact project and
+Compose file plus a private project-derived image override, retries only within
+the deployment policy, and independently lists and label-checks only that
+project's containers, networks, and volumes. It then removes and verifies only
+the exact project-derived image tags with `docker image rm --no-prune`; image
+IDs, shared layers, and unrelated tags are not cleanup targets. Cleanup,
+image-tag, residual, or temporary-workspace failure dominates the primary
+workflow result. A collision is rejected before workflow start. The source
+checkout is observed again after confirmed cleanup; revision drift or a newly
+dirty checkout blocks publication. A successful run is the only state eligible
+for publication: its canonical closed report is written through the existing
+no-replace immutable publisher, read back, and reverified. The additive report
+schema is under `schemas/deployment/v1`; the frozen `schemas/public/v1` set is
+untouched. See
+[DEPLOYMENT_QUALIFICATION_V1.md](DEPLOYMENT_QUALIFICATION_V1.md).
+
 ### SGLang producer-capability boundary
 
 PR11 adds `inferdrome.sglang-normalization.v1` outside the frozen public

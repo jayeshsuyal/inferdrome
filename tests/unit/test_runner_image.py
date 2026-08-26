@@ -31,6 +31,8 @@ def test_runner_dockerfile_has_pinned_base_non_root_and_locked_install() -> None
     assert "ADD --checksum=sha256:" in dockerfile
     assert "UV_VERSION" not in dockerfile
     assert "requirements.txt" not in dockerfile
+    assert "/usr/sbin/useradd" in dockerfile
+    assert not re.search(r"^RUN\s+useradd\b", dockerfile, re.MULTILINE)
     assert "USER 10001:10001" in dockerfile
     assert not re.search(r"^USER\s+root\s*$", dockerfile, re.MULTILINE)
     assert 'VOLUME ["/evidence"]' in dockerfile

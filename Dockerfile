@@ -52,7 +52,7 @@ ENV PATH="/opt/inferdrome-runtime/bin:/usr/local/bin:/usr/bin:/bin" \
     PYTHONDONTWRITEBYTECODE="1" \
     PYTHONUNBUFFERED="1"
 
-RUN useradd --uid 10001 --create-home --home-dir /home/inferdrome \
+RUN /usr/sbin/useradd --uid 10001 --create-home --home-dir /home/inferdrome \
       --shell /usr/sbin/nologin inferdrome \
     && mkdir -p /evidence /tmp/inferdrome \
     && chown -R 10001:10001 /evidence /tmp/inferdrome /home/inferdrome

@@ -1,0 +1,376 @@
+{
+  "$comment": "Additive local Docker Compose orchestration observation only. This report is synthetic, evidence-ineligible, and outside frozen public evidence schemas; it assigns no acceptance verdict.",
+  "$defs": {
+    "QualificationCleanup": {
+      "additionalProperties": false,
+      "description": "Successful exact-project cleanup and residual inspection.",
+      "properties": {
+        "action": {
+          "const": "docker compose down --remove-orphans --volumes",
+          "title": "Action",
+          "type": "string"
+        },
+        "attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Attempts",
+          "type": "integer"
+        },
+        "cleanup_confirmed": {
+          "const": true,
+          "title": "Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "exit_code": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "image_tag_cleanup_action": {
+          "const": "docker image rm --no-prune",
+          "title": "Image Tag Cleanup Action",
+          "type": "string"
+        },
+        "image_tag_cleanup_confirmed": {
+          "const": true,
+          "title": "Image Tag Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "image_tag_references": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^inferdrome/(?:compose-mock|runner):[a-z0-9](?:[a-z0-9_.-]{0,126}[a-z0-9])?$",
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Image Tag References",
+          "type": "array"
+        },
+        "project_name": {
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$",
+          "title": "Project Name",
+          "type": "string"
+        },
+        "residual_container_count": {
+          "const": 0,
+          "title": "Residual Container Count",
+          "type": "integer"
+        },
+        "residual_network_count": {
+          "const": 0,
+          "title": "Residual Network Count",
+          "type": "integer"
+        },
+        "residual_volume_count": {
+          "const": 0,
+          "title": "Residual Volume Count",
+          "type": "integer"
+        },
+        "scope_label": {
+          "const": "com.docker.compose.project",
+          "title": "Scope Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "scope_label",
+        "project_name",
+        "attempts",
+        "exit_code",
+        "residual_container_count",
+        "residual_network_count",
+        "residual_volume_count",
+        "cleanup_confirmed",
+        "image_tag_cleanup_action",
+        "image_tag_references",
+        "image_tag_cleanup_confirmed"
+      ],
+      "title": "QualificationCleanup",
+      "type": "object"
+    },
+    "QualificationImageObservation": {
+      "additionalProperties": false,
+      "description": "Image identity returned by Docker, never copied from Compose config.",
+      "properties": {
+        "image_id": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image Id"
+        },
+        "image_reference": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^inferdrome/(?:compose-mock|runner):[a-z0-9](?:[a-z0-9_.-]{0,126}[a-z0-9])?$",
+          "title": "Image Reference",
+          "type": "string"
+        },
+        "observation_status": {
+          "enum": [
+            "OBSERVED",
+            "UNAVAILABLE"
+          ],
+          "title": "Observation Status",
+          "type": "string"
+        },
+        "repository_digests": {
+          "default": [],
+          "items": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Repository Digests",
+          "type": "array"
+        },
+        "service": {
+          "enum": [
+            "mock-engine",
+            "synthetic-smoke"
+          ],
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "image_reference",
+        "observation_status"
+      ],
+      "title": "QualificationImageObservation",
+      "type": "object"
+    },
+    "QualificationOutputObservation": {
+      "additionalProperties": false,
+      "description": "Bounded facts about the exact runner-output bytes that were checked.",
+      "properties": {
+        "byte_length": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Byte Length",
+          "type": "integer"
+        },
+        "evidence_eligible": {
+          "const": false,
+          "title": "Evidence Eligible",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "inferdrome.runner-probe-output.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "synthetic_only": {
+          "const": true,
+          "title": "Synthetic Only",
+          "type": "boolean"
+        },
+        "verified_bounded_output": {
+          "const": true,
+          "title": "Verified Bounded Output",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "sha256",
+        "byte_length",
+        "synthetic_only",
+        "evidence_eligible",
+        "verified_bounded_output"
+      ],
+      "title": "QualificationOutputObservation",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:deployment-qualification:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Strict immutable report with a non-recursive canonical identity.",
+  "properties": {
+    "cleanup": {
+      "$ref": "#/$defs/QualificationCleanup"
+    },
+    "compose_contract_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Compose Contract Sha256",
+      "type": "string"
+    },
+    "compose_file_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Compose File Sha256",
+      "type": "string"
+    },
+    "compose_override_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Compose Override Sha256",
+      "type": "string"
+    },
+    "compose_project": {
+      "maxLength": 63,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$",
+      "title": "Compose Project",
+      "type": "string"
+    },
+    "deployment_receipt_issued": {
+      "const": false,
+      "title": "Deployment Receipt Issued",
+      "type": "boolean"
+    },
+    "deployment_spec_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Deployment Spec Digest",
+      "type": "string"
+    },
+    "endpoint": {
+      "const": "http://mock-engine.internal:8000/v1/chat/completions",
+      "title": "Endpoint",
+      "type": "string"
+    },
+    "evidence_eligible": {
+      "const": false,
+      "title": "Evidence Eligible",
+      "type": "boolean"
+    },
+    "evidence_published": {
+      "const": false,
+      "title": "Evidence Published",
+      "type": "boolean"
+    },
+    "gpu_execution": {
+      "const": "NOT_PERFORMED",
+      "title": "Gpu Execution",
+      "type": "string"
+    },
+    "image_observations": {
+      "items": {
+        "$ref": "#/$defs/QualificationImageObservation"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "title": "Image Observations",
+      "type": "array"
+    },
+    "inferdrome_version": {
+      "maxLength": 64,
+      "minLength": 5,
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:[.-][0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "title": "Inferdrome Version",
+      "type": "string"
+    },
+    "observation_status": {
+      "const": "COMPLETE",
+      "title": "Observation Status",
+      "type": "string"
+    },
+    "output_observation": {
+      "$ref": "#/$defs/QualificationOutputObservation"
+    },
+    "provider_execution": {
+      "const": "NOT_PERFORMED",
+      "title": "Provider Execution",
+      "type": "string"
+    },
+    "qualification_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Qualification Id",
+      "type": "string"
+    },
+    "qualification_kind": {
+      "const": "local_compose_mock",
+      "title": "Qualification Kind",
+      "type": "string"
+    },
+    "qualification_mode": {
+      "const": "SYNTHETIC_ONLY",
+      "title": "Qualification Mode",
+      "type": "string"
+    },
+    "runtime_contract_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Runtime Contract Sha256",
+      "type": "string"
+    },
+    "schema_id": {
+      "const": "urn:inferdrome:deployment-qualification:v1",
+      "title": "Schema Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.deployment-qualification.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_repository": {
+      "const": "https://github.com/jayeshsuyal/inferdrome",
+      "title": "Source Repository",
+      "type": "string"
+    },
+    "source_revision": {
+      "maxLength": 64,
+      "minLength": 40,
+      "pattern": "^[0-9a-f]{40,64}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "source_worktree_clean": {
+      "const": true,
+      "title": "Source Worktree Clean",
+      "type": "boolean"
+    },
+    "synthetic_only": {
+      "const": true,
+      "title": "Synthetic Only",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema_id",
+    "qualification_kind",
+    "observation_status",
+    "qualification_mode",
+    "synthetic_only",
+    "evidence_eligible",
+    "provider_execution",
+    "gpu_execution",
+    "deployment_receipt_issued",
+    "evidence_published",
+    "source_repository",
+    "source_revision",
+    "source_worktree_clean",
+    "inferdrome_version",
+    "deployment_spec_digest",
+    "compose_file_sha256",
+    "compose_override_sha256",
+    "compose_contract_sha256",
+    "runtime_contract_sha256",
+    "compose_project",
+    "endpoint",
+    "image_observations",
+    "output_observation",
+    "cleanup",
+    "qualification_id"
+  ],
+  "title": "QualificationReport",
+  "type": "object"
+}

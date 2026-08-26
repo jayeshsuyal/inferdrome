@@ -84,6 +84,32 @@ real evidence. The GPU template requires an operator-provided evidence PVC;
 without independent PVC and retrieval verification, persistence and evidence
 eligibility remain unknown.
 
+### Docker Compose qualification boundary
+
+The qualification command is an operationally local orchestration boundary,
+not an execution attestation. It accepts only the repository's fixed Compose
+file and local mock deployment specification after strict bounded reads,
+canonical parsing, exact contract comparisons, and source-cleanliness checks.
+It rejects remote Docker contexts, public/host networking, privileged or
+GPU-shaped Compose escape hatches, and runner/engine topology drift. Its
+subprocess interface is an argv vector with a small allowlisted environment,
+bounded output/diagnostics, no shell, and bounded timeout termination.
+
+Every started workflow has one generated project identity. Cleanup uses that
+identity, fixed Compose file, and a private project-derived image override;
+residual lists are filtered by the exact Compose project label and every
+returned resource is independently label checked. The two project-derived image
+tags are checked for collision before start, removed only by exact tag reference
+with `docker image rm --no-prune`, and independently verified absent; no image
+ID, shared layer, unrelated tag, or broad prune is accepted as a cleanup target.
+A collision fails before workflow start, cleanup/image-tag/residual/temporary-
+workspace failure dominates any primary result, and interrupted workflows do
+not publish. The source revision and clean-worktree observation is repeated
+after cleanup, so drift blocks publication. The report publisher uses canonical
+bytes, strict closed parsing, read-back verification, and no-replace publication
+under the report's domain-separated identity. Image configuration is never
+substituted for an observed Docker image identity.
+
 ### ExitSpec importer
 
 The importer processes an attacker-controlled directory or transport package.
@@ -115,6 +141,25 @@ flows.
 
 This does not stop a malicious producer from fabricating an entirely different
 bundle before an external trust anchor exists.
+
+### Qualification-result overclaiming
+
+The qualification schema has fixed synthetic and negative-capability fields:
+`SYNTHETIC_ONLY`, `evidence_eligible=false`, provider/GPU not performed, no
+receipt, and no evidence publication. It contains no acceptance verdict or
+hardware claim. The checked vector proves only that this bounded mock runner
+interaction and local cleanup were observed; it cannot prove Linux,
+NVIDIA/CUDA, vLLM, model, cloud, provider, cost, or customer behavior.
+
+### Scoped cleanup and publication attacks
+
+Exact project labels, validated project names, no-replace publication, stable
+canonical bytes, duplicate-key rejection, symlink/no-follow file reads,
+bounded diagnostics, and independent report re-verification address accidental
+cross-project deletion, residual omission, path traversal, symlink swaps,
+report replacement, malformed output, and parser ambiguity. These controls do
+not attest to a malicious Docker daemon or a compromised host; such an actor
+can return internally consistent false observations.
 
 ### Secret leakage through configured inputs
 
