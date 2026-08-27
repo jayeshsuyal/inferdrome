@@ -172,7 +172,9 @@ def test_prospective_dry_run_is_inert_and_reports_both_archive_identities(
         lambda *_args, **_kwargs: None,
     )
 
-    def source_archive(path: Path, _commit: str) -> tuple[str, int]:
+    def source_archive(
+        path: Path, _commit: str, **_kwargs: object
+    ) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 
@@ -250,28 +252,13 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
     monkeypatch.setattr(
         remote,
         "_extract_prospective_archive",
-        lambda _archive, _destination: tmp_path / "session-root",
+        lambda *_a, **_k: pytest.fail("raw transport must not extract"),
     )
     monkeypatch.setattr(
         remote,
         "_prospective_session_identities",
-        lambda _root: (
-            "prospective-real-gpu-session",
-            [
-                {
-                    "case_id": case_id,
-                    "run_id": f"run-{index}",
-                    "bundle_digest": f"sha256:{index:064x}",
-                    "request_plan_digest": f"sha256:{index + 10:064x}",
-                }
-                for index, case_id in enumerate(handoff.CASE_IDS, start=1)
-            ],
-        ),
+        lambda *_a, **_k: pytest.fail("raw transport must not parse identities"),
     )
-    monkeypatch.setattr(
-        remote, "_host_identity_digest", lambda _path: "sha256:" + HOST_KEY_DIGEST
-    )
-
     selected = remote._capture_prospective_over_ssh(
         args,
         COMMIT,
@@ -280,7 +267,8 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
         SOURCE_DIGEST,
         handoff_archive,
     )
-    assert selected.is_dir()
+    assert selected[0].is_dir()
+    assert selected[1] == len(SOURCE_BYTES)
     assert events == [
         "host-pin",
         "preflight",
@@ -445,7 +433,9 @@ def test_guarded_prospective_capture_terminates_before_offline_verify(
         remote, "_validate_prospective_snapshot", lambda *_a, **_k: None
     )
 
-    def source_archive(path: Path, _commit: str) -> tuple[str, int]:
+    def source_archive(
+        path: Path, _commit: str, **_kwargs: object
+    ) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 
@@ -459,9 +449,26 @@ def test_guarded_prospective_capture_terminates_before_offline_verify(
         events.append("arm")
         return watchdog
 
-    def capture(*_args: object, **_kwargs: object) -> Path:
+    def capture(*_args: object, **_kwargs: object) -> tuple[Path, int]:
         events.append("retrieve")
-        return tmp_path / "captured"
+        captured = tmp_path / "captured"
+        captured.mkdir()
+        (captured / "ssh-known-hosts").write_bytes(HOST_KEY_BYTES)
+        archive_bytes = b"archive"
+        (captured / "prospective-session.tar.gz").write_bytes(archive_bytes)
+        (captured / "prospective-session.tar.gz.metadata.json").write_text(
+            json.dumps(
+                {
+                    "archive_name": "prospective-session.tar.gz",
+                    "archive_sha256": (
+                        "sha256:" + hashlib.sha256(archive_bytes).hexdigest()
+                    ),
+                    "schema_version": remote._PROSPECTIVE_TRANSFER_METADATA_SCHEMA,
+                    "size_bytes": 7,
+                }
+            )
+        )
+        return captured, len(SOURCE_BYTES)
 
     def terminate(_handle: object) -> object:
         events.append("terminate")
@@ -469,28 +476,88 @@ def test_guarded_prospective_capture_terminates_before_offline_verify(
             final_status="absent", public_record=lambda: {"status": "absent"}
         )
 
-    def offline_verify(*_args: object, **_kwargs: object) -> dict[str, bool]:
+    def extract(_archive: Path, _destination: Path) -> Path:
         assert events[-1] == "terminate"
+        events.append("extract")
+        return tmp_path / "session"
+
+    def identities(_root: Path) -> tuple[str, list[dict[str, str]]]:
+        assert events[-1] == "extract"
+        events.append("identity")
+        return (
+            "prospective-real-gpu-session",
+            [
+                {
+                    "case_id": case_id,
+                    "run_id": f"run-{index}",
+                    "bundle_digest": f"sha256:{index:064x}",
+                    "request_plan_digest": f"sha256:{index + 10:064x}",
+                }
+                for index, case_id in enumerate(handoff.CASE_IDS, start=1)
+            ],
+        )
+
+    def offline_verify(*_args: object, **_kwargs: object) -> dict[str, bool]:
+        assert events[-1] == "identity"
         events.append("offline-verify")
         return {"valid": True}
-
-    def finalize(*_args: object, **_kwargs: object) -> Path:
-        remote._verify_prospective_session(tmp_path / "session", snapshot)
-        return tmp_path / "captured"
 
     monkeypatch.setattr(remote, "_arm_lambda_watchdog", arm)
     monkeypatch.setattr(remote, "_capture_prospective_over_ssh", capture)
     monkeypatch.setattr(
         remote.lambda_gpu_guard, "terminate_guarded_instance", terminate
     )
+    monkeypatch.setattr(remote, "_extract_prospective_archive", extract)
+    monkeypatch.setattr(remote, "_prospective_session_identities", identities)
     monkeypatch.setattr(remote, "_verify_prospective_session", offline_verify)
-    monkeypatch.setattr(remote, "_finalize_prospective_capture", finalize)
 
-    assert (
-        remote._capture_prospective_with_handoff(args, COMMIT, tmp_path / "id")
-        == tmp_path / "captured"
+    assert remote._capture_prospective_with_handoff(args, COMMIT, tmp_path / "id") == (
+        tmp_path / "captured"
     )
-    assert events == ["arm", "retrieve", "terminate", "offline-verify"]
+    assert events == [
+        "arm",
+        "retrieve",
+        "terminate",
+        "extract",
+        "identity",
+        "offline-verify",
+    ]
+
+
+def test_post_termination_archive_mutation_is_rejected_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot()
+    capture_path = tmp_path / "captured"
+    capture_path.mkdir()
+    archive = capture_path / "prospective-session.tar.gz"
+    archive.write_bytes(b"mutated")
+    original = b"original"
+    (capture_path / "prospective-session.tar.gz.metadata.json").write_text(
+        json.dumps(
+            {
+                "archive_name": "prospective-session.tar.gz",
+                "archive_sha256": "sha256:" + hashlib.sha256(original).hexdigest(),
+                "schema_version": remote._PROSPECTIVE_TRANSFER_METADATA_SCHEMA,
+                "size_bytes": len(original),
+            }
+        )
+    )
+    monkeypatch.setattr(
+        remote,
+        "_extract_prospective_archive",
+        lambda *_args, **_kwargs: pytest.fail("mutated archive must not extract"),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="changed before extraction"):
+        remote._materialize_prospective_capture(
+            capture_path,
+            snapshot,
+            commit=COMMIT,
+            source_archive_sha256=SOURCE_DIGEST,
+            source_archive_size_bytes=len(SOURCE_BYTES),
+        )
 
 
 def test_prospective_remote_failure_finalizes_guard_without_verification(
@@ -526,7 +593,9 @@ def test_prospective_remote_failure_finalizes_guard_without_verification(
         remote, "_validate_prospective_snapshot", lambda *_a, **_k: None
     )
 
-    def source_archive(path: Path, _commit: str) -> tuple[str, int]:
+    def source_archive(
+        path: Path, _commit: str, **_kwargs: object
+    ) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 
@@ -538,7 +607,7 @@ def test_prospective_remote_failure_finalizes_guard_without_verification(
 
     monkeypatch.setattr(remote, "_arm_lambda_watchdog", arm)
 
-    def capture(*_args: object, **_kwargs: object) -> Path:
+    def capture(*_args: object, **_kwargs: object) -> tuple[Path, int]:
         events.append("capture")
         raise remote.RemoteCaptureError("remote/case/retrieval failure")
 
@@ -549,6 +618,21 @@ def test_prospective_remote_failure_finalizes_guard_without_verification(
     monkeypatch.setattr(remote, "_capture_prospective_over_ssh", capture)
     monkeypatch.setattr(
         remote.lambda_gpu_guard, "terminate_guarded_instance", terminate
+    )
+    monkeypatch.setattr(
+        remote,
+        "_extract_prospective_archive",
+        lambda *_a, **_k: pytest.fail("failed capture must not extract"),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_prospective_session_identities",
+        lambda *_a, **_k: pytest.fail("failed capture must not parse identities"),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_verify_prospective_session",
+        lambda *_a, **_k: pytest.fail("failed capture must not verify"),
     )
     monkeypatch.setattr(
         remote,
@@ -594,7 +678,9 @@ def test_unconfirmed_guard_termination_blocks_prospective_verification(
         remote, "_validate_prospective_snapshot", lambda *_a, **_k: None
     )
 
-    def source_archive(path: Path, _commit: str) -> tuple[str, int]:
+    def source_archive(
+        path: Path, _commit: str, **_kwargs: object
+    ) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 
@@ -606,9 +692,9 @@ def test_unconfirmed_guard_termination_blocks_prospective_verification(
 
     monkeypatch.setattr(remote, "_arm_lambda_watchdog", arm)
 
-    def capture(*_args: object, **_kwargs: object) -> Path:
+    def capture(*_args: object, **_kwargs: object) -> tuple[Path, int]:
         events.append("capture")
-        return tmp_path / "captured"
+        return tmp_path / "captured", len(SOURCE_BYTES)
 
     def terminate(_handle: object) -> object:
         events.append("terminate")
@@ -617,6 +703,23 @@ def test_unconfirmed_guard_termination_blocks_prospective_verification(
     monkeypatch.setattr(remote, "_capture_prospective_over_ssh", capture)
     monkeypatch.setattr(
         remote.lambda_gpu_guard, "terminate_guarded_instance", terminate
+    )
+    monkeypatch.setattr(
+        remote,
+        "_extract_prospective_archive",
+        lambda *_a, **_k: pytest.fail("unconfirmed termination must not extract"),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_prospective_session_identities",
+        lambda *_a, **_k: pytest.fail(
+            "unconfirmed termination must not parse identities"
+        ),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_verify_prospective_session",
+        lambda *_a, **_k: pytest.fail("unconfirmed termination must not verify"),
     )
     monkeypatch.setattr(
         remote,
@@ -683,6 +786,10 @@ def test_prospective_retrieval_receipt_keeps_three_identities_without_verdict(
         capture_path,
         snapshot,
         guarded_termination=None,
+        verified_session_identities=(
+            "prospective-real-gpu-session",
+            identities,
+        ),
     )
     receipt = json.loads((result / "retrieval-receipt.json").read_text())
     assert receipt["status"] == "CAPTURED_PENDING_EXTERNAL_EXITSPEC"
@@ -695,3 +802,19 @@ def test_prospective_retrieval_receipt_keeps_three_identities_without_verdict(
     assert len({item["run_id"] for item in receipt["case_identities"]}) == 3
     assert len({item["bundle_digest"] for item in receipt["case_identities"]}) == 3
     assert "acceptance_verdict" not in receipt
+
+    transport_path = capture_path / "prospective-transport.json"
+    transport = json.loads(transport_path.read_text())
+    transport["case_identities"][0]["run_id"] = "tampered-run"
+    transport_path.chmod(0o600)
+    transport_path.write_text(json.dumps(transport))
+    with pytest.raises(remote.RemoteCaptureError, match="identities disagree"):
+        remote._finalize_prospective_capture(
+            capture_path,
+            snapshot,
+            guarded_termination=None,
+            verified_session_identities=(
+                "prospective-real-gpu-session",
+                identities,
+            ),
+        )

@@ -13,12 +13,16 @@ import hashlib
 import io
 import json
 import os
+import re
 import stat
 import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+import rfc8785
+import yaml
 
 CASE_IDS = (
     "native-p95-under-20ms",
@@ -34,6 +38,222 @@ _MAX_WORKLOAD_BYTES = 64 * 1024 * 1024
 _MAX_HANDOFF_ARCHIVE_BYTES = 128 * 1024 * 1024
 _MAX_HANDOFF_FILES = 12
 _MAX_ARCHIVE_MEMBERS = 64
+_P1_SCHEMA_VERSION = "exitspec.inferdrome-prospective-handoff.v1"
+_P1_AUTHORITY_BOUNDARY = "EXIT_SPEC_CUSTOMER_CONFIRMED_HANDOFF_ONLY"
+_P1_CONFIRMATION_ASSURANCE = "PROCESS_LOCAL_DECLARED_IDENTITY_NOT_AUTHENTICATED"
+_P1_CANONICALIZATION_SCHEME = "rfc8785_jcs_v1"
+_P1_HASH_ALGORITHM = "sha256_v1"
+_P1_LINK_POLICY = "exitspec.producer_link.sha256_canonical_hash.v1"
+_P1_WORKLOAD_PATH = "sources/real-gpu/workload.jsonl"
+_P1_WORKLOAD_DIGEST = (
+    "sha256:22bf3389cc29ee946ae567870d7f8d7b458594224542a796e8990c15b1cfcd63"
+)
+_P1_TIMESTAMP = "2026-08-27T00:00:00Z"
+_P1_MANIFEST_KEYS = frozenset(
+    {
+        "acceptance_verdict",
+        "authority_boundary",
+        "canonicalization_scheme_id",
+        "cases",
+        "completion_marker",
+        "confirmation_identity_assurance",
+        "hash_algorithm_id",
+        "link_derivation_policy_id",
+        "schema_version",
+        "workload_artifact_path",
+        "workload_artifact_sha256",
+    }
+)
+_P1_CASE_KEYS = frozenset(
+    {
+        "case_id",
+        "confirmation_artifact_path",
+        "confirmation_id",
+        "confirmation_record_sha256",
+        "contract_artifact_path",
+        "contract_artifact_sha256",
+        "contract_canonical_hash",
+        "contract_confirmation_fingerprint",
+        "contract_id",
+        "contract_version",
+        "methodology",
+        "producer_contract_link",
+        "source_yaml_artifact_path",
+        "source_yaml_artifact_sha256",
+    }
+)
+_P1_METHODOLOGY_KEYS = frozenset(
+    {
+        "adapter_id",
+        "adapter_version",
+        "canonical_response_content",
+        "canonicalization",
+        "case_id",
+        "choices_span_definition_id",
+        "chronology_assurance",
+        "claims_assurance",
+        "evidence_schema_version",
+        "execution_mode",
+        "expected_execution_fingerprint",
+        "include_request_plan",
+        "latency_population",
+        "local_gpu_proof_schema_id",
+        "local_gpu_proof_schema_sha256",
+        "managed_profile_id",
+        "managed_profile_sha256",
+        "max_measured_requests",
+        "max_runtime_seconds",
+        "measurement_streaming",
+        "metric_definitions_version",
+        "native_output_sensitivity",
+        "native_schema_fingerprint",
+        "produced_evidence_metric_definition_id",
+        "producer_name",
+        "producer_version",
+        "reducer_id",
+        "reducer_version",
+        "reliability_population",
+        "requested_criterion_metric_definition_id",
+        "run_aggregation_policy",
+        "sampling",
+        "schema_version",
+        "sequence_requirement",
+        "source_schema_version",
+        "target_api",
+        "target_endpoint",
+        "target_engine",
+        "target_engine_version",
+        "target_model",
+        "target_model_revision",
+        "target_tokenizer_revision",
+        "traffic",
+        "workload_digest",
+        "workload_id",
+    }
+)
+_P1_CANONICALIZATION_KEYS = frozenset(
+    {
+        "canonical_bytes_encoding",
+        "canonicalization_scheme_id",
+        "hash_algorithm_id",
+        "hash_encoding_id",
+        "link_derivation_input",
+        "link_derivation_operation",
+        "link_derivation_policy_id",
+    }
+)
+_P1_RELIABILITY_KEYS = frozenset(
+    {
+        "denominator",
+        "exact_attempts",
+        "numerator",
+        "operator",
+        "population_id",
+        "schema_version",
+        "threshold_basis_points",
+    }
+)
+_P1_SAMPLING_KEYS = frozenset(
+    {
+        "policy_id",
+        "prompt_content_policy",
+        "requested_output_tokens",
+        "schema_version",
+        "seed",
+        "temperature",
+    }
+)
+_P1_TRAFFIC_KEYS = frozenset(
+    {
+        "configured_concurrency",
+        "kind",
+        "measured_requests",
+        "policy_id",
+        "schema_version",
+        "warmup_requests",
+    }
+)
+_P1_CONFIRMATION_KEYS = frozenset(
+    {
+        "agreement_acknowledged",
+        "confirmation_id",
+        "confirmer_identity",
+        "contract_fingerprint",
+        "contract_id",
+        "contract_version",
+        "decided_at",
+        "decision",
+        "rationale",
+    }
+)
+_P1_CONTRACT_KEYS = frozenset(
+    {
+        "approved_at",
+        "canonical_hash",
+        "confirmation_id",
+        "created_at",
+        "criteria",
+        "customer",
+        "evidence_retention_policy",
+        "frozen_at",
+        "id",
+        "non_goals",
+        "owners",
+        "parent_version",
+        "status",
+        "target_system",
+        "use_case",
+        "version",
+        "workload",
+    }
+)
+_P1_CRITERION_KEYS = frozenset(
+    {
+        "approved",
+        "case_id",
+        "concurrency_semantics",
+        "criterion_type",
+        "error_rate",
+        "evidence_identity",
+        "evidence_policy",
+        "human_added",
+        "id",
+        "must_have",
+        "normalized_claim",
+        "owner",
+        "source",
+        "title",
+        "ttft_p95",
+    }
+)
+_P1_TTFT_KEYS = frozenset(
+    {
+        "aggregation",
+        "definition_id",
+        "equality_outcome",
+        "metric",
+        "minimum_successful_samples",
+        "must_pass",
+        "operator",
+        "population",
+        "reducer_id",
+        "schema_version",
+        "threshold_ns",
+        "unit",
+    }
+)
+_P1_ERROR_RATE_KEYS = frozenset(
+    {
+        "aggregation",
+        "denominator",
+        "exact_attempts",
+        "metric",
+        "must_pass",
+        "numerator",
+        "operator",
+        "threshold_basis_points",
+    }
+)
 
 
 class ProspectiveHandoffError(RuntimeError):
@@ -114,6 +334,9 @@ def _strict_json(content: bytes, *, label: str) -> dict[str, Any]:
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"invalid number: {token}")
             ),
+            parse_float=lambda token: (_ for _ in ()).throw(
+                ValueError(f"invalid float: {token}")
+            ),
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         raise ProspectiveHandoffError(f"{label} is not strict JSON") from None
@@ -140,6 +363,408 @@ def _digest(value: object, *, label: str) -> str:
     ):
         raise ProspectiveHandoffError(f"{label} has an invalid SHA-256 shape")
     return selected
+
+
+def _bare_hash(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ProspectiveHandoffError(f"{label} must be a lowercase bare SHA-256 hash")
+    return value
+
+
+def _tagged_digest(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise ProspectiveHandoffError(f"{label} must be a sha256: digest link")
+    return value
+
+
+def _require_exact_keys(
+    value: dict[str, Any], expected: frozenset[str], *, label: str
+) -> None:
+    if set(value) != expected:
+        raise ProspectiveHandoffError(f"{label} has unexpected or missing fields")
+
+
+class _UniqueSafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that does not silently overwrite duplicate keys."""
+
+
+def _construct_unique_mapping(
+    loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if not isinstance(key, str) or key in result:
+            raise yaml.YAMLError("source YAML contains a duplicate or non-string key")
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_UniqueSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+def _strict_source_yaml(content: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        value = yaml.load(content, Loader=_UniqueSafeLoader)
+    except (UnicodeDecodeError, yaml.YAMLError):
+        raise ProspectiveHandoffError(f"{label} is not strict YAML") from None
+    if not isinstance(value, dict):
+        raise ProspectiveHandoffError(f"{label} must be a YAML object")
+    return value
+
+
+def _expected_methodology(case_id: str) -> dict[str, Any]:
+    requested_metric = (
+        "first_nonempty_choices_delta_content_v1"
+        if case_id == "semantic-first-nonempty-under-20ms"
+        else "vllm_first_choices_event_v0_26"
+    )
+    return {
+        "adapter_id": "vllm_bench_serve",
+        "adapter_version": "1.0.0",
+        "canonical_response_content": "omit",
+        "canonicalization": {
+            "canonical_bytes_encoding": "utf-8_rfc8785_jcs",
+            "canonicalization_scheme_id": _P1_CANONICALIZATION_SCHEME,
+            "hash_algorithm_id": _P1_HASH_ALGORITHM,
+            "hash_encoding_id": "lowercase_hex_without_prefix",
+            "link_derivation_input": "bare_canonical_hash",
+            "link_derivation_operation": "prefix_sha256_no_second_hash",
+            "link_derivation_policy_id": _P1_LINK_POLICY,
+        },
+        "case_id": case_id,
+        "choices_span_definition_id": "last_choices_event_span_v1",
+        "chronology_assurance": "UNAVAILABLE",
+        "claims_assurance": "INTERNAL_CONSISTENCY_ONLY",
+        "evidence_schema_version": "inferdrome.evidence.v1",
+        "execution_mode": "attached_endpoint",
+        "expected_execution_fingerprint": (
+            "sha256:76d984ea57a0e7cb00520255a6e362f22885d713a875195a7397771937060edd"
+        ),
+        "include_request_plan": True,
+        "latency_population": "successful_measured_requests_with_observed_ttft",
+        "local_gpu_proof_schema_id": "urn:inferdrome:local-gpu-proof:v1",
+        "local_gpu_proof_schema_sha256": (
+            "sha256:cf83bbdea2bba4c30b8f0e2c5f34f34a4077501207881fdbdab021571d665547"
+        ),
+        "managed_profile_id": "inferdrome.managed-vllm-0.26-evidence-profile.v1",
+        "managed_profile_sha256": (
+            "sha256:9d03b5d0822ed829ddbfa4c87c75530885b9ad51ee2c0cb7c5e31a075996fe34"
+        ),
+        "max_measured_requests": 100,
+        "max_runtime_seconds": 900,
+        "measurement_streaming": True,
+        "metric_definitions_version": "1.0.0",
+        "native_output_sensitivity": "RESPONSE_CONTENT",
+        "native_schema_fingerprint": (
+            "sha256:3a4fdee6fe9b45ce5b42c41fd3bfc6614245a36ecfe6f94de92b59717a136abb"
+        ),
+        "produced_evidence_metric_definition_id": "vllm_first_choices_event_v0_26",
+        "producer_name": "vllm",
+        "producer_version": "0.26.0",
+        "reducer_id": "nearest_rank_v1",
+        "reducer_version": "1.0.0",
+        "reliability_population": {
+            "denominator": "all_measured_requests",
+            "exact_attempts": 100,
+            "numerator": "failed_or_anomalous_native_measured_requests",
+            "operator": "lt",
+            "population_id": "exitspec.inferdrome-reliability.v1",
+            "schema_version": "exitspec.inferdrome-reliability-population.v1",
+            "threshold_basis_points": 100,
+        },
+        "requested_criterion_metric_definition_id": requested_metric,
+        "run_aggregation_policy": "independent_single_run_no_pooling",
+        "sampling": {
+            "policy_id": "inferdrome.qwen2.5-deterministic.v1",
+            "prompt_content_policy": "include",
+            "requested_output_tokens": 32,
+            "schema_version": "exitspec.inferdrome-sampling.v1",
+            "seed": 42,
+            "temperature": 0,
+        },
+        "schema_version": "exitspec.inferdrome-evidence-identity.v2",
+        "sequence_requirement": "OPERATOR_MUST_FREEZE_BEFORE_MEASUREMENT",
+        "source_schema_version": "inferdrome.source-experiment.v1",
+        "target_api": "openai_chat_completions",
+        "target_endpoint": "http://127.0.0.1:18080/",
+        "target_engine": "vllm",
+        "target_engine_version": "0.26.0",
+        "target_model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "target_model_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "target_tokenizer_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "traffic": {
+            "configured_concurrency": 4,
+            "kind": "concurrent",
+            "measured_requests": 100,
+            "policy_id": "inferdrome.concurrent.vllm.v1",
+            "schema_version": "exitspec.inferdrome-traffic.v1",
+            "warmup_requests": 10,
+        },
+        "workload_digest": _P1_WORKLOAD_DIGEST,
+        "workload_id": "inferdrome.qwen2.5-real-gpu-workload.v1",
+    }
+
+
+def _expected_source_yaml(case_id: str, producer_link: str) -> dict[str, Any]:
+    return {
+        "schema_version": "inferdrome.source-experiment.v1",
+        "experiment": {
+            "id": f"inferdrome-p1-{case_id}",
+            "title": "Pinned Qwen2.5 0.5B managed-vLLM real-GPU proof",
+            "hypothesis": (
+                "A clean NVIDIA host can reproduce one sealed Inferdrome bundle."
+            ),
+        },
+        "execution": {
+            "mode": "attached_endpoint",
+            "max_runtime_seconds": 900,
+            "max_measured_requests": 100,
+        },
+        "target": {
+            "engine": "vllm",
+            "endpoint": "http://127.0.0.1:18080",
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "model_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+            "tokenizer_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+            "engine_version": "0.26.0",
+        },
+        "workload": {
+            "path": "real-gpu/workload.jsonl",
+            "sha256": _P1_WORKLOAD_DIGEST,
+            "prompt_content_policy": "include",
+            "requested_output_tokens": 32,
+            "temperature": 0,
+            "seed": 42,
+        },
+        "traffic": {
+            "kind": "concurrent",
+            "concurrency": 4,
+            "warmup_requests": 10,
+            "measured_requests": 100,
+        },
+        "evidence": {"canonical_response_content": "omit"},
+        "links": {"exitspec_contract_digest": producer_link},
+    }
+
+
+_P1_CASE_METADATA: dict[str, dict[str, Any]] = {
+    "native-p95-under-20ms": {
+        "criterion_id": "INFERDROME-P1-NATIVE-P95-20MS",
+        "title": "Native vLLM p95 TTFT below 20 ms",
+        "claim": (
+            "For the pinned Qwen2.5 managed-vLLM workload, native vLLM p95 TTFT "
+            "must be strictly below 20 ms at configured concurrency 4."
+        ),
+        "threshold_ns": 20_000_000,
+    },
+    "native-p95-under-10ms": {
+        "criterion_id": "INFERDROME-P1-NATIVE-P95-10MS",
+        "title": "Native vLLM p95 TTFT below 10 ms",
+        "claim": (
+            "For the pinned Qwen2.5 managed-vLLM workload, native vLLM p95 TTFT "
+            "must be strictly below 10 ms at configured concurrency 4."
+        ),
+        "threshold_ns": 10_000_000,
+    },
+    "semantic-first-nonempty-under-20ms": {
+        "criterion_id": "INFERDROME-P1-SEMANTIC-FIRST-NONEMPTY-20MS",
+        "title": "First non-empty content p95 below 20 ms",
+        "claim": (
+            "For the pinned Qwen2.5 managed-vLLM workload, p95 time to first "
+            "non-empty content must be strictly below 20 ms at configured "
+            "concurrency 4."
+        ),
+        "threshold_ns": 20_000_000,
+    },
+}
+
+
+def _expected_criterion(case_id: str, methodology: dict[str, Any]) -> dict[str, Any]:
+    selected = _P1_CASE_METADATA[case_id]
+    metric = methodology["requested_criterion_metric_definition_id"]
+    return {
+        "approved": True,
+        "case_id": case_id,
+        "concurrency_semantics": "configured_maximum_concurrency_not_observed_overlap",
+        "criterion_type": "inference_performance_v4",
+        "error_rate": {
+            "aggregation": "rate",
+            "denominator": "all_measured_requests",
+            "exact_attempts": 100,
+            "metric": "error_rate",
+            "must_pass": True,
+            "numerator": "failed_or_anomalous_native_measured_requests",
+            "operator": "lt",
+            "threshold_basis_points": 100,
+        },
+        "evidence_identity": methodology,
+        "evidence_policy": (
+            "A later producer capture may be linked only after this exact "
+            "customer-confirmed contract is frozen; ExitSpec independently "
+            "validates any later evidence."
+        ),
+        "human_added": True,
+        "id": selected["criterion_id"],
+        "must_have": True,
+        "normalized_claim": selected["claim"],
+        "owner": "exitspec-p1-reviewer",
+        "source": None,
+        "title": selected["title"],
+        "ttft_p95": {
+            "aggregation": "p95",
+            "definition_id": metric,
+            "equality_outcome": "FAIL",
+            "metric": "time_to_first_token",
+            "minimum_successful_samples": 100,
+            "must_pass": True,
+            "operator": "lt",
+            "population": "successful_measured_requests_with_observed_ttft",
+            "reducer_id": "nearest_rank_v1",
+            "schema_version": "exitspec.inferdrome-ttft-p95.v2",
+            "threshold_ns": selected["threshold_ns"],
+            "unit": "nanoseconds",
+        },
+    }
+
+
+def _contract_confirmation_fingerprint(
+    contract: dict[str, Any], *, case_id: str
+) -> str:
+    payload = {
+        key: contract[key]
+        for key in (
+            "id",
+            "version",
+            "customer",
+            "use_case",
+            "target_system",
+            "workload",
+            "criteria",
+            "owners",
+            "non_goals",
+            "evidence_retention_policy",
+        )
+    }
+    try:
+        canonical = rfc8785.dumps(payload)
+    except (rfc8785.CanonicalizationError, TypeError, ValueError):
+        raise ProspectiveHandoffError(
+            f"{case_id} contract confirmation payload is not canonicalizable"
+        ) from None
+    return hashlib.sha256(
+        b"exitspec-contract-confirmation-v1\x00" + canonical
+    ).hexdigest()
+
+
+def _validate_frozen_contract(
+    contract: dict[str, Any],
+    methodology: dict[str, Any],
+    *,
+    case_id: str,
+    confirmation_id: str,
+) -> str:
+    _require_exact_keys(contract, _P1_CONTRACT_KEYS, label=f"{case_id} frozen contract")
+    expected_contract = {
+        "approved_at": _P1_TIMESTAMP,
+        "canonical_hash": contract.get("canonical_hash"),
+        "confirmation_id": confirmation_id,
+        "created_at": _P1_TIMESTAMP,
+        "criteria": [_expected_criterion(case_id, methodology)],
+        "customer": "prospective-inferdrome-customer",
+        "evidence_retention_policy": (
+            "Retain the exact frozen contract, confirmation artifact, synthetic "
+            "workload bytes, and post-freeze source handoff metadata until a "
+            "separately authorized capture path exists."
+        ),
+        "frozen_at": _P1_TIMESTAMP,
+        "id": f"inferdrome-p1-{case_id}",
+        "non_goals": [
+            "No GPU or provider execution is authorized by this contract.",
+            (
+                "No run, request plan, bundle, observed measurement, receipt, or "
+                "verdict is present before capture."
+            ),
+            "A later evidence evaluation is a separate purpose-bound operation.",
+        ],
+        "owners": ["exitspec-p1-reviewer"],
+        "parent_version": None,
+        "status": "FROZEN",
+        "target_system": {
+            "endpoint_class": "retained-loopback-vllm-benchmark",
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "provider": "inferdrome-managed-vllm",
+        },
+        "use_case": "Prospectively qualify one exact managed Inferdrome case.",
+        "version": "1.0.0",
+        "workload": {
+            "fixture_path": "real-gpu/workload.jsonl",
+            "sha256": _P1_WORKLOAD_DIGEST.removeprefix("sha256:"),
+        },
+    }
+    if contract != expected_contract:
+        raise ProspectiveHandoffError(f"{case_id} frozen contract fields drifted")
+    canonical_hash = _bare_hash(
+        contract.get("canonical_hash"), label=f"{case_id} canonical hash"
+    )
+    try:
+        computed = hashlib.sha256(
+            rfc8785.dumps({
+                key: value for key, value in contract.items() if key != "canonical_hash"
+            })
+        ).hexdigest()
+    except (rfc8785.CanonicalizationError, TypeError, ValueError):
+        raise ProspectiveHandoffError(
+            f"{case_id} contract is not canonicalizable"
+        ) from None
+    if computed != canonical_hash:
+        raise ProspectiveHandoffError(
+            f"{case_id} canonical hash does not match contract"
+        )
+    return canonical_hash
+
+
+def _validate_confirmation(
+    confirmation: dict[str, Any],
+    contract: dict[str, Any],
+    *,
+    case_id: str,
+    expected_confirmation_id: str,
+    expected_fingerprint: str,
+) -> None:
+    _require_exact_keys(
+        confirmation, _P1_CONFIRMATION_KEYS, label=f"{case_id} confirmation"
+    )
+    expected = {
+        "agreement_acknowledged": True,
+        "confirmation_id": expected_confirmation_id,
+        "confirmer_identity": "process-local-customer-reviewer",
+        "contract_fingerprint": expected_fingerprint,
+        "contract_id": contract["id"],
+        "contract_version": contract["version"],
+        "decided_at": _P1_TIMESTAMP,
+        "decision": "CONFIRM",
+        "rationale": (
+            "I confirm this exact prospective managed-Inferdrome case, target, "
+            "workload, and methodology."
+        ),
+    }
+    if confirmation != expected:
+        raise ProspectiveHandoffError(f"{case_id} confirmation binding is invalid")
+
+
+def _workload_digest(value: object) -> str:
+    return _tagged_digest(value, label="handoff workload digest")
 
 
 def _safe_relative(value: object, *, label: str) -> str:
@@ -253,171 +878,24 @@ def _file_path(root: Path, relative: str) -> Path:
     return path
 
 
-def _entry_digest(value: object, *, label: str) -> tuple[str, int | None]:
-    if isinstance(value, str):
-        return _digest(value, label=label), None
-    if not isinstance(value, dict):
-        raise ProspectiveHandoffError(f"{label} is invalid")
-    digest_value = value.get("sha256", value.get("digest"))
-    digest = _digest(digest_value, label=label)
-    size_value = value.get("size_bytes", value.get("size"))
-    if size_value is None:
-        return digest, None
-    if (
-        isinstance(size_value, bool)
-        or not isinstance(size_value, int)
-        or not 1 <= size_value <= _MAX_WORKLOAD_BYTES
-    ):
-        raise ProspectiveHandoffError(f"{label} has an invalid byte count")
-    return digest, size_value
-
-
-def _manifest_file_entries(
-    manifest: dict[str, Any],
-) -> dict[str, tuple[str, int | None]]:
-    raw = manifest.get("files", manifest.get("artifacts"))
-    if raw is None and isinstance(manifest.get("cases"), list):
-        result: dict[str, tuple[str, int | None]] = {}
-        for item in manifest["cases"]:
-            if not isinstance(item, dict):
-                raise ProspectiveHandoffError("handoff case entry is invalid")
-            for path_key, digest_key in (
-                ("contract_artifact_path", "contract_artifact_sha256"),
-                ("confirmation_artifact_path", "confirmation_record_sha256"),
-                ("source_yaml_artifact_path", "source_yaml_artifact_sha256"),
-            ):
-                path = _safe_relative(item.get(path_key), label="handoff file")
-                if path in result:
-                    raise ProspectiveHandoffError(
-                        "handoff file manifest repeats a path"
-                    )
-                result[path] = _entry_digest(
-                    item.get(digest_key),
-                    label=f"handoff file {path}",
-                )
-        workload_path = _safe_relative(
-            manifest.get("workload_artifact_path"),
-            label="handoff workload file",
-        )
-        result[workload_path] = _entry_digest(
-            manifest.get("workload_artifact_sha256"),
-            label="handoff workload file",
-        )
-        return result
-    if isinstance(raw, dict):
-        entries: list[tuple[str, Any]] = list(raw.items())
-    elif isinstance(raw, list):
-        entries = []
-        for item in raw:
-            if not isinstance(item, dict):
-                raise ProspectiveHandoffError("handoff file manifest entry is invalid")
-            path = item.get("path", item.get("relative_path"))
-            entries.append((path, item))
-    else:
-        raise ProspectiveHandoffError("handoff manifest omits its file hashes")
-    result: dict[str, tuple[str, int | None]] = {}
-    for raw_path, raw_entry in entries:
-        path = _safe_relative(raw_path, label="handoff file")
-        if path in result:
-            raise ProspectiveHandoffError("handoff file manifest repeats a path")
-        result[path] = _entry_digest(raw_entry, label=f"handoff file {path}")
-    return result
-
-
 def _case_entries(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw = manifest.get("cases")
-    if isinstance(raw, dict):
-        values = []
-        for case_id, value in raw.items():
-            if not isinstance(value, dict):
-                raise ProspectiveHandoffError("handoff case entry is invalid")
-            values.append({"case_id": case_id, **value})
-    elif isinstance(raw, list):
-        values = raw
-    else:
-        raise ProspectiveHandoffError("handoff manifest omits its cases")
+    if not isinstance(raw, list) or len(raw) != len(CASE_IDS):
+        raise ProspectiveHandoffError("handoff manifest omits its canonical cases")
     result: dict[str, dict[str, Any]] = {}
-    for value in values:
-        if not isinstance(value, dict) or not isinstance(value.get("case_id"), str):
+    for expected_case_id, value in zip(CASE_IDS, raw, strict=True):
+        if not isinstance(value, dict) or value.get("case_id") != expected_case_id:
             raise ProspectiveHandoffError("handoff case entry is invalid")
+        _require_exact_keys(
+            value,
+            _P1_CASE_KEYS,
+            label=f"{expected_case_id} manifest case",
+        )
         case_id = value["case_id"]
         if case_id in result:
             raise ProspectiveHandoffError("handoff case IDs are duplicated")
         result[case_id] = value
-    if tuple(result) != CASE_IDS:
-        raise ProspectiveHandoffError(
-            "handoff cases are not the three canonical case IDs"
-        )
     return result
-
-
-def _case_path(value: dict[str, Any], names: tuple[str, ...], *, case_id: str) -> str:
-    for name in names:
-        candidate = value.get(name)
-        if candidate is not None:
-            return _safe_relative(candidate, label=f"{case_id} {name}")
-    raise ProspectiveHandoffError(f"handoff case omits its {names[0]}: {case_id}")
-
-
-def _contract_digest(
-    contract: dict[str, Any], case: dict[str, Any], *, case_id: str
-) -> str:
-    for value in (
-        case.get("producer_contract_link"),
-        contract.get("canonical_hash"),
-        contract.get("contract_digest"),
-        contract.get("contract_sha256"),
-        case.get("contract_digest"),
-        case.get("contract_sha256"),
-    ):
-        if value is not None:
-            return _digest(value, label=f"{case_id} contract digest")
-    raise ProspectiveHandoffError(f"{case_id} frozen contract omits its digest")
-
-
-def _affirmative_confirmation(
-    contract: dict[str, Any], confirmation: dict[str, Any], *, case_id: str
-) -> None:
-    decision = confirmation.get("decision", confirmation.get("status"))
-    if decision != "CONFIRM" or confirmation.get("agreement_acknowledged") is not True:
-        raise ProspectiveHandoffError(f"{case_id} confirmation is not affirmative")
-    contract_id = contract.get("id", contract.get("contract_id"))
-    contract_version = contract.get("version", contract.get("contract_version"))
-    if (
-        confirmation.get("contract_id") != contract_id
-        or confirmation.get("contract_version") != contract_version
-        or (
-            contract.get("confirmation_id") is not None
-            and confirmation.get("confirmation_id") != contract.get("confirmation_id")
-        )
-    ):
-        raise ProspectiveHandoffError(
-            f"{case_id} confirmation is bound to another contract"
-        )
-    if confirmation.get("contract_fingerprint") is None:
-        raise ProspectiveHandoffError(f"{case_id} confirmation omits its fingerprint")
-
-
-def _workload_digest(
-    manifest: dict[str, Any], files: dict[str, tuple[str, int | None]]
-) -> str:
-    candidates: list[object] = [
-        manifest.get("workload_sha256"),
-        manifest.get("workload_digest"),
-        manifest.get("workload_artifact_sha256"),
-    ]
-    workload = manifest.get("workload")
-    if isinstance(workload, dict):
-        candidates.extend([workload.get("sha256"), workload.get("digest")])
-    candidates.extend(
-        digest
-        for path, (digest, _size) in files.items()
-        if path == "sources/real-gpu/workload.jsonl"
-    )
-    for candidate in candidates:
-        if candidate is not None:
-            return _digest(candidate, label="handoff workload digest")
-    raise ProspectiveHandoffError("handoff manifest omits the workload digest")
 
 
 def snapshot_handoff(
@@ -431,7 +909,6 @@ def snapshot_handoff(
     root = handoff_root.expanduser().absolute()
     before = _walk_inventory(root)
     allowed_root = {".complete", "handoff-manifest.json"}
-    nested = set(before) - {""} - allowed_root
     file_paths = {
         path for path, identity in before.items() if path and stat.S_ISREG(identity[2])
     }
@@ -450,17 +927,9 @@ def snapshot_handoff(
         "sources/real-gpu",
     }
     if any(
-        path not in allowed_directories
-        and path
-        not in {
-            ".complete",
-            "handoff-manifest.json",
-            "sources/real-gpu/workload.jsonl",
-        }
-        and not path.startswith("contracts/")
-        and not path.startswith("confirmations/")
-        and not path.startswith("sources/")
-        for path in nested
+        stat.S_ISDIR(identity[2]) and path not in allowed_directories
+        for path, identity in before.items()
+        if path
     ):
         raise ProspectiveHandoffError("prospective handoff contains an extra path")
 
@@ -498,19 +967,62 @@ def snapshot_handoff(
     manifest_value = _strict_json(
         contents["handoff-manifest.json"], label="handoff manifest"
     )
-    schema = manifest_value.get("schema_version")
-    if schema != "exitspec.inferdrome-prospective-handoff.v1":
-        raise ProspectiveHandoffError("handoff manifest schema version is unsupported")
+    _require_exact_keys(manifest_value, _P1_MANIFEST_KEYS, label="handoff manifest")
     if (
-        manifest_value.get("acceptance_verdict") is not None
-        or manifest_value.get("authority_boundary")
-        != "EXIT_SPEC_CUSTOMER_CONFIRMED_HANDOFF_ONLY"
-        or manifest_value.get("completion_marker") != ".complete"
-        or manifest_value.get("workload_artifact_path")
-        != "sources/real-gpu/workload.jsonl"
+        manifest_value["schema_version"] != _P1_SCHEMA_VERSION
+        or manifest_value["authority_boundary"] != _P1_AUTHORITY_BOUNDARY
+        or manifest_value["confirmation_identity_assurance"]
+        != _P1_CONFIRMATION_ASSURANCE
+        or manifest_value["canonicalization_scheme_id"]
+        != _P1_CANONICALIZATION_SCHEME
+        or manifest_value["hash_algorithm_id"] != _P1_HASH_ALGORITHM
+        or manifest_value["link_derivation_policy_id"] != _P1_LINK_POLICY
+        or manifest_value["completion_marker"] != ".complete"
+        or manifest_value["workload_artifact_path"] != _P1_WORKLOAD_PATH
+        or manifest_value["acceptance_verdict"] is not None
     ):
         raise ProspectiveHandoffError("handoff manifest acceptance boundary is invalid")
-    file_entries = _manifest_file_entries(manifest_value)
+    try:
+        manifest_canonical = rfc8785.dumps(manifest_value)
+    except (rfc8785.CanonicalizationError, TypeError, ValueError):
+        raise ProspectiveHandoffError(
+            "handoff manifest is not canonical JSON"
+        ) from None
+    if manifest_canonical != contents["handoff-manifest.json"]:
+        raise ProspectiveHandoffError("handoff manifest is not canonical JSON")
+    case_values = _case_entries(manifest_value)
+    file_entries: dict[str, tuple[str, int | None]] = {}
+    for case_id in CASE_IDS:
+        selected = case_values[case_id]
+        expected_paths = {
+            "contract_artifact_path": f"contracts/{case_id}.frozen.json",
+            "confirmation_artifact_path": f"confirmations/{case_id}.confirmation.json",
+            "source_yaml_artifact_path": f"sources/{case_id}.yaml",
+        }
+        for path_field, expected_path in expected_paths.items():
+            if selected[path_field] != expected_path:
+                raise ProspectiveHandoffError(
+                    f"{case_id} has a non-canonical {path_field}"
+                )
+        for path_field, digest_field in (
+            ("contract_artifact_path", "contract_artifact_sha256"),
+            ("confirmation_artifact_path", "confirmation_record_sha256"),
+            ("source_yaml_artifact_path", "source_yaml_artifact_sha256"),
+        ):
+            path = _safe_relative(selected[path_field], label=f"{case_id} artifact")
+            if path in file_entries:
+                raise ProspectiveHandoffError("handoff artifact paths are duplicated")
+            file_entries[path] = (
+                _tagged_digest(selected[digest_field], label=f"{case_id} artifact"),
+                None,
+            )
+    file_entries[_P1_WORKLOAD_PATH] = (
+        _tagged_digest(
+            manifest_value["workload_artifact_sha256"],
+            label="handoff workload artifact",
+        ),
+        None,
+    )
     expected_paths = set(contents) - {"handoff-manifest.json", ".complete"}
     if set(file_entries) != expected_paths:
         raise ProspectiveHandoffError(
@@ -522,7 +1034,7 @@ def snapshot_handoff(
             raise ProspectiveHandoffError(
                 f"handoff file hash or size disagrees: {relative}"
             )
-    workload_digest = _workload_digest(manifest_value, file_entries)
+    workload_digest = _workload_digest(manifest_value["workload_artifact_sha256"])
     if workload_digest != _digest_bytes(contents["sources/real-gpu/workload.jsonl"]):
         raise ProspectiveHandoffError("handoff workload digest disagrees")
     if expected_manifest_sha256 is not None and _digest(
@@ -538,51 +1050,16 @@ def snapshot_handoff(
     ):
         raise ProspectiveHandoffError("workload digest disagrees with its operator pin")
 
-    case_values = _case_entries(manifest_value)
     cases: list[HandoffCase] = []
     contract_digests: set[str] = set()
+    producer_links: set[str] = set()
+    confirmation_ids: set[str] = set()
     selected_paths: set[str] = set()
     for case_id in CASE_IDS:
         selected = case_values[case_id]
-        contract_path = _case_path(
-            selected,
-            (
-                "contract_artifact_path",
-                "contract_path",
-                "contract",
-                "contract_file",
-            ),
-            case_id=case_id,
-        )
-        confirmation_path = _case_path(
-            selected,
-            (
-                "confirmation_artifact_path",
-                "confirmation_path",
-                "confirmation",
-                "confirmation_file",
-            ),
-            case_id=case_id,
-        )
-        source_path = _case_path(
-            selected,
-            (
-                "source_yaml_artifact_path",
-                "source_path",
-                "source",
-                "source_file",
-            ),
-            case_id=case_id,
-        )
-        if (
-            not contract_path.startswith("contracts/")
-            or not confirmation_path.startswith("confirmations/")
-            or not source_path.startswith("sources/")
-            or source_path == "sources/real-gpu/workload.jsonl"
-        ):
-            raise ProspectiveHandoffError(
-                f"{case_id} paths are outside the P1 allowlist"
-            )
+        contract_path = selected["contract_artifact_path"]
+        confirmation_path = selected["confirmation_artifact_path"]
+        source_path = selected["source_yaml_artifact_path"]
         selected_paths.update({contract_path, confirmation_path, source_path})
         contract_bytes = contents.get(contract_path)
         confirmation_bytes = contents.get(confirmation_path)
@@ -595,62 +1072,100 @@ def snapshot_handoff(
         confirmation_value = _strict_json(
             confirmation_bytes, label=f"{case_id} confirmation"
         )
-        contract_id = contract_value.get("id", contract_value.get("contract_id"))
-        if not isinstance(contract_id, str) or case_id not in contract_id:
+        try:
+            contract_canonical = rfc8785.dumps(contract_value)
+            confirmation_canonical = rfc8785.dumps(confirmation_value)
+        except (rfc8785.CanonicalizationError, TypeError, ValueError):
             raise ProspectiveHandoffError(
-                f"{case_id} contract is not tagged with its case ID"
-            )
-        _affirmative_confirmation(contract_value, confirmation_value, case_id=case_id)
+                f"{case_id} JSON artifact is not canonical"
+            ) from None
         if (
-            selected.get("contract_id") is not None
-            and selected.get("contract_id") != contract_id
-        ) or (
-            selected.get("contract_version") is not None
-            and selected.get("contract_version")
-            != contract_value.get("version", contract_value.get("contract_version"))
+            contract_canonical != contract_bytes
+            or confirmation_canonical != confirmation_bytes
         ):
-            raise ProspectiveHandoffError(
-                f"{case_id} manifest contract identity disagrees"
-            )
-        if (
-            selected.get("confirmation_id") is not None
-            and selected.get("confirmation_id")
-            != confirmation_value.get("confirmation_id")
-        ) or (
-            selected.get("contract_confirmation_fingerprint") is not None
-            and selected.get("contract_confirmation_fingerprint")
-            != confirmation_value.get("contract_fingerprint")
+            raise ProspectiveHandoffError(f"{case_id} JSON artifact is not canonical")
+        methodology = selected["methodology"]
+        if not isinstance(methodology, dict):
+            raise ProspectiveHandoffError(f"{case_id} methodology is invalid")
+        _require_exact_keys(
+            methodology, _P1_METHODOLOGY_KEYS, label=f"{case_id} methodology"
+        )
+        for nested_name, nested_keys in (
+            ("canonicalization", _P1_CANONICALIZATION_KEYS),
+            ("reliability_population", _P1_RELIABILITY_KEYS),
+            ("sampling", _P1_SAMPLING_KEYS),
+            ("traffic", _P1_TRAFFIC_KEYS),
         ):
-            raise ProspectiveHandoffError(
-                f"{case_id} manifest confirmation identity disagrees"
-            )
-        selected_digest = _contract_digest(contract_value, selected, case_id=case_id)
-        if "contract_canonical_hash" in selected:
-            canonical = _digest(
-                selected["contract_canonical_hash"],
-                label=f"{case_id} manifest contract hash",
-            )
-            if canonical != _digest(
-                contract_value.get("canonical_hash"),
-                label=f"{case_id} contract canonical hash",
-            ):
+            nested_value = methodology.get(nested_name)
+            if not isinstance(nested_value, dict):
                 raise ProspectiveHandoffError(
-                    f"{case_id} contract canonical hash disagrees"
+                    f"{case_id} methodology {nested_name} is invalid"
                 )
+            _require_exact_keys(
+                nested_value,
+                nested_keys,
+                label=f"{case_id} methodology {nested_name}",
+            )
+        if methodology != _expected_methodology(case_id):
+            raise ProspectiveHandoffError(f"{case_id} methodology identity drifted")
+        expected_confirmation_id = selected["confirmation_id"]
         if (
-            "producer_contract_link" in selected
-            and _digest(
-                selected["producer_contract_link"],
-                label=f"{case_id} producer contract link",
-            )
-            != selected_digest
+            not isinstance(expected_confirmation_id, str)
+            or not re.fullmatch(r"cnf_[0-9a-f]{64}", expected_confirmation_id)
         ):
-            raise ProspectiveHandoffError(f"{case_id} producer contract link disagrees")
-        if selected_digest in contract_digests:
             raise ProspectiveHandoffError(
-                "the three frozen contract links must be distinct"
+                f"{case_id} confirmation identity is invalid"
             )
-        contract_digests.add(selected_digest)
+        selected_fingerprint = _bare_hash(
+            selected["contract_confirmation_fingerprint"],
+            label=f"{case_id} confirmation fingerprint",
+        )
+        canonical_hash = _validate_frozen_contract(
+            contract_value,
+            methodology,
+            case_id=case_id,
+            confirmation_id=expected_confirmation_id,
+        )
+        if selected["contract_canonical_hash"] != canonical_hash:
+            raise ProspectiveHandoffError(
+                f"{case_id} manifest canonical hash disagrees with contract"
+            )
+        producer_link = _tagged_digest(
+            selected["producer_contract_link"],
+            label=f"{case_id} producer contract link",
+        )
+        if producer_link != f"sha256:{canonical_hash}":
+            raise ProspectiveHandoffError(f"{case_id} producer contract link disagrees")
+        expected_fingerprint = _contract_confirmation_fingerprint(
+            contract_value, case_id=case_id
+        )
+        if selected_fingerprint != expected_fingerprint:
+            raise ProspectiveHandoffError(
+                f"{case_id} confirmation fingerprint disagrees"
+            )
+        _validate_confirmation(
+            confirmation_value,
+            contract_value,
+            case_id=case_id,
+            expected_confirmation_id=expected_confirmation_id,
+            expected_fingerprint=selected_fingerprint,
+        )
+        source_document = _strict_source_yaml(
+            source_bytes, label=f"{case_id} source YAML"
+        )
+        if source_document != _expected_source_yaml(case_id, producer_link):
+            raise ProspectiveHandoffError(f"{case_id} source YAML methodology drifted")
+        if canonical_hash in contract_digests or producer_link in producer_links:
+            raise ProspectiveHandoffError(
+                "the three frozen contract hashes and links must be distinct"
+            )
+        if expected_confirmation_id in confirmation_ids:
+            raise ProspectiveHandoffError(
+                "the three confirmation identities must be distinct"
+            )
+        contract_digests.add(canonical_hash)
+        producer_links.add(producer_link)
+        confirmation_ids.add(expected_confirmation_id)
         cases.append(
             HandoffCase(
                 case_id=case_id,
@@ -665,7 +1180,7 @@ def snapshot_handoff(
                 source=HandoffFile(
                     source_path, source_bytes, _digest_bytes(source_bytes)
                 ),
-                contract_digest=selected_digest,
+                contract_digest=producer_link,
             )
         )
     contract_paths = {path for path in expected_paths if path.startswith("contracts/")}
@@ -694,13 +1209,8 @@ def snapshot_handoff(
     complete = HandoffFile(
         ".complete", contents[".complete"], _digest_bytes(contents[".complete"])
     )
-    if complete.content.strip().lower() not in {
-        b"complete",
-        b"p1-complete",
-        b"true",
-        b"exitspec.inferdrome-prospective-handoff.complete.v1",
-    }:
-        raise ProspectiveHandoffError("handoff completion marker is not affirmative")
+    if complete.content != b"exitspec.inferdrome-prospective-handoff.complete.v1\n":
+        raise ProspectiveHandoffError("handoff completion marker bytes are invalid")
     all_files = tuple(
         HandoffFile(relative, contents[relative], _digest_bytes(contents[relative]))
         for relative in sorted(contents)

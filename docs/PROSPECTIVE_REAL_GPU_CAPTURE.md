@@ -25,8 +25,9 @@ requested output tokens, temperature 0, seed 42, and the checked-in workload
 bytes. The source YAML bytes remain the original-spec artifact in every sealed
 bundle.
 
-The repository intentionally contains no runnable prospective source files or
-ExitSpec digests. The historical sources are not valid substitutes because
+The repository intentionally contains no production capture input or runnable
+prospective source files. A checked-in exact-byte fixture is used only by the
+offline parser tests; the historical sources are not valid substitutes because
 their linkage is null and their captures are retrospective.
 
 ## Read-only preflight
@@ -103,7 +104,10 @@ The controller can transport the complete ExitSpec P1 handoff directory as one
 no-follow, byte-snapshotted archive. It creates a second, distinct exact-HEAD
 Inferdrome source archive, pins both digests remotely, invokes the merged
 prospective wrapper once per case, and retrieves a bounded immutable session
-archive. The controller does not pool cases or emit an ExitSpec acceptance
+archive. For a guarded Lambda run, retrieval returns only after bounded byte
+size and SHA-256 checks; local extraction, session identity parsing, offline
+verification, and receipt publication occur only after provider termination is
+confirmed. The controller does not pool cases or emit an ExitSpec acceptance
 verdict. A non-Lambda host is explicitly an operator-provided boundary: the
 receipt says `OPERATOR_PROVIDED_HOST_NO_COST_TERMINATION_CLAIM`, and the
 operator owns any provider cleanup.
@@ -118,6 +122,7 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   --handoff-root /absolute/path/to/ExitSpec/examples/inference-performance/inferdrome-p1 \
   --expected-handoff-manifest-sha256 <operator-observed-manifest-sha256> \
   --expected-workload-sha256 <operator-observed-workload-sha256> \
+  --expected-source-archive-sha256 <operator-observed-source-archive-sha256> \
   --expected-commit <exact-clean-inferdrome-commit> \
   --identity-file /absolute/path/to/operator-ssh-key \
   --host-key-file /absolute/path/to/pinned-known-hosts \

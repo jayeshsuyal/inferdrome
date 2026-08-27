@@ -180,14 +180,24 @@ def _source_export_marker() -> dict[str, str]:
         raise RemoteCaptureError("source export marker version is unsupported")
     if value["transport"] != "git-archive-exact-head-tree-v1":
         raise RemoteCaptureError("source export transport is unsupported")
-    if _COMMIT_PATTERN.fullmatch(str(value["repository_commit"])) is None:
+    repository_commit = value["repository_commit"]
+    source_archive_sha256 = value["source_archive_sha256"]
+    if (
+        not isinstance(repository_commit, str)
+        or _COMMIT_PATTERN.fullmatch(repository_commit) is None
+    ):
         raise RemoteCaptureError("source export commit is invalid")
     if (
-        re.fullmatch(r"sha256:[0-9a-f]{64}", str(value["source_archive_sha256"]))
-        is None
+        not isinstance(source_archive_sha256, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", source_archive_sha256) is None
     ):
         raise RemoteCaptureError("source export digest is invalid")
-    return {key: str(item) for key, item in value.items()}
+    return {
+        "repository_commit": repository_commit,
+        "schema_version": value["schema_version"],
+        "source_archive_sha256": source_archive_sha256,
+        "transport": value["transport"],
+    }
 
 
 def _create_exported_source_archive(
@@ -298,16 +308,32 @@ def _create_exported_source_archive(
     return actual, len(archived_bytes)
 
 
-def _create_source_archive(destination: Path, commit: str) -> tuple[str, int]:
+def _create_source_archive(
+    destination: Path,
+    commit: str,
+    *,
+    expected_archive_sha256: str | None = None,
+) -> tuple[str, int]:
     """Export only the exact HEAD tree, refusing links, submodules, and secrets."""
 
     if not _git_checkout_present():
         marker = _source_export_marker()
         if marker["repository_commit"] != commit:
             raise RemoteCaptureError("source export commit does not match local HEAD")
+        if expected_archive_sha256 is None:
+            raise RemoteCaptureError(
+                "no-Git source export requires the independent expected archive digest"
+            )
+        if (
+            re.fullmatch(r"sha256:[0-9a-f]{64}", expected_archive_sha256) is None
+            or expected_archive_sha256 != marker["source_archive_sha256"]
+        ):
+            raise RemoteCaptureError(
+                "source export marker does not match the independent archive digest"
+            )
         return _create_exported_source_archive(
             destination,
-            expected_archive_sha256=marker["source_archive_sha256"],
+            expected_archive_sha256=expected_archive_sha256,
         )
 
     if destination.exists() or destination.is_symlink():
@@ -1603,6 +1629,11 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
                 args, "expected_handoff_manifest_sha256", None
             ),
             "expected_workload_sha256": getattr(args, "expected_workload_sha256", None),
+            "expected_source_archive_sha256": (
+                getattr(args, "expected_source_archive_sha256", None)
+                if not _git_checkout_present()
+                else True
+            ),
             "remote_state_root": getattr(args, "remote_state_root", None),
         }
         missing = [name for name, value in required.items() if value is None]
@@ -1637,6 +1668,7 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
         for name in (
             "expected_handoff_manifest_sha256",
             "expected_workload_sha256",
+            "expected_source_archive_sha256",
             "remote_state_root",
             "host_key_file",
         )
@@ -1859,6 +1891,9 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
         source_archive_sha256, source_archive_bytes = _create_source_archive(
             temporary_root / "repo.tar",
             commit,
+            expected_archive_sha256=getattr(
+                args, "expected_source_archive_sha256", None
+            ),
         )
     if _prospective_requested(args) and prospective is None:
         raise AssertionError
@@ -2026,8 +2061,13 @@ def _capture_prospective_over_ssh(
     handoff: prospective_handoff.HandoffSnapshot,
     *,
     termination_deadline: datetime | None = None,
-) -> Path:
-    """Transport one immutable P1 snapshot and retrieve its sealed session."""
+) -> tuple[Path, int]:
+    """Transport one immutable P1 snapshot and retrieve its raw archive.
+
+    This phase deliberately does not inspect the retrieved archive.  Guarded
+    callers must confirm provider termination before any local extraction or
+    session parsing occurs.
+    """
 
     if handoff.archive_path is None or handoff.archive_sha256 is None:
         raise RemoteCaptureError("prospective handoff archive was not prepared")
@@ -2232,24 +2272,6 @@ def _capture_prospective_over_ssh(
                 + "  prospective-session.tar.gz\n"
             ).encode("ascii"),
         )
-        session_root = _extract_prospective_archive(archive, staging_path / "session")
-        session_id, case_identities = _prospective_session_identities(session_root)
-        _write_json(
-            staging_path / "prospective-transport.json",
-            {
-                "case_identities": case_identities,
-                "handoff_archive_sha256": handoff.archive_sha256,
-                "handoff_archive_size_bytes": handoff.archive_size_bytes,
-                "handoff_manifest_sha256": handoff.manifest_sha256,
-                "repository_commit": commit,
-                "schema_version": "inferdrome.prospective-ssh-transport.v1",
-                "session_id": session_id,
-                "source_archive_sha256": source_archive_sha256,
-                "source_archive_size_bytes": len(source_bytes),
-                "ssh_host_identity_sha256": _host_identity_digest(known_hosts),
-                "workload_sha256": handoff.workload_sha256,
-            },
-        )
         os.replace(staging_path, final_path)
     except Exception:
         if staging_path.exists():
@@ -2259,7 +2281,66 @@ def _capture_prospective_over_ssh(
             )
         raise
     print(f"Prospective session retrieved: {final_path}")
-    return final_path
+    return final_path, len(source_bytes)
+
+
+def _materialize_prospective_capture(
+    capture_path: Path,
+    handoff: prospective_handoff.HandoffSnapshot,
+    *,
+    commit: str,
+    source_archive_sha256: str,
+    source_archive_size_bytes: int,
+) -> tuple[str, list[dict[str, str]]]:
+    """Inspect the raw session only after the provider boundary is complete."""
+
+    if not 1 <= source_archive_size_bytes <= _MAX_SOURCE_ARCHIVE_BYTES:
+        raise RemoteCaptureError("prospective source archive size is invalid")
+    try:
+        archive_bytes, archive_identity = prospective_handoff._read_regular_once(
+            capture_path / "prospective-session.tar.gz",
+            label="retained prospective session archive",
+            maximum_bytes=_PROSPECTIVE_MAX_SESSION_ARCHIVE_BYTES,
+        )
+    except prospective_handoff.ProspectiveHandoffError as error:
+        raise RemoteCaptureError(str(error)) from None
+    archive_size, archive_sha256 = _read_prospective_transfer_metadata(
+        capture_path / "prospective-session.tar.gz.metadata.json"
+    )
+    if (
+        len(archive_bytes) != archive_size
+        or "sha256:" + hashlib.sha256(archive_bytes).hexdigest() != archive_sha256
+        or archive_identity[4] != archive_size
+    ):
+        raise RemoteCaptureError(
+            "retained prospective session archive changed before extraction"
+        )
+    verified_archive = capture_path / "prospective-session.verified.tar.gz"
+    _write_bytes_exclusive(verified_archive, archive_bytes)
+    session_root = _extract_prospective_archive(
+        verified_archive,
+        capture_path / "session",
+    )
+    session_id, case_identities = _prospective_session_identities(session_root)
+    _write_json(
+        capture_path / "prospective-transport.json",
+        {
+            "case_identities": case_identities,
+            "handoff_archive_sha256": handoff.archive_sha256,
+            "handoff_archive_size_bytes": handoff.archive_size_bytes,
+            "handoff_manifest_sha256": handoff.manifest_sha256,
+            "repository_commit": commit,
+            "schema_version": "inferdrome.prospective-ssh-transport.v1",
+            "session_id": session_id,
+            "source_archive_sha256": source_archive_sha256,
+            "source_archive_size_bytes": source_archive_size_bytes,
+            "ssh_host_identity_sha256": _host_identity_digest(
+                capture_path / "ssh-known-hosts"
+            ),
+            "workload_sha256": handoff.workload_sha256,
+        },
+    )
+    return session_id, case_identities
 
 
 def _finalize_prospective_capture(
@@ -2267,6 +2348,11 @@ def _finalize_prospective_capture(
     handoff: prospective_handoff.HandoffSnapshot,
     *,
     guarded_termination: lambda_gpu_guard.TerminationResult | None,
+    expected_commit: str | None = None,
+    expected_source_archive_sha256: str | None = None,
+    expected_source_archive_size_bytes: int | None = None,
+    expected_host_identity_sha256: str | None = None,
+    verified_session_identities: tuple[str, list[dict[str, str]]] | None = None,
 ) -> Path:
     """Verify offline after the required termination boundary."""
 
@@ -2316,13 +2402,46 @@ def _finalize_prospective_capture(
         or not isinstance(transport.get("handoff_archive_size_bytes"), int)
         or transport["handoff_archive_size_bytes"] != handoff.archive_size_bytes
         or not 1 <= transport["source_archive_size_bytes"] <= _MAX_SOURCE_ARCHIVE_BYTES
+        or (
+            expected_commit is not None
+            and transport["repository_commit"] != expected_commit
+        )
+        or (
+            expected_source_archive_sha256 is not None
+            and transport["source_archive_sha256"] != expected_source_archive_sha256
+        )
+        or (
+            expected_source_archive_size_bytes is not None
+            and transport["source_archive_size_bytes"]
+            != expected_source_archive_size_bytes
+        )
+        or (
+            expected_host_identity_sha256 is not None
+            and transport["ssh_host_identity_sha256"] != expected_host_identity_sha256
+        )
     ):
         raise RemoteCaptureError("prospective transport provenance disagrees")
-    session_root = capture_path / "session"
+    session_id_value = transport.get("session_id")
+    if (
+        not isinstance(session_id_value, str)
+        or re.fullmatch(
+            r"prospective-real-gpu-[A-Za-z0-9_.-]{1,128}", session_id_value
+        )
+        is None
+    ):
+        raise RemoteCaptureError("prospective transport session identity is invalid")
+    session_root = capture_path / "session" / session_id_value
+    if verified_session_identities is None:
+        verified_session_identities = _prospective_session_identities(session_root)
     verification = _verify_prospective_session(session_root, handoff)
     expected_cases = _validate_prospective_case_identities(
         transport.get("case_identities")
     )
+    session_id, session_cases = verified_session_identities
+    if transport["session_id"] != session_id or expected_cases != session_cases:
+        raise RemoteCaptureError(
+            "prospective transport receipt identities disagree with the session"
+        )
     if verification.get("valid") is not True:
         raise RemoteCaptureError("prospective offline verification is incomplete")
     archive_size, archive_sha256 = _read_prospective_transfer_metadata(
@@ -3417,6 +3536,9 @@ def _capture_prospective_with_handoff_impl(
         source_archive_sha256, source_archive_bytes = _create_source_archive(
             source_archive,
             commit,
+            expected_archive_sha256=getattr(
+                args, "expected_source_archive_sha256", None
+            ),
         )
         print(
             "Prospective P1 snapshot prepared before SSH/provider action: "
@@ -3428,7 +3550,7 @@ def _capture_prospective_with_handoff_impl(
             f"({source_archive_bytes} bytes)"
         )
         watchdog = _arm_lambda_watchdog(args)
-        captured: Path | None = None
+        captured: tuple[Path, int] | None = None
         termination: lambda_gpu_guard.TerminationResult | None = None
         termination_deadline = getattr(
             getattr(watchdog, "cost_window", None),
@@ -3479,10 +3601,23 @@ def _capture_prospective_with_handoff_impl(
                     )
         if captured is None:
             raise AssertionError
+        capture_path, source_archive_size_bytes = captured
+        verified_session_identities = _materialize_prospective_capture(
+            capture_path,
+            handoff,
+            commit=commit,
+            source_archive_sha256=source_archive_sha256,
+            source_archive_size_bytes=source_archive_size_bytes,
+        )
         return _finalize_prospective_capture(
-            captured,
+            capture_path,
             handoff,
             guarded_termination=termination,
+            expected_commit=commit,
+            expected_source_archive_sha256=source_archive_sha256,
+            expected_source_archive_size_bytes=source_archive_size_bytes,
+            expected_host_identity_sha256="sha256:" + args.host_key_sha256,
+            verified_session_identities=verified_session_identities,
         )
 
 
@@ -3525,6 +3660,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-workload-sha256",
         type=_prospective_digest,
         help="operator-observed real-GPU workload digest",
+    )
+    parser.add_argument(
+        "--expected-source-archive-sha256",
+        type=_prospective_digest,
+        help="independent digest pin for a no-Git exported source archive",
     )
     parser.add_argument("--expected-commit")
     parser.add_argument(
@@ -3629,6 +3769,7 @@ def main() -> int:
                 or args.qwen3_gpu_tier is not None
                 or args.identity_file is not None
                 or args.host_key_sha256 is not None
+                or args.expected_source_archive_sha256 is not None
                 or _lambda_guard_requested(args)
             ):
                 raise RemoteCaptureError(
@@ -3663,6 +3804,7 @@ def main() -> int:
                 or args.prospective_handoff_root is not None
                 or args.expected_handoff_manifest_sha256 is not None
                 or args.expected_workload_sha256 is not None
+                or args.expected_source_archive_sha256 is not None
                 or args.host_key_file is not None
                 or args.managed_capability_profile is not None
                 or args.qwen3_gpu_tier is not None

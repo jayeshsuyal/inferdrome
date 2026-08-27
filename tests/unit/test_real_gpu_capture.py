@@ -298,7 +298,39 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
     monkeypatch.setattr(remote, "_git_checkout_present", lambda: False)
 
     archive = tmp_path / "repo.tar"
-    digest, size = remote._create_source_archive(archive, COMMIT)
+    with pytest.raises(
+        remote.RemoteCaptureError, match="independent expected archive digest"
+    ):
+        remote._create_source_archive(archive, COMMIT)
+
+    marker = json.loads((repository / ".inferdrome-source-export.json").read_text())
+    marker["source_archive_sha256"] = "sha256:" + "0" * 64
+    (repository / ".inferdrome-source-export.json").write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(remote.RemoteCaptureError, match="independent archive digest"):
+        remote._create_source_archive(
+            tmp_path / "rewritten-marker.tar",
+            COMMIT,
+            expected_archive_sha256=expected_digest,
+        )
+    marker["source_archive_sha256"] = expected_digest
+    (repository / ".inferdrome-source-export.json").write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (repository / "README.md").write_text("modified exported tree\n", encoding="utf-8")
+    with pytest.raises(remote.RemoteCaptureError, match="disagrees with its marker"):
+        remote._create_source_archive(
+            tmp_path / "modified-tree.tar",
+            COMMIT,
+            expected_archive_sha256=expected_digest,
+        )
+    (repository / "README.md").write_text("exported tree\n", encoding="utf-8")
+    digest, size = remote._create_source_archive(
+        archive,
+        COMMIT,
+        expected_archive_sha256=expected_digest,
+    )
 
     assert digest == expected_digest
     assert size == archive.stat().st_size
@@ -307,7 +339,11 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
     assert b".inferdrome-source-export.json" not in archive.read_bytes()
     (repository / ".codex-venv").mkdir()
     with pytest.raises(remote.RemoteCaptureError, match="task environment"):
-        remote._create_source_archive(tmp_path / "rejected-env.tar", COMMIT)
+        remote._create_source_archive(
+            tmp_path / "rejected-env.tar",
+            COMMIT,
+            expected_archive_sha256=expected_digest,
+        )
 
 
 def test_remote_command_pins_commit_and_bounds_workload() -> None:
@@ -552,7 +588,7 @@ def test_qwen3_dry_run_discloses_termination_before_semantic_verification(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
@@ -601,7 +637,7 @@ def test_qwen3_a100_dry_run_binds_runtime_instance_type_and_exact_gpu(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
@@ -634,7 +670,7 @@ def test_qwen3_a100_sxm4_dry_run_binds_extension_instance_and_gpu(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
@@ -667,7 +703,7 @@ def test_qwen3_h100_dry_run_binds_runtime_instance_type_and_exact_gpu(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
