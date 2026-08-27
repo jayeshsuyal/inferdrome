@@ -55,7 +55,7 @@ For v0.1, Inferdrome may claim:
 - exact-byte artifact integrity after a bundle is sealed;
 - explicit provenance for declared and observed environment fields;
 - deterministic recalculation from canonical records; and
-- independent acceptance evaluation by ExitSpec.
+- a portable handoff to an independent acceptance evaluator such as ExitSpec.
 
 Inferdrome v0.1 must not claim:
 
@@ -66,8 +66,10 @@ Inferdrome v0.1 must not claim:
 - response determinism across otherwise equivalent runs; or
 - causal explanations for performance changes without telemetry.
 
-An ExitSpec ingestion receipt anchors the bundle digest that ExitSpec received.
-It does not attest that the described execution occurred. The complete security
+When ExitSpec supplies an ingestion receipt, it anchors the bundle digest that
+ExitSpec received. It does not attest that the described execution occurred.
+The receipt, acceptance outcomes, and importer are separately owned external
+ExitSpec work; this repository does not contain them. The complete security
 boundary is defined in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Ownership boundaries
@@ -244,9 +246,11 @@ v0.1 contains:
   finish reason;
 - a portable directory bundle with exact-byte hashes;
 - offline bundle verification;
-- a safe ExitSpec importer with independent metric recalculation; and
-- a real-GPU demonstration of `PASS`, `FAIL`, `NOT_PROVEN`, corrupted-evidence
-  rejection, and synthetic-evidence rejection.
+- an external ExitSpec handoff boundary; importer, receipt, and acceptance
+  evaluation are not Inferdrome implementation; and
+- producer-side genuine GPU evidence plus corrupted-evidence and
+  synthetic-evidence rejection demonstrations. ExitSpec `PASS`, `FAIL`, and
+  `NOT_PROVEN` demonstrations remain external release blockers.
 
 ## v0.1 non-goals
 
@@ -254,13 +258,14 @@ The following are explicitly delayed:
 
 - a custom load generator;
 - retries;
-- GuideLLM and SGLang adapters;
+- GuideLLM and executable or eligible second-serving-engine adapters;
 - statistical trial-set comparison;
 - Prometheus, vLLM, DCGM, or Nsight telemetry;
 - router-decision analysis;
 - Parquet, DuckDB, Pandas, or Polars;
 - remote Docker, Kubernetes, or cloud provisioning;
-- a hosted API, database, authentication system, or web dashboard;
+- a hosted API, database, multi-user authentication system, or hosted dashboard
+  (the accepted local dashboard is post-v0.1 and outside the release gate);
 - automatic optimization or AI-generated tuning advice;
 - quality evaluation;
 - artifact signing or trusted execution attestation; and

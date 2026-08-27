@@ -1,7 +1,6 @@
 # Inferdrome v0.1 release checklist
 
-Status: **GPU producer evidence complete; external acceptance and sign-off
-pending**
+Status: **Repository gates defined; external acceptance and sign-off pending**
 
 This checklist maps the frozen
 [v0.1 definition of done](V0_1_DEFINITION_OF_DONE.md) to reviewable evidence.
@@ -11,12 +10,13 @@ security review, or final release sign-off.
 
 ## Automated candidate gates
 
-Every pull request and every update to `main` must run both jobs in
+Every pull request and every update to `main` must run all three jobs in
 `.github/workflows/ci.yml`:
 
 | Required job | Evidence boundary |
 | --- | --- |
 | `Engineering gate` | Generated schemas and goldens, static GPU-proof assets, script syntax, Ruff, strict mypy, and the complete Python suite |
+| `Deployment qualification gate` | Local Docker Compose synthetic qualification, including bounded cleanup and induced-failure diagnostics; no cloud/GPU/evidence claim |
 | `Dashboard gate` | TypeScript, frontend unit tests, populated Playwright navigation against the real server, dashboard backend tests, committed production assets, and installed-wheel smoke |
 
 The workflow uses read-only repository permissions, no secrets, bounded job
@@ -38,7 +38,7 @@ failure. Normal pull-request CI remains GPU-free.
 | 8. ExitSpec integration | Independently owned importer, recalculation, decision table, and receipt | External release blocker |
 | 9. Flagship demonstration | Managed runbook, exact A10 handoff, corruption and synthetic rejection demos | Inferdrome producer evidence complete; ExitSpec outcomes pending |
 | 10. Security and privacy | Threat model, bounded readers, adversarial tests, exact-archive publication review | `EXTERNAL_ONLY`; human security and owner publication review pending |
-| 11. Engineering quality | Both CI jobs, packaging smoke, documentation, contribution guidance | License selection and `v0.1.0` tag pending |
+| 11. Engineering quality | All three CI jobs, packaging smoke, documentation, contribution guidance | License selection and `v0.1.0` tag pending |
 
 ## Release-blocking evidence
 
@@ -62,7 +62,7 @@ failure. Normal pull-request CI remains GPU-free.
   reviewer and date.
 - [ ] Select and add the repository license. This checklist deliberately does
   not make that legal choice on the owner's behalf.
-- [ ] Confirm both required GitHub checks pass at the release commit.
+- [ ] Confirm all required GitHub checks pass at the release commit.
 - [ ] Confirm the release commit has no uncommitted or untracked release
   artifacts.
 - [ ] Tag that exact commit as `v0.1.0` only after every item above is complete.
@@ -104,3 +104,51 @@ neither may be reconstructed from a summary or edited into a sealed bundle.
 These anchors close only Inferdrome's producer-side evidence work. They do not
 create an ExitSpec receipt, prove pre-measurement contract chronology, approve
 public archive delivery, or authorize a release tag.
+
+## Offline candidate and final release procedure
+
+The repository-owned preflight is deliberately separate from the release
+decision. From a clean checkout at the candidate commit, install the locked
+Python and frontend dependencies, then run:
+
+```bash
+uv sync --extra dev --extra dashboard
+npm ci --prefix frontend
+npx --prefix frontend playwright install chromium
+.venv/bin/python scripts/release_preflight.py \
+  --repository-only --require-clean
+```
+
+That command must report `REPOSITORY_READY`. It checks the development version,
+required release inputs, CI gate inventory, claim-boundary labels, and clean
+checkout. It does not claim ExitSpec acceptance, archive publication, security
+sign-off, license selection, or final release approval.
+
+After the owner and ExitSpec owners have supplied the unchecked items above,
+run the repository gates using the same candidate commit:
+
+```bash
+.venv/bin/python scripts/release_preflight.py --run-gates
+INFERDROME_PYTHON=.venv/bin/python ./scripts/deployment_qualification_gate.sh
+git status --short --branch
+git diff --check
+```
+
+The preflight delegates engineering and dashboard work to their existing gate
+scripts; the deployment qualification job remains the separate local Docker
+Compose CI gate because it creates disposable local resources and is not an
+offline provider check. CI must pass all three jobs at the exact candidate
+commit. The qualification result remains `SYNTHETIC_ONLY` and does not replace
+genuine GPU evidence or ExitSpec review.
+
+Only after every checklist item is closed by its named owner, the human threat
+model review is recorded, and the exact candidate commit has passed all three
+CI jobs may the release owner create the `v0.1.0` tag. Tagging, publishing, and
+merging are intentionally not performed by this preflight. The package remains
+`0.1.0.dev0` until that separate release decision.
+
+Automation cannot prove the ExitSpec importer or `PASS`/`FAIL`/`NOT_PROVEN`
+outcomes, pre-measurement contract chronology, human security approval, owner
+license choice, owner archive-publication decision, GitHub check results, or
+final release approval. Those inputs must remain explicit checklist evidence;
+checking a box does not turn them into Inferdrome evidence.

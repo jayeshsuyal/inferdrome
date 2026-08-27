@@ -40,6 +40,9 @@ jobs:
       - name: Install engineering dependencies
         run: python -m pip install --editable ".[dev]"
 
+      - name: Run repository release preflight
+        run: python scripts/release_preflight.py --repository-only --require-clean
+
       - name: Run the engineering gate
         env:
           INFERDROME_PYTHON: python

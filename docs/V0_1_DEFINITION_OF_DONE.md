@@ -107,6 +107,10 @@ demonstration or manually editing an evidence bundle.
 - Workload, target, environment, and achieved-load mismatches follow a documented
   applicability decision table.
 
+This section is separately owned ExitSpec work. Inferdrome can preserve the
+handoff boundary and verify its own bundle, but its gates cannot prove the
+importer, receipt, or acceptance outcomes.
+
 ## 9. Flagship demonstration
 
 A clean GPU host can follow the reproduction guide and produce a new bundle for
@@ -128,8 +132,10 @@ editing measurements.
 Current implementation checkpoint: Inferdrome's managed Linux/NVIDIA harness,
 complete local provenance path, repeatable flagship run, corrupted-copy
 rejection, and synthetic customer-flow rejection are implemented. A genuine
-compatible-host bundle has not yet been promoted, and the separately owned
-ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations remain release-blocking.
+compatible-host A10 bundle is retained as producer-side evidence, but it does
+not close archive publication, human sign-off, or acceptance. The separately
+owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations remain
+release-blocking.
 
 ## 10. Security and privacy
 
@@ -150,8 +156,9 @@ ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations remain release-blocking
 - A GPU is not required for normal pull-request tests.
 - At least one opt-in real-GPU smoke test produces a stored example bundle.
 - Documentation commands are tested or copied from executable demo scripts.
-- The repository has a license, contribution guidance, and a tagged `v0.1.0`
-  release.
+- A repository license is selected and added by the owner, contribution
+  guidance is present, and a tagged `v0.1.0` release identifies the reviewed
+  commit.
 
 ## Release sign-off
 

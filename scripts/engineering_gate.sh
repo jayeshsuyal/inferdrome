@@ -80,6 +80,7 @@ bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/run_qwen3_a100_sxm4_evidence_dashboard.py
 "$inferdrome_python" -m py_compile scripts/verify_dashboard_install.py
 "$inferdrome_python" -m py_compile scripts/verify_qwen3_workload_tokenization.py
+"$inferdrome_python" -m py_compile scripts/release_preflight.py
 "$inferdrome_python" -m ruff check .
 "$inferdrome_python" -m mypy
 "$inferdrome_python" -m pytest
