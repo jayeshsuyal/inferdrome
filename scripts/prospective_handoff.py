@@ -346,22 +346,6 @@ def _digest_bytes(content: bytes) -> str:
     return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
-def _digest(value: object, *, label: str) -> str:
-    if not isinstance(value, str):
-        raise ProspectiveHandoffError(f"{label} has an invalid SHA-256 shape")
-    if value.startswith("sha256:"):
-        selected = value
-    elif len(value) == 64:
-        selected = "sha256:" + value
-    else:
-        selected = ""
-    if len(selected) != 71 or any(
-        character not in "0123456789abcdef" for character in selected[7:]
-    ):
-        raise ProspectiveHandoffError(f"{label} has an invalid SHA-256 shape")
-    return selected
-
-
 def _bare_hash(value: object, *, label: str) -> str:
     if (
         not isinstance(value, str)
@@ -381,6 +365,12 @@ def _tagged_digest(value: object, *, label: str) -> str:
     ):
         raise ProspectiveHandoffError(f"{label} must be a sha256: digest link")
     return value
+
+
+def _inode_identity(metadata: os.stat_result) -> tuple[int, int]:
+    """Return the stable identity used to bind a path to an opened inode."""
+
+    return metadata.st_dev, metadata.st_ino
 
 
 def _require_exact_keys(
@@ -449,19 +439,23 @@ def _bounded_text(value: object, *, label: str, maximum: int = 4_096) -> str:
 
 
 def _timestamp(value: object, *, label: str) -> datetime:
-    selected = _bounded_text(value, label=label, maximum=20)
+    selected = _bounded_text(value, label=label, maximum=32)
     if (
         re.fullmatch(
-            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.[0-9]{1,6})?(?:Z|\+00:00)",
             selected,
         )
         is None
     ):
         raise ProspectiveHandoffError(f"{label} has an invalid UTC timestamp")
     try:
-        return datetime.strptime(selected, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        parsed = datetime.fromisoformat(selected.replace("Z", "+00:00"))
     except ValueError:
         raise ProspectiveHandoffError(f"{label} has an invalid UTC timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise ProspectiveHandoffError(f"{label} has an invalid UTC timestamp")
+    return parsed.astimezone(UTC)
 
 
 def _expected_methodology(case_id: str, workload_digest: str) -> dict[str, Any]:
@@ -1231,14 +1225,14 @@ def snapshot_handoff(
     workload_digest = _workload_digest(manifest_value["workload_artifact_sha256"])
     if workload_digest != _digest_bytes(contents["sources/real-gpu/workload.jsonl"]):
         raise ProspectiveHandoffError("handoff workload digest disagrees")
-    if _digest(
+    if _tagged_digest(
         expected_manifest_sha256, label="expected handoff manifest digest"
     ) != _digest_bytes(contents["handoff-manifest.json"]):
         raise ProspectiveHandoffError(
             "handoff manifest digest disagrees with its operator pin"
         )
     if (
-        _digest(expected_workload_sha256, label="expected workload digest")
+        _tagged_digest(expected_workload_sha256, label="expected workload digest")
         != workload_digest
     ):
         raise ProspectiveHandoffError("workload digest disagrees with its operator pin")
@@ -1463,6 +1457,7 @@ def create_handoff_archive(
             "prospective handoff archive destination already exists"
         )
     descriptor: int | None = None
+    created_inode: tuple[int, int] | None = None
     with tempfile.TemporaryDirectory(prefix="inferdrome-p1-handoff-") as temporary:
         staged = Path(temporary) / "handoff"
         staged.mkdir(mode=0o700)
@@ -1478,29 +1473,32 @@ def create_handoff_archive(
                 | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
             )
-            with (
-                os.fdopen(descriptor, "wb") as output,
-                gzip.GzipFile(fileobj=output, mode="wb", mtime=0) as compressed,
-                tarfile.open(
-                    fileobj=compressed, mode="w:", format=tarfile.USTAR_FORMAT
-                ) as archive,
-            ):
+            created_inode = _inode_identity(os.fstat(descriptor))
+            with os.fdopen(descriptor, "wb") as output:
                 descriptor = None
-                for file in snapshot.files:
-                    info = tarfile.TarInfo(file.relative_path)
-                    info.size = len(file.content)
-                    info.mode = 0o400
-                    info.mtime = 0
-                    info.uid = 0
-                    info.gid = 0
-                    info.uname = ""
-                    info.gname = ""
-                    archive.addfile(info, io.BytesIO(file.content))
+                with (
+                    gzip.GzipFile(fileobj=output, mode="wb", mtime=0) as compressed,
+                    tarfile.open(
+                        fileobj=compressed, mode="w:", format=tarfile.USTAR_FORMAT
+                    ) as archive,
+                ):
+                    for file in snapshot.files:
+                        info = tarfile.TarInfo(file.relative_path)
+                        info.size = len(file.content)
+                        info.mode = 0o400
+                        info.mtime = 0
+                        info.uid = 0
+                        info.gid = 0
+                        info.uname = ""
+                        info.gname = ""
+                        archive.addfile(info, io.BytesIO(file.content))
                 output.flush()
                 os.fsync(output.fileno())
             metadata = os.lstat(destination)
             if (
-                not stat.S_ISREG(metadata.st_mode)
+                created_inode is None
+                or _inode_identity(metadata) != created_inode
+                or not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_nlink != 1
                 or not 1 <= metadata.st_size <= _MAX_HANDOFF_ARCHIVE_BYTES
             ):
@@ -1508,15 +1506,18 @@ def create_handoff_archive(
         except (OSError, tarfile.TarError):
             if descriptor is not None:
                 os.close(descriptor)
-            destination.unlink(missing_ok=True)
             raise ProspectiveHandoffError(
                 "prospective handoff archive is unavailable"
             ) from None
-    archived_bytes, _identity = _read_regular_once(
+    archived_bytes, archive_identity = _read_regular_once(
         destination,
         label="prospective handoff archive",
         maximum_bytes=_MAX_HANDOFF_ARCHIVE_BYTES,
     )
+    if created_inode is None or archive_identity[:2] != created_inode:
+        raise ProspectiveHandoffError(
+            "prospective handoff archive changed after it was created"
+        )
     digest = _digest_bytes(archived_bytes)
     return HandoffSnapshot(
         root=snapshot.root,
@@ -1527,7 +1528,7 @@ def create_handoff_archive(
         files=snapshot.files,
         archive_path=destination,
         archive_sha256=digest,
-        archive_size_bytes=destination.stat().st_size,
+        archive_size_bytes=len(archived_bytes),
     )
 
 

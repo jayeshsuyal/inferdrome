@@ -413,14 +413,18 @@ def test_remote_source_retention_stream_is_bounded_and_exclusive(
     truncated_repository = tmp_path / "truncated-repository"
     truncated_repository.mkdir()
     assert run(truncated_source, truncated_repository, SOURCE_DIGEST).returncode != 0
-    assert not (truncated_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).exists()
+    assert (
+        truncated_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME
+    ).stat().st_size <= len(SOURCE_BYTES)
 
     growing_source = tmp_path / "growing.tar"
     growing_source.write_bytes(SOURCE_BYTES + b"growth")
     growing_repository = tmp_path / "growing-repository"
     growing_repository.mkdir()
     assert run(growing_source, growing_repository, SOURCE_DIGEST).returncode != 0
-    assert not (growing_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).exists()
+    assert (
+        growing_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME
+    ).stat().st_size <= len(SOURCE_BYTES) + len(b"growth")
 
     linked_source = tmp_path / "linked.tar"
     linked_source.symlink_to(source)
@@ -500,7 +504,47 @@ def test_prospective_extraction_rejects_unsafe_members(
             second.size = 1
             archive.addfile(second, io.BytesIO(b"x"))
     with pytest.raises(remote.RemoteCaptureError, match="unsafe"):
-        remote._extract_prospective_archive(archive_path, tmp_path / "extracted")
+        remote._extract_prospective_archive(
+            archive_path.read_bytes(), tmp_path / "extracted"
+        )
+
+
+def test_prospective_extraction_preserves_unowned_destination_on_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "session.tar.gz"
+    with tarfile.open(archive_path, mode="w:gz") as archive:
+        member = tarfile.TarInfo("session/result.json")
+        member.size = 2
+        archive.addfile(member, io.BytesIO(b"{}"))
+    target = tmp_path / "destination-target"
+    target.mkdir()
+    destination = tmp_path / "extracted"
+    destination.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
+        remote._extract_prospective_archive(archive_path.read_bytes(), destination)
+    assert destination.is_symlink()
+    assert target.is_dir()
+
+    destination.unlink()
+    replaced = False
+    original_mkdir = Path.mkdir
+
+    def race_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal replaced
+        original_mkdir(path, *args, **kwargs)
+        if path == destination and not replaced:
+            destination.rmdir()
+            destination.symlink_to(target, target_is_directory=True)
+            replaced = True
+
+    monkeypatch.setattr(Path, "mkdir", race_mkdir)
+    with pytest.raises(remote.RemoteCaptureError, match="unsafe"):
+        remote._extract_prospective_archive(archive_path.read_bytes(), destination)
+    assert destination.is_symlink()
+    assert target.is_dir()
 
 
 def test_guarded_prospective_capture_terminates_before_offline_verify(

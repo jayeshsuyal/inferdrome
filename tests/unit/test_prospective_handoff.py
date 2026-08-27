@@ -159,6 +159,48 @@ def test_exact_p1_snapshot_and_archive_preserve_relative_workload_reference(
     assert archived.archive_size_bytes == (tmp_path / "handoff.tar.gz").stat().st_size
 
 
+def test_handoff_archive_preserves_unowned_and_replaced_destinations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "inferdrome-p1"
+    manifest_digest, workload_digest = _make_handoff(root)
+    snapshot = handoff.snapshot_handoff(
+        root,
+        expected_manifest_sha256=manifest_digest,
+        expected_workload_sha256=workload_digest,
+    )
+    target = tmp_path / "destination-target"
+    target.write_bytes(b"must remain")
+    destination = tmp_path / "handoff.tar.gz"
+    destination.symlink_to(target)
+
+    with pytest.raises(handoff.ProspectiveHandoffError):
+        handoff.create_handoff_archive(snapshot, destination)
+    assert destination.is_symlink()
+    assert target.read_bytes() == b"must remain"
+
+    destination.unlink()
+    original_read = handoff._read_regular_once
+    replaced = False
+
+    def replace_after_write(
+        path: Path, *, label: str, maximum_bytes: int
+    ) -> tuple[bytes, tuple[int, ...]]:
+        nonlocal replaced
+        if path == destination and not replaced:
+            destination.unlink()
+            destination.symlink_to(target)
+            replaced = True
+        return original_read(path, label=label, maximum_bytes=maximum_bytes)
+
+    monkeypatch.setattr(handoff, "_read_regular_once", replace_after_write)
+    with pytest.raises(handoff.ProspectiveHandoffError):
+        handoff.create_handoff_archive(snapshot, destination)
+    assert destination.is_symlink()
+    assert target.read_bytes() == b"must remain"
+
+
 def test_second_valid_v1_fixture_is_not_bound_to_current_artifact_values(
     tmp_path: Path,
 ) -> None:
@@ -176,11 +218,55 @@ def test_second_valid_v1_fixture_is_not_bound_to_current_artifact_values(
     assert tuple(case.case_id for case in snapshot.cases) == handoff.CASE_IDS
 
 
+def test_valid_v1_fixture_accepts_ordered_fractional_utc_timestamps(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "fractional-timestamps"
+    manifest_digest, workload_digest = _make_variant_handoff(
+        root,
+        created_timestamp="2027-01-02T03:04:05.120000Z",
+        decided_timestamp="2027-01-02T03:04:05.120001+00:00",
+        frozen_timestamp="2027-01-02T03:04:05.120002Z",
+    )
+
+    snapshot = handoff.snapshot_handoff(
+        root,
+        expected_manifest_sha256=manifest_digest,
+        expected_workload_sha256=workload_digest,
+    )
+
+    assert snapshot.workload_sha256 == workload_digest
+
+
+def test_snapshot_rejects_bare_operator_digest_pins(tmp_path: Path) -> None:
+    root = tmp_path / "bare-pins"
+    manifest_digest, workload_digest = _make_handoff(root)
+
+    with pytest.raises(handoff.ProspectiveHandoffError, match="sha256"):
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest.removeprefix("sha256:"),
+            expected_workload_sha256=workload_digest,
+        )
+
+    with pytest.raises(handoff.ProspectiveHandoffError, match="sha256"):
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest,
+            expected_workload_sha256=workload_digest.removeprefix("sha256:"),
+        )
+
+
 @pytest.mark.parametrize(
     ("created", "decided", "frozen"),
     [
         ("2027-01-02T03:04:05Z", "2027-01-02T03:03:05Z", "2027-01-02T03:06:05Z"),
         ("2027-01-02T03:04:05Z", "2027-01-02T03:05:05Z", "2027-01-02T03:03:05Z"),
+        (
+            "2027-01-02T03:04:05Z",
+            "2027-01-02T04:05:05+01:00",
+            "2027-01-02T03:06:05Z",
+        ),
     ],
 )
 def test_snapshot_rejects_out_of_order_protocol_timestamps(
@@ -197,7 +283,7 @@ def test_snapshot_rejects_out_of_order_protocol_timestamps(
         frozen_timestamp=frozen,
     )
 
-    with pytest.raises(handoff.ProspectiveHandoffError, match="timestamps"):
+    with pytest.raises(handoff.ProspectiveHandoffError, match="timestamp"):
         handoff.snapshot_handoff(
             root,
             expected_manifest_sha256=manifest_digest,

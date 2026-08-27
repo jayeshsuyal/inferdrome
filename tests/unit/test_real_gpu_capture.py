@@ -225,7 +225,8 @@ def test_exact_tree_export_excludes_removed_secret_and_git_history(
     blocked_key_archive = tmp_path / "blocked-key.tar"
     with pytest.raises(remote.RemoteCaptureError, match="private-key material"):
         remote._create_source_archive(blocked_key_archive, private_commit)
-    assert not blocked_key_archive.exists()
+    assert blocked_key_archive.is_file()
+    assert blocked_key_archive.stat().st_size <= remote._MAX_SOURCE_ARCHIVE_BYTES
 
     private_material.unlink()
     (repository / ".gitattributes").write_text(
@@ -286,6 +287,105 @@ def test_git_source_archive_preflight_rejects_sparse_or_many_entry_trees(
     assert ["archive" for call in calls if "archive" in call] == []
 
 
+def test_git_source_archive_stream_rejects_over_cap_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_popen = subprocess.Popen
+    code = (
+        "import sys\n"
+        "for _ in range(2049):\n"
+        "    sys.stdout.buffer.write(b'x' * 65536)\n"
+        "    sys.stdout.buffer.flush()\n"
+    )
+
+    def over_cap_popen(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        return original_popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+
+    monkeypatch.setattr(remote.subprocess, "Popen", over_cap_popen)
+    destination = tmp_path / "over-cap.tar"
+    with pytest.raises(remote.RemoteCaptureError, match="exceeds"):
+        remote._stream_git_source_archive(destination, COMMIT)
+    assert destination.is_file()
+    assert destination.stat().st_size <= remote._MAX_SOURCE_ARCHIVE_BYTES
+
+
+def test_git_source_archive_preflight_accounts_for_long_path_pax_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_path = "/".join(["long-name"] * 30) + "/payload.txt"
+    listing = (
+        f"100644 blob {'a' * 40} {remote._MAX_SOURCE_ARCHIVE_BYTES - 1024}\t"
+        f"{long_path}\0"
+    ).encode()
+
+    def run(arguments: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv = [str(value) for value in arguments]  # type: ignore[arg-type]
+        if "ls-tree" in argv:
+            return subprocess.CompletedProcess(argv, 0, listing, b"")
+        pytest.fail("PAX-aware source preflight must reject before Git streaming")
+
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(remote, "_git_checkout_present", lambda: True)
+    monkeypatch.setattr(remote, "_run", run)
+
+    with pytest.raises(remote.RemoteCaptureError, match="archive bound"):
+        remote._create_source_archive(tmp_path / "long-path.tar", COMMIT)
+
+
+def test_git_source_archive_stream_preserves_preexisting_or_replaced_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "destination-target"
+    target.write_bytes(b"must remain")
+    destination = tmp_path / "source.tar"
+    destination.symlink_to(target)
+
+    with pytest.raises(remote.RemoteCaptureError):
+        remote._stream_git_source_archive(destination, COMMIT)
+    assert destination.is_symlink()
+    assert target.read_bytes() == b"must remain"
+
+    destination.unlink()
+    original_popen = subprocess.Popen
+    original_lstat = os.lstat
+    replaced = False
+
+    def small_popen(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        return original_popen(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'archive')"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+
+    def replace_on_final_check(path: os.PathLike[str] | str) -> os.stat_result:
+        nonlocal replaced
+        result = original_lstat(path)
+        if Path(path) == destination and not replaced:
+            destination.unlink()
+            destination.symlink_to(target)
+            replaced = True
+            return original_lstat(path)
+        return result
+
+    monkeypatch.setattr(remote.subprocess, "Popen", small_popen)
+    monkeypatch.setattr(remote.os, "lstat", replace_on_final_check)
+    with pytest.raises(remote.RemoteCaptureError, match="changed while it was written"):
+        remote._stream_git_source_archive(destination, COMMIT)
+    assert destination.is_symlink()
+    assert target.read_bytes() == b"must remain"
+
+
 def test_exact_tree_export_supports_pinned_tree_without_git_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -340,6 +440,23 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
         == "sha256:" + hashlib.sha256(original_archive.read_bytes()).hexdigest()
     )
     assert git_size == original_archive.stat().st_size
+
+    original_stream = remote._stream_git_source_archive
+
+    def mutate_after_stream(
+        destination: Path, selected_commit: str
+    ) -> tuple[int, tuple[int, int], int, str]:
+        result = original_stream(destination, selected_commit)
+        offset = original_archive.read_bytes().index(b"exported tree")
+        assert os.pwrite(result[0], b"replaced tree", offset) == len(b"replaced tree")
+        return result
+
+    monkeypatch.setattr(remote, "_stream_git_source_archive", mutate_after_stream)
+    with pytest.raises(
+        remote.RemoteCaptureError, match="changed while it was validated"
+    ):
+        remote._create_source_archive(tmp_path / "mutated-after-stream.tar", commit)
+    monkeypatch.setattr(remote, "_stream_git_source_archive", original_stream)
 
     repository = tmp_path / "export"
     repository.mkdir()
@@ -402,6 +519,40 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
     assert size == archive.stat().st_size
     assert archive.read_bytes() == original_archive.read_bytes()
     assert b".inferdrome-source-export.json" not in archive.read_bytes()
+
+    destination_target = tmp_path / "destination-target"
+    destination_target.write_bytes(b"must remain")
+    destination_link = tmp_path / "destination-link.tar"
+    destination_link.symlink_to(destination_target)
+    with pytest.raises(remote.RemoteCaptureError, match="destination already exists"):
+        remote._create_source_archive(
+            destination_link,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert destination_link.is_symlink()
+    assert destination_target.read_bytes() == b"must remain"
+
+    replacement_destination = tmp_path / "replacement-destination.tar"
+    original_writer = remote._write_bytes_exclusive
+
+    def write_then_replace(path: Path, content: bytes) -> tuple[int, int]:
+        result = original_writer(path, content)
+        path.unlink()
+        path.symlink_to(destination_target)
+        return result
+
+    monkeypatch.setattr(remote, "_write_bytes_exclusive", write_then_replace)
+    with pytest.raises(remote.RemoteCaptureError, match="could not be copied"):
+        remote._create_source_archive(
+            replacement_destination,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert replacement_destination.is_symlink()
+    assert destination_target.read_bytes() == b"must remain"
+    monkeypatch.setattr(remote, "_write_bytes_exclusive", original_writer)
+
     (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).unlink()
     with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
         remote._create_source_archive(
