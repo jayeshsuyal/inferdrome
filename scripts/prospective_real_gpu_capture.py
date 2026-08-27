@@ -28,7 +28,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from inferdrome.bundle import verify_bundle
 from inferdrome.domain.evidence import EvidenceEligibility
-from inferdrome.domain.ids import Sha256Digest, sha256_digest
+from inferdrome.domain.ids import RunId, Sha256Digest, sha256_digest
 from inferdrome.errors import InferdromeError
 from inferdrome.resolution import ResolutionResult, resolve_experiment
 from inferdrome.resolution.io import resolve_safe_child
@@ -73,6 +73,10 @@ class CompletedCase:
     bundle_path: Path
     bundle_digest: str
     run_id: str
+    source_spec_digest: str
+    execution_fingerprint: str
+    request_plan_digest: str
+    exitspec_contract_digest: str
 
 
 def _strict_json_bytes(content: bytes, *, label: str) -> dict[str, Any]:
@@ -102,19 +106,59 @@ def _strict_json_bytes(content: bytes, *, label: str) -> dict[str, Any]:
     return value
 
 
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def _read_regular(path: Path, *, label: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
     try:
-        metadata = os.lstat(path)
-    except OSError:
-        raise ProspectiveCaptureError(f"{label} is unavailable") from None
-    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
-        raise ProspectiveCaptureError(f"{label} must be a regular file")
-    if metadata.st_size > _MAX_METADATA_BYTES:
-        raise ProspectiveCaptureError(f"{label} exceeds its size limit")
-    try:
-        return path.read_bytes()
-    except OSError:
-        raise ProspectiveCaptureError(f"{label} cannot be read") from None
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        identity = _file_identity(metadata)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("input is not a regular file")
+        if metadata.st_size > _MAX_METADATA_BYTES:
+            raise ValueError("input exceeds its size limit")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= _MAX_METADATA_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(65_536, _MAX_METADATA_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        content = b"".join(chunks)
+        final_metadata = os.fstat(descriptor)
+        if (
+            _file_identity(final_metadata) != identity
+            or len(content) > _MAX_METADATA_BYTES
+        ):
+            raise ValueError("input changed during read")
+        try:
+            path_metadata = os.lstat(path)
+        except OSError:
+            raise ValueError("input changed during read") from None
+        if _file_identity(path_metadata) != identity:
+            raise ValueError("input changed during read")
+        return content
+    except (OSError, ValueError):
+        raise ProspectiveCaptureError(f"{label} is unavailable or unsafe") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _read_json(path: Path, *, label: str) -> dict[str, Any]:
@@ -170,11 +214,18 @@ def _metadata_digest(path: Path, *, label: str) -> str:
     return _file_digest(path, label=label)
 
 
-def _validate_contract_digest(value: str, *, label: str) -> str:
+def _validate_contract_digest(value: object, *, label: str) -> str:
     try:
         return TypeAdapter(Sha256Digest).validate_python(value, strict=True)
     except ValidationError:
         raise ProspectiveCaptureError(f"{label} has an invalid SHA-256 shape") from None
+
+
+def _validate_run_id(value: object, *, label: str) -> str:
+    try:
+        return TypeAdapter(RunId).validate_python(value, strict=True)
+    except ValidationError:
+        raise ProspectiveCaptureError(f"{label} has an invalid run identity") from None
 
 
 def _parse_case(value: str) -> tuple[str, Path]:
@@ -306,6 +357,10 @@ def validate_prospective_cases(
             "a runnable prospective session requires exactly the three named cases "
             "and one expected digest per case"
         )
+    if len(set(expected.values())) != len(CASE_IDS):
+        raise ProspectiveCaptureError(
+            "the three expected ExitSpec contract digests must be pairwise distinct"
+        )
 
     pin = _static_pin()
     reference = _reference_resolution()
@@ -417,13 +472,18 @@ def _run_case(
     bundle_text = output.get("bundle_path")
     bundle_digest = output.get("bundle_digest")
     run_id = output.get("run_id")
-    if not all(
-        isinstance(value, str) and value
-        for value in (bundle_text, bundle_digest, run_id)
-    ):
+    if not isinstance(bundle_text, str) or not bundle_text:
         raise ProspectiveCaptureError(
             f"prospective case output omits its bundle identity: {case.case_id}"
         )
+    declared_bundle_digest = _validate_contract_digest(
+        bundle_digest,
+        label=f"{case.case_id} output bundle digest",
+    )
+    declared_run_id = _validate_run_id(
+        run_id,
+        label=f"{case.case_id} output run identity",
+    )
     if (
         output.get("evidence_eligibility") != "CUSTOMER_ELIGIBLE"
         or output.get("integrity_status") != "VALID"
@@ -439,19 +499,51 @@ def _run_case(
             f"prospective case bundle escapes its session: {case.case_id}"
         ) from None
     try:
-        report = verify_bundle(bundle_path, expected_bundle_digest=bundle_digest)
+        report = verify_bundle(
+            bundle_path,
+            expected_bundle_digest=declared_bundle_digest,
+        )
     except InferdromeError:
         raise ProspectiveCaptureError(
             f"prospective case bundle failed verification: {case.case_id}"
         ) from None
+    actual_digests = report.descriptor.digests
+    actual_bundle_digest = _validate_contract_digest(
+        report.bundle_digest,
+        label=f"{case.case_id} verified bundle digest",
+    )
+    actual_source_spec_digest = _validate_contract_digest(
+        actual_digests.source_spec_digest,
+        label=f"{case.case_id} verified source-spec digest",
+    )
+    actual_execution_fingerprint = _validate_contract_digest(
+        actual_digests.execution_fingerprint,
+        label=f"{case.case_id} verified execution fingerprint",
+    )
+    actual_request_plan_digest = _validate_contract_digest(
+        actual_digests.request_plan_digest,
+        label=f"{case.case_id} verified request-plan digest",
+    )
+    actual_contract_digest = actual_digests.exitspec_contract_digest
+    if actual_contract_digest is None:
+        raise ProspectiveCaptureError(
+            f"prospective case bundle omits its ExitSpec contract link: {case.case_id}"
+        )
+    actual_contract_digest = _validate_contract_digest(
+        actual_contract_digest,
+        label=f"{case.case_id} verified ExitSpec contract digest",
+    )
+    actual_run_id = _validate_run_id(
+        report.run_id,
+        label=f"{case.case_id} verified run identity",
+    )
     if (
         report.descriptor.evidence_eligibility
         is not EvidenceEligibility.CUSTOMER_ELIGIBLE
-        or report.descriptor.digests.exitspec_contract_digest
-        != case.expected_contract_digest
-        or report.descriptor.digests.source_spec_digest
-        != case.resolution.source_spec_digest
-        or report.run_id != run_id
+        or actual_bundle_digest != declared_bundle_digest
+        or actual_run_id != declared_run_id
+        or actual_contract_digest != case.expected_contract_digest
+        or actual_source_spec_digest != case.resolution.source_spec_digest
     ):
         raise ProspectiveCaptureError(
             f"prospective case bundle linkage disagrees: {case.case_id}"
@@ -459,8 +551,12 @@ def _run_case(
     return CompletedCase(
         case=case,
         bundle_path=bundle_path,
-        bundle_digest=bundle_digest,
-        run_id=run_id,
+        bundle_digest=actual_bundle_digest,
+        run_id=actual_run_id,
+        source_spec_digest=actual_source_spec_digest,
+        execution_fingerprint=actual_execution_fingerprint,
+        request_plan_digest=actual_request_plan_digest,
+        exitspec_contract_digest=actual_contract_digest,
     )
 
 
@@ -489,15 +585,15 @@ def _case_metadata(completed: CompletedCase, session_root: Path) -> dict[str, An
         "bundle_digest": completed.bundle_digest,
         "bundle_path": bundle_relative,
         "case_id": completed.case.case_id,
-        "execution_fingerprint": completed.case.resolution.execution_fingerprint,
-        "exitspec_contract_digest": completed.case.expected_contract_digest,
+        "execution_fingerprint": completed.execution_fingerprint,
+        "exitspec_contract_digest": completed.exitspec_contract_digest,
         "original_spec_sha256": _file_digest(
             original_spec,
             label=f"{completed.case.case_id} original specification",
         ),
-        "request_plan_digest": completed.case.resolution.request_plan_digest,
+        "request_plan_digest": completed.request_plan_digest,
         "run_id": completed.run_id,
-        "source_spec_digest": completed.case.resolution.source_spec_digest,
+        "source_spec_digest": completed.source_spec_digest,
     }
 
 
@@ -622,6 +718,10 @@ def _expected_from_arguments(expected_arguments: list[str]) -> dict[str, str]:
         raise ProspectiveCaptureError(
             "verification requires one expected contract digest for each named case"
         )
+    if len(set(expected.values())) != len(CASE_IDS):
+        raise ProspectiveCaptureError(
+            "the three expected ExitSpec contract digests must be pairwise distinct"
+        )
     return expected
 
 
@@ -714,16 +814,30 @@ def verify_session(session_root: Path, expected_arguments: list[str]) -> dict[st
         raise ProspectiveCaptureError(
             "prospective capture manifest has the wrong case count"
         )
-    by_id = {item.get("case_id"): item for item in cases if isinstance(item, dict)}
-    if set(by_id) != set(CASE_IDS) or len(by_id) != len(cases):
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in cases:
+        if not isinstance(item, dict):
+            raise ProspectiveCaptureError("prospective capture case is not an object")
+        case_id = item.get("case_id")
+        if not isinstance(case_id, str) or case_id in by_id:
+            raise ProspectiveCaptureError("prospective capture cases are not unique")
+        by_id[case_id] = item
+    if set(by_id) != set(CASE_IDS):
         raise ProspectiveCaptureError("prospective capture cases are not unique")
     if [item.get("case_id") for item in cases] != list(CASE_IDS):
         raise ProspectiveCaptureError(
             "prospective capture cases are not canonically ordered"
         )
-    for item in cases:
-        if not isinstance(item, dict):
-            raise ProspectiveCaptureError("prospective capture case is not an object")
+    case_digest_fields = (
+        "bundle_digest",
+        "execution_fingerprint",
+        "exitspec_contract_digest",
+        "original_spec_sha256",
+        "request_plan_digest",
+        "source_spec_digest",
+    )
+    for case_id in CASE_IDS:
+        item = by_id[case_id]
         _require_fields(
             item,
             {
@@ -739,6 +853,12 @@ def verify_session(session_root: Path, expected_arguments: list[str]) -> dict[st
             },
             label="prospective capture case",
         )
+        for field in case_digest_fields:
+            _validate_contract_digest(
+                item[field],
+                label=f"{case_id} {field}",
+            )
+        _validate_run_id(item["run_id"], label=f"{case_id} run identity")
 
     contract_binding = capture.get("contract_binding")
     if not isinstance(contract_binding, dict) or contract_binding != {
@@ -771,22 +891,54 @@ def verify_session(session_root: Path, expected_arguments: list[str]) -> dict[st
         try:
             report = verify_bundle(
                 bundle,
-                expected_bundle_digest=item.get("bundle_digest"),
+                expected_bundle_digest=item["bundle_digest"],
             )
         except (InferdromeError, TypeError):
             raise ProspectiveCaptureError(
                 f"prospective capture bundle failed verification: {case_id}"
             ) from None
         original = bundle / "experiment.original.yaml"
+        actual_digests = report.descriptor.digests
+        actual_bundle_digest = _validate_contract_digest(
+            report.bundle_digest,
+            label=f"{case_id} verified bundle digest",
+        )
+        actual_execution_fingerprint = _validate_contract_digest(
+            actual_digests.execution_fingerprint,
+            label=f"{case_id} verified execution fingerprint",
+        )
+        actual_request_plan_digest = _validate_contract_digest(
+            actual_digests.request_plan_digest,
+            label=f"{case_id} verified request-plan digest",
+        )
+        actual_source_spec_digest = _validate_contract_digest(
+            actual_digests.source_spec_digest,
+            label=f"{case_id} verified source-spec digest",
+        )
+        actual_contract_digest = actual_digests.exitspec_contract_digest
+        if actual_contract_digest is None:
+            raise ProspectiveCaptureError(
+                f"{case_id} verified bundle omits its ExitSpec contract link"
+            )
+        actual_contract_digest = _validate_contract_digest(
+            actual_contract_digest,
+            label=f"{case_id} verified ExitSpec contract digest",
+        )
+        actual_run_id = _validate_run_id(
+            report.run_id,
+            label=f"{case_id} verified run identity",
+        )
         if (
             report.descriptor.evidence_eligibility
             is not EvidenceEligibility.CUSTOMER_ELIGIBLE
-            or report.descriptor.digests.exitspec_contract_digest != expected[case_id]
-            or report.descriptor.digests.source_spec_digest
-            != item.get("source_spec_digest")
+            or actual_bundle_digest != item["bundle_digest"]
+            or actual_execution_fingerprint != item["execution_fingerprint"]
+            or actual_request_plan_digest != item["request_plan_digest"]
+            or actual_source_spec_digest != item["source_spec_digest"]
+            or actual_contract_digest != item["exitspec_contract_digest"]
             or _file_digest(original, label=f"{case_id} original specification")
-            != item.get("original_spec_sha256")
-            or report.run_id != item.get("run_id")
+            != item["original_spec_sha256"]
+            or actual_run_id != item["run_id"]
         ):
             raise ProspectiveCaptureError(
                 f"prospective capture bundle linkage disagrees: {case_id}"

@@ -94,6 +94,32 @@ def test_preflight_rejects_missing_or_wrong_expected_digest(
         prospective.validate_prospective_cases(case_arguments, wrong)
 
 
+def test_preflight_rejects_duplicate_contract_digests_before_host_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_arguments, expected_arguments = _linked_sources(tmp_path)
+    duplicate = [
+        expected_arguments[0],
+        expected_arguments[0].replace(
+            "native-p95-under-20ms=",
+            "native-p95-under-10ms=",
+        ),
+        expected_arguments[2],
+    ]
+    monkeypatch.setattr(
+        prospective,
+        "_static_pin",
+        lambda: pytest.fail("duplicate contracts must fail before host work"),
+    )
+
+    with pytest.raises(
+        prospective.ProspectiveCaptureError,
+        match="pairwise distinct",
+    ):
+        prospective.validate_prospective_cases(case_arguments, duplicate)
+
+
 def test_preflight_rejects_methodology_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -142,6 +168,23 @@ def test_check_without_contracts_is_inert_and_does_not_prepare_or_run(
     assert not output_root.exists()
 
 
+def test_read_regular_rejects_symlinks_hardlinks_and_unsafe_files(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_bytes(b"{}")
+    link = tmp_path / "link.json"
+    link.symlink_to(source)
+    hard_link = tmp_path / "hard-link.json"
+    hard_link.hardlink_to(source)
+    directory = tmp_path / "directory.json"
+    directory.mkdir()
+
+    for path in (link, hard_link, directory):
+        with pytest.raises(prospective.ProspectiveCaptureError):
+            prospective._read_regular(path, label="test input")
+
+
 def _metadata_cases(
     tmp_path: Path,
 ) -> tuple[tuple[prospective.CompletedCase, ...], list[str]]:
@@ -163,25 +206,29 @@ def _metadata_cases(
                 bundle_path=bundle,
                 bundle_digest=f"sha256:{index + 10:064x}",
                 run_id=run_id,
+                source_spec_digest=case.resolution.source_spec_digest,
+                execution_fingerprint=case.resolution.execution_fingerprint,
+                request_plan_digest=f"sha256:{index + 20:064x}",
+                exitspec_contract_digest=case.expected_contract_digest,
             )
         )
     return tuple(completed), expected_arguments
 
 
-def test_metadata_binds_capture_handoff_publication_and_receipt(
-    tmp_path: Path,
+def _install_fake_reports(
+    completed: tuple[prospective.CompletedCase, ...],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(prospective, "_static_pin", lambda: _host_pin())
-    completed, expected_arguments = _metadata_cases(tmp_path)
-    session_root = tmp_path / "session"
     fake_reports = {
-        item.run_id: SimpleNamespace(
+        item.bundle_digest: SimpleNamespace(
+            bundle_digest=item.bundle_digest,
             descriptor=SimpleNamespace(
                 evidence_eligibility=EvidenceEligibility.CUSTOMER_ELIGIBLE,
                 digests=SimpleNamespace(
-                    exitspec_contract_digest=item.case.expected_contract_digest,
-                    source_spec_digest=item.case.resolution.source_spec_digest,
+                    execution_fingerprint=item.execution_fingerprint,
+                    exitspec_contract_digest=item.exitspec_contract_digest,
+                    request_plan_digest=item.request_plan_digest,
+                    source_spec_digest=item.source_spec_digest,
                 ),
             ),
             run_id=item.run_id,
@@ -191,19 +238,88 @@ def test_metadata_binds_capture_handoff_publication_and_receipt(
     monkeypatch.setattr(
         prospective,
         "verify_bundle",
-        lambda _path, expected_bundle_digest: fake_reports[
-            next(
-                run_id
-                for run_id, report in fake_reports.items()
-                if report.descriptor.digests.exitspec_contract_digest
-                == next(
-                    item.case.expected_contract_digest
-                    for item in completed
-                    if item.bundle_digest == expected_bundle_digest
-                )
-            )
-        ],
+        lambda _path, expected_bundle_digest: fake_reports[expected_bundle_digest],
     )
+
+
+def test_run_case_retains_actual_run_scoped_request_plan_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_arguments, expected_arguments = _linked_sources(tmp_path / "inputs")
+    monkeypatch.setattr(prospective, "_static_pin", lambda: _host_pin())
+    case = prospective.validate_prospective_cases(
+        case_arguments,
+        expected_arguments,
+    )[0]
+    session_root = tmp_path / "session"
+    actual_run_id = "run-" + "c" * 32
+    actual_bundle_digest = "sha256:" + "d" * 64
+    actual_request_plan_digest = "sha256:" + "e" * 64
+    bundle = (
+        session_root
+        / "cases"
+        / case.case_id
+        / "runs"
+        / actual_run_id
+        / "bundle"
+    )
+
+    def fake_run_cli(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        bundle.mkdir(parents=True)
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "bundle_digest": actual_bundle_digest,
+                    "bundle_path": str(bundle),
+                    "evidence_eligibility": "CUSTOMER_ELIGIBLE",
+                    "integrity_status": "VALID",
+                    "run_id": actual_run_id,
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr(prospective.demo, "_run_cli", fake_run_cli)
+    monkeypatch.setattr(
+        prospective,
+        "verify_bundle",
+        lambda _path, expected_bundle_digest: SimpleNamespace(
+            bundle_digest=expected_bundle_digest,
+            descriptor=SimpleNamespace(
+                evidence_eligibility=EvidenceEligibility.CUSTOMER_ELIGIBLE,
+                digests=SimpleNamespace(
+                    execution_fingerprint=case.resolution.execution_fingerprint,
+                    exitspec_contract_digest=case.expected_contract_digest,
+                    request_plan_digest=actual_request_plan_digest,
+                    source_spec_digest=case.resolution.source_spec_digest,
+                ),
+            ),
+            run_id=actual_run_id,
+        ),
+    )
+
+    completed = prospective._run_case(
+        case,
+        session_root=session_root,
+        model_path=tmp_path / "model",
+        gpu_index=0,
+        startup_timeout_seconds=1,
+    )
+
+    assert completed.request_plan_digest == actual_request_plan_digest
+    assert completed.request_plan_digest != case.resolution.request_plan_digest
+    assert completed.run_id == actual_run_id
+    assert completed.bundle_digest == actual_bundle_digest
+
+
+def test_metadata_binds_capture_handoff_publication_and_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(prospective, "_static_pin", lambda: _host_pin())
+    completed, expected_arguments = _metadata_cases(tmp_path)
+    session_root = tmp_path / "session"
+    _install_fake_reports(completed, monkeypatch)
     receipt_path = prospective._write_session_metadata(
         session_root,
         completed,
@@ -221,10 +337,44 @@ def test_metadata_binds_capture_handoff_publication_and_receipt(
     assert receipt["contract_digests"] == [
         CONTRACT_DIGESTS[case_id] for case_id in prospective.CASE_IDS
     ]
+    assert [item["request_plan_digest"] for item in receipt["cases"]] == [
+        item.request_plan_digest for item in completed
+    ]
     assert all(
         item["exitspec_contract_digest"] in receipt["contract_digests"]
         for item in receipt["cases"]
     )
+
+
+@pytest.mark.parametrize("field", ["execution_fingerprint", "request_plan_digest"])
+def test_metadata_rejects_tampered_run_identity_fields(
+    tmp_path: Path,
+    field: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(prospective, "_static_pin", lambda: _host_pin())
+    completed, expected_arguments = _metadata_cases(tmp_path)
+    session_root = tmp_path / "session"
+    _install_fake_reports(completed, monkeypatch)
+    prospective._write_session_metadata(
+        session_root,
+        completed,
+        repository_commit="a" * 40,
+        host_preparation_sha256=sha256_digest(b"host-preparation"),
+        reference=completed[0].case.resolution,
+    )
+    capture = json.loads((session_root / "capture-manifest.json").read_text())
+    capture["cases"][0][field] = "sha256:" + "f" * 64
+    capture_path = session_root / "capture-manifest.json"
+    capture_path.chmod(0o600)
+    capture_path.write_text(json.dumps(capture))
+    capture_path.chmod(0o400)
+
+    with pytest.raises(
+        prospective.ProspectiveCaptureError,
+        match="bundle linkage disagrees",
+    ):
+        prospective.verify_session(session_root, expected_arguments)
 
 
 def test_metadata_rejects_unknown_publication_fields(
@@ -234,32 +384,7 @@ def test_metadata_rejects_unknown_publication_fields(
     monkeypatch.setattr(prospective, "_static_pin", lambda: _host_pin())
     completed, expected_arguments = _metadata_cases(tmp_path)
     session_root = tmp_path / "session"
-    monkeypatch.setattr(
-        prospective,
-        "verify_bundle",
-        lambda _path, expected_bundle_digest: SimpleNamespace(
-            descriptor=SimpleNamespace(
-                evidence_eligibility=EvidenceEligibility.CUSTOMER_ELIGIBLE,
-                digests=SimpleNamespace(
-                    exitspec_contract_digest=next(
-                        item.case.expected_contract_digest
-                        for item in completed
-                        if item.bundle_digest == expected_bundle_digest
-                    ),
-                    source_spec_digest=next(
-                        item.case.resolution.source_spec_digest
-                        for item in completed
-                        if item.bundle_digest == expected_bundle_digest
-                    ),
-                ),
-            ),
-            run_id=next(
-                item.run_id
-                for item in completed
-                if item.bundle_digest == expected_bundle_digest
-            ),
-        ),
-    )
+    _install_fake_reports(completed, monkeypatch)
     prospective._write_session_metadata(
         session_root,
         completed,
