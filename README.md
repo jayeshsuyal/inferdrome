@@ -57,6 +57,14 @@ It presents Runs, Run detail, Compare, and Evidence views over the same bounded
 verification and deterministic recalculation path. It remains read-only,
 loopback-only, database-free, and outside the v0.1 release gate.
 
+Release status is intentionally mixed: genuine Linux/NVIDIA captures are
+producer-side evidence; the Docker Compose qualification is local synthetic
+qualification; Lambda/GCP/Kubernetes surfaces are dry-run, reference, or
+simulation boundaries; and ExitSpec acceptance, human security review, license
+selection, archive publication, and final release approval remain external or
+owner-controlled inputs. The repository is not release-ready merely because a
+local gate or a genuine measurement passes.
+
 The provider-neutral deployment layer begins with a strict, non-executing
 [`inferdrome.deployment.v1` contract](docs/DEPLOYMENT_SPEC_V1.md). It pins
 deployment intent, runtime/model identity, benchmark topology, image digests,
@@ -142,9 +150,40 @@ attestation or portable evidence.
 
 ## Quick start
 
-```bash
-uv sync
+Install the pinned Python environment first:
 
+```bash
+uv sync --extra dev --extra dashboard
+```
+
+The offline candidate preflight checks repository-owned release inputs and
+reports the manual release blockers without treating them as proven. Normal CI
+uses the `auto` phase, which selects candidate only when both version
+locations are exactly `0.1.0.dev0`; for exact `0.1.0`, it selects
+`final-pre-tag` only while `v0.1.0` is absent, selects `post-tag` when that tag
+resolves to `HEAD`, and fails closed if the tag resolves elsewhere. Run it from
+a clean checkout when checking a development candidate commit:
+
+```bash
+.venv/bin/python scripts/release_preflight.py \
+  --phase auto --repository-only --require-clean
+```
+
+The final release-closure mode additionally delegates to the existing
+engineering and dashboard gates and fails closed while manual or external
+checklist inputs remain open. It is run only on a deliberate final release
+commit after both version locations have been changed to `0.1.0`:
+
+```bash
+.venv/bin/python scripts/release_preflight.py \
+  --phase final-pre-tag --run-gates --require-clean
+```
+
+It performs no cloud/provider operation, GPU launch, deployment, publication,
+tagging, or merge. The exact final release procedure is recorded in the
+[v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md).
+
+```bash
 uv run inferdrome validate examples/fake-smoke.yaml
 uv run inferdrome run examples/fake-smoke.yaml --runs-root runs \
   --run-id run-0123456789abcdef0123456789abcdef

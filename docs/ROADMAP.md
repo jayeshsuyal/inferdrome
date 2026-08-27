@@ -412,12 +412,14 @@ Deliver:
 
 In progress: the chartered `validate`, `resolve`, `run`, `inspect`, `bundle
 verify`, `reduce`, and `summarize` commands now share the same fail-closed
-library boundaries used by tests. The release shield runs the engineering and
-populated-dashboard gates in GitHub Actions and maps remaining evidence in
+library boundaries used by tests. The release shield runs the engineering,
+deployment-qualification, and populated-dashboard gates in GitHub Actions and
+maps remaining evidence in
 `V0_1_RELEASE_CHECKLIST.md`. The genuine GPU producer evidence is complete;
 ExitSpec demonstrations, human security sign-off, license selection, owner
 archive-publication decision, and the release tag remain open. Remaining polish
-is tracked by the release gate rather than by adding new product scope.
+is tracked by the offline release preflight and existing gates rather than by
+adding new product scope.
 
 Gate:
 

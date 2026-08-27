@@ -24,21 +24,24 @@ npx --prefix frontend playwright install --with-deps chromium
 
 ## Required checks
 
-Run both repository gates before requesting review:
+Run all three repository gates before requesting review:
 
 ```bash
 INFERDROME_PYTHON=.venv/bin/python ./scripts/engineering_gate.sh
 INFERDROME_PYTHON=.venv/bin/python ./scripts/dashboard_gate.sh
+INFERDROME_PYTHON=.venv/bin/python ./scripts/deployment_qualification_gate.sh
 ```
 
 The engineering gate checks generated schemas and goldens, static real-GPU
 assets, shell and Python script syntax, Ruff, strict mypy, and the complete
 Python test suite. The dashboard gate checks TypeScript, frontend unit tests,
 the populated Playwright route journey, dashboard backend tests, production
-assets, and an sdist-to-wheel installed-package smoke test.
+assets, and an sdist-to-wheel installed-package smoke test. The deployment
+qualification gate checks the local synthetic Docker Compose boundary; it does
+not prove cloud, GPU, serving-engine, or customer-acceptance behavior.
 
 GitHub Actions runs the same gates on pull requests and on `main`. A pull
-request must not substitute a narrower command for either required gate.
+request must not substitute a narrower command for any required gate.
 
 ## Evidence and security boundaries
 
@@ -65,7 +68,7 @@ repository owner before opening a public issue containing sensitive details.
 - Regenerate committed schemas, goldens, and dashboard assets through their
   checked-in scripts; do not edit generated output by hand.
 - Document claim boundaries and unavailable capabilities alongside new output.
-- Keep pull requests draft until both required checks pass and all failure
+- Keep pull requests draft until all three required checks pass and all failure
   artifacts have been reviewed.
 
 The release candidate is tracked in
