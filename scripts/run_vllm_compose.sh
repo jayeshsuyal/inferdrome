@@ -4,12 +4,6 @@
 set -u
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-if [[ -n "${INFERDROME_COMPOSE_FILE:-}" || -n "${INFERDROME_GPU_COMPOSE_FILE:-}" ]]; then
-  printf '%s\n' 'vLLM Compose preflight failed: Compose file overrides are not supported' >&2
-  exit 2
-fi
-compose_file="$repository_root/compose.yaml"
-gpu_compose_file="$repository_root/compose.gpu.yaml"
 evidence_dir=${INFERDROME_COMPOSE_EVIDENCE_DIR:-"$repository_root/.inferdrome-compose/evidence"}
 mode=${1:-mock}
 shift || true
@@ -26,9 +20,21 @@ fail() {
   exit 2
 }
 
-if [[ -n "${DOCKER_HOST:-}" || -n "${DOCKER_CONTEXT:-}" ]]; then
-  fail "explicit Docker host or context overrides are not supported"
-fi
+for compose_variable in \
+  INFERDROME_COMPOSE_FILE \
+  INFERDROME_GPU_COMPOSE_FILE \
+  COMPOSE_FILE \
+  COMPOSE_ENV_FILES \
+  COMPOSE_PROJECT_NAME \
+  COMPOSE_PROFILES \
+  DOCKER_HOST \
+  DOCKER_CONTEXT; do
+  [[ -z "${!compose_variable:-}" ]] || \
+    fail "ambient $compose_variable override is not supported"
+done
+export COMPOSE_DISABLE_ENV_FILE=1
+compose_file="$repository_root/compose.yaml"
+gpu_compose_file="$repository_root/compose.gpu.yaml"
 
 validate_identity_component() {
   value=$1

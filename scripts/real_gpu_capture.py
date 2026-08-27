@@ -1068,8 +1068,13 @@ def _archive_digest(stream: BinaryIO, metadata: os.stat_result) -> str:
     digest = hashlib.sha256()
     try:
         stream.seek(0)
-        while block := stream.read(1024 * 1024):
+        remaining = metadata.st_size
+        while remaining:
+            block = stream.read(min(1024 * 1024, remaining))
+            if not block:
+                raise OSError
             digest.update(block)
+            remaining -= len(block)
         if stream.read(1):
             raise OSError
         current = os.fstat(stream.fileno())
@@ -1087,6 +1092,53 @@ def _archive_digest(stream: BinaryIO, metadata: os.stat_result) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _snapshot_archive(
+    stream: BinaryIO,
+    metadata: os.stat_result,
+) -> tuple[BinaryIO, str]:
+    """Copy a bounded archive before parsing so later source writes cannot race it."""
+
+    snapshot: BinaryIO | None = None
+    try:
+        # Ownership transfers to the caller, which closes the unlinked snapshot.
+        snapshot = tempfile.TemporaryFile(  # noqa: SIM115
+            prefix="inferdrome-capture-archive-"
+        )
+        digest = hashlib.sha256()
+        stream.seek(0)
+        remaining = metadata.st_size
+        while remaining:
+            block = stream.read(min(1024 * 1024, remaining))
+            if not block:
+                raise OSError
+            if snapshot.write(block) != len(block):
+                raise OSError
+            digest.update(block)
+            remaining -= len(block)
+        if stream.read(1):
+            raise OSError
+        current = os.fstat(stream.fileno())
+        if (
+            current.st_dev != metadata.st_dev
+            or current.st_ino != metadata.st_ino
+            or current.st_size != metadata.st_size
+            or current.st_mtime_ns != metadata.st_mtime_ns
+            or current.st_ctime_ns != metadata.st_ctime_ns
+        ):
+            raise CaptureError("capture archive changed during verification")
+        snapshot.flush()
+        snapshot.seek(0)
+        return snapshot, "sha256:" + digest.hexdigest()
+    except CaptureError:
+        if snapshot is not None:
+            snapshot.close()
+        raise
+    except (OSError, ValueError):
+        if snapshot is not None:
+            snapshot.close()
+        raise CaptureError("capture archive is unavailable or unsafe") from None
+
+
 def _extract_capture_archive_stream(
     stream: BinaryIO,
     destination_parent: Path,
@@ -1097,9 +1149,14 @@ def _extract_capture_archive_stream(
         if _SHA256_PATTERN.fullmatch(expected_archive_sha256) is None:
             raise CaptureError("expected archive SHA-256 has an invalid shape")
         metadata = os.fstat(stream.fileno())
-        actual_archive_sha256 = _archive_digest(stream, metadata)
+        snapshot, actual_archive_sha256 = _snapshot_archive(stream, metadata)
         if actual_archive_sha256 != expected_archive_sha256:
+            snapshot.close()
             raise CaptureError("retrieved archive failed SHA-256 verification")
+        try:
+            return _extract_capture_archive_stream(snapshot, destination_parent)
+        finally:
+            snapshot.close()
 
     destination_parent = destination_parent.absolute()
     capture_destination = destination_parent / "capture"
@@ -1205,7 +1262,11 @@ def extract_capture_archive(
     *,
     expected_archive_sha256: str | None = None,
 ) -> Path:
-    """Safely extract one host archive without trusting archive paths or links."""
+    """Safely extract one bounded archive without trusting paths or links.
+
+    An expected digest selects a private snapshot for integrity-bound parsing;
+    without one, the direct extraction remains bounded but is not digest-bound.
+    """
 
     archive = archive.absolute()
     with _open_archive(archive) as (stream, _metadata):
