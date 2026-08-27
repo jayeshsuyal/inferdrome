@@ -437,8 +437,13 @@ def _fake_docker_bin(tmp_path: Path, *, up_status: int = 17) -> tuple[Path, Path
         "printf 'identity=%s:%s\\n' "
         '"$INFERDROME_COMPOSE_UID" "$INFERDROME_COMPOSE_GID" '
         '>> "$INFERDROME_TEST_DOCKER_LOG"\n'
+        'printf \'compose_disable_env=%s\\n\' "$COMPOSE_DISABLE_ENV_FILE" '
+        '>> "$INFERDROME_TEST_DOCKER_LOG"\n'
         'printf \'%s\\n\' "$*" >> "$INFERDROME_TEST_DOCKER_LOG"\n'
         'case "$*" in\n'
+        '  *\'context inspect\'*) printf \'"%s"\\n\' '
+        '"${INFERDROME_TEST_DOCKER_CONTEXT_HOST:-unix:///var/run/docker.sock}"; '
+        'exit 0 ;;\n'
         "  *version*) exit 0 ;;\n"
         f"  *' up '*) exit {up_status} ;;\n"
         "  *' down '*) exit 0 ;;\n"
@@ -485,6 +490,125 @@ def test_compose_wrapper_mock_targets_only_synthetic_runner_and_cleans_up(
     assert not python_log.exists()
     assert "Traceback" not in completed.stderr
     assert str(tmp_path) not in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "variable",
+    (
+        "INFERDROME_COMPOSE_FILE",
+        "INFERDROME_GPU_COMPOSE_FILE",
+        "COMPOSE_FILE",
+        "COMPOSE_ENV_FILES",
+        "COMPOSE_PROJECT_NAME",
+        "COMPOSE_PROFILES",
+    ),
+)
+def test_compose_wrapper_rejects_compose_file_overrides(
+    tmp_path: Path,
+    variable: str,
+) -> None:
+    environment = os.environ.copy()
+    environment[variable] = str(tmp_path / "untrusted-compose.yaml")
+    completed = subprocess.run(
+        ["bash", "scripts/run_vllm_compose.sh", "mock"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        "vLLM Compose preflight failed: "
+        f"ambient {variable} override is not supported\n"
+    )
+    assert str(tmp_path) not in completed.stderr
+
+
+@pytest.mark.parametrize("variable", ("DOCKER_HOST", "DOCKER_CONTEXT"))
+def test_compose_wrapper_rejects_remote_docker_overrides(
+    tmp_path: Path,
+    variable: str,
+) -> None:
+    fake_bin, log_path = _fake_docker_bin(tmp_path)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+    environment[variable] = "ssh://operator@example.invalid/var/run/docker.sock"
+    environment["INFERDROME_COMPOSE_EVIDENCE_DIR"] = str(tmp_path / "evidence")
+    completed = subprocess.run(
+        ["bash", "scripts/run_vllm_compose.sh", "mock"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        "vLLM Compose preflight failed: "
+        f"ambient {variable} override is not supported\n"
+    )
+    assert not log_path.exists()
+
+
+def test_compose_wrapper_disables_dotenv_topology_overrides(
+    tmp_path: Path,
+) -> None:
+    fake_bin, log_path = _fake_docker_bin(tmp_path)
+    (tmp_path / ".env").write_text(
+        "COMPOSE_FILE=/tmp/untrusted-compose.yaml\n"
+        "COMPOSE_PROJECT_NAME=untrusted-project\n"
+        "COMPOSE_PROFILES=gpu\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+    environment["INFERDROME_TEST_DOCKER_LOG"] = str(log_path)
+    environment["INFERDROME_COMPOSE_EVIDENCE_DIR"] = str(tmp_path / "evidence")
+    completed = subprocess.run(
+        [str(REPOSITORY_ROOT / "scripts/run_vllm_compose.sh"), "mock"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 17
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    up_line = next(line for line in lines if " up " in line)
+    down_line = next(line for line in lines if " down " in line)
+    assert "compose_disable_env=1" in lines
+    assert f"-f {REPOSITORY_ROOT / 'compose.yaml'}" in up_line
+    assert "untrusted-compose.yaml" not in "\n".join(lines)
+    assert "untrusted-project" not in "\n".join(lines)
+    assert up_line.endswith("--remove-orphans synthetic-smoke")
+    assert down_line.endswith("down --remove-orphans --volumes")
+
+
+def test_compose_wrapper_rejects_remote_active_docker_context(
+    tmp_path: Path,
+) -> None:
+    fake_bin, log_path = _fake_docker_bin(tmp_path)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+    environment["INFERDROME_TEST_DOCKER_LOG"] = str(log_path)
+    environment["INFERDROME_TEST_DOCKER_CONTEXT_HOST"] = (
+        "ssh://operator@example.invalid/var/run/docker.sock"
+    )
+    environment["INFERDROME_COMPOSE_EVIDENCE_DIR"] = str(tmp_path / "evidence")
+    completed = subprocess.run(
+        ["bash", "scripts/run_vllm_compose.sh", "mock"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        "vLLM Compose preflight failed: active Docker context is not local\n"
+    )
+    assert " up " not in log_path.read_text(encoding="utf-8")
 
 
 def test_compose_wrapper_gpu_targets_only_benchmark_runner_and_cleans_up(

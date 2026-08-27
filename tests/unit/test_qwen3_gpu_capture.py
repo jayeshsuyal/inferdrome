@@ -283,16 +283,22 @@ def test_qwen3_archive_verification_relaxes_disposable_workspace_modes(
 ) -> None:
     archive = tmp_path / "capture.tar.gz"
     archive.write_bytes(b"sealed archive placeholder")
-    expected_archive_sha256 = "sha256:" + "a" * 64
+    expected_archive_sha256_value = "sha256:" + "a" * 64
     cleanup_roots: list[Path] = []
 
     monkeypatch.setattr(
         generic_capture,
         "archive_sha256",
-        lambda _path: expected_archive_sha256,
+        lambda _path: expected_archive_sha256_value,
     )
 
-    def extract(_archive: Path, destination: Path) -> Path:
+    def extract(
+        _archive: Path,
+        destination: Path,
+        *,
+        expected_archive_sha256: str | None = None,
+    ) -> Path:
+        assert expected_archive_sha256 == expected_archive_sha256_value
         root = destination / "capture"
         root.mkdir()
         return root
@@ -314,10 +320,10 @@ def test_qwen3_archive_verification_relaxes_disposable_workspace_modes(
 
     result = capture.verify_capture_archive(
         archive,
-        expected_archive_sha256=expected_archive_sha256,
+        expected_archive_sha256=expected_archive_sha256_value,
     )
 
-    assert result["archive_sha256"] == expected_archive_sha256
+    assert result["archive_sha256"] == expected_archive_sha256_value
     assert cleanup_roots and cleanup_roots[0].name == "capture"
 
 

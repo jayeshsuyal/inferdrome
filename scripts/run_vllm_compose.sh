@@ -4,8 +4,6 @@
 set -u
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-compose_file=${INFERDROME_COMPOSE_FILE:-"$repository_root/compose.yaml"}
-gpu_compose_file=${INFERDROME_GPU_COMPOSE_FILE:-"$repository_root/compose.gpu.yaml"}
 evidence_dir=${INFERDROME_COMPOSE_EVIDENCE_DIR:-"$repository_root/.inferdrome-compose/evidence"}
 mode=${1:-mock}
 shift || true
@@ -22,6 +20,22 @@ fail() {
   exit 2
 }
 
+for compose_variable in \
+  INFERDROME_COMPOSE_FILE \
+  INFERDROME_GPU_COMPOSE_FILE \
+  COMPOSE_FILE \
+  COMPOSE_ENV_FILES \
+  COMPOSE_PROJECT_NAME \
+  COMPOSE_PROFILES \
+  DOCKER_HOST \
+  DOCKER_CONTEXT; do
+  [[ -z "${!compose_variable:-}" ]] || \
+    fail "ambient $compose_variable override is not supported"
+done
+export COMPOSE_DISABLE_ENV_FILE=1
+compose_file="$repository_root/compose.yaml"
+gpu_compose_file="$repository_root/compose.gpu.yaml"
+
 validate_identity_component() {
   value=$1
   label=$2
@@ -31,6 +45,16 @@ validate_identity_component() {
   [[ "${#value}" -le 5 ]] || fail "$label identity is invalid"
   value_number=$((10#$value))
   (( value_number >= 1 && value_number <= 65534 )) || fail "$label identity is invalid"
+}
+
+validate_local_docker_context() {
+  docker_context_host=$(docker context inspect \
+    --format '{{json (index .Endpoints "docker").Host}}' 2>/dev/null) || \
+    fail "active Docker context could not be inspected"
+  case "$docker_context_host" in
+    \"unix://*|\"npipe://*) ;;
+    *) fail "active Docker context is not local" ;;
+  esac
 }
 
 python_candidate_works() {
@@ -151,6 +175,7 @@ if [[ "$mode" == "gpu" ]]; then
 fi
 
 command -v docker >/dev/null 2>&1 || fail "Docker is unavailable"
+validate_local_docker_context
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
 
 if [[ "$mode" == "gpu" ]]; then

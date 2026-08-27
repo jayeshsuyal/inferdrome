@@ -249,7 +249,11 @@ def materialize(
     )
     published = False
     try:
-        capture_root = real_gpu_capture.extract_capture_archive(archive, staging)
+        capture_root = real_gpu_capture.extract_capture_archive(
+            archive,
+            staging,
+            expected_archive_sha256=expected_archive_sha256,
+        )
         failure = real_gpu_capture.verify_failure_capture(
             capture_root,
             expected_repository_commit=expected_repository_commit,

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import re
 import stat
 import subprocess
@@ -13,6 +14,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import BinaryIO
 
 import pytest
 
@@ -954,7 +956,13 @@ def test_qwen3_finalization_binds_termination_then_publishes_semantics(
         },
     )
 
-    def extract(_archive: Path, destination: Path) -> Path:
+    def extract(
+        _archive: Path,
+        destination: Path,
+        *,
+        expected_archive_sha256: str | None = None,
+    ) -> Path:
+        assert expected_archive_sha256 == archive_sha256
         extracted = destination / "capture"
         (extracted / "runs").mkdir(parents=True)
         return extracted
@@ -1096,7 +1104,13 @@ def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
         verify_archive,
     )
 
-    def extract(_archive: Path, destination: Path) -> Path:
+    def extract(
+        _archive: Path,
+        destination: Path,
+        *,
+        expected_archive_sha256: str | None = None,
+    ) -> Path:
+        assert expected_archive_sha256 == archive_sha256
         extracted = destination / "capture"
         (extracted / "runs").mkdir(parents=True)
         return extracted
@@ -1736,6 +1750,102 @@ def test_capture_archive_verification_rejects_digest_mismatch(
             expected_archive_sha256=f"sha256:{'0' * 64}",
             expected_repository_commit=COMMIT,
         )
+
+
+@pytest.mark.parametrize(
+    "member_names",
+    (
+        ("capture/README", "capture/readme"),
+        ("capture/e\u0301", "capture/é"),
+    ),
+)
+def test_capture_archive_rejects_case_or_unicode_colliding_members(
+    tmp_path: Path,
+    member_names: tuple[str, str],
+) -> None:
+    archive = tmp_path / "colliding-members.tar.gz"
+    with tarfile.open(archive, mode="w:gz") as retained:
+        root = tarfile.TarInfo("capture")
+        root.type = tarfile.DIRTYPE
+        root.mode = 0o700
+        retained.addfile(root)
+        for name in member_names:
+            member = tarfile.TarInfo(name)
+            member.mode = 0o400
+            member.size = 1
+            retained.addfile(member, io.BytesIO(b"x"))
+
+    with pytest.raises(capture.CaptureError, match="unsafe member"):
+        capture.extract_capture_archive(archive, tmp_path / "retrieved")
+
+
+def test_capture_archive_digest_and_extraction_share_the_open_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "capture.tar.gz"
+    member = tarfile.TarInfo("capture/verified")
+    member.mode = 0o400
+    _archive_with_member(archive, member, b"good")
+    expected_archive_sha256 = capture.archive_sha256(archive)
+    replacement = tmp_path / "replacement.tar.gz"
+    replacement_member = tarfile.TarInfo("capture/replaced")
+    replacement_member.mode = 0o400
+    _archive_with_member(replacement, replacement_member, b"bad")
+
+    original_snapshot = capture._snapshot_archive
+
+    def snapshot_then_replace(
+        stream: BinaryIO,
+        metadata: os.stat_result,
+    ) -> tuple[BinaryIO, str]:
+        snapshot, digest = original_snapshot(stream, metadata)
+        replacement.replace(archive)
+        return snapshot, digest
+
+    monkeypatch.setattr(capture, "_snapshot_archive", snapshot_then_replace)
+
+    extracted = capture.extract_capture_archive(
+        archive,
+        tmp_path / "retrieved",
+        expected_archive_sha256=expected_archive_sha256,
+    )
+
+    assert (extracted / "verified").read_bytes() == b"good"
+    assert not (extracted / "replaced").exists()
+
+
+def test_capture_archive_snapshot_survives_same_inode_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "capture.tar.gz"
+    member = tarfile.TarInfo("capture/verified")
+    member.mode = 0o400
+    _archive_with_member(archive, member, b"good")
+    expected_archive_sha256 = capture.archive_sha256(archive)
+
+    original_snapshot = capture._snapshot_archive
+
+    def snapshot_then_mutate(
+        stream: BinaryIO,
+        metadata: os.stat_result,
+    ) -> tuple[BinaryIO, str]:
+        snapshot, digest = original_snapshot(stream, metadata)
+        with archive.open("r+b") as mutable:
+            mutable.seek(0)
+            mutable.write(b"same inode mutation")
+        return snapshot, digest
+
+    monkeypatch.setattr(capture, "_snapshot_archive", snapshot_then_mutate)
+
+    extracted = capture.extract_capture_archive(
+        archive,
+        tmp_path / "retrieved",
+        expected_archive_sha256=expected_archive_sha256,
+    )
+
+    assert (extracted / "verified").read_bytes() == b"good"
 
 
 def test_capture_archive_rejects_too_many_members_before_extraction(
