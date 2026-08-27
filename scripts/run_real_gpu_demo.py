@@ -9,6 +9,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import signal
 import stat
@@ -357,15 +358,127 @@ def _git_output(*arguments: str) -> str:
         raise DemoError("Inferdrome repository identity is not UTF-8") from None
 
 
+def _source_export_identity() -> tuple[str, str]:
+    marker_path = REPOSITORY_ROOT / ".inferdrome-source-export.json"
+    descriptor: int | None = None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(marker_path, flags)
+        before = os.fstat(descriptor)
+        def identity(metadata: os.stat_result) -> tuple[int, ...]:
+            return (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_mode,
+                metadata.st_nlink,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise OSError
+        if not 2 <= before.st_size <= 4_096:
+            raise OSError
+        chunks: list[bytes] = []
+        remaining = before.st_size + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        after = os.fstat(descriptor)
+        path_identity = os.lstat(marker_path)
+        if (
+            len(content) != before.st_size
+            or identity(after) != identity(before)
+            or identity(path_identity) != identity(before)
+        ):
+            raise OSError
+        value = _strict_json_bytes(content, label="Inferdrome source export marker")
+    except (OSError, DemoError):
+        raise DemoError(
+            "Inferdrome source export marker is unavailable or unsafe"
+        ) from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if set(value) != {
+        "repository_commit",
+        "schema_version",
+        "source_archive_sha256",
+        "transport",
+    }:
+        raise DemoError("source export marker has an unexpected shape")
+    repository_commit = value.get("repository_commit")
+    source_archive_sha256 = value.get("source_archive_sha256")
+    if (
+        value.get("schema_version") != "inferdrome.source-tree-export.v1"
+        or value.get("transport") != "git-archive-exact-head-tree-v1"
+        or not isinstance(repository_commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", repository_commit) is None
+        or not isinstance(source_archive_sha256, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", source_archive_sha256) is None
+    ):
+        raise DemoError("source export marker identity is invalid")
+    return repository_commit, source_archive_sha256
+
+
+def _git_checkout_present() -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_ROOT),
+                "rev-parse",
+                "--is-inside-work-tree",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == b"true"
+
+
 def _require_clean_prepared_host(
     state_root: Path,
     pin: dict[str, str],
+    *,
+    expected_source_archive_sha256: str | None = None,
+    expected_repository_commit: str | None = None,
 ) -> tuple[Path, str]:
     if platform.system() != "Linux":
         raise DemoError("the real-GPU demonstration requires Linux")
-    if _git_output("status", "--porcelain", "--untracked-files=normal"):
-        raise DemoError("the Inferdrome checkout must be clean")
-    repository_commit = _git_output("rev-parse", "--verify", "HEAD")
+    exported_source_digest: str | None = None
+    if _git_checkout_present():
+        if _git_output("status", "--porcelain", "--untracked-files=normal"):
+            raise DemoError("the Inferdrome checkout must be clean")
+        repository_commit = _git_output("rev-parse", "--verify", "HEAD")
+    else:
+        repository_commit, exported_source_digest = _source_export_identity()
+        if expected_repository_commit is not None and (
+            repository_commit != expected_repository_commit
+        ):
+            raise DemoError("source export commit does not match the controller pin")
+        if expected_source_archive_sha256 is not None and (
+            exported_source_digest != expected_source_archive_sha256
+        ):
+            raise DemoError("source export archive does not match the controller pin")
+    if expected_source_archive_sha256 is not None and exported_source_digest is None:
+        raise DemoError("a prospective exported source identity is required")
+    if (
+        expected_repository_commit is not None
+        and repository_commit != expected_repository_commit
+    ):
+        raise DemoError(
+            "prepared host repository commit does not match the controller pin"
+        )
     preparation = _read_json(
         state_root / "host-preparation.json",
         label="GPU host preparation receipt",

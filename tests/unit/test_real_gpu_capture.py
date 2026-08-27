@@ -250,6 +250,66 @@ def test_exact_tree_export_excludes_removed_secret_and_git_history(
         )
 
 
+def test_exact_tree_export_supports_pinned_tree_without_git_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "export"
+    (repository / "src").mkdir(parents=True)
+    (repository / "README.md").write_text("exported tree\n", encoding="utf-8")
+    (repository / "src" / "nested.txt").write_text(
+        "nested\n", encoding="utf-8"
+    )
+    expected_archive = tmp_path / "expected.tar"
+    entries = ("README.md", "src", "src/nested.txt")
+    with tarfile.open(
+        expected_archive, mode="w:", format=tarfile.USTAR_FORMAT
+    ) as archive:
+        for relative in entries:
+            path = repository / relative
+            metadata = path.lstat()
+            info = tarfile.TarInfo(relative)
+            info.mode = stat.S_IMODE(metadata.st_mode)
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            if path.is_dir():
+                info.type = tarfile.DIRTYPE
+                archive.addfile(info)
+            else:
+                content = path.read_bytes()
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+    expected_digest = "sha256:" + hashlib.sha256(
+        expected_archive.read_bytes()
+    ).hexdigest()
+    marker = {
+        "repository_commit": COMMIT,
+        "schema_version": "inferdrome.source-tree-export.v1",
+        "source_archive_sha256": expected_digest,
+        "transport": "git-archive-exact-head-tree-v1",
+    }
+    (repository / ".inferdrome-source-export.json").write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(remote, "_git_checkout_present", lambda: False)
+
+    archive = tmp_path / "repo.tar"
+    digest, size = remote._create_source_archive(archive, COMMIT)
+
+    assert digest == expected_digest
+    assert size == archive.stat().st_size
+    with tarfile.open(archive, mode="r:") as retained:
+        assert [member.name for member in retained.getmembers()] == list(entries)
+    assert b".inferdrome-source-export.json" not in archive.read_bytes()
+    (repository / ".codex-venv").mkdir()
+    with pytest.raises(remote.RemoteCaptureError, match="task environment"):
+        remote._create_source_archive(tmp_path / "rejected-env.tar", COMMIT)
+
+
 def test_remote_command_pins_commit_and_bounds_workload() -> None:
     script = remote._remote_capture_script(
         "/tmp/inferdrome-safe",

@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import selectors
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -18,7 +20,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -40,9 +42,17 @@ from inferdrome.qwen3_gpu_tiers import (
 )
 
 if __package__:
-    from scripts import lambda_gpu_guard, qwen3_gpu_capture, real_gpu_capture
+    from scripts import (
+        lambda_gpu_guard,
+        prospective_handoff,
+        prospective_real_gpu_capture,
+        qwen3_gpu_capture,
+        real_gpu_capture,
+    )
 else:
     import lambda_gpu_guard
+    import prospective_handoff
+    import prospective_real_gpu_capture
     import qwen3_gpu_capture
     import real_gpu_capture
 
@@ -72,6 +82,11 @@ _QWEN3_ARCHIVE_TRANSFER_SECONDS = QWEN3_ARCHIVE_TRANSFER_SECONDS
 _QWEN3_MAX_ARCHIVE_BYTES = QWEN3_MAX_ARCHIVE_BYTES
 _MAX_SOURCE_ARCHIVE_BYTES = 134_217_728
 _QWEN3_PHASE_BUDGET_SECONDS = dict(QWEN3_PHASE_BUDGET_SECONDS)
+_PROSPECTIVE_MAX_ARCHIVE_BYTES = prospective_handoff.handoff_archive_limit()
+_PROSPECTIVE_TRANSFER_METADATA_SCHEMA = "inferdrome.prospective-transfer-metadata.v1"
+_PROSPECTIVE_REPOSITORY_EXPORT_SCHEMA = "inferdrome.source-tree-export.v1"
+_PROSPECTIVE_MAX_SESSION_ARCHIVE_BYTES = 268_435_456
+_PROSPECTIVE_POST_REMOTE_BUDGET_SECONDS = 300
 
 
 class RemoteCaptureError(RuntimeError):
@@ -121,8 +136,179 @@ def _git(*arguments: str) -> str:
         raise RemoteCaptureError("local Git output is not UTF-8") from None
 
 
+def _git_checkout_present() -> bool:
+    try:
+        result = _run(
+            ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "--is-inside-work-tree"],
+            label="local Git inspection",
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except RemoteCaptureError:
+        return False
+    return result.returncode == 0 and result.stdout.strip() == b"true"
+
+
+def _source_export_marker() -> dict[str, str]:
+    marker_path = REPOSITORY_ROOT / ".inferdrome-source-export.json"
+    try:
+        content, _identity = prospective_handoff._read_regular_once(
+            marker_path,
+            label="Inferdrome source export marker",
+            maximum_bytes=4_096,
+        )
+        value = prospective_handoff._strict_json(
+            content,
+            label="Inferdrome source export marker",
+        )
+    except (
+        prospective_handoff.ProspectiveHandoffError,
+        TypeError,
+    ):
+        raise RemoteCaptureError(
+            "Inferdrome source export marker is unavailable or unsafe"
+        ) from None
+    if not isinstance(value, dict) or set(value) != {
+        "repository_commit",
+        "schema_version",
+        "source_archive_sha256",
+        "transport",
+    }:
+        raise RemoteCaptureError("source export marker has an unexpected shape")
+    if value["schema_version"] != _PROSPECTIVE_REPOSITORY_EXPORT_SCHEMA:
+        raise RemoteCaptureError("source export marker version is unsupported")
+    if value["transport"] != "git-archive-exact-head-tree-v1":
+        raise RemoteCaptureError("source export transport is unsupported")
+    if _COMMIT_PATTERN.fullmatch(str(value["repository_commit"])) is None:
+        raise RemoteCaptureError("source export commit is invalid")
+    if (
+        re.fullmatch(r"sha256:[0-9a-f]{64}", str(value["source_archive_sha256"]))
+        is None
+    ):
+        raise RemoteCaptureError("source export digest is invalid")
+    return {key: str(item) for key, item in value.items()}
+
+
+def _create_exported_source_archive(
+    destination: Path,
+    *,
+    expected_archive_sha256: str,
+) -> tuple[str, int]:
+    """Repackage a no-.git export, binding the result to its export marker."""
+
+    if destination.exists() or destination.is_symlink():
+        raise RemoteCaptureError("exact source archive destination already exists")
+    entries: list[tuple[str, Path, os.stat_result]] = []
+    pending = [REPOSITORY_ROOT]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = sorted(os.scandir(directory), key=lambda item: item.name)
+        except OSError:
+            raise RemoteCaptureError(
+                "exported source tree cannot be inspected"
+            ) from None
+        for child in children:
+            relative = Path(child.path).relative_to(REPOSITORY_ROOT).as_posix()
+            if relative == ".inferdrome-source-export.json":
+                continue
+            if relative == ".codex-venv" or relative.startswith(".codex-venv/"):
+                raise RemoteCaptureError(
+                    "exported source tree contains a task environment"
+                )
+            try:
+                metadata = child.stat(follow_symlinks=False)
+            except OSError:
+                raise RemoteCaptureError(
+                    "exported source tree cannot be inspected"
+                ) from None
+            if stat.S_ISLNK(metadata.st_mode):
+                raise RemoteCaptureError("exported source tree contains a link")
+            if stat.S_ISDIR(metadata.st_mode):
+                entries.append((relative, Path(child.path), metadata))
+                pending.append(Path(child.path))
+            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                entries.append((relative, Path(child.path), metadata))
+            else:
+                raise RemoteCaptureError("exported source tree contains an unsafe node")
+    if not entries or len(entries) > 200_000:
+        raise RemoteCaptureError("exported source tree has an invalid file count")
+    entries.sort(key=lambda item: item[0])
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            destination,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = None
+            with tarfile.open(
+                fileobj=output, mode="w:", format=tarfile.USTAR_FORMAT
+            ) as archive:
+                for relative, path, metadata in entries:
+                    info = tarfile.TarInfo(relative)
+                    info.mode = stat.S_IMODE(metadata.st_mode)
+                    info.mtime = 0
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    if stat.S_ISDIR(metadata.st_mode):
+                        info.type = tarfile.DIRTYPE
+                        archive.addfile(info)
+                    else:
+                        content, _identity = prospective_handoff._read_regular_once(
+                            path,
+                            label=f"exported source {relative}",
+                            maximum_bytes=_MAX_SOURCE_ARCHIVE_BYTES,
+                        )
+                        info.size = len(content)
+                        archive.addfile(info, io.BytesIO(content))
+            output.flush()
+            os.fsync(output.fileno())
+        metadata = os.lstat(destination)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or not 1 <= metadata.st_size <= _MAX_SOURCE_ARCHIVE_BYTES
+        ):
+            raise OSError
+    except (OSError, tarfile.TarError):
+        if descriptor is not None:
+            os.close(descriptor)
+        destination.unlink(missing_ok=True)
+        raise RemoteCaptureError(
+            "exact exported source archive is unavailable"
+        ) from None
+    archived_bytes, _identity = prospective_handoff._read_regular_once(
+        destination,
+        label="exported source archive",
+        maximum_bytes=_MAX_SOURCE_ARCHIVE_BYTES,
+    )
+    actual = "sha256:" + hashlib.sha256(archived_bytes).hexdigest()
+    if actual != expected_archive_sha256:
+        destination.unlink(missing_ok=True)
+        raise RemoteCaptureError("exported source archive disagrees with its marker")
+    return actual, len(archived_bytes)
+
+
 def _create_source_archive(destination: Path, commit: str) -> tuple[str, int]:
     """Export only the exact HEAD tree, refusing links, submodules, and secrets."""
+
+    if not _git_checkout_present():
+        marker = _source_export_marker()
+        if marker["repository_commit"] != commit:
+            raise RemoteCaptureError("source export commit does not match local HEAD")
+        return _create_exported_source_archive(
+            destination,
+            expected_archive_sha256=marker["source_archive_sha256"],
+        )
 
     if destination.exists() or destination.is_symlink():
         raise RemoteCaptureError("exact source archive destination already exists")
@@ -345,7 +531,33 @@ def _lambda_instance_type_name(value: str) -> str:
 
 def _require_checkout(expected_commit: str | None) -> str:
     if shutil.which("git") is None:
-        raise RemoteCaptureError("git is required")
+        if _git_checkout_present():
+            raise RemoteCaptureError("git is required")
+        marker = _source_export_marker()
+        commit = marker["repository_commit"]
+        if expected_commit is not None:
+            if _COMMIT_PATTERN.fullmatch(expected_commit) is None:
+                raise RemoteCaptureError(
+                    "--expected-commit must be 40 lowercase hex digits"
+                )
+            if expected_commit != commit:
+                raise RemoteCaptureError(
+                    "source export commit is not --expected-commit"
+                )
+        return commit
+    if not _git_checkout_present():
+        marker = _source_export_marker()
+        commit = marker["repository_commit"]
+        if expected_commit is not None:
+            if _COMMIT_PATTERN.fullmatch(expected_commit) is None:
+                raise RemoteCaptureError(
+                    "--expected-commit must be 40 lowercase hex digits"
+                )
+            if expected_commit != commit:
+                raise RemoteCaptureError(
+                    "source export commit is not --expected-commit"
+                )
+        return commit
     commit = _git("rev-parse", "--verify", "HEAD")
     if _COMMIT_PATTERN.fullmatch(commit) is None:
         raise RemoteCaptureError("local HEAD is not a full lowercase Git commit")
@@ -387,6 +599,7 @@ def _ssh_options(
     identity: Path | None,
     known_hosts: Path,
     port: int,
+    pinned: bool = False,
 ) -> list[str]:
     options = [
         "-F",
@@ -400,7 +613,7 @@ def _ssh_options(
         "-o",
         "ServerAliveCountMax=4",
         "-o",
-        "StrictHostKeyChecking=accept-new",
+        "StrictHostKeyChecking=yes" if pinned else "StrictHostKeyChecking=accept-new",
         "-o",
         f"UserKnownHostsFile={known_hosts}",
         "-o",
@@ -434,11 +647,13 @@ def _scp_options(
     identity: Path | None,
     known_hosts: Path,
     port: int,
+    pinned: bool = False,
 ) -> list[str]:
     options = _ssh_options(
         identity=identity,
         known_hosts=known_hosts,
         port=port,
+        pinned=pinned,
     )
     port_index = options.index("-p")
     options[port_index] = "-P"
@@ -605,6 +820,158 @@ env -i \\
 """
 
 
+def _remote_prospective_capture_script(
+    remote_root: str,
+    commit: str,
+    source_archive_sha256: str,
+    handoff: prospective_handoff.HandoffSnapshot,
+    *,
+    handoff_archive_sha256: str,
+    handoff_archive_size: int,
+    workload_sha256: str,
+    remote_state_root: str,
+    gpu_index: int,
+    startup_timeout_seconds: float,
+    remote_timeout_seconds: int,
+) -> str:
+    """Build the prospective remote command from controller-pinned bytes."""
+
+    if _COMMIT_PATTERN.fullmatch(commit) is None:
+        raise RemoteCaptureError("prospective repository commit is invalid")
+    for label, digest in (
+        ("source archive", source_archive_sha256),
+        ("handoff archive", handoff_archive_sha256),
+        ("workload", workload_sha256),
+    ):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise RemoteCaptureError(f"prospective {label} digest is invalid")
+    if not 1 <= handoff_archive_size <= _PROSPECTIVE_MAX_ARCHIVE_BYTES:
+        raise RemoteCaptureError("prospective handoff archive size is invalid")
+    root = shlex.quote(remote_root)
+    state = shlex.quote(remote_state_root)
+    prepared_python = shlex.quote(f"{remote_state_root}/venv/bin/python")
+    source_digest = shlex.quote(source_archive_sha256.removeprefix("sha256:"))
+    handoff_digest = shlex.quote(handoff_archive_sha256.removeprefix("sha256:"))
+    pythonpath = shlex.quote(remote_root + "/repo/src:" + remote_root + "/repo")
+    case_args = "".join(
+        " \\\n  --case "
+        + shlex.quote(
+            f"{case.case_id}={remote_root}/handoff/{case.source.relative_path}"
+        )
+        for case in handoff.cases
+    )
+    contract_args = "".join(
+        " \\\n  --expected-contract-digest "
+        + shlex.quote(f"{case.case_id}={case.contract_digest}")
+        for case in handoff.cases
+    )
+    wrapper = (
+        f"{prepared_python} "
+        f"{remote_root}/repo/scripts/prospective_real_gpu_capture.py "
+        f"--state-root {state} --output-root {root}/output "
+        f"--gpu-index {gpu_index} --startup-timeout-seconds "
+        f"{startup_timeout_seconds} --expected-source-archive-sha256 "
+        f"{shlex.quote(source_archive_sha256)} --expected-repository-commit "
+        f"{shlex.quote(commit)}{case_args}{contract_args}"
+    )
+    return f"""set -euo pipefail
+umask 077
+source_size=$(stat -c %s {root}/repo.tar)
+(( source_size >= 1 && source_size <= {_MAX_SOURCE_ARCHIVE_BYTES} ))
+[[ $(sha256sum {root}/repo.tar | cut -d ' ' -f 1) == {source_digest} ]]
+[[ $(stat -c %s {root}/handoff.tar.gz) == {handoff_archive_size} ]]
+[[ $(sha256sum {root}/handoff.tar.gz | cut -d ' ' -f 1) == {handoff_digest} ]]
+mkdir -m 700 -- {root}/repo {root}/handoff {root}/output {root}/home
+tar --extract --file {root}/repo.tar \
+  --directory {root}/repo --no-same-owner --no-same-permissions
+tar --extract --gzip --file {root}/handoff.tar.gz \
+  --directory {root}/handoff --no-same-owner --no-same-permissions
+python3.12 - {root}/repo {shlex.quote(commit)} \
+  {shlex.quote(source_archive_sha256)} <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+destination = Path(sys.argv[1])
+marker = destination / ".inferdrome-source-export.json"
+value = json.dumps({{"repository_commit": sys.argv[2],
+    "schema_version": "inferdrome.source-tree-export.v1",
+    "source_archive_sha256": sys.argv[3],
+    "transport": "git-archive-exact-head-tree-v1",
+}}, indent=2, sort_keys=True).encode("utf-8") + b"\\n"
+descriptor = os.open(
+    marker,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+    0o400,
+)
+with os.fdopen(descriptor, "wb") as stream:
+    stream.write(value)
+    stream.flush()
+    os.fsync(stream.fileno())
+PY
+PYTHONPATH={pythonpath} python3.12 - {root}/handoff \
+  {shlex.quote(workload_sha256)} <<'PY'
+from pathlib import Path
+import sys
+from scripts.prospective_handoff import snapshot_handoff
+
+snapshot_handoff(Path(sys.argv[1]), expected_workload_sha256=sys.argv[2])
+PY
+[[ -x {state}/venv/bin/python ]]
+wrapper_status=0
+env -i HOME={root}/home LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  PYTHONPATH={pythonpath} timeout --foreground --signal=TERM --kill-after=60s \
+  {remote_timeout_seconds}s {wrapper} >{root}/wrapper-output.log 2>&1 \
+  || wrapper_status=$?
+session_path=$(PYTHONPATH={pythonpath} python3.12 - \
+  {root}/wrapper-output.log {root}/output <<'PY'
+from pathlib import Path
+import sys
+log, output = Path(sys.argv[1]), Path(sys.argv[2]).resolve(strict=True)
+paths = [
+    line.removeprefix("receipt_path=")
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines()
+    if line.startswith("receipt_path=")
+]
+if len(paths) != 1:
+    raise SystemExit("prospective wrapper did not emit one receipt path")
+selected = Path(paths[0]).resolve(strict=True)
+selected.relative_to(output)
+print(selected.parent)
+PY
+)
+session_name=$(basename -- "$session_path")
+tar -C {root}/output --create --gzip \
+  --file {root}/prospective-session.tar.gz -- "$session_name"
+session_size=$(stat -c %s {root}/prospective-session.tar.gz)
+(( session_size <= {_PROSPECTIVE_MAX_SESSION_ARCHIVE_BYTES} ))
+session_digest=$(sha256sum {root}/prospective-session.tar.gz | cut -d ' ' -f 1)
+python3.12 - {root}/prospective-session.tar.gz \
+  {root}/prospective-session.tar.gz.metadata.json \
+  "$session_digest" "$session_size" <<'PY'
+import json
+from pathlib import Path
+import sys
+metadata = Path(sys.argv[2])
+digest = sys.argv[3]
+size = sys.argv[4]
+metadata.write_text(json.dumps({{"archive_name": "prospective-session.tar.gz",
+    "archive_sha256": "sha256:" + digest,
+    "schema_version": "{_PROSPECTIVE_TRANSFER_METADATA_SCHEMA}",
+    "size_bytes": int(size),
+}}, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+PY
+python3.12 - {root}/wrapper-output.log <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")
+PY
+exit "$wrapper_status"
+"""
+
+
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     content = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     try:
@@ -664,6 +1031,230 @@ def _read_transfer_metadata(path: Path) -> tuple[int, str]:
     ):
         raise RemoteCaptureError("remote transfer metadata is invalid")
     return value["size_bytes"], value["archive_sha256"]
+
+
+def _read_prospective_transfer_metadata(path: Path) -> tuple[int, str]:
+    try:
+        content, identity = prospective_handoff._read_regular_once(
+            path,
+            label="prospective transfer metadata",
+            maximum_bytes=4_096,
+        )
+        metadata = os.lstat(path)
+    except (OSError, prospective_handoff.ProspectiveHandoffError):
+        raise RemoteCaptureError(
+            "prospective transfer metadata is unavailable"
+        ) from None
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or prospective_handoff._identity(metadata) != identity
+        or not 2 <= metadata.st_size <= 4_096
+    ):
+        raise RemoteCaptureError("prospective transfer metadata is unsafe")
+    try:
+        value = prospective_handoff._strict_json(
+            content, label="prospective transfer metadata"
+        )
+    except prospective_handoff.ProspectiveHandoffError as error:
+        raise RemoteCaptureError(str(error)) from None
+    if (
+        set(value) != {"archive_name", "archive_sha256", "schema_version", "size_bytes"}
+        or value.get("archive_name") != "prospective-session.tar.gz"
+        or value.get("schema_version") != _PROSPECTIVE_TRANSFER_METADATA_SCHEMA
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(value.get("archive_sha256")))
+        is None
+        or isinstance(value.get("size_bytes"), bool)
+        or not isinstance(value.get("size_bytes"), int)
+        or not 1 <= value["size_bytes"] <= _PROSPECTIVE_MAX_SESSION_ARCHIVE_BYTES
+    ):
+        raise RemoteCaptureError("prospective transfer metadata is invalid")
+    return value["size_bytes"], value["archive_sha256"]
+
+
+def _prepare_pinned_known_hosts(
+    *,
+    destination: str,
+    known_hosts: Path,
+    host_key_file: Path | None,
+    expected_digest: str,
+    port: int,
+) -> str:
+    """Materialize the operator-pinned known_hosts bytes before SSH connects."""
+
+    expected = "sha256:" + expected_digest
+    if host_key_file is not None:
+        content, _identity = prospective_handoff._read_regular_once(
+            host_key_file,
+            label="operator host-key file",
+            maximum_bytes=1_048_576,
+        )
+    else:
+        host = _destination_host(destination)
+        result = _run(
+            [
+                "ssh-keyscan",
+                "-T",
+                "20",
+                "-p",
+                str(port),
+                host,
+            ],
+            label="pinned SSH host-key scan",
+            capture_output=True,
+            timeout=30,
+        )
+        content = result.stdout
+    if not content or hashlib.sha256(content).hexdigest() != expected_digest:
+        raise RemoteCaptureError("SSH host key bytes do not match their pin")
+    _write_bytes_exclusive(known_hosts, content)
+    actual = _host_identity_digest(known_hosts)
+    if actual != expected:
+        raise RemoteCaptureError("SSH host identity does not match its expected digest")
+    return actual
+
+
+def _extract_prospective_archive(archive_path: Path, destination: Path) -> Path:
+    """Extract one bounded session archive with no links or path traversal."""
+
+    if destination.exists() or destination.is_symlink():
+        raise RemoteCaptureError("prospective extraction destination already exists")
+    destination.mkdir(mode=0o700)
+    top_levels: set[str] = set()
+    seen: set[str] = set()
+    total_bytes = 0
+    try:
+        with tarfile.open(archive_path, mode="r:gz") as archive:
+            members = archive.getmembers()
+            if not members or len(members) > 8_192:
+                raise ValueError("invalid prospective archive member count")
+            for member in members:
+                pure = PurePosixPath(member.name)
+                if (
+                    pure.is_absolute()
+                    or not pure.parts
+                    or any(part in {"", ".", ".."} for part in pure.parts)
+                    or "\\" in member.name
+                    or any(
+                        ord(character) < 32 or ord(character) == 127
+                        for character in member.name
+                    )
+                    or member.name in seen
+                    or not (member.isdir() or member.isfile())
+                ):
+                    raise ValueError("unsafe prospective archive member")
+                seen.add(member.name)
+                top_levels.add(pure.parts[0])
+                if member.isfile():
+                    if member.size < 0:
+                        raise ValueError("prospective archive member size is invalid")
+                    total_bytes += member.size
+                    if total_bytes > 1_073_741_824:
+                        raise ValueError("prospective archive expands beyond its limit")
+            if len(top_levels) != 1:
+                raise ValueError("prospective archive has multiple roots")
+            for member in members:
+                target = destination.joinpath(*PurePosixPath(member.name).parts)
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if member.isdir():
+                    target.mkdir(mode=0o700, exist_ok=True)
+                    continue
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError("prospective archive member cannot be read")
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o400,
+                )
+                with os.fdopen(descriptor, "wb") as output:
+                    while True:
+                        chunk = stream.read(65_536)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+    except (OSError, tarfile.TarError, ValueError):
+        shutil.rmtree(destination, ignore_errors=True)
+        raise RemoteCaptureError("prospective session archive is unsafe") from None
+    return destination / next(iter(top_levels))
+
+
+def _verify_prospective_session(
+    session_root: Path,
+    handoff: prospective_handoff.HandoffSnapshot,
+) -> dict[str, Any]:
+    expected = [f"{case.case_id}={case.contract_digest}" for case in handoff.cases]
+    try:
+        return prospective_real_gpu_capture.verify_session(session_root, expected)
+    except (prospective_real_gpu_capture.ProspectiveCaptureError, OSError) as error:
+        raise RemoteCaptureError(
+            f"retrieved prospective session failed offline verification: {error}"
+        ) from None
+
+
+def _validate_prospective_case_identities(
+    raw_cases: object,
+) -> list[dict[str, str]]:
+    """Validate the three producer identities without making a verdict."""
+
+    if not isinstance(raw_cases, list) or len(raw_cases) != 3:
+        raise RemoteCaptureError("prospective capture receipt has an invalid case list")
+    identities: list[dict[str, str]] = []
+    for raw_case in raw_cases:
+        if not isinstance(raw_case, dict):
+            raise RemoteCaptureError("prospective capture case identity is invalid")
+        values = {
+            "bundle_digest": raw_case.get("bundle_digest"),
+            "case_id": raw_case.get("case_id"),
+            "request_plan_digest": raw_case.get("request_plan_digest"),
+            "run_id": raw_case.get("run_id"),
+        }
+        if (
+            not isinstance(values["case_id"], str)
+            or not isinstance(values["run_id"], str)
+            or re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", values["run_id"]) is None
+            or any(
+                not isinstance(values[field], str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", values[field]) is None
+                for field in ("bundle_digest", "request_plan_digest")
+            )
+        ):
+            raise RemoteCaptureError("prospective capture case identity is incomplete")
+        identities.append({key: str(value) for key, value in values.items()})
+    if [item["case_id"] for item in identities] != list(prospective_handoff.CASE_IDS):
+        raise RemoteCaptureError("prospective capture cases are not canonical")
+    if (
+        len({item["run_id"] for item in identities}) != 3
+        or len({item["bundle_digest"] for item in identities}) != 3
+    ):
+        raise RemoteCaptureError("prospective capture case identities are not distinct")
+    return identities
+
+
+def _prospective_session_identities(
+    session_root: Path,
+) -> tuple[str, list[dict[str, str]]]:
+    """Read only the producer identities needed for the transport receipt."""
+
+    try:
+        receipt = prospective_real_gpu_capture._read_json(
+            session_root / "prospective-capture-receipt.json",
+            label="prospective capture receipt",
+        )
+    except prospective_real_gpu_capture.ProspectiveCaptureError as error:
+        raise RemoteCaptureError(str(error)) from None
+    identities = _validate_prospective_case_identities(receipt.get("cases"))
+    session_id = session_root.name
+    if not re.fullmatch(r"prospective-real-gpu-[A-Za-z0-9_.-]{1,128}", session_id):
+        raise RemoteCaptureError("prospective session identity is invalid")
+    return session_id, identities
 
 
 def _remote_file_stream_command(
@@ -914,6 +1505,8 @@ def _static_check() -> None:
         REPOSITORY_ROOT / "scripts" / "real_gpu_capture.py",
         REPOSITORY_ROOT / "scripts" / "qwen3_gpu_capture.py",
         REPOSITORY_ROOT / "scripts" / "lambda_gpu_guard.py",
+        REPOSITORY_ROOT / "scripts" / "prospective_handoff.py",
+        REPOSITORY_ROOT / "scripts" / "prospective_real_gpu_capture.py",
     ]
     for path in required:
         if not path.is_file() or path.is_symlink():
@@ -955,12 +1548,36 @@ def _qwen3_profile_requested(args: argparse.Namespace) -> bool:
     return getattr(args, "managed_capability_profile", None) == _QWEN3_PROFILE_ID
 
 
+def _prospective_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "prospective", False)
+        or getattr(args, "prospective_handoff_root", None) is not None
+    )
+
+
+def _prospective_digest(value: str) -> str:
+    if re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", value) is None:
+        raise argparse.ArgumentTypeError("prospective SHA-256 digest is invalid")
+    return value if value.startswith("sha256:") else "sha256:" + value
+
+
+def _bounded_remote_path(value: str) -> str:
+    if (
+        not value
+        or len(value) > 512
+        or "\n" in value
+        or "\r" in value
+        or not value.startswith("/")
+        or any(part in {"", ".", ".."} for part in PurePosixPath(value).parts)
+    ):
+        raise argparse.ArgumentTypeError("remote path must be a bounded absolute path")
+    return value
+
+
 def _qwen3_tier_policy(args: argparse.Namespace) -> Qwen3GpuTierPolicy:
     gpu_tier_id = getattr(args, "qwen3_gpu_tier", None)
     if gpu_tier_id is None:
-        raise RemoteCaptureError(
-            "Qwen3 capability capture requires --qwen3-gpu-tier"
-        )
+        raise RemoteCaptureError("Qwen3 capability capture requires --qwen3-gpu-tier")
     try:
         return qwen3_gpu_tier_policy(gpu_tier_id)
     except ValueError as error:
@@ -969,6 +1586,64 @@ def _qwen3_tier_policy(args: argparse.Namespace) -> Qwen3GpuTierPolicy:
 
 def _validate_capture_mode(args: argparse.Namespace) -> None:
     """Keep the legacy workflow stable and make the campaign path fail closed."""
+
+    if _prospective_requested(args):
+        if (
+            getattr(args, "managed_capability_profile", None) is not None
+            or getattr(args, "qwen3_gpu_tier", None) is not None
+        ):
+            raise RemoteCaptureError(
+                "prospective capture cannot use the managed Qwen3 profile"
+            )
+        required = {
+            "identity_file": getattr(args, "identity_file", None),
+            "host_key_sha256": getattr(args, "host_key_sha256", None),
+            "prospective_handoff_root": getattr(args, "prospective_handoff_root", None),
+            "expected_handoff_manifest_sha256": getattr(
+                args, "expected_handoff_manifest_sha256", None
+            ),
+            "expected_workload_sha256": getattr(args, "expected_workload_sha256", None),
+            "remote_state_root": getattr(args, "remote_state_root", None),
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise RemoteCaptureError(
+                "prospective capture requires explicit " + ", ".join(missing)
+            )
+        if args.startup_timeout_seconds < 1 or args.startup_timeout_seconds > 3_600:
+            raise RemoteCaptureError("prospective startup timeout is out of bounds")
+        if args.remote_timeout_seconds < _MINIMUM_PROFILE_REMOTE_SECONDS:
+            raise RemoteCaptureError(
+                "prospective remote timeout must be at least 300 seconds"
+            )
+        guarded = _lambda_guard_requested(args)
+        if guarded:
+            if args.lambda_instance_id is None:
+                raise RemoteCaptureError(
+                    "guarded prospective capture requires --lambda-instance-id"
+                )
+            if args.lambda_instance_type_name is None:
+                raise RemoteCaptureError(
+                    "guarded prospective capture requires --lambda-instance-type-name"
+                )
+            if args.lambda_instance_type_name.startswith("gpu_") is False:
+                raise RemoteCaptureError(
+                    "guarded prospective capture requires a GPU Lambda instance type"
+                )
+        return
+
+    if any(
+        getattr(args, name, None) is not None
+        for name in (
+            "expected_handoff_manifest_sha256",
+            "expected_workload_sha256",
+            "remote_state_root",
+            "host_key_file",
+        )
+    ):
+        raise RemoteCaptureError(
+            "prospective transport options require --prospective"
+        )
 
     profile = getattr(args, "managed_capability_profile", None)
     if profile is None:
@@ -1005,8 +1680,7 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
         )
     if args.startup_timeout_seconds != _QWEN3_STARTUP_TIMEOUT_SECONDS:
         raise RemoteCaptureError(
-            "Qwen3 capability capture requires the frozen "
-            "300-second startup timeout"
+            "Qwen3 capability capture requires the frozen 300-second startup timeout"
         )
     if args.remote_timeout_seconds < _QWEN3_REMOTE_CAPTURE_SECONDS:
         raise RemoteCaptureError(
@@ -1031,6 +1705,8 @@ def _effective_remote_timeout(
     *,
     termination_deadline: datetime | None,
     now: datetime | None = None,
+    max_remote_seconds: int = _QWEN3_REMOTE_CAPTURE_SECONDS,
+    post_remote_budget_seconds: int = _QWEN3_POST_REMOTE_BUDGET_SECONDS,
 ) -> int:
     """Clamp remote work so control returns before provider termination."""
 
@@ -1041,8 +1717,8 @@ def _effective_remote_timeout(
     available = int((deadline - selected_now).total_seconds())
     bounded = min(
         requested_seconds,
-        _QWEN3_REMOTE_CAPTURE_SECONDS,
-        available - _QWEN3_POST_REMOTE_BUDGET_SECONDS,
+        max_remote_seconds,
+        available - post_remote_budget_seconds,
     )
     if bounded < _MINIMUM_PROFILE_REMOTE_SECONDS:
         raise RemoteCaptureError(
@@ -1104,8 +1780,8 @@ def _arm_lambda_watchdog(
         raise RemoteCaptureError(
             f"Lambda cost guard could not be armed: {error}"
         ) from None
-    if _qwen3_profile_requested(args):
-        policy = _qwen3_tier_policy(args)
+    if _qwen3_profile_requested(args) or _prospective_requested(args):
+        policy = _qwen3_tier_policy(args) if _qwen3_profile_requested(args) else None
         expected_instance_type = args.lambda_instance_type_name
         try:
             active_ids = [
@@ -1118,10 +1794,14 @@ def _arm_lambda_watchdog(
                 or active_ids != [handle.instance.instance_id]
                 or handle.instance.instance_type_name != expected_instance_type
             ):
-                raise lambda_gpu_guard.LambdaGuardError(
+                message = (
                     "Qwen3 campaign requires exactly one active "
                     f"{expected_instance_type} target for {policy.gpu_tier_id}"
+                    if policy is not None
+                    else "prospective capture requires exactly one active "
+                    f"{expected_instance_type} target"
                 )
+                raise lambda_gpu_guard.LambdaGuardError(message)
         except lambda_gpu_guard.LambdaGuardError as error:
             try:
                 lambda_gpu_guard.terminate_guarded_instance(
@@ -1129,13 +1809,23 @@ def _arm_lambda_watchdog(
                     trigger="campaign-single-instance-check-failed",
                 )
             except lambda_gpu_guard.LambdaGuardError as termination_error:
-                raise RemoteCaptureError(
+                prefix = (
                     "Qwen3 single-instance check failed and immediate "
-                    "termination was not confirmed; the watchdog remains armed: "
-                    f"{termination_error}"
+                    if policy is not None
+                    else "prospective single-instance check failed and immediate "
+                )
+                raise RemoteCaptureError(
+                    prefix
+                    + "termination was not confirmed; the watchdog remains armed: "
+                    + str(termination_error)
                 ) from None
             raise RemoteCaptureError(
-                f"Qwen3 single-instance check failed; target terminated: {error}"
+                (
+                    "Qwen3 single-instance check failed; target terminated: "
+                    if policy is not None
+                    else "prospective single-instance check failed; target terminated: "
+                )
+                + str(error)
             ) from None
     print(
         "Lambda termination watchdog armed for "
@@ -1149,16 +1839,38 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
     remote_root = f"/tmp/inferdrome-gpu-{commit[:12]}-<random>"
     guarded = _lambda_guard_requested(args)
     policy = _qwen3_tier_policy(args) if _qwen3_profile_requested(args) else None
+    prospective: prospective_handoff.HandoffSnapshot | None = None
     with tempfile.TemporaryDirectory(prefix="inferdrome-source-tree-") as temporary:
+        temporary_root = Path(temporary)
+        if _prospective_requested(args):
+            prospective = prospective_handoff.snapshot_handoff(
+                Path(args.prospective_handoff_root),
+                expected_manifest_sha256=args.expected_handoff_manifest_sha256,
+                expected_workload_sha256=args.expected_workload_sha256,
+            )
+            prospective = prospective_handoff.create_handoff_archive(
+                prospective,
+                temporary_root / "handoff.tar.gz",
+            )
+            _validate_prospective_snapshot(
+                prospective,
+                temporary_root / "validated-handoff",
+            )
         source_archive_sha256, source_archive_bytes = _create_source_archive(
-            Path(temporary) / "repo.tar",
+            temporary_root / "repo.tar",
             commit,
         )
+    if _prospective_requested(args) and prospective is None:
+        raise AssertionError
     plan = {
         "billing_boundary": (
             "LAMBDA API TERMINATION WATCHDOG PLUS CONTROLLER FINALLY"
             if guarded
-            else "OPERATOR MUST TERMINATE THE CLOUD INSTANCE"
+            else (
+                "OPERATOR_PROVIDED_HOST; NO COST-TERMINATION CLAIM"
+                if prospective is not None
+                else "OPERATOR MUST TERMINATE THE CLOUD INSTANCE"
+            )
         ),
         "destination": args.destination,
         "expected_gpu_model": (
@@ -1185,6 +1897,16 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
         "repository_commit": commit,
         "source_archive_bytes": source_archive_bytes,
         "source_archive_sha256": source_archive_sha256,
+        "prospective_handoff": (
+            {
+                "archive_sha256": prospective.archive_sha256,
+                "archive_size_bytes": prospective.archive_size_bytes,
+                "manifest_sha256": prospective.manifest_sha256,
+                "workload_sha256": prospective.workload_sha256,
+            }
+            if prospective is not None
+            else None
+        ),
         "managed_capability_profile": args.managed_capability_profile,
         "qwen3_gpu_tier": policy.gpu_tier_id if policy is not None else None,
         "phase_budget_seconds": (
@@ -1193,30 +1915,460 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
         "remote_root": remote_root,
         "remote_timeout_seconds": args.remote_timeout_seconds,
         "startup_timeout_seconds": args.startup_timeout_seconds,
-        "steps": [
-            "verify a clean exact local commit",
-            "validate an exact-HEAD tree archive locally without Git history",
-            "arm and validate the independent Lambda termination watchdog",
-            "rebuild the checked source archive under watchdog protection",
-            "preflight Linux, Python 3.12, NVIDIA, and required host tools",
-            "upload and digest-check the exact source archive",
-            "prepare the pinned vLLM/model environment",
-            (
-                "run one Qwen3-8B concurrency-1 capability spike on "
-                f"{policy.expected_nvidia_smi_name}"
-                if policy is not None
-                else "run the single proof and four-run controlled comparison"
-            ),
-            "retrieve bounded size/checksum metadata, then exactly those archive bytes",
-            (
-                "terminate and confirm the Lambda instance through its API"
-                if guarded
-                else "prompt the operator to terminate the billable instance"
-            ),
-            "independently recalculate and verify every retrieved proof artifact",
-        ],
+        "steps": (
+            [
+                "snapshot the complete three-case P1 handoff exactly once",
+                "create and digest-check distinct source and handoff archives",
+                "verify the explicit SSH identity and host-key pin before connecting",
+                "preflight the pinned operator-provided NVIDIA host",
+                "upload only the bounded source and handoff archives",
+                "run three independent prospective cases through the merged wrapper",
+                "retrieve and checksum the immutable bounded session archive",
+                "offline-verify after the required termination boundary",
+                "report CAPTURED_PENDING_EXTERNAL_EXITSPEC and EXTERNAL_ONLY",
+            ]
+            if prospective is not None
+            else [
+                "verify a clean exact local commit",
+                "validate an exact-HEAD tree archive locally without Git history",
+                "arm and validate the independent Lambda termination watchdog",
+                "rebuild the checked source archive under watchdog protection",
+                "preflight Linux, Python 3.12, NVIDIA, and required host tools",
+                "upload and digest-check the exact source archive",
+                "prepare the pinned vLLM/model environment",
+                (
+                    "run one Qwen3-8B concurrency-1 capability spike on "
+                    f"{policy.expected_nvidia_smi_name}"
+                    if policy is not None
+                    else "run the single proof and four-run controlled comparison"
+                ),
+                (
+                    "retrieve bounded size/checksum metadata, then exactly those "
+                    "archive bytes"
+                ),
+                (
+                    "terminate and confirm the Lambda instance through its API"
+                    if guarded
+                    else "prompt the operator to terminate the billable instance"
+                ),
+                "independently recalculate and verify every retrieved proof artifact",
+            ]
+        ),
     }
     print(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _prospective_transfer_deadline(
+    termination_deadline: datetime | None,
+) -> float | None:
+    if termination_deadline is None:
+        return None
+    available = (
+        int((termination_deadline.astimezone(UTC) - datetime.now(UTC)).total_seconds())
+        - _PROSPECTIVE_POST_REMOTE_BUDGET_SECONDS
+    )
+    if available < 1:
+        raise RemoteCaptureError("Lambda prospective retrieval deadline is exhausted")
+    return time.monotonic() + available
+
+
+def _prospective_transfer_timeout(
+    deadline: float | None,
+    phase_limit_seconds: int,
+) -> int:
+    if deadline is None:
+        return phase_limit_seconds
+    remaining = int(deadline - time.monotonic())
+    if remaining < 1:
+        raise RemoteCaptureError("Lambda prospective retrieval deadline is exhausted")
+    return min(phase_limit_seconds, remaining)
+
+
+def _validate_prospective_snapshot(
+    snapshot: prospective_handoff.HandoffSnapshot,
+    validation_root: Path,
+) -> None:
+    """Run Inferdrome's inert three-case preflight over captured bytes."""
+
+    validation_root.mkdir(mode=0o700)
+    for file in snapshot.files:
+        prospective_handoff._write_snapshot_file(validation_root, file)
+    case_arguments = [
+        f"{case.case_id}={validation_root / case.source.relative_path}"
+        for case in snapshot.cases
+    ]
+    expected_arguments = [
+        f"{case.case_id}={case.contract_digest}" for case in snapshot.cases
+    ]
+    try:
+        cases = prospective_real_gpu_capture.validate_prospective_cases(
+            case_arguments,
+            expected_arguments,
+        )
+    except prospective_real_gpu_capture.ProspectiveCaptureError as error:
+        raise RemoteCaptureError(
+            f"captured P1 handoff failed Inferdrome preflight: {error}"
+        ) from None
+    if [case.case_id for case in cases] != list(prospective_handoff.CASE_IDS):
+        raise RemoteCaptureError("captured P1 handoff preflight changed case order")
+    if [case.expected_contract_digest for case in cases] != list(
+        snapshot.expected_contract_digests
+    ):
+        raise RemoteCaptureError("captured P1 handoff preflight changed contract links")
+
+
+def _capture_prospective_over_ssh(
+    args: argparse.Namespace,
+    commit: str,
+    identity: Path,
+    source_archive: Path,
+    source_archive_sha256: str,
+    handoff: prospective_handoff.HandoffSnapshot,
+    *,
+    termination_deadline: datetime | None = None,
+) -> Path:
+    """Transport one immutable P1 snapshot and retrieve its sealed session."""
+
+    if handoff.archive_path is None or handoff.archive_sha256 is None:
+        raise RemoteCaptureError("prospective handoff archive was not prepared")
+    if handoff.archive_size_bytes is None:
+        raise RemoteCaptureError("prospective handoff archive size is unavailable")
+    for path, label, maximum in (
+        (source_archive, "source archive", _MAX_SOURCE_ARCHIVE_BYTES),
+        (handoff.archive_path, "handoff archive", _PROSPECTIVE_MAX_ARCHIVE_BYTES),
+    ):
+        try:
+            metadata = os.lstat(path)
+        except OSError:
+            raise RemoteCaptureError(f"{label} is unavailable") from None
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or not 1 <= metadata.st_size <= maximum
+        ):
+            raise RemoteCaptureError(f"{label} is unsafe")
+    try:
+        source_bytes, _source_identity = prospective_handoff._read_regular_once(
+            source_archive,
+            label="source archive",
+            maximum_bytes=_MAX_SOURCE_ARCHIVE_BYTES,
+        )
+        handoff_bytes, _handoff_identity = prospective_handoff._read_regular_once(
+            handoff.archive_path,
+            label="handoff archive",
+            maximum_bytes=_PROSPECTIVE_MAX_ARCHIVE_BYTES,
+        )
+    except prospective_handoff.ProspectiveHandoffError as error:
+        raise RemoteCaptureError(str(error)) from None
+    if (
+        "sha256:" + hashlib.sha256(source_bytes).hexdigest() != source_archive_sha256
+        or len(handoff_bytes) != handoff.archive_size_bytes
+        or "sha256:" + hashlib.sha256(handoff_bytes).hexdigest()
+        != handoff.archive_sha256
+    ):
+        raise RemoteCaptureError("prospective transport archive identity changed")
+
+    for executable in ("ssh", "scp"):
+        if shutil.which(executable) is None:
+            raise RemoteCaptureError(f"{executable} is required")
+    output_root = Path(args.output_root).expanduser().absolute()
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        output_metadata = os.lstat(output_root)
+    except OSError:
+        raise RemoteCaptureError(
+            "local prospective output root is unavailable"
+        ) from None
+    if output_root.is_symlink() or not stat.S_ISDIR(output_metadata.st_mode):
+        raise RemoteCaptureError("local prospective output root is unsafe")
+    token = os.urandom(4).hex()
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    name = f"prospective-{timestamp}-{commit[:12]}-{token}"
+    final_path = output_root / name
+    staging_path = output_root / f".{name}.staging"
+    if final_path.exists() or staging_path.exists():
+        raise RemoteCaptureError("local prospective capture destination already exists")
+    staging_path.mkdir(mode=0o700)
+    known_hosts = staging_path / "ssh-known-hosts"
+    archive = staging_path / "prospective-session.tar.gz"
+    transfer_metadata = staging_path / "prospective-session.tar.gz.metadata.json"
+    checksum = staging_path / "prospective-session.tar.gz.sha256"
+    remote_root = f"/tmp/inferdrome-prospective-{commit[:12]}-{token}"
+    try:
+        _prepare_pinned_known_hosts(
+            destination=args.destination,
+            known_hosts=known_hosts,
+            host_key_file=(
+                Path(args.host_key_file).expanduser().absolute()
+                if getattr(args, "host_key_file", None) is not None
+                else None
+            ),
+            expected_digest=args.host_key_sha256,
+            port=args.port,
+        )
+        ssh_options = _ssh_options(
+            identity=identity,
+            known_hosts=known_hosts,
+            port=args.port,
+            pinned=True,
+        )
+        scp_options = _scp_options(
+            identity=identity,
+            known_hosts=known_hosts,
+            port=args.port,
+            pinned=True,
+        )
+        print(f"Inferdrome commit: {commit}")
+        print(f"Prospective remote workspace: {remote_root}")
+        print("Preflighting the pinned operator-provided GPU host…", flush=True)
+        _run(
+            [
+                "ssh",
+                *ssh_options,
+                args.destination,
+                _bash_command(
+                    _remote_preflight_script(remote_root, gpu_index=args.gpu_index)
+                ),
+            ],
+            label="prospective remote GPU preflight",
+            timeout=90,
+        )
+        _run(
+            [
+                "scp",
+                *scp_options,
+                str(source_archive),
+                f"{args.destination}:{remote_root}/repo.tar",
+            ],
+            label="prospective source archive upload",
+            timeout=600,
+        )
+        _run(
+            [
+                "scp",
+                *scp_options,
+                str(handoff.archive_path),
+                f"{args.destination}:{remote_root}/handoff.tar.gz",
+            ],
+            label="prospective handoff archive upload",
+            timeout=600,
+        )
+        effective_timeout = _effective_remote_timeout(
+            args.remote_timeout_seconds,
+            termination_deadline=termination_deadline,
+            max_remote_seconds=args.remote_timeout_seconds,
+            post_remote_budget_seconds=_PROSPECTIVE_POST_REMOTE_BUDGET_SECONDS,
+        )
+        remote_result = _run(
+            [
+                "ssh",
+                *ssh_options,
+                args.destination,
+                _bash_command(
+                    _remote_prospective_capture_script(
+                        remote_root,
+                        commit,
+                        source_archive_sha256,
+                        handoff,
+                        handoff_archive_sha256=handoff.archive_sha256,
+                        handoff_archive_size=handoff.archive_size_bytes,
+                        workload_sha256=handoff.workload_sha256,
+                        remote_state_root=args.remote_state_root,
+                        gpu_index=args.gpu_index,
+                        startup_timeout_seconds=args.startup_timeout_seconds,
+                        remote_timeout_seconds=effective_timeout,
+                    )
+                ),
+            ],
+            label="prospective remote capture",
+            timeout=effective_timeout + 600,
+            check=False,
+        )
+        if remote_result.returncode != 0:
+            raise RemoteCaptureError(
+                "prospective remote capture failed; retained diagnostics at "
+                f"{staging_path} (remote workspace {remote_root})"
+            )
+        transfer_deadline = _prospective_transfer_deadline(termination_deadline)
+        _download_bounded_remote_file(
+            [
+                "ssh",
+                *ssh_options,
+                args.destination,
+                _remote_file_stream_command(
+                    f"{remote_root}/prospective-session.tar.gz.metadata.json",
+                    minimum_size=2,
+                    maximum_size=4_096,
+                ),
+            ],
+            transfer_metadata,
+            minimum_size=2,
+            maximum_size=4_096,
+            timeout=_prospective_transfer_timeout(transfer_deadline, 300),
+        )
+        expected_size, expected_archive_sha256 = _read_prospective_transfer_metadata(
+            transfer_metadata
+        )
+        _download_exact_remote_file(
+            [
+                "ssh",
+                *ssh_options,
+                args.destination,
+                _remote_file_stream_command(
+                    f"{remote_root}/prospective-session.tar.gz",
+                    expected_size,
+                ),
+            ],
+            archive,
+            expected_size=expected_size,
+            expected_sha256=expected_archive_sha256,
+            timeout=_prospective_transfer_timeout(transfer_deadline, 1_800),
+        )
+        _write_bytes_exclusive(
+            checksum,
+            (
+                expected_archive_sha256.removeprefix("sha256:")
+                + "  prospective-session.tar.gz\n"
+            ).encode("ascii"),
+        )
+        session_root = _extract_prospective_archive(archive, staging_path / "session")
+        session_id, case_identities = _prospective_session_identities(session_root)
+        _write_json(
+            staging_path / "prospective-transport.json",
+            {
+                "case_identities": case_identities,
+                "handoff_archive_sha256": handoff.archive_sha256,
+                "handoff_archive_size_bytes": handoff.archive_size_bytes,
+                "handoff_manifest_sha256": handoff.manifest_sha256,
+                "repository_commit": commit,
+                "schema_version": "inferdrome.prospective-ssh-transport.v1",
+                "session_id": session_id,
+                "source_archive_sha256": source_archive_sha256,
+                "source_archive_size_bytes": len(source_bytes),
+                "ssh_host_identity_sha256": _host_identity_digest(known_hosts),
+                "workload_sha256": handoff.workload_sha256,
+            },
+        )
+        os.replace(staging_path, final_path)
+    except Exception:
+        if staging_path.exists():
+            print(
+                f"Partial prospective local diagnostics remain at {staging_path}",
+                file=sys.stderr,
+            )
+        raise
+    print(f"Prospective session retrieved: {final_path}")
+    return final_path
+
+
+def _finalize_prospective_capture(
+    capture_path: Path,
+    handoff: prospective_handoff.HandoffSnapshot,
+    *,
+    guarded_termination: lambda_gpu_guard.TerminationResult | None,
+) -> Path:
+    """Verify offline after the required termination boundary."""
+
+    transport_bytes = _safe_record_bytes(
+        capture_path / "prospective-transport.json",
+        label="prospective transport receipt",
+    )
+    transport = _strict_json_bytes(
+        transport_bytes,
+        label="prospective transport receipt",
+    )
+    if set(transport) != {
+        "case_identities",
+        "handoff_archive_sha256",
+        "handoff_archive_size_bytes",
+        "handoff_manifest_sha256",
+        "repository_commit",
+        "schema_version",
+        "session_id",
+        "source_archive_sha256",
+        "source_archive_size_bytes",
+        "ssh_host_identity_sha256",
+        "workload_sha256",
+    } or transport.get("schema_version") != "inferdrome.prospective-ssh-transport.v1":
+        raise RemoteCaptureError("prospective transport receipt schema is unsupported")
+    digest_values = (
+        transport.get("handoff_archive_sha256"),
+        transport.get("handoff_manifest_sha256"),
+        transport.get("source_archive_sha256"),
+        transport.get("ssh_host_identity_sha256"),
+        transport.get("workload_sha256"),
+    )
+    if any(
+        not isinstance(value, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+        for value in digest_values
+    ):
+        raise RemoteCaptureError("prospective transport receipt has invalid digests")
+    if (
+        transport["handoff_archive_sha256"] != handoff.archive_sha256
+        or transport["handoff_manifest_sha256"] != handoff.manifest_sha256
+        or transport["workload_sha256"] != handoff.workload_sha256
+        or not isinstance(transport.get("repository_commit"), str)
+        or _COMMIT_PATTERN.fullmatch(transport["repository_commit"]) is None
+        or not isinstance(transport.get("session_id"), str)
+        or not isinstance(transport.get("source_archive_size_bytes"), int)
+        or not isinstance(transport.get("handoff_archive_size_bytes"), int)
+        or transport["handoff_archive_size_bytes"] != handoff.archive_size_bytes
+        or not 1 <= transport["source_archive_size_bytes"] <= _MAX_SOURCE_ARCHIVE_BYTES
+    ):
+        raise RemoteCaptureError("prospective transport provenance disagrees")
+    session_root = capture_path / "session"
+    verification = _verify_prospective_session(session_root, handoff)
+    expected_cases = _validate_prospective_case_identities(
+        transport.get("case_identities")
+    )
+    if verification.get("valid") is not True:
+        raise RemoteCaptureError("prospective offline verification is incomplete")
+    archive_size, archive_sha256 = _read_prospective_transfer_metadata(
+        capture_path / "prospective-session.tar.gz.metadata.json"
+    )
+    receipt = {
+        "case_identities": expected_cases,
+        "chronology": "OPERATOR_MUST_FREEZE_BEFORE_MEASUREMENT",
+        "handoff_archive": {
+            "sha256": transport.get("handoff_archive_sha256"),
+            "size_bytes": transport.get("handoff_archive_size_bytes"),
+        },
+        "handoff_archive_sha256": transport.get("handoff_archive_sha256"),
+        "handoff_manifest_sha256": transport.get("handoff_manifest_sha256"),
+        "offline_verification": verification,
+        "publication_status": "EXTERNAL_ONLY",
+        "repository_commit": transport.get("repository_commit"),
+        "retrieved_archive": {
+            "sha256": archive_sha256,
+            "size_bytes": archive_size,
+        },
+        "schema_version": "inferdrome.prospective-real-gpu-retrieval.v1",
+        "session_id": transport.get("session_id"),
+        "source_archive": {
+            "sha256": transport.get("source_archive_sha256"),
+            "size_bytes": transport.get("source_archive_size_bytes"),
+        },
+        "source_archive_sha256": transport.get("source_archive_sha256"),
+        "ssh_host_identity_sha256": transport.get("ssh_host_identity_sha256"),
+        "status": "CAPTURED_PENDING_EXTERNAL_EXITSPEC",
+        "termination_boundary": (
+            "PROVIDER_TERMINATION_CONFIRMED"
+            if guarded_termination is not None
+            else "OPERATOR_PROVIDED_HOST_NO_COST_TERMINATION_CLAIM"
+        ),
+        "workload_sha256": transport.get("workload_sha256"),
+    }
+    if guarded_termination is not None:
+        receipt["provider_termination"] = guarded_termination.public_record()
+    _write_json(capture_path / "retrieval-receipt.json", receipt)
+    print(
+        "\nPROSPECTIVE CAPTURE VERIFIED OFFLINE; no ExitSpec acceptance verdict "
+        "was emitted."
+    )
+    print(f"Local prospective capture record: {capture_path}")
+    return capture_path
 
 
 def _capture_over_ssh(
@@ -1288,9 +2440,7 @@ def _capture_over_ssh(
                     remote_root,
                     gpu_index=args.gpu_index,
                     expected_gpu_model=(
-                        policy.expected_nvidia_smi_name
-                        if policy is not None
-                        else None
+                        policy.expected_nvidia_smi_name if policy is not None else None
                     ),
                 )
             ),
@@ -1620,6 +2770,7 @@ def _safe_record_bytes(path: Path, *, label: str) -> bytes:
     if (
         path.is_symlink()
         or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
         or not content
         or len(content) > 65_536
     ):
@@ -1910,8 +3061,7 @@ def _finalize_qwen3_capture_with_evidence(
     if (
         evidence.instance.get("instance_type_name") != identity.instance_type_name
         or evidence.instance.get("hourly_rate_usd") != str(policy.hourly_rate_usd)
-        or evidence.cost_window.get("max_cost_usd")
-        != str(policy.max_session_cost_usd)
+        or evidence.cost_window.get("max_cost_usd") != str(policy.max_session_cost_usd)
     ):
         raise RemoteCaptureError(
             "Lambda termination evidence disagrees with Qwen3 retrieval identity"
@@ -2210,9 +3360,137 @@ def _capture_with_source(
     return captured
 
 
+@contextmanager
+def _prospective_interruptible() -> Any:
+    """Make controller SIGINT/SIGTERM enter the guarded cleanup path."""
+
+    previous: dict[signal.Signals, Any] = {}
+
+    def interrupt(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        for selected_signal in (signal.SIGINT, signal.SIGTERM):
+            previous[selected_signal] = signal.getsignal(selected_signal)
+            signal.signal(selected_signal, interrupt)
+        yield
+    finally:
+        for selected_signal, handler in previous.items():
+            signal.signal(selected_signal, handler)
+
+
+def _capture_prospective_with_handoff(
+    args: argparse.Namespace,
+    commit: str,
+    identity: Path | None,
+) -> Path:
+    """Snapshot P1 and only then enter the guarded remote workflow."""
+
+    with _prospective_interruptible():
+        return _capture_prospective_with_handoff_impl(args, commit, identity)
+
+
+def _capture_prospective_with_handoff_impl(
+    args: argparse.Namespace,
+    commit: str,
+    identity: Path | None,
+) -> Path:
+
+    if identity is None:
+        raise RemoteCaptureError("prospective capture requires an SSH identity file")
+    handoff_root = Path(args.prospective_handoff_root).expanduser().absolute()
+    with tempfile.TemporaryDirectory(
+        prefix="inferdrome-prospective-inputs-"
+    ) as temporary:
+        temporary_root = Path(temporary)
+        handoff = prospective_handoff.snapshot_handoff(
+            handoff_root,
+            expected_manifest_sha256=args.expected_handoff_manifest_sha256,
+            expected_workload_sha256=args.expected_workload_sha256,
+        )
+        handoff = prospective_handoff.create_handoff_archive(
+            handoff,
+            temporary_root / "handoff.tar.gz",
+        )
+        _validate_prospective_snapshot(handoff, temporary_root / "validated-handoff")
+        source_archive = temporary_root / "repo.tar"
+        source_archive_sha256, source_archive_bytes = _create_source_archive(
+            source_archive,
+            commit,
+        )
+        print(
+            "Prospective P1 snapshot prepared before SSH/provider action: "
+            f"{handoff.manifest_sha256} manifest, "
+            f"{handoff.workload_sha256} workload"
+        )
+        print(
+            f"Exact source archive prepared: {source_archive_sha256} "
+            f"({source_archive_bytes} bytes)"
+        )
+        watchdog = _arm_lambda_watchdog(args)
+        captured: Path | None = None
+        termination: lambda_gpu_guard.TerminationResult | None = None
+        termination_deadline = getattr(
+            getattr(watchdog, "cost_window", None),
+            "deadline",
+            None,
+        )
+        try:
+            captured = _capture_prospective_over_ssh(
+                args,
+                commit,
+                identity,
+                source_archive,
+                source_archive_sha256,
+                handoff,
+                termination_deadline=termination_deadline,
+            )
+        finally:
+            if watchdog is not None:
+                capture_failed = sys.exc_info()[0] is not None
+                try:
+                    termination = lambda_gpu_guard.terminate_guarded_instance(watchdog)
+                except lambda_gpu_guard.LambdaGuardFinalizationError as error:
+                    print(
+                        "WARNING: local Lambda guard finalization failed after "
+                        f"confirmed termination: {error}",
+                        file=sys.stderr,
+                    )
+                    if not capture_failed:
+                        raise RemoteCaptureError(
+                            "prospective capture completed and Lambda terminated, "
+                            "but local guard finalization failed"
+                        ) from None
+                except lambda_gpu_guard.LambdaGuardError as error:
+                    print(
+                        "CRITICAL: immediate Lambda termination was not confirmed; "
+                        f"the deadline watchdog remains armed: {error}",
+                        file=sys.stderr,
+                    )
+                    if not capture_failed:
+                        raise RemoteCaptureError(
+                            "prospective capture completed, but Lambda termination "
+                            "was not confirmed"
+                        ) from None
+                else:
+                    print(
+                        "Lambda termination confirmed: "
+                        f"{watchdog.instance.instance_id} ({termination.final_status})."
+                    )
+        if captured is None:
+            raise AssertionError
+        return _finalize_prospective_capture(
+            captured,
+            handoff,
+            guarded_termination=termination,
+        )
+
+
 def _capture(args: argparse.Namespace, commit: str, identity: Path | None) -> Path:
     """Protect the active instance before rebuilding the checked source payload."""
 
+    if _prospective_requested(args):
+        return _capture_prospective_with_handoff(args, commit, identity)
     return _capture_with_source(args, commit, identity)
 
 
@@ -2226,6 +3504,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="show the bounded workflow without contacting a host",
+    )
+    parser.add_argument(
+        "--prospective",
+        action="store_true",
+        help="transport the externally frozen three-case P1 handoff",
+    )
+    parser.add_argument(
+        "--prospective-handoff-root",
+        "--handoff-root",
+        dest="prospective_handoff_root",
+        help="complete local ExitSpec P1 handoff directory",
+    )
+    parser.add_argument(
+        "--expected-handoff-manifest-sha256",
+        type=_prospective_digest,
+        help="operator-observed handoff manifest digest",
+    )
+    parser.add_argument(
+        "--expected-workload-sha256",
+        type=_prospective_digest,
+        help="operator-observed real-GPU workload digest",
     )
     parser.add_argument("--expected-commit")
     parser.add_argument(
@@ -2241,7 +3540,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--host-key-sha256",
         type=_host_key_digest,
-        help="optional SHA-256 hex digest of the capture-specific known_hosts bytes",
+        help="required prospective SHA-256 hex digest of the pinned known_hosts bytes",
+    )
+    parser.add_argument(
+        "--host-key-file",
+        help="optional operator-supplied known_hosts bytes for prospective mode",
     )
     parser.add_argument("--port", type=_port, default=22)
     parser.add_argument("--gpu-index", type=_gpu_index, default=0)
@@ -2305,6 +3608,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--lambda-guard-state-root",
         default=str(Path.home() / ".inferdrome" / "lambda-guards"),
     )
+    parser.add_argument(
+        "--remote-state-root",
+        type=_bounded_remote_path,
+        help="prepared host state directory used by prospective capture",
+    )
     return parser
 
 
@@ -2351,14 +3659,19 @@ def main() -> int:
             if (
                 args.destination is not None
                 or args.dry_run
+                or args.prospective
+                or args.prospective_handoff_root is not None
+                or args.expected_handoff_manifest_sha256 is not None
+                or args.expected_workload_sha256 is not None
+                or args.host_key_file is not None
                 or args.managed_capability_profile is not None
                 or args.qwen3_gpu_tier is not None
                 or args.lambda_instance_type_name is not None
                 or _lambda_guard_requested(args)
             ):
                 raise RemoteCaptureError(
-                    "--check does not accept a destination, --dry-run, profile, "
-                    "or Lambda guard"
+                    "--check does not accept capture mode, destination, --dry-run, "
+                    "profile, or Lambda guard"
                 )
             print("real-GPU remote capture assets: OK")
             return 0
@@ -2371,6 +3684,12 @@ def main() -> int:
             _dry_run(args, commit, identity)
         else:
             _capture(args, commit, identity)
+    except KeyboardInterrupt:
+        print(
+            "remote-real-gpu-capture: interrupted; guarded cleanup was requested",
+            file=sys.stderr,
+        )
+        return 130
     except RemoteCaptureError as error:
         print(f"remote-real-gpu-capture: {error}", file=sys.stderr)
         return 1

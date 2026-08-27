@@ -96,3 +96,41 @@ Cancellation and managed-vLLM cleanup use the existing `inferdrome run`
 supervision path. No shell command is assembled from the source contents or
 digest values; subprocess arguments remain a structured vector. No cloud/GPU
 run or receipt is performed as part of repository validation.
+
+## Prepared-host transport boundary
+
+The controller can transport the complete ExitSpec P1 handoff directory as one
+no-follow, byte-snapshotted archive. It creates a second, distinct exact-HEAD
+Inferdrome source archive, pins both digests remotely, invokes the merged
+prospective wrapper once per case, and retrieves a bounded immutable session
+archive. The controller does not pool cases or emit an ExitSpec acceptance
+verdict. A non-Lambda host is explicitly an operator-provided boundary: the
+receipt says `OPERATOR_PROVIDED_HOST_NO_COST_TERMINATION_CLAIM`, and the
+operator owns any provider cleanup.
+
+The following is intentionally a placeholder operator command. Replace every
+angle-bracket value with an independently retained input; the two observed
+handoff digests are not Inferdrome production constants.
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
+  --prospective \
+  --handoff-root /absolute/path/to/ExitSpec/examples/inference-performance/inferdrome-p1 \
+  --expected-handoff-manifest-sha256 <operator-observed-manifest-sha256> \
+  --expected-workload-sha256 <operator-observed-workload-sha256> \
+  --expected-commit <exact-clean-inferdrome-commit> \
+  --identity-file /absolute/path/to/operator-ssh-key \
+  --host-key-file /absolute/path/to/pinned-known-hosts \
+  --host-key-sha256 <sha256-of-pinned-known-hosts-bytes> \
+  --remote-state-root /absolute/path/to/prepared/.inferdrome-gpu \
+  --output-root /absolute/path/to/prospective-retrieved \
+  <operator-user>@<prepared-nvidia-host>
+```
+
+The guarded Lambda variant additionally requires the existing complete cost
+guard inputs (`--lambda-instance-id`, `--lambda-instance-type-name`,
+`--lambda-hourly-rate-usd`, `--max-cost-usd`, `--lambda-billing-started-at`,
+and `--lambda-guard-state-root`). Its provider termination confirmation is
+recorded before local semantic verification. `--dry-run` performs the local
+snapshot, exact archive construction, and static currentness checks only; it
+does not run `ssh-keyscan`, SSH, a provider API, or a GPU workload.
