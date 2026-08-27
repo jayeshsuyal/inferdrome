@@ -1,12 +1,13 @@
 """End-to-end execution orchestration for the frozen Inferdrome v0.1 paths."""
 
+import hmac
 import os
 import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from inferdrome.adapters.fake import (
     FAKE_ADAPTER_VERSION,
@@ -39,6 +40,7 @@ from inferdrome.domain.experiment import (
     SyntheticTarget,
     VllmExecution,
 )
+from inferdrome.domain.ids import Sha256Digest
 from inferdrome.domain.states import (
     EvidenceEligibility,
     RunState,
@@ -53,6 +55,7 @@ from inferdrome.errors import (
     AdapterError,
     CancellationRequested,
     InferdromeError,
+    ResolutionError,
 )
 from inferdrome.execution.cancellation import CancellationToken
 from inferdrome.execution.managed_vllm import ManagedVllmServer
@@ -467,6 +470,31 @@ def _mark_terminal(workspace: RunWorkspace, target: RunState) -> None:
         return
 
 
+def _require_expected_exitspec_contract_digest(
+    resolution: ResolutionResult,
+    expected_digest: str | None,
+) -> None:
+    """Require an explicit external contract link before reserving a run."""
+
+    if expected_digest is None:
+        return
+    try:
+        validated_digest = TypeAdapter(Sha256Digest).validate_python(
+            expected_digest,
+            strict=True,
+        )
+    except ValidationError:
+        raise ResolutionError("expected ExitSpec contract digest is invalid") from None
+    actual_digest = resolution.resolved_spec.links.exitspec_contract_digest
+    if actual_digest is None or not hmac.compare_digest(
+        actual_digest,
+        validated_digest,
+    ):
+        raise ResolutionError(
+            "resolved experiment does not carry the expected ExitSpec contract digest"
+        )
+
+
 def run_experiment(
     source_path: Path,
     *,
@@ -476,6 +504,7 @@ def run_experiment(
     tokenizer_path: Path | None = None,
     managed_vllm: ManagedVllmConfig | None = None,
     cancellation: CancellationToken | None = None,
+    expected_exitspec_contract_digest: str | None = None,
 ) -> RunResult:
     """Resolve, execute, reduce, seal, and verify one Inferdrome run."""
 
@@ -488,6 +517,7 @@ def run_experiment(
         tokenizer_path=tokenizer_path,
         managed_vllm=managed_vllm,
         cancellation=selected_cancellation,
+        expected_exitspec_contract_digest=expected_exitspec_contract_digest,
     )
 
 
@@ -498,12 +528,17 @@ def run_resolved_experiment(
     tokenizer_path: Path | None = None,
     managed_vllm: ManagedVllmConfig | None = None,
     cancellation: CancellationToken | None = None,
+    expected_exitspec_contract_digest: str | None = None,
 ) -> RunResult:
     """Execute one already-resolved input without rereading its source files."""
 
     selected_cancellation = cancellation or CancellationToken()
     selected_cancellation.raise_if_requested()
     validate_resolution_result(resolution)
+    _require_expected_exitspec_contract_digest(
+        resolution,
+        expected_exitspec_contract_digest,
+    )
     is_fake = isinstance(resolution.resolved_spec.execution, FakeExecution)
     if is_fake and tokenizer_path is not None:
         raise AdapterError("tokenizer path is only valid for attached vLLM execution")
