@@ -221,6 +221,10 @@ def _command_run(namespace: argparse.Namespace) -> int:
             tokenizer_path=_optional_path(namespace, "tokenizer_path"),
             managed_vllm=_managed_vllm_config(namespace),
             cancellation=cancellation,
+            expected_exitspec_contract_digest=_optional_text(
+                namespace,
+                "expected_exitspec_contract_digest",
+            ),
         )
     sealed = result.sealed_bundle
     _json_output(
@@ -800,6 +804,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--managed-capability-profile",
         choices=(QWEN3_8B_PROFILE_ID,),
         help="opt into one exact operational model/workload profile",
+    )
+    run.add_argument(
+        "--expected-exitspec-contract-digest",
+        help=(
+            "require the resolved experiment to carry this exact external "
+            "ExitSpec contract digest before execution"
+        ),
     )
     run.set_defaults(handler=_command_run)
 

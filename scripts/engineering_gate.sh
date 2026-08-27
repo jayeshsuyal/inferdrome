@@ -21,6 +21,7 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/generate_vllm_golden.py --check
 "$inferdrome_python" scripts/generate_sglang_normalization.py --check
 "$inferdrome_python" scripts/run_real_gpu_demo.py --check
+"$inferdrome_python" scripts/prospective_real_gpu_capture.py --check
 "$inferdrome_python" scripts/capture_real_gpu_over_ssh.py --check
 "$inferdrome_python" scripts/watch_lambda_a100_capacity.py --check
 "$inferdrome_python" scripts/watch_lambda_gpu_capacity.py \
@@ -51,6 +52,7 @@ bash -n scripts/run_real_gpu_capture.sh
 bash -n scripts/dashboard_gate.sh
 bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
+"$inferdrome_python" -m py_compile scripts/prospective_real_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/generate_deployment_spec.py
 "$inferdrome_python" -m py_compile scripts/run_deployment_qualification.py
 "$inferdrome_python" -m py_compile scripts/generate_deployment_receipt.py

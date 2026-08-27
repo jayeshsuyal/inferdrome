@@ -280,6 +280,10 @@ server-reported facts into locally verified evidence.
 
 The managed NVIDIA reproduction path and its one-command rejection demo are
 documented in [Managed real-GPU proof](docs/REAL_GPU_PROOF.md).
+The additive prospective, three-case ExitSpec-linked path is documented in
+[Prospective contract-linked GPU capture](docs/PROSPECTIVE_REAL_GPU_CAPTURE.md).
+It has no checked-in contract digests or runnable source files until the
+external contracts are genuinely frozen.
 The same pinned host can produce a four-run controlled-comparison proof pack:
 
 ```bash
@@ -328,6 +332,7 @@ provider-neutral.
 - [v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md)
 - [Build roadmap](docs/ROADMAP.md)
 - [Public contracts v1](docs/PUBLIC_CONTRACTS_V1.md)
+- [Prospective contract-linked GPU capture](docs/PROSPECTIVE_REAL_GPU_CAPTURE.md)
 - [Resolution and run workspace](docs/RESOLUTION_AND_WORKSPACE.md)
 - [Deterministic reduction and fake adapter](docs/DETERMINISTIC_REDUCTION.md)
 - [Evidence bundle and offline verification](docs/EVIDENCE_BUNDLE_V1.md)
