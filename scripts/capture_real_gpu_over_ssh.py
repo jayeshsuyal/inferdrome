@@ -1454,6 +1454,7 @@ def _capture_over_ssh(
                     real_gpu_capture.extract_capture_archive(
                         archive,
                         staging_path,
+                        expected_archive_sha256=expected_archive_sha256,
                     )
                 except real_gpu_capture.CaptureError as error:
                     raise RemoteCaptureError(str(error)) from None
@@ -1486,6 +1487,7 @@ def _capture_over_ssh(
                 real_gpu_capture.extract_capture_archive(
                     archive,
                     staging_path,
+                    expected_archive_sha256=expected_archive_sha256,
                 )
                 archive_verification = real_gpu_capture.verify_capture_archive(
                     archive,
@@ -1940,6 +1942,7 @@ def _finalize_qwen3_capture_with_evidence(
                 staged = real_gpu_capture.extract_capture_archive(
                     archive,
                     Path(temporary),
+                    expected_archive_sha256=expected_archive_sha256,
                 )
                 staged_verification = qwen3_gpu_capture.verify_capture(
                     staged,

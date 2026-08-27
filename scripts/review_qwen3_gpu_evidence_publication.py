@@ -930,7 +930,11 @@ def render_outputs(archive: Path, capture_record: Path) -> dict[Path, bytes]:
             temporary_root = Path(root)
             capture_root: Path | None = None
             try:
-                capture_root = capture.extract_capture_archive(archive, temporary_root)
+                capture_root = capture.extract_capture_archive(
+                    archive,
+                    temporary_root,
+                    expected_archive_sha256=ARCHIVE_SHA256,
+                )
                 review = build_publication_review(
                     archive,
                     capture_root,

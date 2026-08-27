@@ -117,6 +117,7 @@ def _launch(
             capture_root = capture.extract_capture_archive(
                 archive.absolute(),
                 Path(temporary),
+                expected_archive_sha256=publication.ARCHIVE_SHA256,
             )
             verification = qwen3_capture.verify_capture(
                 capture_root,

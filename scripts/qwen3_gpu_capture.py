@@ -771,6 +771,7 @@ def verify_capture_archive(
             root = real_gpu_capture.extract_capture_archive(
                 archive,
                 Path(temporary),
+                expected_archive_sha256=expected_archive_sha256,
             )
             verification = verify_capture(
                 root,

@@ -23,7 +23,7 @@ from inferdrome.deployment import (
     qualify_compose_mock,
     verify_qualification_report_bytes,
 )
-from inferdrome.deployment.qualification import _publish_report
+from inferdrome.deployment.qualification import _publish_report, _safe_environment
 from inferdrome.domain.ids import sha256_digest
 from inferdrome.execution.cancellation import CancellationReason, CancellationToken
 
@@ -188,6 +188,18 @@ class FakeProcessRunner:
         self.compose_override_content = Path(
             command[file_indexes[-1] + 1]
         ).read_bytes()
+
+
+def test_qualification_compose_environment_disables_implicit_dotenv_loading() -> None:
+    environment = _safe_environment(
+        uid=os.getuid(),
+        gid=os.getgid(),
+        evidence_dir=Path("/tmp/inferdrome-qualification-evidence"),
+    )
+
+    assert environment["COMPOSE_DISABLE_ENV_FILE"] == "1"
+    assert "DOCKER_HOST" not in environment
+    assert "DOCKER_CONTEXT" not in environment
 
 
 def _root(tmp_path: Path) -> Path:

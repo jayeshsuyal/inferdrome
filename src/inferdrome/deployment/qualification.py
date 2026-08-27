@@ -893,6 +893,8 @@ def _safe_environment(*, uid: int, gid: int, evidence_dir: Path) -> dict[str, st
             result[key] = value
     result.update(
         {
+            # Compose must not implicitly read a developer-controlled .env file.
+            "COMPOSE_DISABLE_ENV_FILE": "1",
             "INFERDROME_COMPOSE_UID": str(uid),
             "INFERDROME_COMPOSE_GID": str(gid),
             "INFERDROME_COMPOSE_EVIDENCE_DIR": str(evidence_dir),

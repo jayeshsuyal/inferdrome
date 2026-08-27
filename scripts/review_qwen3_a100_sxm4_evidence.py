@@ -893,7 +893,11 @@ def render_outputs(archive: Path, capture_record: Path) -> dict[Path, bytes]:
             temporary_root = Path(root)
             capture_root: Path | None = None
             try:
-                capture_root = capture.extract_capture_archive(archive, temporary_root)
+                capture_root = capture.extract_capture_archive(
+                    archive,
+                    temporary_root,
+                    expected_archive_sha256=ARCHIVE_SHA256,
+                )
                 semantic_verification = qwen3_capture.verify_capture(
                     capture_root,
                     expected_repository_commit=CAPTURE_PRODUCER_COMMIT,

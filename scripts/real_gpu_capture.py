@@ -12,10 +12,12 @@ import stat
 import sys
 import tarfile
 import tempfile
-from contextlib import suppress
+import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 _CAPTURE_SCHEMA = "inferdrome.real-gpu-capture.v1"
 _FAILURE_SCHEMA = "inferdrome.real-gpu-capture-failure.v1"
@@ -1037,10 +1039,68 @@ def verify_capture(
     }
 
 
-def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
-    """Safely extract one host archive without trusting archive paths or links."""
+@contextmanager
+def _open_archive(path: Path) -> Iterator[tuple[BinaryIO, os.stat_result]]:
+    """Open one archive inode without following a final symlink."""
 
-    archive = archive.absolute()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > _MAX_ARCHIVE_BYTES
+        ):
+            raise OSError
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            yield stream, metadata
+    except OSError:
+        raise CaptureError("capture archive is unavailable or unsafe") from None
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _archive_digest(stream: BinaryIO, metadata: os.stat_result) -> str:
+    digest = hashlib.sha256()
+    try:
+        stream.seek(0)
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+        if stream.read(1):
+            raise OSError
+        current = os.fstat(stream.fileno())
+    except (OSError, ValueError):
+        raise CaptureError("capture archive is unavailable or unsafe") from None
+    if (
+        current.st_dev != metadata.st_dev
+        or current.st_ino != metadata.st_ino
+        or current.st_size != metadata.st_size
+        or current.st_mtime_ns != metadata.st_mtime_ns
+        or current.st_ctime_ns != metadata.st_ctime_ns
+    ):
+        raise CaptureError("capture archive changed during verification")
+    stream.seek(0)
+    return "sha256:" + digest.hexdigest()
+
+
+def _extract_capture_archive_stream(
+    stream: BinaryIO,
+    destination_parent: Path,
+    *,
+    expected_archive_sha256: str | None = None,
+) -> Path:
+    if expected_archive_sha256 is not None:
+        if _SHA256_PATTERN.fullmatch(expected_archive_sha256) is None:
+            raise CaptureError("expected archive SHA-256 has an invalid shape")
+        metadata = os.fstat(stream.fileno())
+        actual_archive_sha256 = _archive_digest(stream, metadata)
+        if actual_archive_sha256 != expected_archive_sha256:
+            raise CaptureError("retrieved archive failed SHA-256 verification")
+
     destination_parent = destination_parent.absolute()
     capture_destination = destination_parent / "capture"
     if capture_destination.exists() or capture_destination.is_symlink():
@@ -1055,8 +1115,7 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
         or destination_parent.is_symlink()
     ):
         raise CaptureError("capture extraction destination must be a real directory")
-    seen: set[str] = set()
-    seen_directories: set[str] = set()
+    seen_paths: dict[str, bool] = {}
     member_count = 0
     directory_count = 0
     total_bytes = 0
@@ -1064,36 +1123,50 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
     members: list[tarfile.TarInfo] = []
     retained_modes: list[tuple[PurePosixPath, int, bool]] = []
     try:
-        with tarfile.open(archive, mode="r:gz") as retained:
+        stream.seek(0)
+        with tarfile.open(fileobj=stream, mode="r:gz") as retained:
+            has_capture_root = False
             for member in retained:
                 path = PurePosixPath(member.name)
                 canonical_name = path.as_posix()
+                identity = unicodedata.normalize("NFKC", canonical_name).casefold()
                 mode = stat.S_IMODE(member.mode)
                 if (
                     path.is_absolute()
                     or not path.parts
                     or path.parts[0] != "capture"
                     or any(part in {"", ".", ".."} for part in path.parts)
-                    or canonical_name in seen
                     or member.issym()
                     or member.islnk()
                     or not (member.isdir() or member.isfile())
+                    or member.size < 0
                     or member.mode & ~0o777
                     or (member.isdir() and mode & 0o500 != 0o500)
                     or (member.isfile() and mode & 0o400 != 0o400)
                 ):
                     raise CaptureError("capture archive contains an unsafe member")
-                seen.add(canonical_name)
+
+                for depth in range(1, len(path.parts)):
+                    directory = PurePosixPath(*path.parts[:depth]).as_posix()
+                    directory_identity = unicodedata.normalize(
+                        "NFKC", directory
+                    ).casefold()
+                    if seen_paths.get(directory_identity) is False:
+                        raise CaptureError(
+                            "capture archive contains an unsafe member"
+                        )
+                    if directory_identity not in seen_paths:
+                        seen_paths[directory_identity] = True
+                        directory_count += 1
+                if identity in seen_paths:
+                    raise CaptureError("capture archive contains an unsafe member")
+                seen_paths[identity] = member.isdir()
+                if path.parts == ("capture",):
+                    has_capture_root = True
                 members.append(member)
                 member_count += 1
-                directory_depth = (
-                    len(path.parts) if member.isdir() else len(path.parts) - 1
-                )
-                for depth in range(1, directory_depth + 1):
-                    directory = PurePosixPath(*path.parts[:depth]).as_posix()
-                    if directory not in seen_directories:
-                        seen_directories.add(directory)
-                        directory_count += 1
+                if member.isdir():
+                    directory_count += 1
                 retained_modes.append((path, mode, member.isdir()))
                 if member.isfile():
                     file_count += 1
@@ -1105,7 +1178,7 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
                     or total_bytes > _MAX_CAPTURE_BYTES
                 ):
                     raise CaptureError("capture archive exceeds its safety limits")
-            if not any(PurePosixPath(name).parts == ("capture",) for name in seen):
+            if not has_capture_root:
                 raise CaptureError("capture archive omits its top-level directory")
             retained.extractall(destination_parent, members=members, filter="data")
         ordered_modes = sorted(
@@ -1126,24 +1199,28 @@ def extract_capture_archive(archive: Path, destination_parent: Path) -> Path:
     return capture_destination
 
 
+def extract_capture_archive(
+    archive: Path,
+    destination_parent: Path,
+    *,
+    expected_archive_sha256: str | None = None,
+) -> Path:
+    """Safely extract one host archive without trusting archive paths or links."""
+
+    archive = archive.absolute()
+    with _open_archive(archive) as (stream, _metadata):
+        return _extract_capture_archive_stream(
+            stream,
+            destination_parent,
+            expected_archive_sha256=expected_archive_sha256,
+        )
+
+
 def archive_sha256(path: Path) -> str:
     """Hash a potentially large archive without applying the JSON size limit."""
 
-    digest = hashlib.sha256()
-    try:
-        metadata = os.lstat(path)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or path.is_symlink()
-            or metadata.st_size > _MAX_ARCHIVE_BYTES
-        ):
-            raise OSError
-        with path.open("rb") as stream:
-            while block := stream.read(1024 * 1024):
-                digest.update(block)
-    except OSError:
-        raise CaptureError("capture archive is unavailable or unsafe") from None
-    return "sha256:" + digest.hexdigest()
+    with _open_archive(path) as (stream, metadata):
+        return _archive_digest(stream, metadata)
 
 
 def _make_directories_writable_for_cleanup(root: Path) -> None:
@@ -1184,7 +1261,11 @@ def verify_capture_archive(
             temporary_root = Path(temporary)
             capture_root: Path | None = None
             try:
-                capture_root = extract_capture_archive(archive, temporary_root)
+                capture_root = extract_capture_archive(
+                    archive,
+                    temporary_root,
+                    expected_archive_sha256=expected_archive_sha256,
+                )
                 capture_manifest_sha256 = archive_sha256(
                     capture_root / "capture-manifest.json"
                 )
