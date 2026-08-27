@@ -49,12 +49,14 @@ def _minimal_repository(root: Path) -> None:
 def test_repository_only_preflight_is_deterministic() -> None:
     first = release_preflight.run_preflight(
         REPOSITORY_ROOT,
+        phase="candidate",
         repository_only=True,
         require_clean=False,
         run_gates=False,
     )
     second = release_preflight.run_preflight(
         REPOSITORY_ROOT,
+        phase="candidate",
         repository_only=True,
         require_clean=False,
         run_gates=False,
@@ -74,6 +76,7 @@ def test_missing_claim_boundary_fails_closed(tmp_path: Path) -> None:
 
     checks = release_preflight.run_preflight(
         tmp_path,
+        phase="candidate",
         repository_only=True,
         require_clean=False,
         run_gates=False,
@@ -93,13 +96,14 @@ def test_development_version_mismatch_fails_closed(tmp_path: Path) -> None:
 
     checks = release_preflight.run_preflight(
         tmp_path,
+        phase="candidate",
         repository_only=True,
         require_clean=False,
         run_gates=False,
     )
 
     version_check = next(
-        check for check in checks if check.name == "development-version"
+        check for check in checks if check.name == "package-version"
     )
     assert version_check.status == "FAIL"
     assert "0.1.0.dev0" in version_check.detail
@@ -123,6 +127,7 @@ def test_gate_option_delegates_to_existing_gate_scripts(
 
     checks = release_preflight.run_preflight(
         tmp_path,
+        phase="candidate",
         repository_only=True,
         require_clean=True,
         run_gates=True,
@@ -140,11 +145,191 @@ def test_gate_option_delegates_to_existing_gate_scripts(
     )
 
 
+def test_final_pre_tag_requires_final_version_and_license_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md").write_text(
+        (tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md")
+        .read_text(encoding="utf-8")
+        .replace(
+            "- [ ] Select and add the repository license",
+            "- [x] Select and add the repository license",
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="final-pre-tag",
+        repository_only=False,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    version_check = next(check for check in checks if check.name == "package-version")
+    license_check = next(check for check in checks if check.name == "license-artifact")
+    manual_license = next(
+        check for check in checks if check.name == "manual-license-selection"
+    )
+    manual_tag = next(check for check in checks if check.name == "manual-release-tag")
+    assert version_check.status == "FAIL"
+    assert license_check.status == "FAIL"
+    assert manual_license.status == "MANUAL"
+    assert manual_tag.status == "MANUAL"
+
+
+def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        assert command[:4] == ["git", "show-ref", "--verify", "--quiet"]
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="final-pre-tag",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    assert (
+        next(check for check in checks if check.name == "package-version").status
+        == "PASS"
+    )
+    assert (
+        next(check for check in checks if check.name == "license-artifact").status
+        == "PASS"
+    )
+    assert (
+        next(check for check in checks if check.name == "release-tag").status == "PASS"
+    )
+
+
+def test_final_pre_tag_does_not_wait_for_release_tag_checkbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+    checklist = tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md"
+    checklist_text = checklist.read_text(encoding="utf-8")
+    for item in release_preflight.MANUAL_RELEASE_ITEMS:
+        if item.name != "release-tag":
+            checklist_text = checklist_text.replace(
+                f"- [ ] {item.marker}", f"- [x] {item.marker}"
+            )
+    checklist.write_text(checklist_text, encoding="utf-8")
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="final-pre-tag",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    manual_checks = [check for check in checks if check.name.startswith("manual-")]
+    assert all(check.status != "PENDING" for check in manual_checks)
+    release_tag_check = next(
+        check for check in manual_checks if check.name == "manual-release-tag"
+    )
+    assert (
+        release_tag_check.status == "MANUAL"
+    )
+
+
+def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if "refs/tags/v0.1.0^{commit}" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="tag-commit\n",
+                stderr="",
+            )
+        assert command[-1] == "HEAD"
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="head-commit\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="post-tag",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    tag_check = next(check for check in checks if check.name == "release-tag")
+    assert tag_check.status == "FAIL"
+    assert "does not point to the checked commit" in tag_check.detail
+
+
 def test_release_closure_reports_open_manual_inputs(capsys) -> None:
     result = release_preflight.main(["--allow-dirty"])
 
     captured = capsys.readouterr().out
     assert result == 1
     assert "[SKIPPED] engineering-gate" in captured
+    assert "phase: candidate" in captured
     assert "[PENDING] manual-exitspec-outcomes" in captured
     assert "result: BLOCKED" in captured

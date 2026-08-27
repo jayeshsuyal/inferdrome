@@ -41,7 +41,7 @@ qualification gate checks the local synthetic Docker Compose boundary; it does
 not prove cloud, GPU, serving-engine, or customer-acceptance behavior.
 
 GitHub Actions runs the same gates on pull requests and on `main`. A pull
-request must not substitute a narrower command for either required gate.
+request must not substitute a narrower command for any required gate.
 
 ## Evidence and security boundaries
 
@@ -68,7 +68,7 @@ repository owner before opening a public issue containing sensitive details.
 - Regenerate committed schemas, goldens, and dashboard assets through their
   checked-in scripts; do not edit generated output by hand.
 - Document claim boundaries and unavailable capabilities alongside new output.
-- Keep pull requests draft until both required checks pass and all failure
+- Keep pull requests draft until all three required checks pass and all failure
   artifacts have been reviewed.
 
 The release candidate is tracked in

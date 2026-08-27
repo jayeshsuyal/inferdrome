@@ -161,15 +161,18 @@ reports the manual release blockers without treating them as proven. Run it
 from a clean checkout when checking a candidate commit:
 
 ```bash
-.venv/bin/python scripts/release_preflight.py --repository-only --require-clean
+.venv/bin/python scripts/release_preflight.py \
+  --phase candidate --repository-only --require-clean
 ```
 
-The full release-closure mode additionally delegates to the existing
+The final release-closure mode additionally delegates to the existing
 engineering and dashboard gates and fails closed while manual or external
-checklist inputs remain open:
+checklist inputs remain open. It is run only on a deliberate final release
+commit after both version locations have been changed to `0.1.0`:
 
 ```bash
-.venv/bin/python scripts/release_preflight.py --run-gates
+.venv/bin/python scripts/release_preflight.py \
+  --phase final-pre-tag --run-gates --require-clean
 ```
 
 It performs no cloud/provider operation, GPU launch, deployment, publication,

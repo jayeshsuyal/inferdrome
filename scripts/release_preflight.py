@@ -20,8 +20,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-EXPECTED_DEVELOPMENT_VERSION = "0.1.0.dev0"
+DEVELOPMENT_VERSION = "0.1.0.dev0"
+FINAL_VERSION = "0.1.0"
+FINAL_TAG = "v0.1.0"
+Phase = Literal["candidate", "final-pre-tag", "post-tag"]
 CheckStatus = Literal["PASS", "FAIL", "PENDING", "MANUAL", "SKIPPED"]
+
+LICENSE_FILENAMES: tuple[str, ...] = (
+    "LICENSE",
+    "LICENSE.md",
+    "LICENSE.txt",
+    "COPYING",
+    "COPYING.md",
+    "COPYING.txt",
+)
 
 
 @dataclass(frozen=True)
@@ -160,7 +172,10 @@ def _check_required_files(repository_root: Path) -> Check:
     )
 
 
-def _check_development_version(repository_root: Path) -> Check:
+def _check_version(repository_root: Path, *, phase: Phase) -> Check:
+    expected_version = (
+        DEVELOPMENT_VERSION if phase == "candidate" else FINAL_VERSION
+    )
     try:
         with (repository_root / "pyproject.toml").open("rb") as source:
             project = tomllib.load(source).get("project", {})
@@ -175,7 +190,7 @@ def _check_development_version(repository_root: Path) -> Check:
         TypeError,
         AttributeError,
     ) as error:
-        return Check("development-version", "FAIL", f"could not read version: {error}")
+        return Check("package-version", "FAIL", f"could not read version: {error}")
 
     package_match = re.search(
         r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$',
@@ -184,18 +199,108 @@ def _check_development_version(repository_root: Path) -> Check:
     )
     package_version = package_match.group(1) if package_match else None
     versions = (project_version, package_version)
-    if versions != (EXPECTED_DEVELOPMENT_VERSION, EXPECTED_DEVELOPMENT_VERSION):
+    if versions != (expected_version, expected_version):
         return Check(
-            "development-version",
+            "package-version",
             "FAIL",
-            "pyproject/package versions must both remain "
-            f"{EXPECTED_DEVELOPMENT_VERSION!r}; found {versions!r}",
+            f"pyproject/package versions must both be {expected_version!r} "
+            f"for phase {phase!r}; found {versions!r}",
         )
     return Check(
-        "development-version",
+        "package-version",
         "PASS",
-        f"package and metadata remain at {EXPECTED_DEVELOPMENT_VERSION}",
+        f"package and metadata are {expected_version} for phase {phase}",
     )
+
+
+def _check_license_artifact(repository_root: Path, *, phase: Phase) -> Check:
+    if phase == "candidate":
+        return Check(
+            "license-artifact",
+            "SKIPPED",
+            "not required for development candidates; owner decides the license",
+        )
+    present: list[str] = []
+    for filename in LICENSE_FILENAMES:
+        path = repository_root / filename
+        try:
+            if path.is_file() and not path.is_symlink() and path.stat().st_size > 0:
+                present.append(filename)
+        except OSError:
+            continue
+    if not present:
+        return Check(
+            "license-artifact",
+            "FAIL",
+            "final phases require one non-empty regular license artifact "
+            f"({', '.join(LICENSE_FILENAMES)})",
+        )
+    return Check(
+        "license-artifact",
+        "PASS",
+        f"final phase license artifact present: {present[0]}",
+    )
+
+
+def _check_tag(repository_root: Path, *, phase: Phase, tag: str) -> Check:
+    try:
+        if phase == "final-pre-tag":
+            result = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
+                cwd=repository_root,
+                check=False,
+            )
+            if result.returncode == 1:
+                return Check(
+                    "release-tag",
+                    "PASS",
+                    f"{tag} does not exist; pre-tag phase may proceed",
+                )
+            if result.returncode == 0:
+                return Check(
+                    "release-tag",
+                    "FAIL",
+                    f"{tag} already exists; use post-tag verification",
+                )
+            return Check(
+                "release-tag",
+                "FAIL",
+                f"could not verify that {tag} is absent (git exit code "
+                f"{result.returncode})",
+            )
+
+        tag_result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        head_result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        return Check("release-tag", "FAIL", f"tag verification failed: {error}")
+    if tag_result.returncode != 0 or head_result.returncode != 0:
+        return Check(
+            "release-tag",
+            "FAIL",
+            f"{tag} and HEAD must both resolve to commits "
+            f"(tag exit {tag_result.returncode}, HEAD exit {head_result.returncode})",
+        )
+    tag_commit = (tag_result.stdout or "").strip()
+    head_commit = (head_result.stdout or "").strip()
+    if not tag_commit or tag_commit != head_commit:
+        return Check(
+            "release-tag",
+            "FAIL",
+            f"{tag} does not point to the checked commit",
+        )
+    return Check("release-tag", "PASS", f"{tag} points to HEAD ({head_commit})")
 
 
 def _check_document_markers(repository_root: Path) -> Check:
@@ -325,6 +430,23 @@ def _manual_check(repository_root: Path, item: ManualItem) -> Check:
     )
 
 
+def _manual_checks(repository_root: Path, *, phase: Phase) -> tuple[Check, ...]:
+    checks: list[Check] = []
+    for item in MANUAL_RELEASE_ITEMS:
+        if item.name == "release-tag" and phase != "candidate":
+            checks.append(
+                Check(
+                    "manual-release-tag",
+                    "MANUAL",
+                    "checklist recording follows automated pre-tag/post-tag "
+                    "verification",
+                )
+            )
+        else:
+            checks.append(_manual_check(repository_root, item))
+    return tuple(checks)
+
+
 def _run_gate(repository_root: Path, name: str, script_name: str) -> Check:
     script = repository_root / "scripts" / script_name
     gate_environment = os.environ.copy()
@@ -355,6 +477,7 @@ def _run_gate(repository_root: Path, name: str, script_name: str) -> Check:
 def run_preflight(
     repository_root: Path,
     *,
+    phase: Phase,
     repository_only: bool,
     require_clean: bool,
     run_gates: bool,
@@ -363,11 +486,14 @@ def run_preflight(
 
     checks = [
         _check_required_files(repository_root),
-        _check_development_version(repository_root),
+        _check_version(repository_root, phase=phase),
+        _check_license_artifact(repository_root, phase=phase),
         _check_document_markers(repository_root),
         _check_ci_gate_inventory(repository_root),
         _check_working_tree(repository_root, require_clean=require_clean),
     ]
+    if phase != "candidate":
+        checks.append(_check_tag(repository_root, phase=phase, tag=FINAL_TAG))
     if run_gates:
         checks.extend(
             (
@@ -390,7 +516,7 @@ def run_preflight(
                 ),
             )
         )
-    checks.extend(_manual_check(repository_root, item) for item in MANUAL_RELEASE_ITEMS)
+    checks.extend(_manual_checks(repository_root, phase=phase))
     return tuple(checks)
 
 
@@ -409,11 +535,13 @@ def _has_skipped_check(checks: Sequence[Check]) -> bool:
 def _print_report(
     checks: Sequence[Check],
     *,
+    phase: Phase,
     repository_only: bool,
     run_gates: bool,
 ) -> None:
     mode = "repository-only" if repository_only else "release-closure"
     print("Inferdrome v0.1 release preflight")
+    print(f"phase: {phase}")
     print(f"mode: {mode}")
     print(f"existing gates delegated: {'yes' if run_gates else 'no'}")
     for check in checks:
@@ -422,9 +550,14 @@ def _print_report(
         if _has_failure(checks):
             print("result: FAIL (repository-owned checks are not ready)")
         else:
+            result = {
+                "candidate": "REPOSITORY_READY",
+                "final-pre-tag": "FINAL_PRE_TAG_REPOSITORY_READY",
+                "post-tag": "POST_TAG_REPOSITORY_READY",
+            }[phase]
             print(
-                "result: REPOSITORY_READY (manual release inputs are reported only; "
-                "no acceptance or release approval is claimed)"
+                f"result: {result} (manual inputs are reported only; existing "
+                "CI jobs and owner review supply remaining release evidence)"
             )
         return
 
@@ -438,10 +571,21 @@ def _print_report(
             "the still-open manual/external inputs; skipped checks are not proof)"
         )
     else:
-        print(
-            "result: READY_FOR_OWNER_RELEASE_REVIEW (manual entries are recorded, "
-            "but automation does not verify them)"
-        )
+        result = {
+            "candidate": (
+                "CANDIDATE_READY (manual entries are recorded, but automation "
+                "does not verify them)"
+            ),
+            "final-pre-tag": (
+                "PRE_TAG_READY (machine checks passed; the release owner may "
+                "perform the separately authorized tag action)"
+            ),
+            "post-tag": (
+                "POST_TAG_VERIFIED (the tag points to HEAD; final record and "
+                "approval remain owner-controlled)"
+            ),
+        }[phase]
+        print(f"result: {result}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -452,9 +596,18 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument(
+        "--phase",
+        choices=("candidate", "final-pre-tag", "post-tag"),
+        default="candidate",
+        help=(
+            "candidate keeps the development version; final-pre-tag requires the "
+            "final version before tagging; post-tag verifies the final tag"
+        ),
+    )
+    parser.add_argument(
         "--repository-only",
         action="store_true",
-        help="check repository-owned conditions without blocking on manual inputs",
+        help="report manual inputs without blocking on them",
     )
     parser.add_argument(
         "--run-gates",
@@ -479,18 +632,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     repository_root = Path(__file__).resolve().parent.parent
+    phase = arguments.phase
     repository_only = bool(arguments.repository_only)
     require_clean = not bool(arguments.allow_dirty)
     if repository_only and not arguments.require_clean and not arguments.allow_dirty:
         require_clean = False
     checks = run_preflight(
         repository_root,
+        phase=phase,
         repository_only=repository_only,
         require_clean=require_clean,
         run_gates=bool(arguments.run_gates),
     )
     _print_report(
         checks,
+        phase=phase,
         repository_only=repository_only,
         run_gates=bool(arguments.run_gates),
     )

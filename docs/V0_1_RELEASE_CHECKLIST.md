@@ -65,11 +65,13 @@ failure. Normal pull-request CI remains GPU-free.
 - [ ] Confirm all required GitHub checks pass at the release commit.
 - [ ] Confirm the release commit has no uncommitted or untracked release
   artifacts.
-- [ ] Tag that exact commit as `v0.1.0` only after every item above is complete.
+- [ ] Tag that exact commit as `v0.1.0` after final-pre-tag CI passes and all
+  prior owner/external items are complete; record post-tag verification.
 
 ## Final sign-off record
 
-Fill this section in one reviewable commit when all blockers are closed:
+Fill this section in one reviewable post-tag record commit when all blockers
+are closed:
 
 ```text
 Release commit:
@@ -83,7 +85,7 @@ Selected license:
 Release tag: v0.1.0
 ```
 
-The tag must identify the same commit tested by both required jobs. The GPU
+The tag must identify the same commit tested by all three required jobs. The GPU
 bundle digest and ExitSpec receipt digest remain out-of-band evidence anchors;
 neither may be reconstructed from a summary or edited into a sealed bundle.
 
@@ -107,8 +109,13 @@ public archive delivery, or authorize a release tag.
 
 ## Offline candidate and final release procedure
 
-The repository-owned preflight is deliberately separate from the release
-decision. From a clean checkout at the candidate commit, install the locked
+The repository-owned preflight has explicit candidate, final-pre-tag, and
+post-tag phases. It is deliberately separate from the release decision and
+never creates a tag, publishes an artifact, or approves a release.
+
+### Candidate phase: normal pull requests and `main`
+
+From a clean checkout at a development candidate commit, install the locked
 Python and frontend dependencies, then run:
 
 ```bash
@@ -116,19 +123,51 @@ uv sync --extra dev --extra dashboard
 npm ci --prefix frontend
 npx --prefix frontend playwright install chromium
 .venv/bin/python scripts/release_preflight.py \
-  --repository-only --require-clean
+  --phase candidate --repository-only --require-clean
 ```
 
-That command must report `REPOSITORY_READY`. It checks the development version,
-required release inputs, CI gate inventory, claim-boundary labels, and clean
-checkout. It does not claim ExitSpec acceptance, archive publication, security
-sign-off, license selection, or final release approval.
+That command must report `REPOSITORY_READY`. Candidate mode requires both the
+package metadata and `src/inferdrome/__init__.py` to remain at
+`0.1.0.dev0`. Pull-request, merge-queue, and `main` CI use this phase by
+default; the workflow's manual `release_phase` input is only for deliberately
+running a final phase against a release commit or tag. Candidate mode does
+not claim ExitSpec acceptance, archive publication, security sign-off, license
+selection, or final release approval.
 
-After the owner and ExitSpec owners have supplied the unchecked items above,
-run the repository gates using the same candidate commit:
+### Final pre-tag phase: readiness of the exact release commit
+
+After the external and owner-controlled checklist inputs are genuinely closed
+except for the release tag and the not-yet-recorded final CI result, the
+release owner creates a separate release commit. That commit (which is not
+this development-version PR) changes both package-version locations to
+`0.1.0` and includes the owner-selected, non-empty repository license artifact.
+No `v0.1.0` tag exists yet.
+
+Run the existing GitHub Actions `CI` workflow manually against that exact
+release commit or ref, selecting `release_phase=final-pre-tag`. Its
+engineering job invokes this exact repository-only check:
 
 ```bash
-.venv/bin/python scripts/release_preflight.py --run-gates
+python scripts/release_preflight.py \
+  --phase final-pre-tag --repository-only --require-clean
+```
+
+It must pass the final version, license-artifact presence, clean-checkout,
+claim-boundary, required-file, CI-inventory, and no-existing-tag checks. All
+three CI jobs must pass at that exact commit. The pre-tag phase deliberately
+reports the checklist's `release-tag` item as a manual record that follows
+this verification; it does not require a tag to exist and therefore does not
+prove the tag in advance. The license check proves only that an artifact is
+present; the owner remains responsible for choosing and legally approving its
+contents.
+
+For a local release-owner review after the three CI results and other manual
+inputs have been recorded, the existing gates may be delegated without
+changing their semantics:
+
+```bash
+.venv/bin/python scripts/release_preflight.py \
+  --phase final-pre-tag --run-gates --require-clean
 INFERDROME_PYTHON=.venv/bin/python ./scripts/deployment_qualification_gate.sh
 git status --short --branch
 git diff --check
@@ -137,15 +176,32 @@ git diff --check
 The preflight delegates engineering and dashboard work to their existing gate
 scripts; the deployment qualification job remains the separate local Docker
 Compose CI gate because it creates disposable local resources and is not an
-offline provider check. CI must pass all three jobs at the exact candidate
-commit. The qualification result remains `SYNTHETIC_ONLY` and does not replace
-genuine GPU evidence or ExitSpec review.
+offline provider check. Its result remains `SYNTHETIC_ONLY` and does not
+replace genuine GPU evidence or ExitSpec review.
 
-Only after every checklist item is closed by its named owner, the human threat
-model review is recorded, and the exact candidate commit has passed all three
-CI jobs may the release owner create the `v0.1.0` tag. Tagging, publishing, and
-merging are intentionally not performed by this preflight. The package remains
-`0.1.0.dev0` until that separate release decision.
+### Post-tag phase: verification and release record
+
+Only after final-pre-tag CI passes and the named owners have completed the
+remaining checklist decisions may the release owner create and push the
+annotated `v0.1.0` tag at that exact release commit. This is the first point
+at which the tag can be checked; a commit cannot contain proof of a tag that
+does not yet exist.
+
+Then run the same `CI` workflow manually against the tag ref with
+`release_phase=post-tag`, or run locally on that checked-out tag:
+
+```bash
+.venv/bin/python scripts/release_preflight.py \
+  --phase post-tag --run-gates --require-clean
+```
+
+Post-tag mode requires `v0.1.0` to resolve to the checked `HEAD`, the final
+version, the license artifact, and all repository gates. After it passes,
+record the tag and the three CI run URLs in the final sign-off record and
+check the `release-tag` item. This is a post-tag verification and record step,
+not a substitute for ExitSpec outcomes, human security review, owner archive
+approval, or final release approval. Tagging, publishing, and merging are not
+performed by this preflight.
 
 Automation cannot prove the ExitSpec importer or `PASS`/`FAIL`/`NOT_PROVEN`
 outcomes, pre-measurement contract chronology, human security approval, owner
