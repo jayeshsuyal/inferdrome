@@ -31,11 +31,116 @@ def _make_handoff(root: Path) -> tuple[str, str]:
     )
 
 
+def _make_variant_handoff(
+    root: Path,
+    *,
+    created_timestamp: str = "2027-01-02T03:04:05Z",
+    decided_timestamp: str = "2027-01-02T03:05:05Z",
+    frozen_timestamp: str = "2027-01-02T03:06:05Z",
+) -> tuple[str, str]:
+    fixture = Path(__file__).parents[1] / "fixtures" / "prospective_p1_v1_bytes.json"
+    files = {
+        relative: content.encode("utf-8")
+        for relative, content in json.loads(fixture.read_text())["files"].items()
+    }
+    old_workload_digest = _digest(files["sources/real-gpu/workload.jsonl"])
+    files["sources/real-gpu/workload.jsonl"] = files[
+        "sources/real-gpu/workload.jsonl"
+    ].replace(b"public GPU demonstration", b"synthetic P1 variant")
+    workload_digest = _digest(files["sources/real-gpu/workload.jsonl"])
+    manifest = json.loads(files["handoff-manifest.json"])
+    variant_confirmation_ids = {
+        case_id: f"cnf_{'def'[index] * 64}"
+        for index, case_id in enumerate(handoff.CASE_IDS)
+    }
+    for selected in manifest["cases"]:
+        case_id = selected["case_id"]
+        methodology = selected["methodology"]
+        methodology["workload_digest"] = workload_digest
+        contract_path = selected["contract_artifact_path"]
+        contract = json.loads(files[contract_path])
+        contract["approved_at"] = created_timestamp
+        contract["created_at"] = created_timestamp
+        contract["frozen_at"] = frozen_timestamp
+        contract["confirmation_id"] = variant_confirmation_ids[case_id]
+        contract["customer"] = "synthetic-protocol-customer"
+        contract["evidence_retention_policy"] = "Synthetic retention policy."
+        contract["non_goals"] = [
+            "Synthetic fixture authorizes no execution.",
+            "Synthetic fixture contains no future run or verdict.",
+            "Synthetic fixture requires later external evaluation.",
+        ]
+        contract["owners"] = ["synthetic-protocol-owner"]
+        contract["use_case"] = "Synthetic protocol validation."
+        contract["workload"]["sha256"] = workload_digest.removeprefix("sha256:")
+        criterion = contract["criteria"][0]
+        criterion["evidence_identity"] = methodology
+        criterion["evidence_policy"] = "Synthetic evidence policy."
+        criterion["normalized_claim"] = "Synthetic protocol claim."
+        criterion["owner"] = "synthetic-protocol-owner"
+        criterion["title"] = "Synthetic protocol criterion"
+        canonical_without_hash = rfc8785.dumps(
+            {key: value for key, value in contract.items() if key != "canonical_hash"}
+        )
+        canonical_hash = hashlib.sha256(canonical_without_hash).hexdigest()
+        contract["canonical_hash"] = canonical_hash
+        contract_bytes = rfc8785.dumps(contract)
+        files[contract_path] = contract_bytes
+        producer_link = "sha256:" + canonical_hash
+        confirmation_path = selected["confirmation_artifact_path"]
+        confirmation = json.loads(files[confirmation_path])
+        confirmation["confirmation_id"] = variant_confirmation_ids[case_id]
+        confirmation["confirmer_identity"] = "synthetic-protocol-reviewer"
+        confirmation["contract_fingerprint"] = (
+            handoff._contract_confirmation_fingerprint(contract, case_id=case_id)
+        )
+        confirmation["decided_at"] = decided_timestamp
+        confirmation["rationale"] = "Synthetic confirmation rationale."
+        confirmation_bytes = rfc8785.dumps(confirmation)
+        files[confirmation_path] = confirmation_bytes
+        source_path = selected["source_yaml_artifact_path"]
+        source = files[source_path].decode("utf-8")
+        source = source.replace(
+            old_workload_digest,
+            workload_digest,
+        )
+        source = source.replace(
+            "Pinned Qwen2.5 0.5B managed-vLLM real-GPU proof",
+            "Synthetic protocol source",
+        )
+        source = source.replace(
+            "A clean NVIDIA host can reproduce one sealed Inferdrome bundle.",
+            "A synthetic protocol fixture can preserve bound identities.",
+        )
+        old_link = selected["producer_contract_link"]
+        source = source.replace(old_link, producer_link)
+        files[source_path] = source.encode("utf-8")
+        selected["confirmation_id"] = variant_confirmation_ids[case_id]
+        selected["confirmation_record_sha256"] = _digest(confirmation_bytes)
+        selected["contract_artifact_sha256"] = _digest(contract_bytes)
+        selected["contract_canonical_hash"] = canonical_hash
+        selected["contract_confirmation_fingerprint"] = confirmation[
+            "contract_fingerprint"
+        ]
+        selected["producer_contract_link"] = producer_link
+        selected["source_yaml_artifact_sha256"] = _digest(files[source_path])
+    manifest["workload_artifact_sha256"] = workload_digest
+    files["handoff-manifest.json"] = rfc8785.dumps(manifest)
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    return _digest(files["handoff-manifest.json"]), workload_digest
+
+
 def test_exact_p1_snapshot_and_archive_preserve_relative_workload_reference(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "inferdrome-p1"
     manifest_digest, workload_digest = _make_handoff(root)
+
+    with pytest.raises(handoff.ProspectiveHandoffError, match="explicit"):
+        handoff.snapshot_handoff(root)
 
     snapshot = handoff.snapshot_handoff(
         root,
@@ -52,6 +157,52 @@ def test_exact_p1_snapshot_and_archive_preserve_relative_workload_reference(
     )
     assert archived.archive_path == tmp_path / "handoff.tar.gz"
     assert archived.archive_size_bytes == (tmp_path / "handoff.tar.gz").stat().st_size
+
+
+def test_second_valid_v1_fixture_is_not_bound_to_current_artifact_values(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "synthetic-valid-v1"
+    manifest_digest, workload_digest = _make_variant_handoff(root)
+
+    snapshot = handoff.snapshot_handoff(
+        root,
+        expected_manifest_sha256=manifest_digest,
+        expected_workload_sha256=workload_digest,
+    )
+
+    assert snapshot.workload_sha256 == workload_digest
+    assert snapshot.manifest_sha256 == manifest_digest
+    assert tuple(case.case_id for case in snapshot.cases) == handoff.CASE_IDS
+
+
+@pytest.mark.parametrize(
+    ("created", "decided", "frozen"),
+    [
+        ("2027-01-02T03:04:05Z", "2027-01-02T03:03:05Z", "2027-01-02T03:06:05Z"),
+        ("2027-01-02T03:04:05Z", "2027-01-02T03:05:05Z", "2027-01-02T03:03:05Z"),
+    ],
+)
+def test_snapshot_rejects_out_of_order_protocol_timestamps(
+    tmp_path: Path,
+    created: str,
+    decided: str,
+    frozen: str,
+) -> None:
+    root = tmp_path / "invalid-timestamps"
+    manifest_digest, workload_digest = _make_variant_handoff(
+        root,
+        created_timestamp=created,
+        decided_timestamp=decided,
+        frozen_timestamp=frozen,
+    )
+
+    with pytest.raises(handoff.ProspectiveHandoffError, match="timestamps"):
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest,
+            expected_workload_sha256=workload_digest,
+        )
 
 
 @pytest.mark.parametrize(
@@ -73,7 +224,7 @@ def test_snapshot_rejects_local_handoff_input_mutations(
     mutation: str,
 ) -> None:
     root = tmp_path / "inferdrome-p1"
-    _make_handoff(root)
+    manifest_digest, workload_digest = _make_handoff(root)
     target = root / "sources" / "native-p95-under-20ms.yaml"
     if mutation == "symlink":
         target.unlink()
@@ -111,7 +262,11 @@ def test_snapshot_rejects_local_handoff_input_mutations(
         target.unlink()
 
     with pytest.raises(handoff.ProspectiveHandoffError):
-        handoff.snapshot_handoff(root)
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest,
+            expected_workload_sha256=workload_digest,
+        )
 
 
 def test_snapshot_rejects_toctou_inventory_change(
@@ -119,7 +274,7 @@ def test_snapshot_rejects_toctou_inventory_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "inferdrome-p1"
-    _make_handoff(root)
+    manifest_digest, workload_digest = _make_handoff(root)
     original = handoff._walk_inventory
     calls = 0
 
@@ -135,16 +290,24 @@ def test_snapshot_rejects_toctou_inventory_change(
 
     monkeypatch.setattr(handoff, "_walk_inventory", mutate_after_first)
     with pytest.raises(handoff.ProspectiveHandoffError, match="changed"):
-        handoff.snapshot_handoff(root)
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest,
+            expected_workload_sha256=workload_digest,
+        )
 
 
 def test_snapshot_rejects_unallowlisted_nested_directory(tmp_path: Path) -> None:
     root = tmp_path / "inferdrome-p1"
-    _make_handoff(root)
+    manifest_digest, workload_digest = _make_handoff(root)
     (root / "contracts" / "unexpected-directory").mkdir()
 
     with pytest.raises(handoff.ProspectiveHandoffError, match="extra path"):
-        handoff.snapshot_handoff(root)
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest,
+            expected_workload_sha256=workload_digest,
+        )
 
 
 def _manifest(root: Path) -> dict[str, object]:
@@ -180,7 +343,7 @@ def test_exact_p1_v1_rejects_protocol_and_methodology_drift(
     tmp_path: Path, mutation: str
 ) -> None:
     root = tmp_path / mutation
-    _make_handoff(root)
+    manifest_digest, workload_digest = _make_handoff(root)
     manifest = _manifest(root)
     if mutation == "unknown_top_level":
         manifest["unexpected"] = True
@@ -222,14 +385,18 @@ def test_exact_p1_v1_rejects_protocol_and_methodology_drift(
     _write_manifest(root, manifest)
 
     with pytest.raises(handoff.ProspectiveHandoffError):
-        handoff.snapshot_handoff(root)
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest,
+            expected_workload_sha256=workload_digest,
+        )
 
 
 def test_producer_link_cannot_self_authorize_a_changed_source_and_manifest(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "producer-link-mismatch"
-    _make_handoff(root)
+    _manifest_digest, workload_digest = _make_handoff(root)
     manifest = _manifest(root)
     cases = manifest["cases"]
     assert isinstance(cases, list)
@@ -244,9 +411,14 @@ def test_producer_link_cannot_self_authorize_a_changed_source_and_manifest(
     selected["producer_contract_link"] = replacement
     selected["source_yaml_artifact_sha256"] = _digest(source)
     _write_manifest(root, manifest)
+    mutated_manifest_digest = _digest((root / "handoff-manifest.json").read_bytes())
 
     with pytest.raises(handoff.ProspectiveHandoffError, match="producer contract"):
-        handoff.snapshot_handoff(root)
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=mutated_manifest_digest,
+            expected_workload_sha256=workload_digest,
+        )
 
 
 def test_changed_contract_cannot_pass_with_recalculated_artifact_and_manifest_pins(
@@ -279,7 +451,7 @@ def test_recalculated_contract_fingerprint_cannot_self_authorize_drift(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "recalculated-fingerprint"
-    _make_handoff(root)
+    manifest_digest, workload_digest = _make_handoff(root)
     manifest = _manifest(root)
     cases = manifest["cases"]
     assert isinstance(cases, list)
@@ -291,13 +463,15 @@ def test_recalculated_contract_fingerprint_cannot_self_authorize_drift(
     confirmation_bytes = rfc8785.dumps(confirmation)
     confirmation_path.write_bytes(confirmation_bytes)
     selected["confirmation_record_sha256"] = _digest(confirmation_bytes)
-    selected["contract_confirmation_fingerprint"] = (
-        "a" * 64
-    )
+    selected["contract_confirmation_fingerprint"] = "a" * 64
     _write_manifest(root, manifest)
 
     with pytest.raises(handoff.ProspectiveHandoffError):
-        handoff.snapshot_handoff(root)
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=manifest_digest,
+            expected_workload_sha256=workload_digest,
+        )
 
 
 def test_exact_fixture_matches_observed_operator_pins(tmp_path: Path) -> None:

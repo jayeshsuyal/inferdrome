@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -172,9 +173,7 @@ def test_prospective_dry_run_is_inert_and_reports_both_archive_identities(
         lambda *_args, **_kwargs: None,
     )
 
-    def source_archive(
-        path: Path, _commit: str, **_kwargs: object
-    ) -> tuple[str, int]:
+    def source_archive(path: Path, _commit: str, **_kwargs: object) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 
@@ -325,6 +324,7 @@ def test_remote_digest_gates_precede_wrapper_and_local_mismatch_stops_ssh(
         snapshot,
         handoff_archive_sha256="sha256:" + "b" * 64,
         handoff_archive_size=100,
+        handoff_manifest_sha256="sha256:" + "d" * 64,
         workload_sha256="sha256:" + "c" * 64,
         remote_state_root="/prepared/state",
         gpu_index=0,
@@ -340,6 +340,105 @@ def test_remote_digest_gates_precede_wrapper_and_local_mismatch_stops_ssh(
     assert script.count("--case ") == 3
     assert script.count("--expected-contract-digest ") == 3
     assert "acceptance_verdict" not in script
+    assert (
+        subprocess.run(
+            ["bash", "-n"],
+            input=script,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+    for index, block in enumerate(
+        re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", script, flags=re.DOTALL)
+    ):
+        compile(block, f"<prospective-remote-python-{index}>", "exec")
+
+
+def test_remote_source_retention_stream_is_bounded_and_exclusive(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot()
+    script = remote._remote_prospective_capture_script(
+        "/tmp/r",
+        COMMIT,
+        SOURCE_DIGEST,
+        snapshot,
+        handoff_archive_sha256="sha256:" + "b" * 64,
+        handoff_archive_size=100,
+        handoff_manifest_sha256="sha256:" + "d" * 64,
+        workload_sha256="sha256:" + "c" * 64,
+        remote_state_root="/prepared/state",
+        gpu_index=0,
+        startup_timeout_seconds=900,
+        remote_timeout_seconds=300,
+    )
+    blocks = re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", script, flags=re.DOTALL)
+    retention = blocks[0]
+
+    def run(
+        source: Path, repository: Path, digest: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-", str(repository), str(source), COMMIT, digest],
+            input=retention,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    source = tmp_path / "repo.tar"
+    source.write_bytes(SOURCE_BYTES)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    result = run(source, repository, SOURCE_DIGEST)
+    assert result.returncode == 0, result.stderr
+    assert (
+        repository / remote._RETAINED_SOURCE_ARCHIVE_NAME
+    ).read_bytes() == SOURCE_BYTES
+    assert (repository / ".inferdrome-source-export.json").is_file()
+
+    oversized_source = tmp_path / "oversized.tar"
+    oversized_source.write_bytes(b"x")
+    with oversized_source.open("r+b") as stream:
+        stream.truncate(remote._MAX_SOURCE_ARCHIVE_BYTES + 1)
+    oversized_repository = tmp_path / "oversized-repository"
+    oversized_repository.mkdir()
+    assert run(oversized_source, oversized_repository, SOURCE_DIGEST).returncode != 0
+    assert not (oversized_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).exists()
+
+    truncated_source = tmp_path / "truncated.tar"
+    truncated_source.write_bytes(b"short")
+    truncated_repository = tmp_path / "truncated-repository"
+    truncated_repository.mkdir()
+    assert run(truncated_source, truncated_repository, SOURCE_DIGEST).returncode != 0
+    assert not (truncated_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).exists()
+
+    growing_source = tmp_path / "growing.tar"
+    growing_source.write_bytes(SOURCE_BYTES + b"growth")
+    growing_repository = tmp_path / "growing-repository"
+    growing_repository.mkdir()
+    assert run(growing_source, growing_repository, SOURCE_DIGEST).returncode != 0
+    assert not (growing_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).exists()
+
+    linked_source = tmp_path / "linked.tar"
+    linked_source.symlink_to(source)
+    linked_repository = tmp_path / "linked-repository"
+    linked_repository.mkdir()
+    assert run(linked_source, linked_repository, SOURCE_DIGEST).returncode != 0
+    assert not (linked_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).exists()
+
+    existing_link_repository = tmp_path / "existing-link-repository"
+    existing_link_repository.mkdir()
+    target = tmp_path / "retained-target"
+    target.write_bytes(b"must remain")
+    (existing_link_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).symlink_to(target)
+    assert run(source, existing_link_repository, SOURCE_DIGEST).returncode != 0
+    assert (
+        existing_link_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME
+    ).is_symlink()
+    assert target.read_bytes() == b"must remain"
 
 
 @pytest.mark.parametrize("kind", ["malformed", "oversized", "truncated", "growing"])
@@ -433,9 +532,7 @@ def test_guarded_prospective_capture_terminates_before_offline_verify(
         remote, "_validate_prospective_snapshot", lambda *_a, **_k: None
     )
 
-    def source_archive(
-        path: Path, _commit: str, **_kwargs: object
-    ) -> tuple[str, int]:
+    def source_archive(path: Path, _commit: str, **_kwargs: object) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 
@@ -593,9 +690,7 @@ def test_prospective_remote_failure_finalizes_guard_without_verification(
         remote, "_validate_prospective_snapshot", lambda *_a, **_k: None
     )
 
-    def source_archive(
-        path: Path, _commit: str, **_kwargs: object
-    ) -> tuple[str, int]:
+    def source_archive(path: Path, _commit: str, **_kwargs: object) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 
@@ -678,9 +773,7 @@ def test_unconfirmed_guard_termination_blocks_prospective_verification(
         remote, "_validate_prospective_snapshot", lambda *_a, **_k: None
     )
 
-    def source_archive(
-        path: Path, _commit: str, **_kwargs: object
-    ) -> tuple[str, int]:
+    def source_archive(path: Path, _commit: str, **_kwargs: object) -> tuple[str, int]:
         path.write_bytes(SOURCE_BYTES)
         return SOURCE_DIGEST, len(SOURCE_BYTES)
 

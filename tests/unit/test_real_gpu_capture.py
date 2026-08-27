@@ -250,49 +250,115 @@ def test_exact_tree_export_excludes_removed_secret_and_git_history(
         )
 
 
+@pytest.mark.parametrize(
+    ("entry_count", "blob_size", "message"),
+    [
+        (1, remote._MAX_SOURCE_ARCHIVE_BYTES, "archive bound"),
+        (100_001, 0, "file count"),
+    ],
+)
+def test_git_source_archive_preflight_rejects_sparse_or_many_entry_trees(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_count: int,
+    blob_size: int,
+    message: str,
+) -> None:
+    listing = b"".join(
+        f"100644 blob {'a' * 40} {blob_size}\tfile-{index}.txt\0".encode()
+        for index in range(entry_count)
+    )
+    calls: list[list[str]] = []
+
+    def run(arguments: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv = [str(value) for value in arguments]  # type: ignore[arg-type]
+        calls.append(argv)
+        if "ls-tree" in argv:
+            return subprocess.CompletedProcess(argv, 0, listing, b"")
+        pytest.fail("bounded source preflight must reject before git archive")
+
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(remote, "_git_checkout_present", lambda: True)
+    monkeypatch.setattr(remote, "_run", run)
+
+    with pytest.raises(remote.RemoteCaptureError, match=message):
+        remote._create_source_archive(tmp_path / "rejected.tar", COMMIT)
+    assert ["archive" for call in calls if "archive" in call] == []
+
+
 def test_exact_tree_export_supports_pinned_tree_without_git_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = tmp_path / "export"
-    (repository / "src").mkdir(parents=True)
-    (repository / "README.md").write_text("exported tree\n", encoding="utf-8")
-    (repository / "src" / "nested.txt").write_text(
-        "nested\n", encoding="utf-8"
+    git_repository = tmp_path / "git-repository"
+    git_repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(git_repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repository), "config", "user.email", "test@example.test"],
+        check=True,
     )
-    expected_archive = tmp_path / "expected.tar"
-    entries = ("README.md", "src", "src/nested.txt")
-    with tarfile.open(
-        expected_archive, mode="w:", format=tarfile.USTAR_FORMAT
-    ) as archive:
-        for relative in entries:
-            path = repository / relative
-            metadata = path.lstat()
-            info = tarfile.TarInfo(relative)
-            info.mode = stat.S_IMODE(metadata.st_mode)
-            info.mtime = 0
-            info.uid = 0
-            info.gid = 0
-            info.uname = ""
-            info.gname = ""
-            if path.is_dir():
-                info.type = tarfile.DIRTYPE
-                archive.addfile(info)
-            else:
-                content = path.read_bytes()
-                info.size = len(content)
-                archive.addfile(info, io.BytesIO(content))
-    expected_digest = "sha256:" + hashlib.sha256(
-        expected_archive.read_bytes()
-    ).hexdigest()
+    subprocess.run(
+        ["git", "-C", str(git_repository), "config", "user.name", "Inferdrome Test"],
+        check=True,
+    )
+    (git_repository / "README.md").write_text("exported tree\n", encoding="utf-8")
+    (git_repository / "src").mkdir()
+    (git_repository / "src" / "nested.txt").write_text("nested\n", encoding="utf-8")
+    executable = git_repository / "src" / "run.sh"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    subprocess.run(["git", "-C", str(git_repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repository), "commit", "-qm", "exported tree"],
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(git_repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    original_archive = tmp_path / "original-git-archive.tar"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repository),
+            "archive",
+            "--format=tar",
+            f"--output={original_archive}",
+            commit,
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", git_repository)
+    git_archive = tmp_path / "git-path.tar"
+    git_digest, git_size = remote._create_source_archive(git_archive, commit)
+    assert git_archive.read_bytes() == original_archive.read_bytes()
+    assert (
+        git_digest
+        == "sha256:" + hashlib.sha256(original_archive.read_bytes()).hexdigest()
+    )
+    assert git_size == original_archive.stat().st_size
+
+    repository = tmp_path / "export"
+    repository.mkdir()
+    with tarfile.open(original_archive, mode="r:") as archive:
+        archive.extractall(repository, filter="data")
+    expected_digest = (
+        "sha256:" + hashlib.sha256(original_archive.read_bytes()).hexdigest()
+    )
     marker = {
-        "repository_commit": COMMIT,
+        "repository_commit": commit,
         "schema_version": "inferdrome.source-tree-export.v1",
         "source_archive_sha256": expected_digest,
         "transport": "git-archive-exact-head-tree-v1",
     }
     (repository / ".inferdrome-source-export.json").write_text(
         json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).write_bytes(
+        original_archive.read_bytes()
     )
     monkeypatch.setattr(remote, "REPOSITORY_ROOT", repository)
     monkeypatch.setattr(remote, "_git_checkout_present", lambda: False)
@@ -301,7 +367,7 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
     with pytest.raises(
         remote.RemoteCaptureError, match="independent expected archive digest"
     ):
-        remote._create_source_archive(archive, COMMIT)
+        remote._create_source_archive(archive, commit)
 
     marker = json.loads((repository / ".inferdrome-source-export.json").read_text())
     marker["source_archive_sha256"] = "sha256:" + "0" * 64
@@ -311,7 +377,7 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
     with pytest.raises(remote.RemoteCaptureError, match="independent archive digest"):
         remote._create_source_archive(
             tmp_path / "rewritten-marker.tar",
-            COMMIT,
+            commit,
             expected_archive_sha256=expected_digest,
         )
     marker["source_archive_sha256"] = expected_digest
@@ -319,29 +385,79 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
         json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     (repository / "README.md").write_text("modified exported tree\n", encoding="utf-8")
-    with pytest.raises(remote.RemoteCaptureError, match="disagrees with its marker"):
+    with pytest.raises(remote.RemoteCaptureError, match="disagrees with retained"):
         remote._create_source_archive(
             tmp_path / "modified-tree.tar",
-            COMMIT,
+            commit,
             expected_archive_sha256=expected_digest,
         )
     (repository / "README.md").write_text("exported tree\n", encoding="utf-8")
     digest, size = remote._create_source_archive(
         archive,
-        COMMIT,
+        commit,
         expected_archive_sha256=expected_digest,
     )
 
     assert digest == expected_digest
     assert size == archive.stat().st_size
-    with tarfile.open(archive, mode="r:") as retained:
-        assert [member.name for member in retained.getmembers()] == list(entries)
+    assert archive.read_bytes() == original_archive.read_bytes()
     assert b".inferdrome-source-export.json" not in archive.read_bytes()
+    (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).unlink()
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "missing-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).write_bytes(
+        original_archive.read_bytes()
+    )
+    retained = repository / remote._RETAINED_SOURCE_ARCHIVE_NAME
+    retained_target = tmp_path / "retained-target"
+    retained_target.write_bytes(original_archive.read_bytes())
+    retained.unlink()
+    retained.symlink_to(retained_target)
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "linked-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert retained.is_symlink()
+    retained.unlink()
+    hardlink_target = tmp_path / "hardlink-target"
+    hardlink_target.write_bytes(original_archive.read_bytes())
+    retained.hardlink_to(hardlink_target)
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "hardlinked-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    retained.unlink()
+    retained.write_bytes(b"x")
+    with retained.open("r+b") as stream:
+        stream.truncate(remote._MAX_SOURCE_ARCHIVE_BYTES + 1)
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "oversized-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    retained.unlink()
+    retained.write_bytes(b"truncated")
+    with pytest.raises(remote.RemoteCaptureError, match="independent digest"):
+        remote._create_source_archive(
+            tmp_path / "truncated-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    retained.write_bytes(original_archive.read_bytes())
     (repository / ".codex-venv").mkdir()
-    with pytest.raises(remote.RemoteCaptureError, match="task environment"):
+    with pytest.raises(remote.RemoteCaptureError, match="disagrees with retained"):
         remote._create_source_archive(
             tmp_path / "rejected-env.tar",
-            COMMIT,
+            commit,
             expected_archive_sha256=expected_digest,
         )
 
@@ -483,9 +599,7 @@ def test_qwen3_a100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
         ({"qwen3_gpu_tier": "h100-80gb-pcie"}, "3.29"),
     ):
         with pytest.raises(remote.RemoteCaptureError, match=message):
-            remote._validate_capture_mode(
-                SimpleNamespace(**{**base, **mutation})
-            )
+            remote._validate_capture_mode(SimpleNamespace(**{**base, **mutation}))
 
 
 def test_qwen3_a100_sxm4_capture_mode_freezes_exact_rate_and_cap() -> None:
@@ -560,9 +674,9 @@ def test_h100_phase_budget_preserves_termination_slack() -> None:
 
     assert policy.allowed_seconds == 2_462
     assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 2_078
-    assert policy.allowed_seconds - sum(
-        remote._QWEN3_PHASE_BUDGET_SECONDS.values()
-    ) == 384
+    assert (
+        policy.allowed_seconds - sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 384
+    )
 
 
 def test_qwen3_transfer_metadata_rejects_oversized_archive(tmp_path: Path) -> None:
@@ -1136,9 +1250,7 @@ def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
             "managed_capability_profile": remote._QWEN3_PROFILE_ID,
             "repository_commit": COMMIT,
             "schema_version": "inferdrome.qwen3-gpu-retrieval.v2",
-            "semantic_verification": (
-                "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
-            ),
+            "semantic_verification": ("PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"),
             "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
             "ssh_host_identity_sha256": "sha256:" + "9" * 64,
             "verified_at": "2026-08-20T20:19:00Z",
@@ -1172,9 +1284,7 @@ def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
             "trigger": "controller-finally",
         },
     )
-    gpu_target = remote.qwen3_gpu_tier_policy(
-        "a100-40gb-pcie"
-    ).public_target()
+    gpu_target = remote.qwen3_gpu_tier_policy("a100-40gb-pcie").public_target()
     verification = {
         "capture_manifest_sha256": "sha256:" + "d" * 64,
         "gpu_target": gpu_target,
@@ -1236,19 +1346,20 @@ def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
         receipt_path=guard_receipt,
     )
 
-    assert remote._finalize_qwen3_capture(
-        capture_path,
-        commit=COMMIT,
-        watchdog=watchdog,
-        termination=termination,
-    ) == capture_path
+    assert (
+        remote._finalize_qwen3_capture(
+            capture_path,
+            commit=COMMIT,
+            watchdog=watchdog,
+            termination=termination,
+        )
+        == capture_path
+    )
     semantic = json.loads(
         (capture_path / "semantic-verification.json").read_text(encoding="utf-8")
     )
 
-    assert semantic["schema_version"] == (
-        "inferdrome.qwen3-offline-verification.v2"
-    )
+    assert semantic["schema_version"] == ("inferdrome.qwen3-offline-verification.v2")
     assert semantic["gpu_tier_id"] == "a100-40gb-pcie"
     assert semantic["gpu_target"] == gpu_target
     assert semantic["lambda_instance_type_name"] == instance_type
@@ -1310,9 +1421,7 @@ def test_qwen3_offline_resume_uses_retained_guard_receipts(
             "managed_capability_profile": remote._QWEN3_PROFILE_ID,
             "repository_commit": COMMIT,
             "schema_version": "inferdrome.qwen3-gpu-retrieval.v1",
-            "semantic_verification": (
-                "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
-            ),
+            "semantic_verification": ("PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"),
             "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
             "ssh_host_identity_sha256": "sha256:" + "9" * 64,
             "verified_at": "2026-08-20T20:19:00Z",
@@ -1546,9 +1655,7 @@ def test_qwen3_a100_guard_accepts_only_the_runtime_bound_instance_type(
     )
     handle = SimpleNamespace(
         client=SimpleNamespace(list_instances=lambda: (target,)),
-        cost_window=SimpleNamespace(
-            deadline=datetime(2026, 8, 20, 20, 20, tzinfo=UTC)
-        ),
+        cost_window=SimpleNamespace(deadline=datetime(2026, 8, 20, 20, 20, tzinfo=UTC)),
         instance=target,
         state_directory=Path("/tmp/inferdrome-test-guard"),
     )

@@ -18,6 +18,7 @@ import stat
 import tarfile
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -45,10 +46,6 @@ _P1_CANONICALIZATION_SCHEME = "rfc8785_jcs_v1"
 _P1_HASH_ALGORITHM = "sha256_v1"
 _P1_LINK_POLICY = "exitspec.producer_link.sha256_canonical_hash.v1"
 _P1_WORKLOAD_PATH = "sources/real-gpu/workload.jsonl"
-_P1_WORKLOAD_DIGEST = (
-    "sha256:22bf3389cc29ee946ae567870d7f8d7b458594224542a796e8990c15b1cfcd63"
-)
-_P1_TIMESTAMP = "2026-08-27T00:00:00Z"
 _P1_MANIFEST_KEYS = frozenset(
     {
         "acceptance_verdict",
@@ -366,8 +363,10 @@ def _digest(value: object, *, label: str) -> str:
 
 
 def _bare_hash(value: object, *, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise ProspectiveHandoffError(f"{label} must be a lowercase bare SHA-256 hash")
     return value
@@ -423,7 +422,49 @@ def _strict_source_yaml(content: bytes, *, label: str) -> dict[str, Any]:
     return value
 
 
-def _expected_methodology(case_id: str) -> dict[str, Any]:
+def _deep_exact(actual: object, expected: object) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _deep_exact(actual[key], expected[key]) for key in actual
+        )
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _deep_exact(item, expected_item)
+            for item, expected_item in zip(actual, expected, strict=True)
+        )
+    return actual == expected
+
+
+def _bounded_text(value: object, *, label: str, maximum: int = 4_096) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ProspectiveHandoffError(f"{label} has invalid bounded text")
+    return value
+
+
+def _timestamp(value: object, *, label: str) -> datetime:
+    selected = _bounded_text(value, label=label, maximum=20)
+    if (
+        re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            selected,
+        )
+        is None
+    ):
+        raise ProspectiveHandoffError(f"{label} has an invalid UTC timestamp")
+    try:
+        return datetime.strptime(selected, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        raise ProspectiveHandoffError(f"{label} has an invalid UTC timestamp") from None
+
+
+def _expected_methodology(case_id: str, workload_digest: str) -> dict[str, Any]:
     requested_metric = (
         "first_nonempty_choices_delta_content_v1"
         if case_id == "semantic-first-nonempty-under-20ms"
@@ -511,131 +552,228 @@ def _expected_methodology(case_id: str) -> dict[str, Any]:
             "schema_version": "exitspec.inferdrome-traffic.v1",
             "warmup_requests": 10,
         },
-        "workload_digest": _P1_WORKLOAD_DIGEST,
+        "workload_digest": workload_digest,
         "workload_id": "inferdrome.qwen2.5-real-gpu-workload.v1",
-    }
-
-
-def _expected_source_yaml(case_id: str, producer_link: str) -> dict[str, Any]:
-    return {
-        "schema_version": "inferdrome.source-experiment.v1",
-        "experiment": {
-            "id": f"inferdrome-p1-{case_id}",
-            "title": "Pinned Qwen2.5 0.5B managed-vLLM real-GPU proof",
-            "hypothesis": (
-                "A clean NVIDIA host can reproduce one sealed Inferdrome bundle."
-            ),
-        },
-        "execution": {
-            "mode": "attached_endpoint",
-            "max_runtime_seconds": 900,
-            "max_measured_requests": 100,
-        },
-        "target": {
-            "engine": "vllm",
-            "endpoint": "http://127.0.0.1:18080",
-            "model": "Qwen/Qwen2.5-0.5B-Instruct",
-            "model_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
-            "tokenizer_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
-            "engine_version": "0.26.0",
-        },
-        "workload": {
-            "path": "real-gpu/workload.jsonl",
-            "sha256": _P1_WORKLOAD_DIGEST,
-            "prompt_content_policy": "include",
-            "requested_output_tokens": 32,
-            "temperature": 0,
-            "seed": 42,
-        },
-        "traffic": {
-            "kind": "concurrent",
-            "concurrency": 4,
-            "warmup_requests": 10,
-            "measured_requests": 100,
-        },
-        "evidence": {"canonical_response_content": "omit"},
-        "links": {"exitspec_contract_digest": producer_link},
     }
 
 
 _P1_CASE_METADATA: dict[str, dict[str, Any]] = {
     "native-p95-under-20ms": {
         "criterion_id": "INFERDROME-P1-NATIVE-P95-20MS",
-        "title": "Native vLLM p95 TTFT below 20 ms",
-        "claim": (
-            "For the pinned Qwen2.5 managed-vLLM workload, native vLLM p95 TTFT "
-            "must be strictly below 20 ms at configured concurrency 4."
-        ),
         "threshold_ns": 20_000_000,
     },
     "native-p95-under-10ms": {
         "criterion_id": "INFERDROME-P1-NATIVE-P95-10MS",
-        "title": "Native vLLM p95 TTFT below 10 ms",
-        "claim": (
-            "For the pinned Qwen2.5 managed-vLLM workload, native vLLM p95 TTFT "
-            "must be strictly below 10 ms at configured concurrency 4."
-        ),
         "threshold_ns": 10_000_000,
     },
     "semantic-first-nonempty-under-20ms": {
         "criterion_id": "INFERDROME-P1-SEMANTIC-FIRST-NONEMPTY-20MS",
-        "title": "First non-empty content p95 below 20 ms",
-        "claim": (
-            "For the pinned Qwen2.5 managed-vLLM workload, p95 time to first "
-            "non-empty content must be strictly below 20 ms at configured "
-            "concurrency 4."
-        ),
         "threshold_ns": 20_000_000,
     },
 }
 
 
-def _expected_criterion(case_id: str, methodology: dict[str, Any]) -> dict[str, Any]:
+def _validate_criterion(
+    criterion: dict[str, Any],
+    methodology: dict[str, Any],
+    *,
+    case_id: str,
+    owners: list[str],
+) -> None:
     selected = _P1_CASE_METADATA[case_id]
     metric = methodology["requested_criterion_metric_definition_id"]
-    return {
-        "approved": True,
-        "case_id": case_id,
-        "concurrency_semantics": "configured_maximum_concurrency_not_observed_overlap",
-        "criterion_type": "inference_performance_v4",
-        "error_rate": {
-            "aggregation": "rate",
-            "denominator": "all_measured_requests",
-            "exact_attempts": 100,
-            "metric": "error_rate",
-            "must_pass": True,
-            "numerator": "failed_or_anomalous_native_measured_requests",
-            "operator": "lt",
-            "threshold_basis_points": 100,
-        },
-        "evidence_identity": methodology,
-        "evidence_policy": (
-            "A later producer capture may be linked only after this exact "
-            "customer-confirmed contract is frozen; ExitSpec independently "
-            "validates any later evidence."
-        ),
-        "human_added": True,
-        "id": selected["criterion_id"],
-        "must_have": True,
-        "normalized_claim": selected["claim"],
-        "owner": "exitspec-p1-reviewer",
-        "source": None,
-        "title": selected["title"],
-        "ttft_p95": {
-            "aggregation": "p95",
-            "definition_id": metric,
-            "equality_outcome": "FAIL",
-            "metric": "time_to_first_token",
-            "minimum_successful_samples": 100,
-            "must_pass": True,
-            "operator": "lt",
-            "population": "successful_measured_requests_with_observed_ttft",
-            "reducer_id": "nearest_rank_v1",
-            "schema_version": "exitspec.inferdrome-ttft-p95.v2",
-            "threshold_ns": selected["threshold_ns"],
-            "unit": "nanoseconds",
-        },
+    _require_exact_keys(criterion, _P1_CRITERION_KEYS, label=f"{case_id} criterion")
+    if (
+        criterion["approved"] is not True
+        or criterion["case_id"] != case_id
+        or criterion["concurrency_semantics"]
+        != "configured_maximum_concurrency_not_observed_overlap"
+        or criterion["criterion_type"] != "inference_performance_v4"
+        or not _deep_exact(criterion["evidence_identity"], methodology)
+        or criterion["human_added"] is not True
+        or criterion["id"] != selected["criterion_id"]
+        or criterion["must_have"] is not True
+        or criterion["source"] is not None
+    ):
+        raise ProspectiveHandoffError(f"{case_id} criterion semantics drifted")
+    _bounded_text(criterion["title"], label=f"{case_id} criterion title")
+    _bounded_text(criterion["normalized_claim"], label=f"{case_id} criterion claim")
+    _bounded_text(criterion["evidence_policy"], label=f"{case_id} evidence policy")
+    owner = _bounded_text(criterion["owner"], label=f"{case_id} criterion owner")
+    if owner not in owners:
+        raise ProspectiveHandoffError(f"{case_id} criterion owner is not bound")
+    error_rate = criterion["error_rate"]
+    ttft = criterion["ttft_p95"]
+    if not isinstance(error_rate, dict) or not isinstance(ttft, dict):
+        raise ProspectiveHandoffError(f"{case_id} criterion metrics are invalid")
+    _require_exact_keys(error_rate, _P1_ERROR_RATE_KEYS, label=f"{case_id} error rate")
+    _require_exact_keys(ttft, _P1_TTFT_KEYS, label=f"{case_id} TTFT criterion")
+    expected_error_rate = {
+        "aggregation": "rate",
+        "denominator": "all_measured_requests",
+        "exact_attempts": 100,
+        "metric": "error_rate",
+        "must_pass": True,
+        "numerator": "failed_or_anomalous_native_measured_requests",
+        "operator": "lt",
+        "threshold_basis_points": 100,
     }
+    expected_ttft = {
+        "aggregation": "p95",
+        "definition_id": metric,
+        "equality_outcome": "FAIL",
+        "metric": "time_to_first_token",
+        "minimum_successful_samples": 100,
+        "must_pass": True,
+        "operator": "lt",
+        "population": "successful_measured_requests_with_observed_ttft",
+        "reducer_id": "nearest_rank_v1",
+        "schema_version": "exitspec.inferdrome-ttft-p95.v2",
+        "threshold_ns": selected["threshold_ns"],
+        "unit": "nanoseconds",
+    }
+    if not _deep_exact(error_rate, expected_error_rate) or not _deep_exact(
+        ttft, expected_ttft
+    ):
+        raise ProspectiveHandoffError(f"{case_id} criterion metrics drifted")
+
+
+def _validate_source_document(
+    source: dict[str, Any],
+    *,
+    case_id: str,
+    producer_link: str,
+    workload_digest: str,
+) -> None:
+    _require_exact_keys(
+        source,
+        frozenset(
+            {
+                "evidence",
+                "execution",
+                "experiment",
+                "links",
+                "schema_version",
+                "target",
+                "traffic",
+                "workload",
+            }
+        ),
+        label=f"{case_id} source YAML",
+    )
+    experiment = source["experiment"]
+    execution = source["execution"]
+    target = source["target"]
+    workload = source["workload"]
+    traffic = source["traffic"]
+    evidence = source["evidence"]
+    links = source["links"]
+    if not all(
+        isinstance(value, dict)
+        for value in (experiment, execution, target, workload, traffic, evidence, links)
+    ):
+        raise ProspectiveHandoffError(f"{case_id} source YAML sections are invalid")
+    _require_exact_keys(
+        experiment,
+        frozenset({"hypothesis", "id", "title"}),
+        label=f"{case_id} source experiment",
+    )
+    _require_exact_keys(
+        execution,
+        frozenset({"max_measured_requests", "max_runtime_seconds", "mode"}),
+        label=f"{case_id} source execution",
+    )
+    _require_exact_keys(
+        target,
+        frozenset(
+            {
+                "engine",
+                "engine_version",
+                "endpoint",
+                "model",
+                "model_revision",
+                "tokenizer_revision",
+            }
+        ),
+        label=f"{case_id} source target",
+    )
+    _require_exact_keys(
+        workload,
+        frozenset(
+            {
+                "path",
+                "prompt_content_policy",
+                "requested_output_tokens",
+                "seed",
+                "sha256",
+                "temperature",
+            }
+        ),
+        label=f"{case_id} source workload",
+    )
+    _require_exact_keys(
+        traffic,
+        frozenset({"concurrency", "kind", "measured_requests", "warmup_requests"}),
+        label=f"{case_id} source traffic",
+    )
+    _require_exact_keys(
+        evidence,
+        frozenset({"canonical_response_content"}),
+        label=f"{case_id} source evidence",
+    )
+    _require_exact_keys(
+        links,
+        frozenset({"exitspec_contract_digest"}),
+        label=f"{case_id} source links",
+    )
+    if (
+        source["schema_version"] != "inferdrome.source-experiment.v1"
+        or experiment["id"] != f"inferdrome-p1-{case_id}"
+        or not _deep_exact(
+            execution,
+            {
+                "mode": "attached_endpoint",
+                "max_runtime_seconds": 900,
+                "max_measured_requests": 100,
+            },
+        )
+        or not _deep_exact(
+            target,
+            {
+                "engine": "vllm",
+                "endpoint": "http://127.0.0.1:18080",
+                "model": "Qwen/Qwen2.5-0.5B-Instruct",
+                "model_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+                "tokenizer_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+                "engine_version": "0.26.0",
+            },
+        )
+        or not _deep_exact(
+            workload,
+            {
+                "path": "real-gpu/workload.jsonl",
+                "sha256": workload_digest,
+                "prompt_content_policy": "include",
+                "requested_output_tokens": 32,
+                "temperature": 0,
+                "seed": 42,
+            },
+        )
+        or not _deep_exact(
+            traffic,
+            {
+                "kind": "concurrent",
+                "concurrency": 4,
+                "warmup_requests": 10,
+                "measured_requests": 100,
+            },
+        )
+        or evidence != {"canonical_response_content": "omit"}
+        or links != {"exitspec_contract_digest": producer_link}
+    ):
+        raise ProspectiveHandoffError(f"{case_id} source YAML methodology drifted")
+    _bounded_text(experiment["title"], label=f"{case_id} source title")
+    _bounded_text(experiment["hypothesis"], label=f"{case_id} source hypothesis")
 
 
 def _contract_confirmation_fingerprint(
@@ -673,55 +811,93 @@ def _validate_frozen_contract(
     *,
     case_id: str,
     confirmation_id: str,
+    workload_digest: str,
 ) -> str:
     _require_exact_keys(contract, _P1_CONTRACT_KEYS, label=f"{case_id} frozen contract")
-    expected_contract = {
-        "approved_at": _P1_TIMESTAMP,
-        "canonical_hash": contract.get("canonical_hash"),
-        "confirmation_id": confirmation_id,
-        "created_at": _P1_TIMESTAMP,
-        "criteria": [_expected_criterion(case_id, methodology)],
-        "customer": "prospective-inferdrome-customer",
-        "evidence_retention_policy": (
-            "Retain the exact frozen contract, confirmation artifact, synthetic "
-            "workload bytes, and post-freeze source handoff metadata until a "
-            "separately authorized capture path exists."
-        ),
-        "frozen_at": _P1_TIMESTAMP,
-        "id": f"inferdrome-p1-{case_id}",
-        "non_goals": [
-            "No GPU or provider execution is authorized by this contract.",
-            (
-                "No run, request plan, bundle, observed measurement, receipt, or "
-                "verdict is present before capture."
-            ),
-            "A later evidence evaluation is a separate purpose-bound operation.",
-        ],
-        "owners": ["exitspec-p1-reviewer"],
-        "parent_version": None,
-        "status": "FROZEN",
-        "target_system": {
+    approved_at = _timestamp(
+        contract["approved_at"], label=f"{case_id} contract approved time"
+    )
+    created_at = _timestamp(
+        contract["created_at"], label=f"{case_id} contract created time"
+    )
+    frozen_at = _timestamp(
+        contract["frozen_at"], label=f"{case_id} contract frozen time"
+    )
+    if approved_at != created_at or created_at > frozen_at:
+        raise ProspectiveHandoffError(f"{case_id} contract timestamps are not bound")
+    if (
+        contract["confirmation_id"] != confirmation_id
+        or contract["id"] != f"inferdrome-p1-{case_id}"
+        or contract["parent_version"] is not None
+        or contract["status"] != "FROZEN"
+        or contract["version"] != "1.0.0"
+    ):
+        raise ProspectiveHandoffError(f"{case_id} frozen contract identity drifted")
+    _bounded_text(contract["customer"], label=f"{case_id} contract customer")
+    _bounded_text(contract["use_case"], label=f"{case_id} contract use case")
+    _bounded_text(
+        contract["evidence_retention_policy"],
+        label=f"{case_id} retention policy",
+    )
+    owners = contract["owners"]
+    non_goals = contract["non_goals"]
+    criteria = contract["criteria"]
+    target_system = contract["target_system"]
+    workload = contract["workload"]
+    if (
+        not isinstance(owners, list)
+        or not 1 <= len(owners) <= 16
+        or not isinstance(non_goals, list)
+        or len(non_goals) != 3
+        or not isinstance(criteria, list)
+        or len(criteria) != 1
+        or not isinstance(target_system, dict)
+        or not isinstance(workload, dict)
+    ):
+        raise ProspectiveHandoffError(f"{case_id} frozen contract shape is invalid")
+    owner_values = [
+        _bounded_text(owner, label=f"{case_id} contract owner") for owner in owners
+    ]
+    if len(set(owner_values)) != len(owner_values):
+        raise ProspectiveHandoffError(f"{case_id} contract owners are duplicated")
+    for index, non_goal in enumerate(non_goals):
+        _bounded_text(non_goal, label=f"{case_id} non-goal {index}")
+    if not _deep_exact(
+        target_system,
+        {
             "endpoint_class": "retained-loopback-vllm-benchmark",
             "model": "Qwen/Qwen2.5-0.5B-Instruct",
             "provider": "inferdrome-managed-vllm",
         },
-        "use_case": "Prospectively qualify one exact managed Inferdrome case.",
-        "version": "1.0.0",
-        "workload": {
+    ) or not _deep_exact(
+        workload,
+        {
             "fixture_path": "real-gpu/workload.jsonl",
-            "sha256": _P1_WORKLOAD_DIGEST.removeprefix("sha256:"),
+            "sha256": workload_digest.removeprefix("sha256:"),
         },
-    }
-    if contract != expected_contract:
-        raise ProspectiveHandoffError(f"{case_id} frozen contract fields drifted")
+    ):
+        raise ProspectiveHandoffError(f"{case_id} frozen contract target drifted")
+    criterion = criteria[0]
+    if not isinstance(criterion, dict):
+        raise ProspectiveHandoffError(f"{case_id} criterion is invalid")
+    _validate_criterion(
+        criterion,
+        methodology,
+        case_id=case_id,
+        owners=owner_values,
+    )
     canonical_hash = _bare_hash(
         contract.get("canonical_hash"), label=f"{case_id} canonical hash"
     )
     try:
         computed = hashlib.sha256(
-            rfc8785.dumps({
-                key: value for key, value in contract.items() if key != "canonical_hash"
-            })
+            rfc8785.dumps(
+                {
+                    key: value
+                    for key, value in contract.items()
+                    if key != "canonical_hash"
+                }
+            )
         ).hexdigest()
     except (rfc8785.CanonicalizationError, TypeError, ValueError):
         raise ProspectiveHandoffError(
@@ -745,22 +921,37 @@ def _validate_confirmation(
     _require_exact_keys(
         confirmation, _P1_CONFIRMATION_KEYS, label=f"{case_id} confirmation"
     )
-    expected = {
-        "agreement_acknowledged": True,
-        "confirmation_id": expected_confirmation_id,
-        "confirmer_identity": "process-local-customer-reviewer",
-        "contract_fingerprint": expected_fingerprint,
-        "contract_id": contract["id"],
-        "contract_version": contract["version"],
-        "decided_at": _P1_TIMESTAMP,
-        "decision": "CONFIRM",
-        "rationale": (
-            "I confirm this exact prospective managed-Inferdrome case, target, "
-            "workload, and methodology."
-        ),
-    }
-    if confirmation != expected:
+    created_at = _timestamp(
+        contract["created_at"], label=f"{case_id} contract created time"
+    )
+    decided_at = _timestamp(
+        confirmation["decided_at"], label=f"{case_id} confirmation decision time"
+    )
+    frozen_at = _timestamp(
+        contract["frozen_at"], label=f"{case_id} contract frozen time"
+    )
+    if not (created_at <= decided_at <= frozen_at):
+        raise ProspectiveHandoffError(
+            f"{case_id} confirmation timestamps are out of order"
+        )
+    if (
+        confirmation["agreement_acknowledged"] is not True
+        or confirmation["confirmation_id"] != expected_confirmation_id
+        or confirmation["contract_fingerprint"] != expected_fingerprint
+        or confirmation["contract_id"] != contract["id"]
+        or confirmation["contract_version"] != contract["version"]
+        or confirmation["decision"] != "CONFIRM"
+    ):
         raise ProspectiveHandoffError(f"{case_id} confirmation binding is invalid")
+    _bounded_text(
+        confirmation["confirmer_identity"],
+        label=f"{case_id} confirmer identity",
+        maximum=512,
+    )
+    _bounded_text(
+        confirmation["rationale"],
+        label=f"{case_id} confirmation rationale",
+    )
 
 
 def _workload_digest(value: object) -> str:
@@ -906,6 +1097,10 @@ def snapshot_handoff(
 ) -> HandoffSnapshot:
     """Read the complete handoff exactly once and validate its byte snapshot."""
 
+    if expected_manifest_sha256 is None or expected_workload_sha256 is None:
+        raise ProspectiveHandoffError(
+            "handoff validation requires explicit manifest and workload pins"
+        )
     root = handoff_root.expanduser().absolute()
     before = _walk_inventory(root)
     allowed_root = {".complete", "handoff-manifest.json"}
@@ -973,8 +1168,7 @@ def snapshot_handoff(
         or manifest_value["authority_boundary"] != _P1_AUTHORITY_BOUNDARY
         or manifest_value["confirmation_identity_assurance"]
         != _P1_CONFIRMATION_ASSURANCE
-        or manifest_value["canonicalization_scheme_id"]
-        != _P1_CANONICALIZATION_SCHEME
+        or manifest_value["canonicalization_scheme_id"] != _P1_CANONICALIZATION_SCHEME
         or manifest_value["hash_algorithm_id"] != _P1_HASH_ALGORITHM
         or manifest_value["link_derivation_policy_id"] != _P1_LINK_POLICY
         or manifest_value["completion_marker"] != ".complete"
@@ -1037,15 +1231,14 @@ def snapshot_handoff(
     workload_digest = _workload_digest(manifest_value["workload_artifact_sha256"])
     if workload_digest != _digest_bytes(contents["sources/real-gpu/workload.jsonl"]):
         raise ProspectiveHandoffError("handoff workload digest disagrees")
-    if expected_manifest_sha256 is not None and _digest(
+    if _digest(
         expected_manifest_sha256, label="expected handoff manifest digest"
     ) != _digest_bytes(contents["handoff-manifest.json"]):
         raise ProspectiveHandoffError(
             "handoff manifest digest disagrees with its operator pin"
         )
     if (
-        expected_workload_sha256 is not None
-        and _digest(expected_workload_sha256, label="expected workload digest")
+        _digest(expected_workload_sha256, label="expected workload digest")
         != workload_digest
     ):
         raise ProspectiveHandoffError("workload digest disagrees with its operator pin")
@@ -1106,16 +1299,15 @@ def snapshot_handoff(
                 nested_keys,
                 label=f"{case_id} methodology {nested_name}",
             )
-        if methodology != _expected_methodology(case_id):
+        if not _deep_exact(
+            methodology, _expected_methodology(case_id, workload_digest)
+        ):
             raise ProspectiveHandoffError(f"{case_id} methodology identity drifted")
         expected_confirmation_id = selected["confirmation_id"]
-        if (
-            not isinstance(expected_confirmation_id, str)
-            or not re.fullmatch(r"cnf_[0-9a-f]{64}", expected_confirmation_id)
+        if not isinstance(expected_confirmation_id, str) or not re.fullmatch(
+            r"cnf_[0-9a-f]{64}", expected_confirmation_id
         ):
-            raise ProspectiveHandoffError(
-                f"{case_id} confirmation identity is invalid"
-            )
+            raise ProspectiveHandoffError(f"{case_id} confirmation identity is invalid")
         selected_fingerprint = _bare_hash(
             selected["contract_confirmation_fingerprint"],
             label=f"{case_id} confirmation fingerprint",
@@ -1125,6 +1317,7 @@ def snapshot_handoff(
             methodology,
             case_id=case_id,
             confirmation_id=expected_confirmation_id,
+            workload_digest=workload_digest,
         )
         if selected["contract_canonical_hash"] != canonical_hash:
             raise ProspectiveHandoffError(
@@ -1153,8 +1346,12 @@ def snapshot_handoff(
         source_document = _strict_source_yaml(
             source_bytes, label=f"{case_id} source YAML"
         )
-        if source_document != _expected_source_yaml(case_id, producer_link):
-            raise ProspectiveHandoffError(f"{case_id} source YAML methodology drifted")
+        _validate_source_document(
+            source_document,
+            case_id=case_id,
+            producer_link=producer_link,
+            workload_digest=workload_digest,
+        )
         if canonical_hash in contract_digests or producer_link in producer_links:
             raise ProspectiveHandoffError(
                 "the three frozen contract hashes and links must be distinct"
