@@ -418,7 +418,11 @@ def test_pre_tag_ready_without_aggregate_ci_or_tag(
         repository_only=False,
         run_gates=True,
     )
-    assert "result: PRE_TAG_READY" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "result: PRE_TAG_READY" in output
+    assert "machine preflight only" in output
+    assert "externally verified three-job aggregate CI" in output
+    assert "explicit owner authorization" in output
 
 
 def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
@@ -471,6 +475,73 @@ def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
     assert selection_check.status == "PASS"
     assert "post-tag" in selection_check.detail
     assert tag_check.status == "PASS"
+
+
+def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
+    tmp_path: Path,
+) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "add", ".")
+    commit_arguments = (
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "release commit",
+    )
+    _git(tmp_path, *commit_arguments)
+
+    _git(tmp_path, "tag", "v0.1.0")
+    lightweight_checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="post-tag",
+        repository_only=True,
+        require_clean=True,
+        run_gates=False,
+    )
+    lightweight_tag_check = next(
+        check for check in lightweight_checks if check.name == "release-tag"
+    )
+    assert lightweight_tag_check.status == "FAIL"
+    assert "not an annotated tag" in lightweight_tag_check.detail
+
+    _git(tmp_path, "tag", "--delete", "v0.1.0")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "tag",
+        "-a",
+        "v0.1.0",
+        "-m",
+        "Inferdrome v0.1.0",
+    )
+    annotated_checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="post-tag",
+        repository_only=True,
+        require_clean=True,
+        run_gates=False,
+    )
+    annotated_tag_check = next(
+        check for check in annotated_checks if check.name == "release-tag"
+    )
+    assert annotated_tag_check.status == "PASS"
 
 
 def test_post_tag_auto_rejects_tag_elsewhere(tmp_path: Path) -> None:
@@ -532,6 +603,13 @@ def test_release_docs_do_not_require_a_post_tag_repository_commit() -> None:
 
     assert "post-tag record commit" not in checklist
     assert "post-tag repository commit" not in checklist
+    assert "post-tag verification result must not be added to" in checklist
+    assert "already-created annotated tag message" in checklist
+    assert (
+        "GitHub Release or another explicit external immutable release record"
+        in checklist
+    )
+    assert "annotated tag message" in checklist
 
 
 def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> None:
@@ -552,6 +630,8 @@ def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> 
     ) -> subprocess.CompletedProcess[str]:
         if command[:4] == ["git", "show-ref", "--verify", "--quiet"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["git", "cat-file", "-t"]:
+            return subprocess.CompletedProcess(command, 0, stdout="tag\n", stderr="")
         if "refs/tags/v0.1.0^{commit}" in command:
             return subprocess.CompletedProcess(
                 command,
@@ -663,3 +743,20 @@ def test_release_closure_reports_open_manual_inputs(capsys) -> None:
     assert "phase: candidate" in captured
     assert "[PENDING] manual-exitspec-outcomes" in captured
     assert "result: BLOCKED" in captured
+
+
+def test_main_resolves_auto_phase_once(monkeypatch, capsys) -> None:
+    original_resolve_phase = release_preflight._resolve_phase
+    calls = 0
+
+    def resolve_phase_once(repository_root: Path, requested_phase):
+        nonlocal calls
+        calls += 1
+        return original_resolve_phase(repository_root, requested_phase)
+
+    monkeypatch.setattr(release_preflight, "_resolve_phase", resolve_phase_once)
+    result = release_preflight.main(["--repository-only", "--allow-dirty"])
+
+    assert result == 0
+    assert calls == 1
+    assert "phase: candidate" in capsys.readouterr().out

@@ -90,18 +90,25 @@ three GitHub job results for itself.
 The exact release SHA, the three aggregate CI job URLs, the authorized
 annotated tag, and the post-tag verification result are recorded by the
 GitHub/tag/release process. They are not pending inputs for the Engineering
-job to prove about itself.
+job to prove about itself. The annotated tag message may contain only facts
+known at tag creation; the post-tag verification result must not be added to
+that tag message.
+
+After post-tag verification, record the post-tag result and its URL in a
+GitHub Release or another explicit external immutable release record. It must
+not be added to the already-created annotated tag message. Do not change the
+repository after tagging solely to populate it.
 
 ## Final sign-off record template
 
-After post-tag verification, use this template in the annotated tag message,
-GitHub Release, or another explicit external immutable release record. Do not
-change the repository after tagging solely to populate it:
+The authorized annotated tag message may contain these facts known before
+tagging:
 
 ```text
 Release commit:
-Engineering gate run URL:
-Dashboard gate run URL:
+Engineering gate run URL(s):
+Deployment qualification gate run URL(s):
+Dashboard gate run URL(s):
 GPU provider and declared instance type:
 GPU demonstration bundle digest:
 ExitSpec receipt digest:
@@ -110,8 +117,18 @@ Selected license:
 Release tag: v0.1.0
 ```
 
-The record must cite the exact release commit whose final-pre-tag pull-request
-and `main` workflows passed all three jobs, plus the post-tag workflow result.
+The later GitHub Release or another explicit external immutable release record
+may contain the post-tag facts:
+
+```text
+Post-tag workflow run URL:
+Tag verification:
+```
+
+The final external record must also cite the exact release commit whose
+final-pre-tag pull-request and `main` workflows passed all three jobs, plus the
+post-tag workflow result. The annotated tag itself must not be amended or
+recreated to append post-tag facts.
 The GPU bundle digest and ExitSpec receipt digest remain out-of-band evidence
 anchors; neither may be reconstructed from a summary or edited into a sealed
 bundle.

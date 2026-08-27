@@ -24,7 +24,7 @@ from typing import Literal
 
 Phase = Literal["candidate", "final-pre-tag", "post-tag"]
 RequestedPhase = Literal["auto", "candidate", "final-pre-tag", "post-tag"]
-TagState = Literal["absent", "head", "elsewhere", "error"]
+TagState = Literal["absent", "head", "elsewhere", "unannotated", "error"]
 DEVELOPMENT_VERSION = "0.1.0.dev0"
 FINAL_VERSION = "0.1.0"
 FINAL_TAG = "v0.1.0"
@@ -222,6 +222,23 @@ def _tag_state(repository_root: Path, *, tag: str) -> tuple[TagState, str]:
         if show_ref.returncode != 0:
             return "error", f"could not inspect {tag_ref}"
 
+        type_result = subprocess.run(
+            ["git", "cat-file", "-t", tag_ref],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if type_result.returncode != 0:
+            return "error", f"could not inspect the object type for {tag_ref}"
+        object_type = (type_result.stdout or "").strip()
+        if object_type != "tag":
+            return (
+                "unannotated",
+                f"{tag} is not an annotated tag (object type: "
+                f"{object_type or 'unknown'})",
+            )
+
         tag_result = subprocess.run(
             ["git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"],
             cwd=repository_root,
@@ -292,6 +309,12 @@ def _resolve_phase(
                 "auto phase selected final-pre-tag for exact final versions "
                 "without a release tag",
             )
+        if tag_state == "unannotated":
+            return "final-pre-tag", Check(
+                "phase-selection",
+                "FAIL",
+                f"{tag_detail}; the release tag must be an authorized annotated tag",
+            )
         if tag_state == "elsewhere":
             return "final-pre-tag", Check(
                 "phase-selection",
@@ -350,6 +373,8 @@ def _check_tag(repository_root: Path, *, phase: Phase, tag: str) -> Check:
                 "PASS",
                 f"{tag} does not exist; pre-tag phase may proceed",
             )
+        if tag_state == "unannotated":
+            return Check("release-tag", "FAIL", tag_detail)
         if tag_state in ("head", "elsewhere"):
             return Check(
                 "release-tag",
@@ -365,6 +390,8 @@ def _check_tag(repository_root: Path, *, phase: Phase, tag: str) -> Check:
             "FAIL",
             f"{tag} does not point to the checked commit",
         )
+    if tag_state == "unannotated":
+        return Check("release-tag", "FAIL", tag_detail)
     return Check("release-tag", "FAIL", tag_detail)
 
 
@@ -566,17 +593,17 @@ def _run_gate(repository_root: Path, name: str, script_name: str) -> Check:
     return Check(name, "PASS", f"delegated to {script_name}")
 
 
-def run_preflight(
+def _run_preflight_for_phase(
     repository_root: Path,
     *,
-    phase: RequestedPhase,
+    resolved_phase: Phase,
+    phase_selection: Check | None,
     repository_only: bool,
     require_clean: bool,
     run_gates: bool,
 ) -> tuple[Check, ...]:
-    """Return deterministic checks for one release-preflight invocation."""
+    """Return deterministic checks after phase selection."""
 
-    resolved_phase, phase_selection = _resolve_phase(repository_root, phase)
     checks = [
         _check_required_files(repository_root),
     ]
@@ -596,12 +623,8 @@ def run_preflight(
         )
     )
     if resolved_phase != "candidate":
-        checks.append(
-            _check_capture_ancestor(repository_root)
-        )
-        checks.append(
-            _check_tag(repository_root, phase=resolved_phase, tag=FINAL_TAG)
-        )
+        checks.append(_check_capture_ancestor(repository_root))
+        checks.append(_check_tag(repository_root, phase=resolved_phase, tag=FINAL_TAG))
         checks.append(
             Check(
                 "aggregate-ci",
@@ -634,6 +657,27 @@ def run_preflight(
         )
     checks.extend(_manual_checks(repository_root))
     return tuple(checks)
+
+
+def run_preflight(
+    repository_root: Path,
+    *,
+    phase: RequestedPhase,
+    repository_only: bool,
+    require_clean: bool,
+    run_gates: bool,
+) -> tuple[Check, ...]:
+    """Return deterministic checks for one release-preflight invocation."""
+
+    resolved_phase, phase_selection = _resolve_phase(repository_root, phase)
+    return _run_preflight_for_phase(
+        repository_root,
+        resolved_phase=resolved_phase,
+        phase_selection=phase_selection,
+        repository_only=repository_only,
+        require_clean=require_clean,
+        run_gates=run_gates,
+    )
 
 
 def _has_failure(checks: Sequence[Check]) -> bool:
@@ -693,8 +737,9 @@ def _print_report(
                 "does not verify them)"
             ),
             "final-pre-tag": (
-                "PRE_TAG_READY (machine checks passed; the release owner may "
-                "perform the separately authorized tag action)"
+                "PRE_TAG_READY (machine preflight only; tagging still requires "
+                "externally verified three-job aggregate CI plus explicit owner "
+                "authorization)"
             ),
             "post-tag": (
                 "POST_TAG_VERIFIED (the tag points to HEAD; final record and "
@@ -751,14 +796,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     repository_root = Path(__file__).resolve().parent.parent
     requested_phase = arguments.phase
-    phase, _ = _resolve_phase(repository_root, requested_phase)
+    phase, phase_selection = _resolve_phase(repository_root, requested_phase)
     repository_only = bool(arguments.repository_only)
     require_clean = not bool(arguments.allow_dirty)
     if repository_only and not arguments.require_clean and not arguments.allow_dirty:
         require_clean = False
-    checks = run_preflight(
+    checks = _run_preflight_for_phase(
         repository_root,
-        phase=requested_phase,
+        resolved_phase=phase,
+        phase_selection=phase_selection,
         repository_only=repository_only,
         require_clean=require_clean,
         run_gates=bool(arguments.run_gates),
