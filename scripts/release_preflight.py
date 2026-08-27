@@ -4,7 +4,9 @@
 This command checks repository-owned release inputs and can delegate to the
 existing engineering and dashboard gates. It never contacts a provider,
 launches a GPU, publishes an artifact, or treats a checked checklist item as
-machine-verifiable proof.
+machine-verifiable proof. Normal CI can resolve its phase from the exact
+package version; final release work must explicitly select final-pre-tag or
+post-tag.
 """
 
 from __future__ import annotations
@@ -20,10 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+Phase = Literal["candidate", "final-pre-tag", "post-tag"]
+RequestedPhase = Literal["auto", "candidate", "final-pre-tag", "post-tag"]
 DEVELOPMENT_VERSION = "0.1.0.dev0"
 FINAL_VERSION = "0.1.0"
 FINAL_TAG = "v0.1.0"
-Phase = Literal["candidate", "final-pre-tag", "post-tag"]
 CheckStatus = Literal["PASS", "FAIL", "PENDING", "MANUAL", "SKIPPED"]
 
 LICENSE_FILENAMES: tuple[str, ...] = (
@@ -172,17 +175,31 @@ def _check_required_files(repository_root: Path) -> Check:
     )
 
 
+def _read_package_versions(repository_root: Path) -> tuple[str | None, str | None]:
+    with (repository_root / "pyproject.toml").open("rb") as source:
+        project = tomllib.load(source).get("project", {})
+    project_version = project.get("version")
+    package_text = (repository_root / "src/inferdrome/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    package_match = re.search(
+        r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$',
+        package_text,
+        flags=re.MULTILINE,
+    )
+    package_version = package_match.group(1) if package_match else None
+    return (
+        project_version if isinstance(project_version, str) else None,
+        package_version,
+    )
+
+
 def _check_version(repository_root: Path, *, phase: Phase) -> Check:
     expected_version = (
         DEVELOPMENT_VERSION if phase == "candidate" else FINAL_VERSION
     )
     try:
-        with (repository_root / "pyproject.toml").open("rb") as source:
-            project = tomllib.load(source).get("project", {})
-        project_version = project.get("version")
-        package_text = (repository_root / "src/inferdrome/__init__.py").read_text(
-            encoding="utf-8"
-        )
+        versions = _read_package_versions(repository_root)
     except (
         OSError,
         UnicodeError,
@@ -191,14 +208,6 @@ def _check_version(repository_root: Path, *, phase: Phase) -> Check:
         AttributeError,
     ) as error:
         return Check("package-version", "FAIL", f"could not read version: {error}")
-
-    package_match = re.search(
-        r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$',
-        package_text,
-        flags=re.MULTILINE,
-    )
-    package_version = package_match.group(1) if package_match else None
-    versions = (project_version, package_version)
     if versions != (expected_version, expected_version):
         return Check(
             "package-version",
@@ -210,6 +219,45 @@ def _check_version(repository_root: Path, *, phase: Phase) -> Check:
         "package-version",
         "PASS",
         f"package and metadata are {expected_version} for phase {phase}",
+    )
+
+
+def _resolve_phase(
+    repository_root: Path, requested_phase: RequestedPhase
+) -> tuple[Phase, Check | None]:
+    if requested_phase != "auto":
+        return requested_phase, None
+    try:
+        versions = _read_package_versions(repository_root)
+    except (
+        OSError,
+        UnicodeError,
+        tomllib.TOMLDecodeError,
+        TypeError,
+        AttributeError,
+    ) as error:
+        return "candidate", Check(
+            "phase-selection",
+            "FAIL",
+            f"auto phase could not read package versions: {error}",
+        )
+    if versions == (DEVELOPMENT_VERSION, DEVELOPMENT_VERSION):
+        return "candidate", Check(
+            "phase-selection",
+            "PASS",
+            "auto phase selected candidate for exact development versions",
+        )
+    if versions == (FINAL_VERSION, FINAL_VERSION):
+        return "final-pre-tag", Check(
+            "phase-selection",
+            "PASS",
+            "auto phase selected final-pre-tag for exact final versions",
+        )
+    return "candidate", Check(
+        "phase-selection",
+        "FAIL",
+        "auto phase requires both version locations to be exactly "
+        f"{DEVELOPMENT_VERSION!r} or exactly {FINAL_VERSION!r}; found {versions!r}",
     )
 
 
@@ -477,23 +525,36 @@ def _run_gate(repository_root: Path, name: str, script_name: str) -> Check:
 def run_preflight(
     repository_root: Path,
     *,
-    phase: Phase,
+    phase: RequestedPhase,
     repository_only: bool,
     require_clean: bool,
     run_gates: bool,
 ) -> tuple[Check, ...]:
     """Return deterministic checks for one release-preflight invocation."""
 
+    resolved_phase, phase_selection = _resolve_phase(repository_root, phase)
     checks = [
         _check_required_files(repository_root),
-        _check_version(repository_root, phase=phase),
-        _check_license_artifact(repository_root, phase=phase),
-        _check_document_markers(repository_root),
-        _check_ci_gate_inventory(repository_root),
-        _check_working_tree(repository_root, require_clean=require_clean),
     ]
-    if phase != "candidate":
-        checks.append(_check_tag(repository_root, phase=phase, tag=FINAL_TAG))
+    if phase_selection is not None:
+        checks.append(phase_selection)
+    checks.extend(
+        (
+            _check_version(repository_root, phase=resolved_phase),
+            _check_license_artifact(repository_root, phase=resolved_phase),
+        )
+    )
+    checks.extend(
+        (
+            _check_document_markers(repository_root),
+            _check_ci_gate_inventory(repository_root),
+            _check_working_tree(repository_root, require_clean=require_clean),
+        )
+    )
+    if resolved_phase != "candidate":
+        checks.append(
+            _check_tag(repository_root, phase=resolved_phase, tag=FINAL_TAG)
+        )
     if run_gates:
         checks.extend(
             (
@@ -516,7 +577,7 @@ def run_preflight(
                 ),
             )
         )
-    checks.extend(_manual_checks(repository_root, phase=phase))
+    checks.extend(_manual_checks(repository_root, phase=resolved_phase))
     return tuple(checks)
 
 
@@ -597,11 +658,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--phase",
-        choices=("candidate", "final-pre-tag", "post-tag"),
-        default="candidate",
+        choices=("auto", "candidate", "final-pre-tag", "post-tag"),
+        default="auto",
         help=(
-            "candidate keeps the development version; final-pre-tag requires the "
-            "final version before tagging; post-tag verifies the final tag"
+            "auto selects candidate for exact development versions and "
+            "final-pre-tag for exact final versions; explicit phases override it"
         ),
     )
     parser.add_argument(
@@ -632,14 +693,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     repository_root = Path(__file__).resolve().parent.parent
-    phase = arguments.phase
+    requested_phase = arguments.phase
+    phase, _ = _resolve_phase(repository_root, requested_phase)
     repository_only = bool(arguments.repository_only)
     require_clean = not bool(arguments.allow_dirty)
     if repository_only and not arguments.require_clean and not arguments.allow_dirty:
         require_clean = False
     checks = run_preflight(
         repository_root,
-        phase=phase,
+        phase=requested_phase,
         repository_only=repository_only,
         require_clean=require_clean,
         run_gates=bool(arguments.run_gates),

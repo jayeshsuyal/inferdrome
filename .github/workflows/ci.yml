@@ -11,9 +11,10 @@ on:
       release_phase:
         description: "Release preflight phase"
         required: true
-        default: candidate
+        default: auto
         type: choice
         options:
+          - auto
           - candidate
           - final-pre-tag
           - post-tag
@@ -38,6 +39,7 @@ jobs:
       - name: Check out the candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python 3.12
@@ -52,7 +54,7 @@ jobs:
 
       - name: Run repository release preflight
         env:
-          RELEASE_PREFLIGHT_PHASE: ${{ inputs.release_phase || 'candidate' }}
+          RELEASE_PREFLIGHT_PHASE: ${{ inputs.release_phase || 'auto' }}
         run: >-
           python scripts/release_preflight.py
           --phase "$RELEASE_PREFLIGHT_PHASE"

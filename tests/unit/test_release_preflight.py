@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts import release_preflight
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +46,27 @@ def _minimal_repository(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _git(root: Path, *arguments: str) -> None:
+    subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_engineering_ci_preflight_resolves_phase_and_fetches_tags() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8"
+    )
+    engineering_job = workflow.split("  deployment-qualification:", maxsplit=1)[0]
+
+    assert "fetch-depth: 0" in engineering_job
+    assert "inputs.release_phase || 'auto'" in engineering_job
+    assert '--phase "$RELEASE_PREFLIGHT_PHASE"' in engineering_job
 
 
 def test_repository_only_preflight_is_deterministic() -> None:
@@ -107,6 +130,107 @@ def test_development_version_mismatch_fails_closed(tmp_path: Path) -> None:
     )
     assert version_check.status == "FAIL"
     assert "0.1.0.dev0" in version_check.detail
+
+
+def test_auto_phase_selects_candidate_for_exact_development_versions(
+    tmp_path: Path,
+) -> None:
+    _minimal_repository(tmp_path)
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="auto",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    selection_check = next(check for check in checks if check.name == "phase-selection")
+    assert selection_check.status == "PASS"
+    assert "candidate" in selection_check.detail
+    assert (
+        next(check for check in checks if check.name == "package-version").status
+        == "PASS"
+    )
+
+
+def test_auto_phase_selects_final_pre_tag_for_exact_final_versions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        assert command[:4] == ["git", "show-ref", "--verify", "--quiet"]
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="auto",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    selection_check = next(check for check in checks if check.name == "phase-selection")
+    assert selection_check.status == "PASS"
+    assert "final-pre-tag" in selection_check.detail
+    assert (
+        next(check for check in checks if check.name == "package-version").status
+        == "PASS"
+    )
+    assert (
+        next(check for check in checks if check.name == "license-artifact").status
+        == "PASS"
+    )
+    assert (
+        next(check for check in checks if check.name == "release-tag").status == "PASS"
+    )
+
+
+@pytest.mark.parametrize(
+    ("project_version", "package_version"),
+    (("0.2.0", "0.2.0"), ("0.1.0", "0.1.0.dev0")),
+)
+def test_auto_phase_rejects_unknown_or_mismatched_versions(
+    tmp_path: Path,
+    project_version: str,
+    package_version: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "inferdrome"\nversion = "{project_version}"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        f'__version__ = "{package_version}"\n',
+        encoding="utf-8",
+    )
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="auto",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    selection_check = next(check for check in checks if check.name == "phase-selection")
+    assert selection_check.status == "FAIL"
+    assert "exactly" in selection_check.detail
 
 
 def test_gate_option_delegates_to_existing_gate_scripts(
@@ -322,6 +446,68 @@ def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> 
     tag_check = next(check for check in checks if check.name == "release-tag")
     assert tag_check.status == "FAIL"
     assert "does not point to the checked commit" in tag_check.detail
+
+
+def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "add", ".")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "release commit",
+    )
+
+    pre_tag_checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="final-pre-tag",
+        repository_only=True,
+        require_clean=True,
+        run_gates=False,
+    )
+    assert (
+        next(check for check in pre_tag_checks if check.name == "release-tag").status
+        == "PASS"
+    )
+
+    _git(tmp_path, "tag", "-a", "v0.1.0", "-m", "Inferdrome v0.1.0")
+    pre_tag_after_tag = release_preflight.run_preflight(
+        tmp_path,
+        phase="final-pre-tag",
+        repository_only=True,
+        require_clean=True,
+        run_gates=False,
+    )
+    assert (
+        next(check for check in pre_tag_after_tag if check.name == "release-tag").status
+        == "FAIL"
+    )
+
+    post_tag_checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="post-tag",
+        repository_only=True,
+        require_clean=True,
+        run_gates=False,
+    )
+    tag_check = next(check for check in post_tag_checks if check.name == "release-tag")
+    assert tag_check.status == "PASS"
+    assert "v0.1.0 points to HEAD" in tag_check.detail
 
 
 def test_release_closure_reports_open_manual_inputs(capsys) -> None:

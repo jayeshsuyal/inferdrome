@@ -128,11 +128,13 @@ npx --prefix frontend playwright install chromium
 
 That command must report `REPOSITORY_READY`. Candidate mode requires both the
 package metadata and `src/inferdrome/__init__.py` to remain at
-`0.1.0.dev0`. Pull-request, merge-queue, and `main` CI use this phase by
-default; the workflow's manual `release_phase` input is only for deliberately
-running a final phase against a release commit or tag. Candidate mode does
-not claim ExitSpec acceptance, archive publication, security sign-off, license
-selection, or final release approval.
+`0.1.0.dev0`. Normal pull-request, merge-queue, and `main` CI invoke the
+`auto` phase: exact development versions resolve to candidate, while any
+other or mismatched versions fail closed. The workflow's manual
+`release_phase` input can explicitly run auto, candidate, final-pre-tag, or
+post-tag against a deliberately selected ref. Candidate mode does not claim ExitSpec
+acceptance, archive publication, security sign-off, license selection, or
+final release approval.
 
 ### Final pre-tag phase: readiness of the exact release commit
 
@@ -143,9 +145,17 @@ this development-version PR) changes both package-version locations to
 `0.1.0` and includes the owner-selected, non-empty repository license artifact.
 No `v0.1.0` tag exists yet.
 
-Run the existing GitHub Actions `CI` workflow manually against that exact
-release commit or ref, selecting `release_phase=final-pre-tag`. Its
-engineering job invokes this exact repository-only check:
+Submit that commit through the branch-protected pull-request path. Its normal
+CI invocation uses `--phase auto`, resolves the exact final versions to
+`final-pre-tag`, and must pass all three required jobs before it can merge.
+The resulting `main` push invokes the same `auto` phase and must also pass all
+three jobs; it resolves to `final-pre-tag` because the package is still
+untagged. Do not merge a red release PR or leave `main` red.
+
+After that green `main` run, run the existing GitHub Actions `CI` workflow
+manually against the exact `main` release commit, selecting
+`release_phase=final-pre-tag`. Its engineering job invokes this exact
+repository-only check:
 
 ```bash
 python scripts/release_preflight.py \
@@ -154,7 +164,10 @@ python scripts/release_preflight.py \
 
 It must pass the final version, license-artifact presence, clean-checkout,
 claim-boundary, required-file, CI-inventory, and no-existing-tag checks. All
-three CI jobs must pass at that exact commit. The pre-tag phase deliberately
+three jobs must pass at that exact commit. The Engineering checkout fetches
+the complete repository tag namespace (`fetch-depth: 0`), so the no-tag check
+is against the actual `refs/tags` namespace rather than a shallow clone. The
+pre-tag phase deliberately
 reports the checklist's `release-tag` item as a manual record that follows
 this verification; it does not require a tag to exist and therefore does not
 prove the tag in advance. The license check proves only that an artifact is
@@ -181,11 +194,11 @@ replace genuine GPU evidence or ExitSpec review.
 
 ### Post-tag phase: verification and release record
 
-Only after final-pre-tag CI passes and the named owners have completed the
-remaining checklist decisions may the release owner create and push the
-annotated `v0.1.0` tag at that exact release commit. This is the first point
-at which the tag can be checked; a commit cannot contain proof of a tag that
-does not yet exist.
+Only after the final-pre-tag checks on the exact `main` commit pass and the
+named owners have completed the remaining checklist decisions may the release
+owner create and push the annotated `v0.1.0` tag at that exact commit. This is
+the first point at which the tag can be checked; a commit cannot contain proof
+of a tag that does not yet exist.
 
 Then run the same `CI` workflow manually against the tag ref with
 `release_phase=post-tag`, or run locally on that checked-out tag:
@@ -196,7 +209,9 @@ Then run the same `CI` workflow manually against the tag ref with
 ```
 
 Post-tag mode requires `v0.1.0` to resolve to the checked `HEAD`, the final
-version, the license artifact, and all repository gates. After it passes,
+version, the license artifact, and all repository gates. The Engineering
+checkout's complete tag visibility allows this `refs/tags/v0.1.0` resolution
+to be checked against the actual tag namespace. After all three jobs pass,
 record the tag and the three CI run URLs in the final sign-off record and
 check the `release-tag` item. This is a post-tag verification and record step,
 not a substitute for ExitSpec outcomes, human security review, owner archive
