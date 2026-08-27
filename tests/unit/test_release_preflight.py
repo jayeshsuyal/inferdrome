@@ -173,6 +173,8 @@ def test_auto_phase_selects_final_pre_tag_for_exact_final_versions(
         command: list[str],
         **_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         assert command[:4] == ["git", "show-ref", "--verify", "--quiet"]
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
 
@@ -304,11 +306,9 @@ def test_final_pre_tag_requires_final_version_and_license_artifact(
     manual_license = next(
         check for check in checks if check.name == "manual-license-selection"
     )
-    manual_tag = next(check for check in checks if check.name == "manual-release-tag")
     assert version_check.status == "FAIL"
     assert license_check.status == "FAIL"
     assert manual_license.status == "MANUAL"
-    assert manual_tag.status == "MANUAL"
 
 
 def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
@@ -330,6 +330,8 @@ def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
         command: list[str],
         **_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         assert command[:4] == ["git", "show-ref", "--verify", "--quiet"]
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
 
@@ -355,9 +357,10 @@ def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
     )
 
 
-def test_final_pre_tag_does_not_wait_for_release_tag_checkbox(
+def test_pre_tag_ready_without_aggregate_ci_or_tag(
     tmp_path: Path,
     monkeypatch,
+    capsys,
 ) -> None:
     _minimal_repository(tmp_path)
     (tmp_path / "pyproject.toml").write_text(
@@ -372,35 +375,163 @@ def test_final_pre_tag_does_not_wait_for_release_tag_checkbox(
     checklist = tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md"
     checklist_text = checklist.read_text(encoding="utf-8")
     for item in release_preflight.MANUAL_RELEASE_ITEMS:
-        if item.name != "release-tag":
-            checklist_text = checklist_text.replace(
-                f"- [ ] {item.marker}", f"- [x] {item.marker}"
-            )
+        checklist_text = checklist_text.replace(
+            f"- [ ] {item.marker}", f"- [x] {item.marker}"
+        )
     checklist.write_text(checklist_text, encoding="utf-8")
 
     def fake_run(
         command: list[str],
         **_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        if command[:3] == ["git", "status", "--porcelain=v1"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "show-ref", "--verify", "--quiet"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        assert Path(command[0]).name in {"engineering_gate.sh", "dashboard_gate.sh"}
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
     checks = release_preflight.run_preflight(
         tmp_path,
         phase="final-pre-tag",
+        repository_only=False,
+        require_clean=True,
+        run_gates=True,
+    )
+
+    release_tag_check = next(
+        check for check in checks if check.name == "release-tag"
+    )
+    aggregate_check = next(check for check in checks if check.name == "aggregate-ci")
+    assert release_tag_check.status == "PASS"
+    assert aggregate_check.status == "MANUAL"
+    assert not release_preflight._has_failure(checks)
+    assert not release_preflight._has_pending_manual_input(checks)
+    assert not release_preflight._has_skipped_check(checks)
+
+    release_preflight._print_report(
+        checks,
+        phase="final-pre-tag",
+        repository_only=False,
+        run_gates=True,
+    )
+    assert "result: PRE_TAG_READY" in capsys.readouterr().out
+
+
+def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "add", ".")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "release commit",
+    )
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "tag",
+        "-a",
+        "v0.1.0",
+        "-m",
+        "Inferdrome v0.1.0",
+    )
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="auto",
         repository_only=True,
-        require_clean=False,
+        require_clean=True,
         run_gates=False,
     )
 
-    manual_checks = [check for check in checks if check.name.startswith("manual-")]
-    assert all(check.status != "PENDING" for check in manual_checks)
-    release_tag_check = next(
-        check for check in manual_checks if check.name == "manual-release-tag"
+    selection_check = next(check for check in checks if check.name == "phase-selection")
+    tag_check = next(check for check in checks if check.name == "release-tag")
+    assert selection_check.status == "PASS"
+    assert "post-tag" in selection_check.detail
+    assert tag_check.status == "PASS"
+
+
+def test_post_tag_auto_rejects_tag_elsewhere(tmp_path: Path) -> None:
+    _minimal_repository(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "inferdrome"\nversion = "0.1.0"\n',
+        encoding="utf-8",
     )
-    assert (
-        release_tag_check.status == "MANUAL"
+    (tmp_path / "src/inferdrome/__init__.py").write_text(
+        '__version__ = "0.1.0"\n',
+        encoding="utf-8",
     )
+    (tmp_path / "LICENSE").write_text("owner-selected license text\n", encoding="utf-8")
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "add", ".")
+    commit_arguments = (
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+    )
+    _git(tmp_path, *commit_arguments, "release commit")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "tag",
+        "-a",
+        "v0.1.0",
+        "-m",
+        "Inferdrome v0.1.0",
+    )
+    (tmp_path / "README.md").write_text("post-tag commit\n", encoding="utf-8")
+    _git(tmp_path, "add", "README.md")
+    _git(tmp_path, *commit_arguments, "post-tag commit")
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="auto",
+        repository_only=True,
+        require_clean=True,
+        run_gates=False,
+    )
+
+    selection_check = next(check for check in checks if check.name == "phase-selection")
+    assert selection_check.status == "FAIL"
+    assert "next development-cycle" in selection_check.detail
+
+
+def test_release_docs_do_not_require_a_post_tag_repository_commit() -> None:
+    checklist = (REPOSITORY_ROOT / "docs/V0_1_RELEASE_CHECKLIST.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "post-tag record commit" not in checklist
+    assert "post-tag repository commit" not in checklist
 
 
 def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> None:
@@ -419,6 +550,8 @@ def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> 
         command: list[str],
         **_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
+        if command[:4] == ["git", "show-ref", "--verify", "--quiet"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if "refs/tags/v0.1.0^{commit}" in command:
             return subprocess.CompletedProcess(
                 command,
@@ -485,7 +618,18 @@ def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> N
         == "PASS"
     )
 
-    _git(tmp_path, "tag", "-a", "v0.1.0", "-m", "Inferdrome v0.1.0")
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=Inferdrome Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "tag",
+        "-a",
+        "v0.1.0",
+        "-m",
+        "Inferdrome v0.1.0",
+    )
     pre_tag_after_tag = release_preflight.run_preflight(
         tmp_path,
         phase="final-pre-tag",

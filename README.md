@@ -159,8 +159,10 @@ uv sync --extra dev --extra dashboard
 The offline candidate preflight checks repository-owned release inputs and
 reports the manual release blockers without treating them as proven. Normal CI
 uses the `auto` phase, which selects candidate only when both version
-locations are exactly `0.1.0.dev0`; run it from a clean checkout when checking
-a development candidate commit:
+locations are exactly `0.1.0.dev0`; for exact `0.1.0`, it selects
+`final-pre-tag` only while `v0.1.0` is absent, selects `post-tag` when that tag
+resolves to `HEAD`, and fails closed if the tag resolves elsewhere. Run it from
+a clean checkout when checking a development candidate commit:
 
 ```bash
 .venv/bin/python scripts/release_preflight.py \

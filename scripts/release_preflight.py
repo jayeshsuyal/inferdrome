@@ -24,9 +24,11 @@ from typing import Literal
 
 Phase = Literal["candidate", "final-pre-tag", "post-tag"]
 RequestedPhase = Literal["auto", "candidate", "final-pre-tag", "post-tag"]
+TagState = Literal["absent", "head", "elsewhere", "error"]
 DEVELOPMENT_VERSION = "0.1.0.dev0"
 FINAL_VERSION = "0.1.0"
 FINAL_TAG = "v0.1.0"
+CAPTURE_PRODUCER_COMMIT = "c08b46d9fbd87477f45d130aa3c63615937c4dc3"
 CheckStatus = Literal["PASS", "FAIL", "PENDING", "MANUAL", "SKIPPED"]
 
 LICENSE_FILENAMES: tuple[str, ...] = (
@@ -55,11 +57,6 @@ class ManualItem:
 
 MANUAL_RELEASE_ITEMS: tuple[ManualItem, ...] = (
     ManualItem(
-        "capture-ancestor",
-        "Record the eventual release commit",
-        "release owner",
-    ),
-    ManualItem(
         "exitspec-outcomes",
         "Independently demonstrate ExitSpec",
         "ExitSpec owner",
@@ -83,16 +80,6 @@ MANUAL_RELEASE_ITEMS: tuple[ManualItem, ...] = (
         "license-selection",
         "Select and add the repository license",
         "repository owner",
-    ),
-    ManualItem(
-        "required-checks",
-        "Confirm all required GitHub checks pass",
-        "release owner",
-    ),
-    ManualItem(
-        "release-tag",
-        "Tag that exact commit as",
-        "release owner",
     ),
 )
 
@@ -222,6 +209,48 @@ def _check_version(repository_root: Path, *, phase: Phase) -> Check:
     )
 
 
+def _tag_state(repository_root: Path, *, tag: str) -> tuple[TagState, str]:
+    try:
+        tag_ref = f"refs/tags/{tag}"
+        show_ref = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", tag_ref],
+            cwd=repository_root,
+            check=False,
+        )
+        if show_ref.returncode == 1:
+            return "absent", f"{tag} does not exist"
+        if show_ref.returncode != 0:
+            return "error", f"could not inspect {tag_ref}"
+
+        tag_result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        head_result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        return "error", f"tag inspection failed: {error}"
+    if tag_result.returncode != 0 or head_result.returncode != 0:
+        return (
+            "error",
+            f"{tag} and HEAD must both resolve to commits "
+            f"(tag exit {tag_result.returncode}, HEAD exit {head_result.returncode})",
+        )
+    tag_commit = (tag_result.stdout or "").strip()
+    head_commit = (head_result.stdout or "").strip()
+    if not tag_commit or tag_commit != head_commit:
+        return "elsewhere", f"{tag} does not point to HEAD"
+    return "head", f"{tag} points to HEAD ({head_commit})"
+
+
 def _resolve_phase(
     repository_root: Path, requested_phase: RequestedPhase
 ) -> tuple[Phase, Check | None]:
@@ -248,10 +277,32 @@ def _resolve_phase(
             "auto phase selected candidate for exact development versions",
         )
     if versions == (FINAL_VERSION, FINAL_VERSION):
+        tag_state, tag_detail = _tag_state(repository_root, tag=FINAL_TAG)
+        if tag_state == "head":
+            return "post-tag", Check(
+                "phase-selection",
+                "PASS",
+                "auto phase selected post-tag for final versions and a tag "
+                "that resolves to HEAD",
+            )
+        if tag_state == "absent":
+            return "final-pre-tag", Check(
+                "phase-selection",
+                "PASS",
+                "auto phase selected final-pre-tag for exact final versions "
+                "without a release tag",
+            )
+        if tag_state == "elsewhere":
+            return "final-pre-tag", Check(
+                "phase-selection",
+                "FAIL",
+                f"exact final versions are already tagged elsewhere ({tag_detail}); "
+                "update to the next development-cycle version/configuration",
+            )
         return "final-pre-tag", Check(
             "phase-selection",
-            "PASS",
-            "auto phase selected final-pre-tag for exact final versions",
+            "FAIL",
+            f"could not safely select a final phase: {tag_detail}",
         )
     return "candidate", Check(
         "phase-selection",
@@ -291,64 +342,70 @@ def _check_license_artifact(repository_root: Path, *, phase: Phase) -> Check:
 
 
 def _check_tag(repository_root: Path, *, phase: Phase, tag: str) -> Check:
-    try:
-        if phase == "final-pre-tag":
-            result = subprocess.run(
-                ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
-                cwd=repository_root,
-                check=False,
+    tag_state, tag_detail = _tag_state(repository_root, tag=tag)
+    if phase == "final-pre-tag":
+        if tag_state == "absent":
+            return Check(
+                "release-tag",
+                "PASS",
+                f"{tag} does not exist; pre-tag phase may proceed",
             )
-            if result.returncode == 1:
-                return Check(
-                    "release-tag",
-                    "PASS",
-                    f"{tag} does not exist; pre-tag phase may proceed",
-                )
-            if result.returncode == 0:
-                return Check(
-                    "release-tag",
-                    "FAIL",
-                    f"{tag} already exists; use post-tag verification",
-                )
+        if tag_state in ("head", "elsewhere"):
             return Check(
                 "release-tag",
                 "FAIL",
-                f"could not verify that {tag} is absent (git exit code "
-                f"{result.returncode})",
+                f"{tag} already exists; use post-tag verification",
             )
-
-        tag_result = subprocess.run(
-            ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"],
-            cwd=repository_root,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        head_result = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"],
-            cwd=repository_root,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as error:
-        return Check("release-tag", "FAIL", f"tag verification failed: {error}")
-    if tag_result.returncode != 0 or head_result.returncode != 0:
-        return Check(
-            "release-tag",
-            "FAIL",
-            f"{tag} and HEAD must both resolve to commits "
-            f"(tag exit {tag_result.returncode}, HEAD exit {head_result.returncode})",
-        )
-    tag_commit = (tag_result.stdout or "").strip()
-    head_commit = (head_result.stdout or "").strip()
-    if not tag_commit or tag_commit != head_commit:
+        return Check("release-tag", "FAIL", tag_detail)
+    if tag_state == "head":
+        return Check("release-tag", "PASS", tag_detail)
+    if tag_state == "elsewhere":
         return Check(
             "release-tag",
             "FAIL",
             f"{tag} does not point to the checked commit",
         )
-    return Check("release-tag", "PASS", f"{tag} points to HEAD ({head_commit})")
+    return Check("release-tag", "FAIL", tag_detail)
+
+
+def _check_capture_ancestor(repository_root: Path) -> Check:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                CAPTURE_PRODUCER_COMMIT,
+                "HEAD",
+            ],
+            cwd=repository_root,
+            check=False,
+        )
+    except OSError as error:
+        return Check(
+            "capture-producer-ancestor",
+            "FAIL",
+            f"could not verify frozen capture producer ancestry: {error}",
+        )
+    if result.returncode == 0:
+        return Check(
+            "capture-producer-ancestor",
+            "PASS",
+            f"frozen capture producer {CAPTURE_PRODUCER_COMMIT} is an ancestor of HEAD",
+        )
+    if result.returncode == 1:
+        return Check(
+            "capture-producer-ancestor",
+            "FAIL",
+            f"frozen capture producer {CAPTURE_PRODUCER_COMMIT} is not an "
+            "ancestor of HEAD",
+        )
+    return Check(
+        "capture-producer-ancestor",
+        "FAIL",
+        "git merge-base could not verify the frozen capture producer ancestry "
+        f"(exit code {result.returncode})",
+    )
 
 
 def _check_document_markers(repository_root: Path) -> Check:
@@ -478,21 +535,8 @@ def _manual_check(repository_root: Path, item: ManualItem) -> Check:
     )
 
 
-def _manual_checks(repository_root: Path, *, phase: Phase) -> tuple[Check, ...]:
-    checks: list[Check] = []
-    for item in MANUAL_RELEASE_ITEMS:
-        if item.name == "release-tag" and phase != "candidate":
-            checks.append(
-                Check(
-                    "manual-release-tag",
-                    "MANUAL",
-                    "checklist recording follows automated pre-tag/post-tag "
-                    "verification",
-                )
-            )
-        else:
-            checks.append(_manual_check(repository_root, item))
-    return tuple(checks)
+def _manual_checks(repository_root: Path) -> tuple[Check, ...]:
+    return tuple(_manual_check(repository_root, item) for item in MANUAL_RELEASE_ITEMS)
 
 
 def _run_gate(repository_root: Path, name: str, script_name: str) -> Check:
@@ -553,7 +597,18 @@ def run_preflight(
     )
     if resolved_phase != "candidate":
         checks.append(
+            _check_capture_ancestor(repository_root)
+        )
+        checks.append(
             _check_tag(repository_root, phase=resolved_phase, tag=FINAL_TAG)
+        )
+        checks.append(
+            Check(
+                "aggregate-ci",
+                "MANUAL",
+                "GitHub records all three required jobs; this preflight does not "
+                "self-verify their aggregate result",
+            )
         )
     if run_gates:
         checks.extend(
@@ -577,7 +632,7 @@ def run_preflight(
                 ),
             )
         )
-    checks.extend(_manual_checks(repository_root, phase=resolved_phase))
+    checks.extend(_manual_checks(repository_root))
     return tuple(checks)
 
 
@@ -661,8 +716,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "candidate", "final-pre-tag", "post-tag"),
         default="auto",
         help=(
-            "auto selects candidate for exact development versions and "
-            "final-pre-tag for exact final versions; explicit phases override it"
+            "auto selects candidate for exact development versions; for exact "
+            "final versions it selects final-pre-tag without the tag, post-tag "
+            "at tag HEAD, and fails if the tag is elsewhere; explicit phases "
+            "override it"
         ),
     )
     parser.add_argument(
