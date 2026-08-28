@@ -185,6 +185,99 @@ def test_read_regular_rejects_symlinks_hardlinks_and_unsafe_files(
             prospective._read_regular(path, label="test input")
 
 
+@pytest.mark.parametrize("swapped", ["commit", "digest"])
+def test_exported_source_marker_cannot_self_authorize_controller_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    swapped: str,
+) -> None:
+    controller_digest = "sha256:" + "a" * 64
+    swapped_marker_digest = "sha256:" + "b" * 64
+    marker_commit = "b" * 40 if swapped == "commit" else "c" * 40
+    host_pin = _host_pin()
+    monkeypatch.setattr(demo.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(demo, "_git_checkout_present", lambda: False)
+    monkeypatch.setattr(
+        demo,
+        "_source_export_identity",
+        lambda: (
+            marker_commit,
+            swapped_marker_digest if swapped == "digest" else controller_digest,
+        ),
+    )
+    monkeypatch.setattr(
+        demo,
+        "_read_json",
+        lambda *_args, **_kwargs: pytest.fail(
+            "host preparation must not be consulted after marker mismatch"
+        ),
+    )
+
+    with pytest.raises(demo.DemoError, match="controller pin"):
+        demo._require_clean_prepared_host(
+            tmp_path / "state",
+            host_pin,
+            expected_source_archive_sha256=controller_digest,
+            expected_repository_commit="c" * 40,
+        )
+
+
+def test_exported_source_marker_and_host_preparation_must_share_controller_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    model_path = state_root / "models" / "model"
+    model_path.mkdir(parents=True)
+    packages = state_root / "python-packages.txt"
+    packages.write_bytes(b"alpha==1\n")
+    controller_commit = "a" * 40
+    controller_digest = "sha256:" + "a" * 64
+    host_pin = _host_pin()
+    monkeypatch.setattr(demo.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(demo, "_git_checkout_present", lambda: False)
+    monkeypatch.setattr(
+        demo,
+        "_source_export_identity",
+        lambda: (controller_commit, controller_digest),
+    )
+    monkeypatch.setattr(
+        demo,
+        "_read_json",
+        lambda *_args, **_kwargs: {
+            "architecture": "arm64",
+            "model_directory": str(model_path),
+            "model_id": "model-id",
+            "model_revision": "revision",
+            "prepared_at": "2026-08-27T00:00:00Z",
+            "python_packages_sha256": "sha256:" + "b" * 64,
+            "repository_commit": "b" * 40,
+            "schema_version": "inferdrome.real-gpu-host-preparation.v1",
+            "vllm_wheel_filename": "vllm.whl",
+            "vllm_wheel_sha256": "sha256:" + "c" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        demo,
+        "_producer_wheel_pin",
+        lambda *_args: {"filename": "vllm.whl", "sha256": "c" * 64},
+    )
+    monkeypatch.setattr(
+        demo, "_require_package_environment_unchanged", lambda _path: None
+    )
+    monkeypatch.setattr(
+        demo.sys, "executable", str(state_root / "venv" / "bin" / "python")
+    )
+
+    with pytest.raises(demo.DemoError, match="does not match this checkout"):
+        demo._require_clean_prepared_host(
+            state_root,
+            host_pin,
+            expected_source_archive_sha256=controller_digest,
+            expected_repository_commit=controller_commit,
+        )
+
+
 def _metadata_cases(
     tmp_path: Path,
 ) -> tuple[tuple[prospective.CompletedCase, ...], list[str]]:

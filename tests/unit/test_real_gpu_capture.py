@@ -1,6 +1,7 @@
 """Remote real-GPU capture transport and verification boundaries."""
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -222,9 +223,42 @@ def test_exact_tree_export_excludes_removed_secret_and_git_history(
         text=True,
     ).stdout.strip()
 
+    literal_marker_archive = tmp_path / "literal-marker.tar"
+    marker_digest, marker_size = remote._create_source_archive(
+        literal_marker_archive,
+        private_commit,
+    )
+    assert marker_digest == (
+        "sha256:" + hashlib.sha256(literal_marker_archive.read_bytes()).hexdigest()
+    )
+    assert marker_size == literal_marker_archive.stat().st_size
+
+    private_payload = base64.b64encode(
+        b"openssh-key-v1\x00" + b"\x00" * 256
+    ).decode("ascii")
+    private_material.write_text(
+        "-----BEGIN OPENSSH "
+        + "PRIVATE KEY-----\n"
+        + private_payload
+        + "\n-----END OPENSSH "
+        + "PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "tracked private key"],
+        check=True,
+    )
+    actual_private_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
     blocked_key_archive = tmp_path / "blocked-key.tar"
     with pytest.raises(remote.RemoteCaptureError, match="private-key material"):
-        remote._create_source_archive(blocked_key_archive, private_commit)
+        remote._create_source_archive(blocked_key_archive, actual_private_commit)
     assert not blocked_key_archive.exists()
 
     private_material.unlink()
@@ -247,6 +281,457 @@ def test_exact_tree_export_excludes_removed_secret_and_git_history(
     with pytest.raises(remote.RemoteCaptureError, match="attributes alter"):
         remote._create_source_archive(
             tmp_path / "blocked-attributes.tar", attributes_commit
+        )
+
+
+def test_exact_source_archive_accepts_the_current_tracked_head(tmp_path: Path) -> None:
+    commit = subprocess.run(
+        ["git", "-C", str(remote.REPOSITORY_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    expected_archive = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(remote.REPOSITORY_ROOT),
+            "archive",
+            "--format=tar",
+            commit,
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    expected_digest = "sha256:" + hashlib.sha256(expected_archive).hexdigest()
+    destination = tmp_path / "current-head.tar"
+
+    digest, size = remote._create_source_archive(
+        destination,
+        commit,
+        expected_archive_sha256=expected_digest,
+    )
+
+    assert digest == expected_digest
+    assert size == len(expected_archive)
+    assert destination.read_bytes() == expected_archive
+
+
+@pytest.mark.parametrize(
+    ("entry_count", "blob_size", "message"),
+    [
+        (1, remote._MAX_SOURCE_ARCHIVE_BYTES, "archive bound"),
+        (100_001, 0, "file count"),
+    ],
+)
+def test_git_source_archive_preflight_rejects_sparse_or_many_entry_trees(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_count: int,
+    blob_size: int,
+    message: str,
+) -> None:
+    listing = b"".join(
+        f"100644 blob {'a' * 40} {blob_size}\tfile-{index}.txt\0".encode()
+        for index in range(entry_count)
+    )
+    calls: list[list[str]] = []
+
+    def run(arguments: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv = [str(value) for value in arguments]  # type: ignore[arg-type]
+        calls.append(argv)
+        if "ls-tree" in argv:
+            return subprocess.CompletedProcess(argv, 0, listing, b"")
+        pytest.fail("bounded source preflight must reject before git archive")
+
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(remote, "_git_checkout_present", lambda: True)
+    monkeypatch.setattr(remote, "_run", run)
+
+    with pytest.raises(remote.RemoteCaptureError, match=message):
+        remote._create_source_archive(tmp_path / "rejected.tar", COMMIT)
+    assert ["archive" for call in calls if "archive" in call] == []
+
+
+def test_git_source_archive_stream_rejects_over_cap_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_popen = subprocess.Popen
+    code = (
+        "import sys\n"
+        "for _ in range(2049):\n"
+        "    sys.stdout.buffer.write(b'x' * 65536)\n"
+        "    sys.stdout.buffer.flush()\n"
+    )
+
+    def over_cap_popen(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        return original_popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+
+    monkeypatch.setattr(remote.subprocess, "Popen", over_cap_popen)
+    destination = tmp_path / "over-cap.tar"
+    with pytest.raises(remote.RemoteCaptureError, match="exceeds"):
+        remote._stream_git_source_archive(destination, COMMIT)
+    assert destination.is_file()
+    assert destination.stat().st_size <= remote._MAX_SOURCE_ARCHIVE_BYTES
+
+
+def test_git_source_archive_preflight_accounts_for_long_path_pax_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_path = "/".join(["long-name"] * 30) + "/payload.txt"
+    listing = (
+        f"100644 blob {'a' * 40} {remote._MAX_SOURCE_ARCHIVE_BYTES - 1024}\t"
+        f"{long_path}\0"
+    ).encode()
+
+    def run(arguments: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        argv = [str(value) for value in arguments]  # type: ignore[arg-type]
+        if "ls-tree" in argv:
+            return subprocess.CompletedProcess(argv, 0, listing, b"")
+        pytest.fail("PAX-aware source preflight must reject before Git streaming")
+
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(remote, "_git_checkout_present", lambda: True)
+    monkeypatch.setattr(remote, "_run", run)
+
+    with pytest.raises(remote.RemoteCaptureError, match="archive bound"):
+        remote._create_source_archive(tmp_path / "long-path.tar", COMMIT)
+
+
+def test_git_source_archive_stream_preserves_preexisting_or_replaced_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "destination-target"
+    target.write_bytes(b"must remain")
+    destination = tmp_path / "source.tar"
+    destination.symlink_to(target)
+
+    with pytest.raises(remote.RemoteCaptureError):
+        remote._stream_git_source_archive(destination, COMMIT)
+    assert destination.is_symlink()
+    assert target.read_bytes() == b"must remain"
+
+    destination.unlink()
+    original_popen = subprocess.Popen
+    original_lstat = os.lstat
+    replaced = False
+
+    def small_popen(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        return original_popen(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'archive')"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+
+    def replace_on_final_check(path: os.PathLike[str] | str) -> os.stat_result:
+        nonlocal replaced
+        result = original_lstat(path)
+        if Path(path) == destination and not replaced:
+            destination.unlink()
+            destination.symlink_to(target)
+            replaced = True
+            return original_lstat(path)
+        return result
+
+    monkeypatch.setattr(remote.subprocess, "Popen", small_popen)
+    monkeypatch.setattr(remote.os, "lstat", replace_on_final_check)
+    with pytest.raises(remote.RemoteCaptureError, match="changed while it was written"):
+        remote._stream_git_source_archive(destination, COMMIT)
+    assert destination.is_symlink()
+    assert target.read_bytes() == b"must remain"
+
+
+def test_exact_tree_export_supports_pinned_tree_without_git_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    git_repository = tmp_path / "git-repository"
+    git_repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(git_repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repository), "config", "user.email", "test@example.test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(git_repository), "config", "user.name", "Inferdrome Test"],
+        check=True,
+    )
+    (git_repository / "README.md").write_text("exported tree\n", encoding="utf-8")
+    (git_repository / "src").mkdir()
+    (git_repository / "src" / "nested.txt").write_text("nested\n", encoding="utf-8")
+    executable = git_repository / "src" / "run.sh"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    subprocess.run(["git", "-C", str(git_repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repository), "commit", "-qm", "exported tree"],
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(git_repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    original_archive = tmp_path / "original-git-archive.tar"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repository),
+            "archive",
+            "--format=tar",
+            f"--output={original_archive}",
+            commit,
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", git_repository)
+    expected_digest = (
+        "sha256:" + hashlib.sha256(original_archive.read_bytes()).hexdigest()
+    )
+    with pytest.raises(remote.RemoteCaptureError, match="independent digest pin"):
+        remote._create_source_archive(
+            tmp_path / "wrong-git-pin.tar",
+            commit,
+            expected_archive_sha256="sha256:" + "0" * 64,
+        )
+    git_archive = tmp_path / "git-path.tar"
+    git_digest, git_size = remote._create_source_archive(
+        git_archive,
+        commit,
+        expected_archive_sha256=expected_digest,
+    )
+    assert git_archive.read_bytes() == original_archive.read_bytes()
+    assert git_digest == expected_digest
+    assert git_size == original_archive.stat().st_size
+    assert remote._require_checkout(commit) == commit
+    with pytest.raises(remote.RemoteCaptureError, match="not --expected-commit"):
+        remote._require_checkout("0" * 40)
+
+    original_stream = remote._stream_git_source_archive
+
+    publication_target = tmp_path / "git-publication-target"
+    publication_target.write_bytes(b"must remain")
+    publication_destination = tmp_path / "git-publication-race.tar"
+    original_rename = remote._rename_no_replace
+
+    def race_git_publication(source: Path, destination: Path) -> None:
+        assert destination == publication_destination
+        publication_destination.symlink_to(publication_target)
+        original_rename(source, destination)
+
+    monkeypatch.setattr(remote, "_rename_no_replace", race_git_publication)
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
+        remote._create_source_archive(
+            publication_destination,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert publication_destination.is_symlink()
+    assert publication_target.read_bytes() == b"must remain"
+    monkeypatch.setattr(remote, "_rename_no_replace", original_rename)
+
+    def mutate_after_stream(
+        destination: Path, selected_commit: str
+    ) -> tuple[int, tuple[int, int], int, str]:
+        result = original_stream(destination, selected_commit)
+        offset = original_archive.read_bytes().index(b"exported tree")
+        assert os.pwrite(result[0], b"replaced tree", offset) == len(b"replaced tree")
+        return result
+
+    monkeypatch.setattr(remote, "_stream_git_source_archive", mutate_after_stream)
+    with pytest.raises(
+        remote.RemoteCaptureError, match="changed while it was validated"
+    ):
+        remote._create_source_archive(tmp_path / "mutated-after-stream.tar", commit)
+    monkeypatch.setattr(remote, "_stream_git_source_archive", original_stream)
+
+    repository = tmp_path / "export"
+    repository.mkdir()
+    with tarfile.open(original_archive, mode="r:") as archive:
+        archive.extractall(repository, filter="data")
+    marker = {
+        "repository_commit": commit,
+        "schema_version": "inferdrome.source-tree-export.v1",
+        "source_archive_sha256": expected_digest,
+        "transport": "git-archive-exact-head-tree-v1",
+    }
+    (repository / ".inferdrome-source-export.json").write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).write_bytes(
+        original_archive.read_bytes()
+    )
+    monkeypatch.setattr(remote, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(remote, "_git_checkout_present", lambda: False)
+    assert remote._require_checkout(commit) == commit
+    with pytest.raises(remote.RemoteCaptureError, match="not --expected-commit"):
+        remote._require_checkout("0" * 40)
+
+    archive = tmp_path / "repo.tar"
+    with pytest.raises(
+        remote.RemoteCaptureError, match="independent expected archive digest"
+    ):
+        remote._create_source_archive(archive, commit)
+
+    marker = json.loads((repository / ".inferdrome-source-export.json").read_text())
+    marker["source_archive_sha256"] = "sha256:" + "0" * 64
+    (repository / ".inferdrome-source-export.json").write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(remote.RemoteCaptureError, match="independent archive digest"):
+        remote._create_source_archive(
+            tmp_path / "rewritten-marker.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    marker["source_archive_sha256"] = expected_digest
+    (repository / ".inferdrome-source-export.json").write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (repository / "README.md").write_text("modified exported tree\n", encoding="utf-8")
+    with pytest.raises(remote.RemoteCaptureError, match="disagrees with retained"):
+        remote._create_source_archive(
+            tmp_path / "modified-tree.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    (repository / "README.md").write_text("exported tree\n", encoding="utf-8")
+    digest, size = remote._create_source_archive(
+        archive,
+        commit,
+        expected_archive_sha256=expected_digest,
+    )
+
+    assert digest == expected_digest
+    assert size == archive.stat().st_size
+    assert archive.read_bytes() == original_archive.read_bytes()
+    assert b".inferdrome-source-export.json" not in archive.read_bytes()
+
+    destination_target = tmp_path / "destination-target"
+    destination_target.write_bytes(b"must remain")
+    destination_link = tmp_path / "destination-link.tar"
+    destination_link.symlink_to(destination_target)
+    with pytest.raises(remote.RemoteCaptureError, match="destination already exists"):
+        remote._create_source_archive(
+            destination_link,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert destination_link.is_symlink()
+    assert destination_target.read_bytes() == b"must remain"
+
+    replacement_destination = tmp_path / "replacement-destination.tar"
+    original_writer = remote._write_bytes_exclusive
+    replaced_staging: list[Path] = []
+
+    def write_then_replace(path: Path, content: bytes) -> tuple[int, int]:
+        result = original_writer(path, content)
+        path.unlink()
+        path.symlink_to(destination_target)
+        replaced_staging.append(path)
+        return result
+
+    monkeypatch.setattr(remote, "_write_bytes_exclusive", write_then_replace)
+    with pytest.raises(remote.RemoteCaptureError, match="could not be copied"):
+        remote._create_source_archive(
+            replacement_destination,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert not replacement_destination.exists()
+    assert len(replaced_staging) == 1
+    assert replaced_staging[0].is_symlink()
+    assert destination_target.read_bytes() == b"must remain"
+    monkeypatch.setattr(remote, "_write_bytes_exclusive", original_writer)
+
+    retained_publication_destination = tmp_path / "retained-publication-race.tar"
+
+    def race_retained_publication(source: Path, destination: Path) -> None:
+        assert destination == retained_publication_destination
+        retained_publication_destination.symlink_to(destination_target)
+        original_rename(source, destination)
+
+    monkeypatch.setattr(remote, "_rename_no_replace", race_retained_publication)
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
+        remote._create_source_archive(
+            retained_publication_destination,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert retained_publication_destination.is_symlink()
+    assert destination_target.read_bytes() == b"must remain"
+    monkeypatch.setattr(remote, "_rename_no_replace", original_rename)
+
+    (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).unlink()
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "missing-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).write_bytes(
+        original_archive.read_bytes()
+    )
+    retained = repository / remote._RETAINED_SOURCE_ARCHIVE_NAME
+    retained_target = tmp_path / "retained-target"
+    retained_target.write_bytes(original_archive.read_bytes())
+    retained.unlink()
+    retained.symlink_to(retained_target)
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "linked-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert retained.is_symlink()
+    retained.unlink()
+    hardlink_target = tmp_path / "hardlink-target"
+    hardlink_target.write_bytes(original_archive.read_bytes())
+    retained.hardlink_to(hardlink_target)
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "hardlinked-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    retained.unlink()
+    retained.write_bytes(b"x")
+    with retained.open("r+b") as stream:
+        stream.truncate(remote._MAX_SOURCE_ARCHIVE_BYTES + 1)
+    with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):
+        remote._create_source_archive(
+            tmp_path / "oversized-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    retained.unlink()
+    retained.write_bytes(b"truncated")
+    with pytest.raises(remote.RemoteCaptureError, match="independent digest"):
+        remote._create_source_archive(
+            tmp_path / "truncated-retained.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    retained.write_bytes(original_archive.read_bytes())
+    (repository / ".codex-venv").mkdir()
+    with pytest.raises(remote.RemoteCaptureError, match="disagrees with retained"):
+        remote._create_source_archive(
+            tmp_path / "rejected-env.tar",
+            commit,
+            expected_archive_sha256=expected_digest,
         )
 
 
@@ -387,9 +872,7 @@ def test_qwen3_a100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
         ({"qwen3_gpu_tier": "h100-80gb-pcie"}, "3.29"),
     ):
         with pytest.raises(remote.RemoteCaptureError, match=message):
-            remote._validate_capture_mode(
-                SimpleNamespace(**{**base, **mutation})
-            )
+            remote._validate_capture_mode(SimpleNamespace(**{**base, **mutation}))
 
 
 def test_qwen3_a100_sxm4_capture_mode_freezes_exact_rate_and_cap() -> None:
@@ -464,9 +947,9 @@ def test_h100_phase_budget_preserves_termination_slack() -> None:
 
     assert policy.allowed_seconds == 2_462
     assert sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 2_078
-    assert policy.allowed_seconds - sum(
-        remote._QWEN3_PHASE_BUDGET_SECONDS.values()
-    ) == 384
+    assert (
+        policy.allowed_seconds - sum(remote._QWEN3_PHASE_BUDGET_SECONDS.values()) == 384
+    )
 
 
 def test_qwen3_transfer_metadata_rejects_oversized_archive(tmp_path: Path) -> None:
@@ -492,7 +975,7 @@ def test_qwen3_dry_run_discloses_termination_before_semantic_verification(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
@@ -541,7 +1024,7 @@ def test_qwen3_a100_dry_run_binds_runtime_instance_type_and_exact_gpu(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
@@ -574,7 +1057,7 @@ def test_qwen3_a100_sxm4_dry_run_binds_extension_instance_and_gpu(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
@@ -607,7 +1090,7 @@ def test_qwen3_h100_dry_run_binds_runtime_instance_type_and_exact_gpu(
     monkeypatch.setattr(
         remote,
         "_create_source_archive",
-        lambda _path, _commit: (SOURCE_ARCHIVE_SHA256, 1_024),
+        lambda _path, _commit, **_kwargs: (SOURCE_ARCHIVE_SHA256, 1_024),
     )
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
@@ -1040,9 +1523,7 @@ def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
             "managed_capability_profile": remote._QWEN3_PROFILE_ID,
             "repository_commit": COMMIT,
             "schema_version": "inferdrome.qwen3-gpu-retrieval.v2",
-            "semantic_verification": (
-                "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
-            ),
+            "semantic_verification": ("PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"),
             "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
             "ssh_host_identity_sha256": "sha256:" + "9" * 64,
             "verified_at": "2026-08-20T20:19:00Z",
@@ -1076,9 +1557,7 @@ def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
             "trigger": "controller-finally",
         },
     )
-    gpu_target = remote.qwen3_gpu_tier_policy(
-        "a100-40gb-pcie"
-    ).public_target()
+    gpu_target = remote.qwen3_gpu_tier_policy("a100-40gb-pcie").public_target()
     verification = {
         "capture_manifest_sha256": "sha256:" + "d" * 64,
         "gpu_target": gpu_target,
@@ -1140,19 +1619,20 @@ def test_qwen3_a100_finalization_publishes_tier_bound_v2_semantics(
         receipt_path=guard_receipt,
     )
 
-    assert remote._finalize_qwen3_capture(
-        capture_path,
-        commit=COMMIT,
-        watchdog=watchdog,
-        termination=termination,
-    ) == capture_path
+    assert (
+        remote._finalize_qwen3_capture(
+            capture_path,
+            commit=COMMIT,
+            watchdog=watchdog,
+            termination=termination,
+        )
+        == capture_path
+    )
     semantic = json.loads(
         (capture_path / "semantic-verification.json").read_text(encoding="utf-8")
     )
 
-    assert semantic["schema_version"] == (
-        "inferdrome.qwen3-offline-verification.v2"
-    )
+    assert semantic["schema_version"] == ("inferdrome.qwen3-offline-verification.v2")
     assert semantic["gpu_tier_id"] == "a100-40gb-pcie"
     assert semantic["gpu_target"] == gpu_target
     assert semantic["lambda_instance_type_name"] == instance_type
@@ -1214,9 +1694,7 @@ def test_qwen3_offline_resume_uses_retained_guard_receipts(
             "managed_capability_profile": remote._QWEN3_PROFILE_ID,
             "repository_commit": COMMIT,
             "schema_version": "inferdrome.qwen3-gpu-retrieval.v1",
-            "semantic_verification": (
-                "PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"
-            ),
+            "semantic_verification": ("PENDING_UNTIL_PROVIDER_TERMINATION_CONFIRMED"),
             "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
             "ssh_host_identity_sha256": "sha256:" + "9" * 64,
             "verified_at": "2026-08-20T20:19:00Z",
@@ -1450,9 +1928,7 @@ def test_qwen3_a100_guard_accepts_only_the_runtime_bound_instance_type(
     )
     handle = SimpleNamespace(
         client=SimpleNamespace(list_instances=lambda: (target,)),
-        cost_window=SimpleNamespace(
-            deadline=datetime(2026, 8, 20, 20, 20, tzinfo=UTC)
-        ),
+        cost_window=SimpleNamespace(deadline=datetime(2026, 8, 20, 20, 20, tzinfo=UTC)),
         instance=target,
         state_directory=Path("/tmp/inferdrome-test-guard"),
     )

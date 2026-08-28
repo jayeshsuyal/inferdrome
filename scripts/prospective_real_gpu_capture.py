@@ -597,7 +597,19 @@ def _case_metadata(completed: CompletedCase, session_root: Path) -> dict[str, An
     }
 
 
-def _repository_commit() -> str:
+def _repository_commit(expected_commit: str | None = None) -> str:
+    if not demo._git_checkout_present():
+        try:
+            value = demo._source_export_identity()[0]
+        except demo.DemoError:
+            raise ProspectiveCaptureError(
+                "Inferdrome source export identity cannot be inspected"
+            ) from None
+        if expected_commit is not None and value != expected_commit:
+            raise ProspectiveCaptureError(
+                "source export commit does not match the controller pin"
+            )
+        return value
     try:
         value = demo._git_output("rev-parse", "--verify", "HEAD")
     except demo.DemoError:
@@ -606,6 +618,10 @@ def _repository_commit() -> str:
         ) from None
     if _COMMIT.fullmatch(value) is None:
         raise ProspectiveCaptureError("Inferdrome repository commit is invalid")
+    if expected_commit is not None and value != expected_commit:
+        raise ProspectiveCaptureError(
+            "repository commit does not match the controller pin"
+        )
     return value
 
 
@@ -1078,6 +1094,18 @@ def _startup_timeout(value: str) -> float:
     return timeout
 
 
+def _expected_commit(value: str) -> str:
+    if _COMMIT.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("expected repository commit is invalid")
+    return value
+
+
+def _expected_source_archive_digest(value: str) -> str:
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise argparse.ArgumentTypeError("expected source archive digest is invalid")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run a prospective ExitSpec-linked Qwen2.5 real-GPU capture"
@@ -1125,6 +1153,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--startup-timeout-seconds",
         type=_startup_timeout,
         default=900.0,
+    )
+    parser.add_argument(
+        "--expected-source-archive-sha256",
+        type=_expected_source_archive_digest,
+        help="controller-pinned exact source archive digest for an exported tree",
+    )
+    parser.add_argument(
+        "--expected-repository-commit",
+        type=_expected_commit,
+        help="controller-pinned repository commit for an exported tree",
     )
     return parser
 
@@ -1180,10 +1218,25 @@ def _run_without_interrupts(args: argparse.Namespace) -> Path:
         )
     pin = _static_pin()
     state_root = Path(args.state_root).absolute()
+    expected_source_archive_sha256: str | None = None
+    if not demo._git_checkout_present():
+        if args.expected_source_archive_sha256 is None:
+            raise ProspectiveCaptureError(
+                "prospective exported-tree capture requires the controller "
+                "source digest"
+            )
+        if args.expected_repository_commit is None:
+            raise ProspectiveCaptureError(
+                "prospective exported-tree capture requires the controller "
+                "repository commit"
+            )
+        expected_source_archive_sha256 = args.expected_source_archive_sha256
     try:
         model_path, repository_commit = demo._require_clean_prepared_host(
             state_root,
             pin,
+            expected_source_archive_sha256=expected_source_archive_sha256,
+            expected_repository_commit=args.expected_repository_commit,
         )
     except demo.DemoError as error:
         raise ProspectiveCaptureError(str(error)) from None
