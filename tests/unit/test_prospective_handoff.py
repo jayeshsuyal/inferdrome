@@ -507,6 +507,40 @@ def test_producer_link_cannot_self_authorize_a_changed_source_and_manifest(
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("contract_id", "inferdrome-p1-independent-lookalike"),
+        ("contract_version", "1.0.1"),
+    ],
+)
+def test_manifest_contract_identity_cannot_be_independently_re_pinned(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    root = tmp_path / field
+    _manifest_digest, workload_digest = _make_handoff(root)
+    manifest = _manifest(root)
+    cases = manifest["cases"]
+    assert isinstance(cases, list)
+    selected = cases[0]
+    assert isinstance(selected, dict)
+    selected[field] = replacement
+    manifest_bytes = rfc8785.dumps(manifest)
+    (root / "handoff-manifest.json").write_bytes(manifest_bytes)
+
+    with pytest.raises(
+        handoff.ProspectiveHandoffError,
+        match="manifest contract identity disagrees",
+    ):
+        handoff.snapshot_handoff(
+            root,
+            expected_manifest_sha256=_digest(manifest_bytes),
+            expected_workload_sha256=workload_digest,
+        )
+
+
 def test_changed_contract_cannot_pass_with_recalculated_artifact_and_manifest_pins(
     tmp_path: Path,
 ) -> None:

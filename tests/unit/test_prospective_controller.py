@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -73,7 +74,9 @@ def _snapshot() -> handoff.HandoffSnapshot:
 def _prospective_args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "destination": "operator@prepared.example.test",
+        "expected_commit": COMMIT,
         "expected_handoff_manifest_sha256": "sha256:" + "2" * 64,
+        "expected_source_archive_sha256": SOURCE_DIGEST,
         "expected_workload_sha256": "sha256:" + "3" * 64,
         "gpu_index": 0,
         "host_key_file": None,
@@ -129,14 +132,145 @@ def test_mutated_p1_is_rejected_before_source_or_ssh(
         remote._capture_prospective_with_handoff(args, COMMIT, tmp_path / "id_ed25519")
 
 
-@pytest.mark.parametrize("missing", ["identity_file", "host_key_sha256"])
-def test_prospective_mode_requires_identity_and_host_pin(
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"expected_commit": None},
+        {"expected_commit": "b" * 40},
+        {"expected_source_archive_sha256": None},
+    ],
+)
+def test_prospective_source_pins_fail_before_snapshot_watchdog_or_ssh(
     tmp_path: Path,
-    missing: str,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: dict[str, str | None],
 ) -> None:
+    args = _prospective_args(tmp_path, **mutation)
+    monkeypatch.setattr(
+        remote.prospective_handoff,
+        "snapshot_handoff",
+        lambda *_args, **_kwargs: pytest.fail("source pins must precede snapshot"),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_arm_lambda_watchdog",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source pins must precede provider action"
+        ),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("source pins must precede SSH"),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="prospective"):
+        remote._capture_prospective_with_handoff(
+            args,
+            COMMIT,
+            tmp_path / "id_ed25519",
+        )
+
+
+def test_wrong_prospective_archive_pin_fails_before_watchdog_or_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrong_digest = "sha256:" + "0" * 64
+    args = _prospective_args(
+        tmp_path,
+        expected_source_archive_sha256=wrong_digest,
+    )
+    snapshot = _snapshot()
+    monkeypatch.setattr(
+        remote.prospective_handoff,
+        "snapshot_handoff",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        remote.prospective_handoff,
+        "create_handoff_archive",
+        lambda value, _path: value,
+    )
+    monkeypatch.setattr(
+        remote,
+        "_validate_prospective_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def reject_source_pin(
+        _path: Path,
+        _commit: str,
+        *,
+        expected_archive_sha256: str | None = None,
+    ) -> tuple[str, int]:
+        assert expected_archive_sha256 == wrong_digest
+        raise remote.RemoteCaptureError(
+            "exact source archive disagrees with its independent digest pin"
+        )
+
+    monkeypatch.setattr(remote, "_create_source_archive", reject_source_pin)
+    monkeypatch.setattr(
+        remote,
+        "_arm_lambda_watchdog",
+        lambda *_args, **_kwargs: pytest.fail(
+            "pin mismatch must precede provider action"
+        ),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("pin mismatch must precede SSH"),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="digest pin"):
+        remote._capture_prospective_with_handoff(
+            args,
+            COMMIT,
+            tmp_path / "id_ed25519",
+        )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "expected_commit",
+        "expected_source_archive_sha256",
+        "identity_file",
+        "host_key_sha256",
+    ],
+)
+@pytest.mark.parametrize("git_checkout_present", [True, False])
+def test_prospective_mode_requires_all_pins_in_git_and_exported_trees(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+    git_checkout_present: bool,
+) -> None:
+    monkeypatch.setattr(
+        remote,
+        "_git_checkout_present",
+        lambda: git_checkout_present,
+    )
     values = {missing: None}
     with pytest.raises(remote.RemoteCaptureError, match="explicit"):
         remote._validate_capture_mode(_prospective_args(tmp_path, **values))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"expected_commit": "A" * 40},
+        {"expected_source_archive_sha256": "a" * 64},
+        {"expected_source_archive_sha256": "sha256:" + "A" * 64},
+    ],
+)
+def test_prospective_source_pins_require_exact_lowercase_tagged_shapes(
+    tmp_path: Path,
+    mutation: dict[str, str],
+) -> None:
+    with pytest.raises(remote.RemoteCaptureError, match="prospective"):
+        remote._validate_capture_mode(_prospective_args(tmp_path, **mutation))
 
 
 @pytest.mark.parametrize("missing", ["lambda_instance_id", "lambda_instance_type_name"])
@@ -248,6 +382,14 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
 
     monkeypatch.setattr(remote, "_download_bounded_remote_file", bounded)
     monkeypatch.setattr(remote, "_download_exact_remote_file", exact)
+    original_publish = remote._publish_no_replace
+
+    def publish(source: Path, destination: Path, *, label: str) -> None:
+        events.append("publish")
+        assert label == "local prospective capture destination"
+        original_publish(source, destination, label=label)
+
+    monkeypatch.setattr(remote, "_publish_no_replace", publish)
     monkeypatch.setattr(
         remote,
         "_extract_prospective_archive",
@@ -276,6 +418,7 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
         "remote-run",
         "metadata",
         "archive",
+        "publish",
     ]
     assert "StrictHostKeyChecking=yes" in remote._ssh_options(
         identity=identity,
@@ -283,6 +426,28 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
         port=22,
         pinned=True,
     )
+
+
+def test_prospective_final_publication_never_replaces_raced_destination(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / ".capture.staging"
+    staging.mkdir()
+    (staging / "owned").write_bytes(b"staged evidence")
+    destination = tmp_path / "capture"
+    destination.mkdir()
+    marker = destination / "unowned"
+    marker.write_bytes(b"must remain")
+
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
+        remote._publish_no_replace(
+            staging,
+            destination,
+            label="local prospective capture destination",
+        )
+
+    assert marker.read_bytes() == b"must remain"
+    assert (staging / "owned").read_bytes() == b"staged evidence"
 
 
 @pytest.mark.parametrize("mutated", ["source", "handoff"])
@@ -378,7 +543,11 @@ def test_remote_source_retention_stream_is_bounded_and_exclusive(
     retention = blocks[0]
 
     def run(
-        source: Path, repository: Path, digest: str
+        source: Path,
+        repository: Path,
+        digest: str,
+        *,
+        environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-", str(repository), str(source), COMMIT, digest],
@@ -386,6 +555,7 @@ def test_remote_source_retention_stream_is_bounded_and_exclusive(
             capture_output=True,
             text=True,
             check=False,
+            env=environment,
         )
 
     source = tmp_path / "repo.tar"
@@ -444,6 +614,50 @@ def test_remote_source_retention_stream_is_bounded_and_exclusive(
     ).is_symlink()
     assert target.read_bytes() == b"must remain"
 
+    replacement_repository = tmp_path / "replacement-repository"
+    replacement_repository.mkdir()
+    replacement_target = tmp_path / "replacement-target"
+    replacement_target.write_bytes(b"must remain")
+    hook_root = tmp_path / "retention-race-hook"
+    hook_root.mkdir()
+    (hook_root / "sitecustomize.py").write_text(
+        """import os
+from pathlib import Path
+
+original_lstat = os.lstat
+triggered = False
+
+def replace_retained(path, *args, **kwargs):
+    global triggered
+    selected = Path(path)
+    if not triggered and selected.name == '.inferdrome-source-archive.tar':
+        selected.unlink()
+        selected.symlink_to(Path(os.environ['INFERDROME_TEST_REPLACEMENT']))
+        triggered = True
+    return original_lstat(path, *args, **kwargs)
+
+os.lstat = replace_retained
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(hook_root)
+    environment["INFERDROME_TEST_REPLACEMENT"] = str(replacement_target)
+    assert (
+        run(
+            source,
+            replacement_repository,
+            SOURCE_DIGEST,
+            environment=environment,
+        ).returncode
+        != 0
+    )
+    replaced_retained = (
+        replacement_repository / remote._RETAINED_SOURCE_ARCHIVE_NAME
+    )
+    assert replaced_retained.is_symlink()
+    assert replacement_target.read_bytes() == b"must remain"
+
 
 @pytest.mark.parametrize("kind", ["malformed", "oversized", "truncated", "growing"])
 def test_prospective_transfer_rejects_bounded_stream_failures(
@@ -480,6 +694,33 @@ def test_prospective_transfer_rejects_bounded_stream_failures(
             timeout=5,
         )
     assert not destination.exists()
+
+
+def test_prospective_download_preserves_destination_created_at_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "archive"
+    original_rename = remote._rename_no_replace
+
+    def race_publication(source: Path, selected: Path) -> None:
+        assert selected == destination
+        selected.write_bytes(b"unowned replacement")
+        original_rename(source, selected)
+
+    monkeypatch.setattr(remote, "_rename_no_replace", race_publication)
+    code = "import sys; sys.stdout.buffer.write(b'complete')"
+
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
+        remote._download_remote_file(
+            [sys.executable, "-c", code],
+            destination,
+            minimum_size=8,
+            maximum_size=8,
+            timeout=5,
+        )
+
+    assert destination.read_bytes() == b"unowned replacement"
 
 
 @pytest.mark.parametrize("kind", ["symlink", "traversal", "collision"])
@@ -529,22 +770,83 @@ def test_prospective_extraction_preserves_unowned_destination_on_race(
     assert target.is_dir()
 
     destination.unlink()
-    replaced = False
-    original_mkdir = Path.mkdir
+    original_rename = remote._rename_no_replace
 
-    def race_mkdir(path: Path, *args: object, **kwargs: object) -> None:
-        nonlocal replaced
-        original_mkdir(path, *args, **kwargs)
-        if path == destination and not replaced:
-            destination.rmdir()
-            destination.symlink_to(target, target_is_directory=True)
-            replaced = True
+    def race_publication(source: Path, selected: Path) -> None:
+        assert selected == destination
+        destination.symlink_to(target, target_is_directory=True)
+        original_rename(source, selected)
 
-    monkeypatch.setattr(Path, "mkdir", race_mkdir)
-    with pytest.raises(remote.RemoteCaptureError, match="unsafe"):
+    monkeypatch.setattr(remote, "_rename_no_replace", race_publication)
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
         remote._extract_prospective_archive(archive_path.read_bytes(), destination)
     assert destination.is_symlink()
     assert target.is_dir()
+
+
+def test_prospective_extraction_rejects_nested_directory_symlink_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "session.tar.gz"
+    with tarfile.open(archive_path, mode="w:gz") as archive:
+        member = tarfile.TarInfo("session/nested/result.json")
+        member.size = 2
+        archive.addfile(member, io.BytesIO(b"{}"))
+    target = tmp_path / "nested-target"
+    target.mkdir()
+    marker = target / "marker"
+    marker.write_bytes(b"must remain")
+    original_mkdir = remote.os.mkdir
+
+    def race_nested_directory(
+        path: os.PathLike[str] | str,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        original_mkdir(path, mode=mode, dir_fd=dir_fd)
+        if path == "nested" and dir_fd is not None:
+            os.rmdir(path, dir_fd=dir_fd)
+            os.symlink(target, path, dir_fd=dir_fd, target_is_directory=True)
+
+    monkeypatch.setattr(remote.os, "mkdir", race_nested_directory)
+
+    with pytest.raises(remote.RemoteCaptureError, match="unsafe"):
+        remote._extract_prospective_archive(
+            archive_path.read_bytes(),
+            tmp_path / "extracted",
+        )
+
+    assert marker.read_bytes() == b"must remain"
+    assert not (target / "result.json").exists()
+
+
+@pytest.mark.parametrize("limit", ["depth", "implicit-directories"])
+def test_prospective_extraction_bounds_directory_amplification(
+    tmp_path: Path,
+    limit: str,
+) -> None:
+    archive_path = tmp_path / f"{limit}.tar.gz"
+    with tarfile.open(archive_path, mode="w:gz") as archive:
+        if limit == "depth":
+            parts = ["session"] + [
+                f"d{index}" for index in range(remote._PROSPECTIVE_MAX_PATH_DEPTH)
+            ]
+            member = tarfile.TarInfo("/".join(parts))
+            member.size = 1
+            archive.addfile(member, io.BytesIO(b"x"))
+        else:
+            for index in range(remote._PROSPECTIVE_MAX_IMPLICIT_DIRECTORIES + 1):
+                member = tarfile.TarInfo(f"session/d{index}/result.json")
+                member.size = 1
+                archive.addfile(member, io.BytesIO(b"x"))
+
+    with pytest.raises(remote.RemoteCaptureError, match="unsafe"):
+        remote._extract_prospective_archive(
+            archive_path.read_bytes(),
+            tmp_path / "extracted",
+        )
 
 
 def test_guarded_prospective_capture_terminates_before_offline_verify(

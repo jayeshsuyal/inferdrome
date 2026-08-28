@@ -1,6 +1,7 @@
 """Remote real-GPU capture transport and verification boundaries."""
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -222,11 +223,43 @@ def test_exact_tree_export_excludes_removed_secret_and_git_history(
         text=True,
     ).stdout.strip()
 
+    literal_marker_archive = tmp_path / "literal-marker.tar"
+    marker_digest, marker_size = remote._create_source_archive(
+        literal_marker_archive,
+        private_commit,
+    )
+    assert marker_digest == (
+        "sha256:" + hashlib.sha256(literal_marker_archive.read_bytes()).hexdigest()
+    )
+    assert marker_size == literal_marker_archive.stat().st_size
+
+    private_payload = base64.b64encode(
+        b"openssh-key-v1\x00" + b"\x00" * 256
+    ).decode("ascii")
+    private_material.write_text(
+        "-----BEGIN OPENSSH "
+        + "PRIVATE KEY-----\n"
+        + private_payload
+        + "\n-----END OPENSSH "
+        + "PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "tracked private key"],
+        check=True,
+    )
+    actual_private_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
     blocked_key_archive = tmp_path / "blocked-key.tar"
     with pytest.raises(remote.RemoteCaptureError, match="private-key material"):
-        remote._create_source_archive(blocked_key_archive, private_commit)
-    assert blocked_key_archive.is_file()
-    assert blocked_key_archive.stat().st_size <= remote._MAX_SOURCE_ARCHIVE_BYTES
+        remote._create_source_archive(blocked_key_archive, actual_private_commit)
+    assert not blocked_key_archive.exists()
 
     private_material.unlink()
     (repository / ".gitattributes").write_text(
@@ -249,6 +282,39 @@ def test_exact_tree_export_excludes_removed_secret_and_git_history(
         remote._create_source_archive(
             tmp_path / "blocked-attributes.tar", attributes_commit
         )
+
+
+def test_exact_source_archive_accepts_the_current_tracked_head(tmp_path: Path) -> None:
+    commit = subprocess.run(
+        ["git", "-C", str(remote.REPOSITORY_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    expected_archive = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(remote.REPOSITORY_ROOT),
+            "archive",
+            "--format=tar",
+            commit,
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    expected_digest = "sha256:" + hashlib.sha256(expected_archive).hexdigest()
+    destination = tmp_path / "current-head.tar"
+
+    digest, size = remote._create_source_archive(
+        destination,
+        commit,
+        expected_archive_sha256=expected_digest,
+    )
+
+    assert digest == expected_digest
+    assert size == len(expected_archive)
+    assert destination.read_bytes() == expected_archive
 
 
 @pytest.mark.parametrize(
@@ -432,16 +498,50 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
         check=True,
     )
     monkeypatch.setattr(remote, "REPOSITORY_ROOT", git_repository)
-    git_archive = tmp_path / "git-path.tar"
-    git_digest, git_size = remote._create_source_archive(git_archive, commit)
-    assert git_archive.read_bytes() == original_archive.read_bytes()
-    assert (
-        git_digest
-        == "sha256:" + hashlib.sha256(original_archive.read_bytes()).hexdigest()
+    expected_digest = (
+        "sha256:" + hashlib.sha256(original_archive.read_bytes()).hexdigest()
     )
+    with pytest.raises(remote.RemoteCaptureError, match="independent digest pin"):
+        remote._create_source_archive(
+            tmp_path / "wrong-git-pin.tar",
+            commit,
+            expected_archive_sha256="sha256:" + "0" * 64,
+        )
+    git_archive = tmp_path / "git-path.tar"
+    git_digest, git_size = remote._create_source_archive(
+        git_archive,
+        commit,
+        expected_archive_sha256=expected_digest,
+    )
+    assert git_archive.read_bytes() == original_archive.read_bytes()
+    assert git_digest == expected_digest
     assert git_size == original_archive.stat().st_size
+    assert remote._require_checkout(commit) == commit
+    with pytest.raises(remote.RemoteCaptureError, match="not --expected-commit"):
+        remote._require_checkout("0" * 40)
 
     original_stream = remote._stream_git_source_archive
+
+    publication_target = tmp_path / "git-publication-target"
+    publication_target.write_bytes(b"must remain")
+    publication_destination = tmp_path / "git-publication-race.tar"
+    original_rename = remote._rename_no_replace
+
+    def race_git_publication(source: Path, destination: Path) -> None:
+        assert destination == publication_destination
+        publication_destination.symlink_to(publication_target)
+        original_rename(source, destination)
+
+    monkeypatch.setattr(remote, "_rename_no_replace", race_git_publication)
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
+        remote._create_source_archive(
+            publication_destination,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert publication_destination.is_symlink()
+    assert publication_target.read_bytes() == b"must remain"
+    monkeypatch.setattr(remote, "_rename_no_replace", original_rename)
 
     def mutate_after_stream(
         destination: Path, selected_commit: str
@@ -462,9 +562,6 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
     repository.mkdir()
     with tarfile.open(original_archive, mode="r:") as archive:
         archive.extractall(repository, filter="data")
-    expected_digest = (
-        "sha256:" + hashlib.sha256(original_archive.read_bytes()).hexdigest()
-    )
     marker = {
         "repository_commit": commit,
         "schema_version": "inferdrome.source-tree-export.v1",
@@ -479,6 +576,9 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
     )
     monkeypatch.setattr(remote, "REPOSITORY_ROOT", repository)
     monkeypatch.setattr(remote, "_git_checkout_present", lambda: False)
+    assert remote._require_checkout(commit) == commit
+    with pytest.raises(remote.RemoteCaptureError, match="not --expected-commit"):
+        remote._require_checkout("0" * 40)
 
     archive = tmp_path / "repo.tar"
     with pytest.raises(
@@ -535,11 +635,13 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
 
     replacement_destination = tmp_path / "replacement-destination.tar"
     original_writer = remote._write_bytes_exclusive
+    replaced_staging: list[Path] = []
 
     def write_then_replace(path: Path, content: bytes) -> tuple[int, int]:
         result = original_writer(path, content)
         path.unlink()
         path.symlink_to(destination_target)
+        replaced_staging.append(path)
         return result
 
     monkeypatch.setattr(remote, "_write_bytes_exclusive", write_then_replace)
@@ -549,9 +651,29 @@ def test_exact_tree_export_supports_pinned_tree_without_git_history(
             commit,
             expected_archive_sha256=expected_digest,
         )
-    assert replacement_destination.is_symlink()
+    assert not replacement_destination.exists()
+    assert len(replaced_staging) == 1
+    assert replaced_staging[0].is_symlink()
     assert destination_target.read_bytes() == b"must remain"
     monkeypatch.setattr(remote, "_write_bytes_exclusive", original_writer)
+
+    retained_publication_destination = tmp_path / "retained-publication-race.tar"
+
+    def race_retained_publication(source: Path, destination: Path) -> None:
+        assert destination == retained_publication_destination
+        retained_publication_destination.symlink_to(destination_target)
+        original_rename(source, destination)
+
+    monkeypatch.setattr(remote, "_rename_no_replace", race_retained_publication)
+    with pytest.raises(remote.RemoteCaptureError, match="already exists"):
+        remote._create_source_archive(
+            retained_publication_destination,
+            commit,
+            expected_archive_sha256=expected_digest,
+        )
+    assert retained_publication_destination.is_symlink()
+    assert destination_target.read_bytes() == b"must remain"
+    monkeypatch.setattr(remote, "_rename_no_replace", original_rename)
 
     (repository / remote._RETAINED_SOURCE_ARCHIVE_NAME).unlink()
     with pytest.raises(remote.RemoteCaptureError, match="retained source archive"):

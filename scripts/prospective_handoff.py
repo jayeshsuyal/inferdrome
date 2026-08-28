@@ -1313,6 +1313,13 @@ def snapshot_handoff(
             confirmation_id=expected_confirmation_id,
             workload_digest=workload_digest,
         )
+        if (
+            selected["contract_id"] != contract_value["id"]
+            or selected["contract_version"] != contract_value["version"]
+        ):
+            raise ProspectiveHandoffError(
+                f"{case_id} manifest contract identity disagrees with contract"
+            )
         if selected["contract_canonical_hash"] != canonical_hash:
             raise ProspectiveHandoffError(
                 f"{case_id} manifest canonical hash disagrees with contract"

@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -86,10 +90,126 @@ _PROSPECTIVE_TRANSFER_METADATA_SCHEMA = "inferdrome.prospective-transfer-metadat
 _PROSPECTIVE_REPOSITORY_EXPORT_SCHEMA = "inferdrome.source-tree-export.v1"
 _PROSPECTIVE_MAX_SESSION_ARCHIVE_BYTES = 268_435_456
 _PROSPECTIVE_POST_REMOTE_BUDGET_SECONDS = 300
+_PROSPECTIVE_MAX_PATH_DEPTH = 32
+_PROSPECTIVE_MAX_IMPLICIT_DIRECTORIES = 1_024
+_MAX_PRIVATE_KEY_BLOCK_BYTES = 1_048_576
+_PRIVATE_KEY_LABELS = (
+    b"EC PRIVATE KEY",
+    b"ENCRYPTED PRIVATE KEY",
+    b"OPENSSH PRIVATE KEY",
+    b"PRIVATE KEY",
+    b"RSA PRIVATE KEY",
+)
+_DENIED_SOURCE_NAMES = frozenset(
+    {
+        ".env",
+        ".inferdrome-source-export.json",
+        _RETAINED_SOURCE_ARCHIVE_NAME,
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "credentials.json",
+        "id_ed25519",
+        "id_rsa",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+    }
+)
+_DENIED_SOURCE_DIRECTORIES = frozenset({".aws", ".git", ".gnupg", ".ssh"})
+_DENIED_SOURCE_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+_RENAME_EXCL = 0x00000004
 
 
 class RemoteCaptureError(RuntimeError):
     """Expected, user-facing remote capture failure."""
+
+
+def _raise_rename_error() -> None:
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(error_number, os.strerror(error_number))
+    raise OSError(error_number, os.strerror(error_number))
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    """Atomically publish one path without replacing an existing destination."""
+
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        try:
+            rename = library.renameat2
+        except AttributeError:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace rename is unavailable",
+            ) from None
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        if (
+            rename(
+                _AT_FDCWD,
+                source_bytes,
+                _AT_FDCWD,
+                destination_bytes,
+                _RENAME_NOREPLACE,
+            )
+            != 0
+        ):
+            _raise_rename_error()
+        return
+    if sys.platform == "darwin":
+        try:
+            rename = library.renamex_np
+        except AttributeError:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace rename is unavailable",
+            ) from None
+        rename.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        if rename(source_bytes, destination_bytes, _RENAME_EXCL) != 0:
+            _raise_rename_error()
+        return
+    raise OSError(
+        errno.ENOTSUP,
+        "atomic no-replace rename is unsupported on this platform",
+    )
+
+
+def _publish_no_replace(source: Path, destination: Path, *, label: str) -> None:
+    try:
+        _rename_no_replace(source, destination)
+    except FileExistsError:
+        raise RemoteCaptureError(f"{label} already exists") from None
+    except OSError:
+        raise RemoteCaptureError(f"{label} could not be published safely") from None
+
+
+def _source_path_is_secret_bearing(path: PurePosixPath) -> bool:
+    folded_parts = tuple(part.casefold() for part in path.parts)
+    folded_name = path.name.casefold()
+    return (
+        any(part in _DENIED_SOURCE_DIRECTORIES for part in folded_parts)
+        or folded_name in _DENIED_SOURCE_NAMES
+        or folded_name.startswith(".env.")
+        or PurePosixPath(folded_name).suffix in _DENIED_SOURCE_SUFFIXES
+    )
 
 
 def _run(
@@ -229,6 +349,7 @@ def _verify_exported_tree_matches_archive(archive_bytes: bytes) -> None:
                     )
                     or normalized in expected_files
                     or normalized in expected_directories
+                    or _source_path_is_secret_bearing(pure)
                     or not (member.isdir() or member.isfile())
                 ):
                     raise RemoteCaptureError(
@@ -251,6 +372,10 @@ def _verify_exported_tree_matches_archive(archive_bytes: bytes) -> None:
                 if len(content) != member.size:
                     raise RemoteCaptureError(
                         "retained source archive member is truncated"
+                    )
+                if _stream_contains_private_key_material(io.BytesIO(content)):
+                    raise RemoteCaptureError(
+                        "retained source archive contains private-key material"
                     )
                 expected_files[normalized] = (bool(member.mode & 0o111), content)
     except (OSError, tarfile.TarError):
@@ -370,15 +495,41 @@ def _copy_retained_source_archive(
         )
     _verify_exported_tree_matches_archive(content)
     try:
-        created_inode = _write_bytes_exclusive(destination, content)
+        staging_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".{destination.name}.source-",
+                dir=destination.parent,
+            )
+        )
+        staging = staging_root / "repo.tar"
+    except OSError:
+        raise RemoteCaptureError("exact source archive could not be staged") from None
+    try:
+        created_inode = _write_bytes_exclusive(staging, content)
         copied, copied_identity = prospective_handoff._read_regular_once(
-            destination,
+            staging,
             label="copied source archive",
             maximum_bytes=_MAX_SOURCE_ARCHIVE_BYTES,
         )
     except (RemoteCaptureError, prospective_handoff.ProspectiveHandoffError):
         raise RemoteCaptureError("exact source archive could not be copied") from None
     if copied != content or copied_identity[:2] != created_inode:
+        raise RemoteCaptureError("copied source archive changed")
+    _publish_no_replace(
+        staging,
+        destination,
+        label="exact source archive destination",
+    )
+    try:
+        published = os.lstat(destination)
+    except OSError:
+        raise RemoteCaptureError("copied source archive changed") from None
+    if (
+        not stat.S_ISREG(published.st_mode)
+        or published.st_nlink != 1
+        or published.st_size != len(content)
+        or prospective_handoff._inode_identity(published) != created_inode
+    ):
         raise RemoteCaptureError("copied source archive changed")
     return digest, len(content)
 
@@ -502,6 +653,56 @@ def _stream_git_source_archive(
             os.close(descriptor)
 
 
+def _private_key_payload_is_plausible(label: bytes, payload: bytes) -> bool:
+    compact = b"".join(payload.split())
+    if not 40 <= len(compact) <= _MAX_PRIVATE_KEY_BLOCK_BYTES:
+        return False
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    if label == b"OPENSSH PRIVATE KEY":
+        return decoded.startswith(b"openssh-key-v1\x00")
+    return len(decoded) >= 32 and decoded.startswith(b"\x30")
+
+
+def _stream_contains_private_key_material(stream: Any) -> bool:
+    """Recognize complete, structurally plausible key blocks without marker noise."""
+
+    headers = tuple(
+        (b"-----BEGIN " + label + b"-----", label) for label in _PRIVATE_KEY_LABELS
+    )
+    longest_header = max(len(header) for header, _label in headers)
+    buffered = b""
+    for chunk in iter(lambda: stream.read(65_536), b""):
+        buffered += chunk
+        while True:
+            candidates = [
+                (position, header, label)
+                for header, label in headers
+                if (position := buffered.find(header)) >= 0
+            ]
+            if not candidates:
+                buffered = buffered[-(longest_header - 1) :]
+                break
+            position, header, label = min(candidates, key=lambda item: item[0])
+            footer = b"-----END " + label + b"-----"
+            body_start = position + len(header)
+            footer_position = buffered.find(footer, body_start)
+            if footer_position < 0:
+                buffered = buffered[position:]
+                if len(buffered) > _MAX_PRIVATE_KEY_BLOCK_BYTES:
+                    return True
+                break
+            if _private_key_payload_is_plausible(
+                label,
+                buffered[body_start:footer_position],
+            ):
+                return True
+            buffered = buffered[footer_position + len(footer) :]
+    return False
+
+
 def _create_source_archive(
     destination: Path,
     commit: str,
@@ -510,6 +711,12 @@ def _create_source_archive(
 ) -> tuple[str, int]:
     """Export only the exact HEAD tree, refusing links, submodules, and secrets."""
 
+    if expected_archive_sha256 is not None and re.fullmatch(
+        r"sha256:[0-9a-f]{64}", expected_archive_sha256
+    ) is None:
+        raise RemoteCaptureError(
+            "expected source archive digest must be tagged lowercase SHA-256"
+        )
     if not _git_checkout_present():
         marker = _source_export_marker()
         if marker["repository_commit"] != commit:
@@ -552,22 +759,6 @@ def _create_source_archive(
         raise RemoteCaptureError("exact source tree listing is malformed")
     seen: set[str] = set()
     file_sizes: dict[str, int] = {}
-    denied_names = {
-        ".env",
-        ".inferdrome-source-export.json",
-        _RETAINED_SOURCE_ARCHIVE_NAME,
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        "credentials",
-        "credentials.json",
-        "id_ed25519",
-        "id_rsa",
-        "secrets.json",
-        "secrets.yaml",
-        "secrets.yml",
-    }
-    denied_directories = {".aws", ".git", ".gnupg", ".ssh"}
     for raw in records[:-1]:
         try:
             metadata, raw_path = raw.split(b"\t", 1)
@@ -577,8 +768,6 @@ def _create_source_archive(
         except (UnicodeDecodeError, ValueError):
             raise RemoteCaptureError("exact source tree listing is malformed") from None
         pure = PurePosixPath(path)
-        folded_parts = tuple(part.casefold() for part in pure.parts)
-        folded_name = pure.name.casefold()
         if (
             mode not in {"100644", "100755"}
             or kind != "blob"
@@ -587,10 +776,7 @@ def _create_source_archive(
             or any(part in {"", ".", ".."} for part in pure.parts)
             or "\\" in path
             or any(ord(character) < 32 or ord(character) == 127 for character in path)
-            or any(part in denied_directories for part in folded_parts)
-            or folded_name in denied_names
-            or folded_name.startswith(".env.")
-            or PurePosixPath(folded_name).suffix in {".key", ".p12", ".pem", ".pfx"}
+            or _source_path_is_secret_bearing(pure)
             or path in seen
         ):
             raise RemoteCaptureError(
@@ -625,8 +811,18 @@ def _create_source_archive(
     archive_bound += sum(2 * 512 + pax_record_bound(path) for path in directory_names)
     if archive_bound > _MAX_SOURCE_ARCHIVE_BYTES:
         raise RemoteCaptureError("exact source tree exceeds its archive bound")
+    try:
+        staging_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".{destination.name}.source-",
+                dir=destination.parent,
+            )
+        )
+        staging = staging_root / "repo.tar"
+    except OSError:
+        raise RemoteCaptureError("exact source archive could not be staged") from None
     descriptor, created_inode, archive_size, digest = _stream_git_source_archive(
-        destination, commit
+        staging, commit
     )
     try:
         archived_files: set[str] = set()
@@ -660,6 +856,15 @@ def _create_source_archive(
                 archived_members.add(normalized)
                 if member.isfile():
                     archived_files.add(normalized)
+                    secret_stream = retained.extractfile(member)
+                    if secret_stream is None:
+                        raise RemoteCaptureError(
+                            "exact source archive member cannot be inspected"
+                        )
+                    if _stream_contains_private_key_material(secret_stream):
+                        raise RemoteCaptureError(
+                            "exact source tree contains private-key material"
+                        )
                     if pure.name == ".gitattributes":
                         stream = retained.extractfile(member)
                         if stream is None:
@@ -679,14 +884,6 @@ def _create_source_archive(
             raise RemoteCaptureError(
                 "exact source archive does not match the committed file set"
             )
-        denied_markers = (
-            b"-----BEGIN " + b"EC PRIVATE KEY-----",
-            b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----",
-            b"-----BEGIN " + b"PRIVATE KEY-----",
-            b"-----BEGIN " + b"RSA PRIVATE KEY-----",
-        )
-        carry = b""
-        longest_marker = max(len(marker) for marker in denied_markers)
         final_digest = hashlib.sha256()
         final_size = 0
         os.lseek(descriptor, 0, os.SEEK_SET)
@@ -694,14 +891,8 @@ def _create_source_archive(
             for chunk in iter(lambda: stream.read(1_048_576), b""):
                 final_digest.update(chunk)
                 final_size += len(chunk)
-                inspected = carry + chunk
-                if any(marker in inspected for marker in denied_markers):
-                    raise RemoteCaptureError(
-                        "exact source tree contains private-key material"
-                    )
-                carry = inspected[-(longest_marker - 1) :]
         metadata = os.fstat(descriptor)
-        path_metadata = os.lstat(destination)
+        path_metadata = os.lstat(staging)
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
@@ -716,7 +907,30 @@ def _create_source_archive(
             raise RemoteCaptureError(
                 "exact source archive changed while it was validated"
             )
+        if (
+            expected_archive_sha256 is not None
+            and digest != expected_archive_sha256
+        ):
+            raise RemoteCaptureError(
+                "exact source archive disagrees with its independent digest pin"
+            )
         os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+        _publish_no_replace(
+            staging,
+            destination,
+            label="exact source archive destination",
+        )
+        published = os.lstat(destination)
+        if (
+            not stat.S_ISREG(published.st_mode)
+            or published.st_nlink != 1
+            or published.st_size != archive_size
+            or prospective_handoff._inode_identity(published) != created_inode
+        ):
+            raise RemoteCaptureError(
+                "exact source archive changed during publication"
+            )
     except (OSError, tarfile.TarError):
         raise RemoteCaptureError("exact source archive is unavailable") from None
     except RemoteCaptureError:
@@ -1478,111 +1692,276 @@ def _prepare_pinned_known_hosts(
     return actual
 
 
-def _extract_prospective_archive(archive_bytes: bytes, destination: Path) -> Path:
-    """Extract already-verified archive bytes with no links or traversal."""
+def _open_owned_directory(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    owned_directories: dict[tuple[str, ...], tuple[int, int]],
+) -> int:
+    """Create/traverse one owned directory chain without following path links."""
 
-    if destination.exists() or destination.is_symlink():
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current = os.dup(root_descriptor)
+    walked: tuple[str, ...] = ()
+    try:
+        for part in parts:
+            walked += (part,)
+            expected = owned_directories.get(walked)
+            if expected is None:
+                os.mkdir(part, mode=0o700, dir_fd=current)
+                created = os.stat(part, dir_fd=current, follow_symlinks=False)
+                if not stat.S_ISDIR(created.st_mode):
+                    raise OSError(errno.ENOTDIR, "created archive directory changed")
+                expected = prospective_handoff._inode_identity(created)
+            child = os.open(part, flags, dir_fd=current)
+            metadata = os.fstat(child)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or prospective_handoff._inode_identity(metadata) != expected
+            ):
+                os.close(child)
+                raise OSError(errno.ENOTDIR, "archive directory ownership changed")
+            owned_directories.setdefault(walked, expected)
+            os.close(current)
+            current = child
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _write_archive_member(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    parts: tuple[str, ...],
+    *,
+    root_descriptor: int,
+    owned_directories: dict[tuple[str, ...], tuple[int, int]],
+) -> None:
+    parent = _open_owned_directory(
+        root_descriptor,
+        parts[:-1],
+        owned_directories,
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            parts[-1],
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o400,
+            dir_fd=parent,
+        )
+        created_inode = prospective_handoff._inode_identity(os.fstat(descriptor))
+        stream = archive.extractfile(member)
+        if stream is None:
+            raise OSError(errno.EIO, "archive member cannot be read")
+        remaining = member.size
+        while remaining:
+            chunk = stream.read(min(remaining, 65_536))
+            if not chunk:
+                raise OSError(errno.EIO, "archive member is truncated")
+            view = memoryview(chunk)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError(errno.EIO, "short archive member write")
+                view = view[written:]
+            remaining -= len(chunk)
+        if stream.read(1):
+            raise OSError(errno.EIO, "archive member exceeds its declared size")
+        os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        path_metadata = os.stat(
+            parts[-1],
+            dir_fd=parent,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size != member.size
+            or prospective_handoff._inode_identity(metadata) != created_inode
+            or prospective_handoff._inode_identity(path_metadata) != created_inode
+        ):
+            raise OSError(errno.EIO, "archive member ownership changed")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _extract_prospective_archive(archive_bytes: bytes, destination: Path) -> Path:
+    """Extract verified bytes privately, then publish with atomic no-replace."""
+
+    selected_destination = destination.absolute()
+    if selected_destination.exists() or selected_destination.is_symlink():
         raise RemoteCaptureError("prospective extraction destination already exists")
     if not 1 <= len(archive_bytes) <= _PROSPECTIVE_MAX_SESSION_ARCHIVE_BYTES:
         raise RemoteCaptureError("prospective session archive exceeds its limit")
-    destination_descriptor: int | None = None
-    created_inode: tuple[int, int] | None = None
     try:
-        destination.mkdir(mode=0o700)
-        destination_descriptor = os.open(
-            destination,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
-        created_inode = prospective_handoff._inode_identity(
-            os.fstat(destination_descriptor)
-        )
+        parent_metadata = os.lstat(selected_destination.parent)
     except OSError:
-        if destination_descriptor is not None:
-            os.close(destination_descriptor)
         raise RemoteCaptureError(
-            "prospective extraction destination is unsafe"
+            "prospective extraction destination parent is unsafe"
         ) from None
-    top_levels: set[str] = set()
-    seen: set[str] = set()
-    total_bytes = 0
+    if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
+        parent_metadata.st_mode
+    ):
+        raise RemoteCaptureError(
+            "prospective extraction destination parent is unsafe"
+        )
+
+    staging_path: Path | None = None
+    root_descriptor: int | None = None
+    root_inode: tuple[int, int] | None = None
     try:
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
             members = archive.getmembers()
             if not members or len(members) > 8_192:
                 raise ValueError("invalid prospective archive member count")
+            normalized: list[tuple[tarfile.TarInfo, tuple[str, ...]]] = []
+            seen: set[tuple[str, ...]] = set()
+            explicit_directories: set[tuple[str, ...]] = set()
+            file_paths: set[tuple[str, ...]] = set()
+            top_levels: set[str] = set()
+            total_bytes = 0
             for member in members:
-                pure = PurePosixPath(member.name)
+                raw_name = (
+                    member.name[:-1]
+                    if member.isdir() and member.name.endswith("/")
+                    else member.name
+                )
+                pure = PurePosixPath(raw_name)
+                parts = pure.parts
                 if (
                     pure.is_absolute()
-                    or not pure.parts
-                    or any(part in {"", ".", ".."} for part in pure.parts)
-                    or "\\" in member.name
+                    or not parts
+                    or pure.as_posix() != raw_name
+                    or len(parts) > _PROSPECTIVE_MAX_PATH_DEPTH
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or any(len(part.encode("utf-8")) > 255 for part in parts)
+                    or "\\" in raw_name
                     or any(
                         ord(character) < 32 or ord(character) == 127
-                        for character in member.name
+                        for character in raw_name
                     )
-                    or member.name in seen
+                    or parts in seen
                     or not (member.isdir() or member.isfile())
                 ):
                     raise ValueError("unsafe prospective archive member")
-                seen.add(member.name)
-                top_levels.add(pure.parts[0])
-                if member.isfile():
-                    if member.size < 0:
-                        raise ValueError("prospective archive member size is invalid")
-                    total_bytes += member.size
-                    if total_bytes > 1_073_741_824:
-                        raise ValueError("prospective archive expands beyond its limit")
+                seen.add(parts)
+                normalized.append((member, parts))
+                top_levels.add(parts[0])
+                if member.isdir():
+                    explicit_directories.add(parts)
+                    continue
+                if member.size < 0:
+                    raise ValueError("prospective archive member size is invalid")
+                file_paths.add(parts)
+                total_bytes += member.size
+                if total_bytes > 1_073_741_824:
+                    raise ValueError("prospective archive expands beyond its limit")
             if len(top_levels) != 1:
                 raise ValueError("prospective archive has multiple roots")
-            for member in members:
-                target = destination.joinpath(*PurePosixPath(member.name).parts)
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                if member.isdir():
-                    target.mkdir(mode=0o700, exist_ok=True)
-                    continue
-                stream = archive.extractfile(member)
-                if stream is None:
-                    raise ValueError("prospective archive member cannot be read")
-                descriptor = os.open(
-                    target,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    0o400,
+            required_directories = set(explicit_directories)
+            for _member, parts in normalized:
+                required_directories.update(
+                    parts[:depth] for depth in range(1, len(parts))
                 )
-                with os.fdopen(descriptor, "wb") as output:
-                    while True:
-                        chunk = stream.read(65_536)
-                        if not chunk:
-                            break
-                        if output.write(chunk) != len(chunk):
-                            raise OSError("short prospective archive write")
-                    output.flush()
-                    os.fsync(output.fileno())
-        if destination_descriptor is None or created_inode is None:
-            raise OSError("prospective extraction identity is unavailable")
-        destination_metadata = os.fstat(destination_descriptor)
-        destination_path_metadata = os.lstat(destination)
+            if file_paths & required_directories:
+                raise ValueError("prospective archive has a file/directory collision")
+            implicit_directories = required_directories - explicit_directories
+            if len(implicit_directories) > _PROSPECTIVE_MAX_IMPLICIT_DIRECTORIES:
+                raise ValueError(
+                    "prospective archive has too many implicit directories"
+                )
+
+            staging_path = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{selected_destination.name}.extract-",
+                    dir=selected_destination.parent,
+                )
+            )
+            root_descriptor = os.open(
+                staging_path,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            root_metadata = os.fstat(root_descriptor)
+            root_inode = prospective_handoff._inode_identity(root_metadata)
+            if (
+                not stat.S_ISDIR(root_metadata.st_mode)
+                or prospective_handoff._inode_identity(os.lstat(staging_path))
+                != root_inode
+            ):
+                raise OSError(errno.ENOTDIR, "private extraction root changed")
+            owned_directories = {(): root_inode}
+            ordered_directories = sorted(
+                required_directories,
+                key=lambda value: (len(value), value),
+            )
+            for parts in ordered_directories:
+                descriptor = _open_owned_directory(
+                    root_descriptor,
+                    parts,
+                    owned_directories,
+                )
+                os.close(descriptor)
+            for member, parts in normalized:
+                if member.isfile():
+                    _write_archive_member(
+                        archive,
+                        member,
+                        parts,
+                        root_descriptor=root_descriptor,
+                        owned_directories=owned_directories,
+                    )
+            os.fsync(root_descriptor)
+            if (
+                prospective_handoff._inode_identity(os.fstat(root_descriptor))
+                != root_inode
+                or prospective_handoff._inode_identity(os.lstat(staging_path))
+                != root_inode
+            ):
+                raise OSError(errno.ENOTDIR, "private extraction root changed")
+            os.close(root_descriptor)
+            root_descriptor = None
+        if staging_path is None:
+            raise OSError(errno.ENOENT, "private extraction root is unavailable")
+        _publish_no_replace(
+            staging_path,
+            selected_destination,
+            label="prospective extraction destination",
+        )
+        staging_path = None
+        published = os.lstat(selected_destination)
         if (
-            prospective_handoff._inode_identity(destination_metadata) != created_inode
-            or prospective_handoff._inode_identity(destination_path_metadata)
-            != created_inode
-            or not stat.S_ISDIR(destination_metadata.st_mode)
-            or not stat.S_ISDIR(destination_path_metadata.st_mode)
+            root_inode is None
+            or not stat.S_ISDIR(published.st_mode)
+            or prospective_handoff._inode_identity(published) != root_inode
         ):
-            raise OSError("prospective extraction destination changed")
+            raise RemoteCaptureError(
+                "prospective extraction destination changed during publication"
+            )
+        return selected_destination / next(iter(top_levels))
+    except RemoteCaptureError:
+        raise
     except (OSError, tarfile.TarError, ValueError):
         raise RemoteCaptureError("prospective session archive is unsafe") from None
     finally:
-        if destination_descriptor is not None:
-            os.close(destination_descriptor)
-    return destination / next(iter(top_levels))
+        if root_descriptor is not None:
+            os.close(root_descriptor)
 
 
 def _verify_prospective_session(
@@ -1760,16 +2139,30 @@ def _download_remote_file(
         )
     ):
         raise RemoteCaptureError("bounded archive transfer inputs are invalid")
+    if destination.exists() or destination.is_symlink():
+        raise RemoteCaptureError("bounded archive destination already exists")
+    try:
+        parent_metadata = os.lstat(destination.parent)
+    except OSError:
+        raise RemoteCaptureError(
+            "bounded archive destination parent is unsafe"
+        ) from None
+    if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
+        parent_metadata.st_mode
+    ):
+        raise RemoteCaptureError("bounded archive destination parent is unsafe")
     descriptor: int | None = None
+    temporary_path: Path | None = None
+    created_inode: tuple[int, int] | None = None
     process: subprocess.Popen[bytes] | None = None
     selector: selectors.BaseSelector | None = None
-    completed = False
     try:
-        descriptor = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.download-",
+            dir=destination.parent,
         )
+        temporary_path = Path(temporary_name)
+        created_inode = prospective_handoff._inode_identity(os.fstat(descriptor))
         process = subprocess.Popen(
             list(arguments),
             stdin=subprocess.DEVNULL,
@@ -1809,6 +2202,8 @@ def _download_remote_file(
                 view = memoryview(chunk)
                 while view:
                     written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("short bounded archive write")
                     view = view[written:]
                 received += len(chunk)
                 digest.update(chunk)
@@ -1825,11 +2220,38 @@ def _download_remote_file(
         actual = "sha256:" + digest.hexdigest()
         if expected_sha256 is not None and actual != expected_sha256:
             raise RemoteCaptureError("remote archive SHA-256 disagrees")
+        os.fchmod(descriptor, 0o444)
         os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            created_inode is None
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size != received
+            or prospective_handoff._inode_identity(metadata) != created_inode
+            or temporary_path is None
+            or prospective_handoff._inode_identity(os.lstat(temporary_path))
+            != created_inode
+        ):
+            raise OSError("bounded archive staging ownership changed")
         os.close(descriptor)
         descriptor = None
-        destination.chmod(0o444)
-        completed = True
+        _publish_no_replace(
+            temporary_path,
+            destination,
+            label="bounded archive destination",
+        )
+        temporary_path = None
+        published = os.lstat(destination)
+        if (
+            not stat.S_ISREG(published.st_mode)
+            or published.st_nlink != 1
+            or published.st_size != received
+            or prospective_handoff._inode_identity(published) != created_inode
+        ):
+            raise RemoteCaptureError(
+                "bounded archive destination changed during publication"
+            )
         return received, actual
     except (OSError, subprocess.TimeoutExpired):
         raise RemoteCaptureError(
@@ -1847,8 +2269,6 @@ def _download_remote_file(
                 process.wait()
         if descriptor is not None:
             os.close(descriptor)
-        if destination.exists() and not completed:
-            destination.unlink(missing_ok=True)
 
 
 def _download_bounded_remote_file(
@@ -1960,6 +2380,14 @@ def _prospective_digest(value: str) -> str:
     return value if value.startswith("sha256:") else "sha256:" + value
 
 
+def _tagged_prospective_digest(value: str) -> str:
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise argparse.ArgumentTypeError(
+            "prospective source archive digest must be tagged lowercase SHA-256"
+        )
+    return value
+
+
 def _bounded_remote_path(value: str) -> str:
     if (
         not value
@@ -2002,10 +2430,9 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
                 args, "expected_handoff_manifest_sha256", None
             ),
             "expected_workload_sha256": getattr(args, "expected_workload_sha256", None),
-            "expected_source_archive_sha256": (
-                getattr(args, "expected_source_archive_sha256", None)
-                if not _git_checkout_present()
-                else True
+            "expected_commit": getattr(args, "expected_commit", None),
+            "expected_source_archive_sha256": getattr(
+                args, "expected_source_archive_sha256", None
             ),
             "remote_state_root": getattr(args, "remote_state_root", None),
         }
@@ -2013,6 +2440,20 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
         if missing:
             raise RemoteCaptureError(
                 "prospective capture requires explicit " + ", ".join(missing)
+            )
+        if _COMMIT_PATTERN.fullmatch(str(args.expected_commit)) is None:
+            raise RemoteCaptureError(
+                "prospective expected commit must be 40 lowercase hex digits"
+            )
+        if (
+            re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(args.expected_source_archive_sha256),
+            )
+            is None
+        ):
+            raise RemoteCaptureError(
+                "prospective source archive pin must be tagged lowercase SHA-256"
             )
         if args.startup_timeout_seconds < 1 or args.startup_timeout_seconds > 3_600:
             raise RemoteCaptureError("prospective startup timeout is out of bounds")
@@ -2101,6 +2542,30 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
         )
     if sum(_QWEN3_PHASE_BUDGET_SECONDS.values()) > policy.allowed_seconds:
         raise RemoteCaptureError("Qwen3 paid-session phase budget exceeds its cost cap")
+
+
+def _prospective_source_archive_pin(
+    args: argparse.Namespace,
+    commit: str,
+) -> str:
+    expected_commit = getattr(args, "expected_commit", None)
+    expected_digest = getattr(args, "expected_source_archive_sha256", None)
+    if (
+        not isinstance(expected_commit, str)
+        or _COMMIT_PATTERN.fullmatch(expected_commit) is None
+        or expected_commit != commit
+    ):
+        raise RemoteCaptureError(
+            "prospective expected commit does not match the selected source commit"
+        )
+    if (
+        not isinstance(expected_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest) is None
+    ):
+        raise RemoteCaptureError(
+            "prospective source archive pin must be tagged lowercase SHA-256"
+        )
+    return expected_digest
 
 
 def _effective_remote_timeout(
@@ -2243,6 +2708,11 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
     guarded = _lambda_guard_requested(args)
     policy = _qwen3_tier_policy(args) if _qwen3_profile_requested(args) else None
     prospective: prospective_handoff.HandoffSnapshot | None = None
+    prospective_source_pin = (
+        _prospective_source_archive_pin(args, commit)
+        if _prospective_requested(args)
+        else None
+    )
     with tempfile.TemporaryDirectory(prefix="inferdrome-source-tree-") as temporary:
         temporary_root = Path(temporary)
         if _prospective_requested(args):
@@ -2262,9 +2732,7 @@ def _dry_run(args: argparse.Namespace, commit: str, identity: Path | None) -> No
         source_archive_sha256, source_archive_bytes = _create_source_archive(
             temporary_root / "repo.tar",
             commit,
-            expected_archive_sha256=getattr(
-                args, "expected_source_archive_sha256", None
-            ),
+            expected_archive_sha256=prospective_source_pin,
         )
     if _prospective_requested(args) and prospective is None:
         raise AssertionError
@@ -2644,7 +3112,11 @@ def _capture_prospective_over_ssh(
                 + "  prospective-session.tar.gz\n"
             ).encode("ascii"),
         )
-        os.replace(staging_path, final_path)
+        _publish_no_replace(
+            staging_path,
+            final_path,
+            label="local prospective capture destination",
+        )
     except Exception:
         if staging_path.exists():
             print(
@@ -3900,6 +4372,7 @@ def _capture_prospective_with_handoff_impl(
     identity: Path | None,
 ) -> Path:
 
+    expected_source_archive_sha256 = _prospective_source_archive_pin(args, commit)
     if identity is None:
         raise RemoteCaptureError("prospective capture requires an SSH identity file")
     handoff_root = Path(args.prospective_handoff_root).expanduser().absolute()
@@ -3921,9 +4394,7 @@ def _capture_prospective_with_handoff_impl(
         source_archive_sha256, source_archive_bytes = _create_source_archive(
             source_archive,
             commit,
-            expected_archive_sha256=getattr(
-                args, "expected_source_archive_sha256", None
-            ),
+            expected_archive_sha256=expected_source_archive_sha256,
         )
         print(
             "Prospective P1 snapshot prepared before SSH/provider action: "
@@ -4048,8 +4519,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--expected-source-archive-sha256",
-        type=_prospective_digest,
-        help="independent digest pin for a no-Git exported source archive",
+        type=_tagged_prospective_digest,
+        help="required independent digest pin for the exact prospective source archive",
     )
     parser.add_argument("--expected-commit")
     parser.add_argument(
