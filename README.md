@@ -256,8 +256,8 @@ dashboard:
 
 This path is always labeled `SYNTHETIC_ONLY`; it demonstrates the real product
 workflow without claiming genuine GPU performance. See the
-[local product demo runbook](docs/LOCAL_DEMO.md) for the recording route and
-approved claim boundary.
+[local product demo runbook](docs/LOCAL_DEMO.md) for the recording route, a
+five-minute interview script, and the approved claim boundary.
 
 When the reviewed Qwen3 capture is present locally, one command independently
 reverifies the exact archive and post-termination receipts before opening that

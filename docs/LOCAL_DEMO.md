@@ -85,6 +85,54 @@ Do not describe the synthetic values as benchmark results, customer evidence,
 proof of execution, a causal effect, or a winner. Do not describe the controlled
 result as comparable: the dashboard correctly withholds that estimate.
 
+## Interview script (4–5 minutes)
+
+Use this as a read-aloud guide while moving through the routes above:
+
+1. **0:00 — Thesis and boundary.** “Inferdrome is the measurement and evidence
+   layer for LLM-serving experiments. It resolves the experiment, runs a pinned
+   benchmark producer, preserves native output, normalizes request observations,
+   deterministically reduces measurements, and verifies the sealed bundle. This
+   screen is a synthetic walkthrough of that real workflow: the visible runs are
+   `SYNTHETIC_ONLY`, so none of these numbers are a genuine GPU performance
+   claim.”
+
+2. **0:45 — Runs, detail, and Evidence.** “Runs shows evidence quality before
+   performance. In Run detail, each value keeps its metric identity, definition,
+   population, unit, aggregation, and sample count. Missing observations stay
+   unavailable instead of becoming zeros. Evidence shows the offline verification
+   result, bundle digest, provenance, artifact sensitivity, and eligibility as
+   separate facts. The dashboard is only a read-only projection of authoritative
+   Python verification and recalculation; it never measures from browser state or
+   exposes response-bearing artifact contents.”
+
+3. **1:45 — Descriptive versus controlled comparison.** “Compare two runs is a
+   descriptive, non-causal check. The controlled comparison adds a predeclared
+   treatment, frozen schedule, equal per-run weighting, and explicit controls.
+   This demo intentionally ends `INCOMPARABLE`: five controls are satisfied, but
+   the complete equal observed environment control is not. Inferdrome therefore
+   withholds the controlled outcome estimate while still showing the immutable
+   schedule and bounded reasons. That is a successful fail-closed behavior, not
+   a winner or a recommendation.”
+
+4. **2:45 — Deployment layer.** “Docker changes the packaging and runtime
+   boundary: the runner image and serving runtime remain separate, and the local
+   Compose qualification is synthetic. A Docker image or digest is not an
+   execution receipt. GCP is represented here by offline inventory and guarded
+   dry-run/lifecycle contracts; this demo makes no provider call or paid launch.
+   Kubernetes is represented by a guarded batch Job shape and a local mock
+   simulation; it does not claim a cluster run or Kubernetes evidence. These
+   deployment surfaces change where the benchmark components run, not the frozen
+   measurement methodology or evidence schemas.”
+
+5. **3:45 — ExitSpec boundary and close.** “Inferdrome supplies measurements,
+   provenance, integrity, and a portable bundle. Independent acceptance starts
+   after this point: ExitSpec owns evaluation against a customer contract and
+   any `PASS`, `FAIL`, or `NOT_PROVEN` outcome. Inferdrome does not issue that
+   verdict. A real managed-GPU bundle can use the same ordinary dashboard path
+   after its own local verification, but this recording contains no genuine GPU
+   receipt.”
+
 ## Continuous rehearsal
 
 The populated Playwright release test invokes this launcher with
