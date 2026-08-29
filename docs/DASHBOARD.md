@@ -36,6 +36,10 @@ the dashboard helps a user:
 The dashboard does not make evidence more trustworthy than the underlying
 bundle. It makes the bundle's existing guarantees and limitations visible.
 
+For a concise product walkthrough, use the [local demo interview script](LOCAL_DEMO.md).
+It keeps the dashboard narrative aligned with the measurement, deployment, and
+ExitSpec boundaries described here.
+
 ## Authority and data flow
 
 The normative flow is:
