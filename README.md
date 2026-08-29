@@ -333,6 +333,7 @@ provider-neutral.
 - [Build roadmap](docs/ROADMAP.md)
 - [Public contracts v1](docs/PUBLIC_CONTRACTS_V1.md)
 - [Prospective contract-linked GPU capture](docs/PROSPECTIVE_REAL_GPU_CAPTURE.md)
+- [Prospective capture rehearsal packet](docs/PROSPECTIVE_CAPTURE_REHEARSAL_V0_1.md)
 - [Resolution and run workspace](docs/RESOLUTION_AND_WORKSPACE.md)
 - [Deterministic reduction and fake adapter](docs/DETERMINISTIC_REDUCTION.md)
 - [Evidence bundle and offline verification](docs/EVIDENCE_BUNDLE_V1.md)
