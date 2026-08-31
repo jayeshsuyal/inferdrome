@@ -41,7 +41,7 @@ Normal pull-request CI remains GPU-free.
 | 7. Evidence bundle | Bundle contract, offline verifier, immutable publication, mutation suites | Automated gate |
 | 8. ExitSpec integration | Independently owned importer, recalculation, decision table, and receipt | External release blocker |
 | 9. Flagship demonstration | Managed runbook, exact A10 handoff, corruption and synthetic rejection demos | Inferdrome producer evidence complete; ExitSpec outcomes pending |
-| 10. Security and privacy | Threat model, bounded readers, adversarial tests, exact-archive publication review | `EXTERNAL_ONLY`; human security and owner publication review pending |
+| 10. Security and privacy | Threat model, bounded readers, adversarial tests, exact-archive publication review | `EXTERNAL_ONLY`; owner refusal to publish recorded, human security review pending |
 | 11. Engineering quality | All three CI jobs, packaging smoke, documentation, contribution guidance | Apache-2.0 selected and added; `v0.1.0` tag deferred to the release record |
 
 ## Release-blocking evidence
@@ -58,18 +58,22 @@ Normal pull-request CI remains GPU-free.
   and synthetic-fixture `EVIDENCE_INELIGIBLE` rejection facts.
 - [x] Retain the deterministic GPU capability profile, publication review, and
   handoff manifest. The raw archive remains `EXTERNAL_ONLY` and uncommitted.
-- [ ] Owner decides whether to approve public delivery of the exact archive
-  after archive-bound licensing and privacy review.
+- [x] Owner decides whether to approve public delivery of the exact archive: on
+  2026-08-31, Jayesh decided it remains `KEEP_EXTERNAL_ONLY` and unpublished.
+  This is a refusal to authorize public delivery, not a privacy or licensing
+  clearance, redistribution grant, or authorization to distribute. See the
+  [A10 archive privacy and licensing decision packet](reviews/V0_1_A10_RAW_ARCHIVE_PRIVACY_LICENSING_REVIEW.md).
 - [ ] Complete a human review against `docs/THREAT_MODEL.md` and record the
   reviewer and date.
 - [x] Select and add the repository license. The owner selected Apache License
   2.0 for Inferdrome; `LICENSE`, package metadata, and third-party notices
   record that choice without licensing external materials or raw archives.
 
-The unchecked items above are pre-existing owner or external blockers: ExitSpec
-outcomes and receipt, archive-publication approval, and human security review.
-They must be genuinely recorded before the release owner authorizes the final
-tag.
+The remaining unchecked items are ExitSpec outcomes and receipt plus human
+security review. The archive-publication decision gate is closed only as a
+refusal: the raw archive remains `EXTERNAL_ONLY` and must not be published.
+Those remaining items must be genuinely recorded before the release owner
+authorizes the final tag.
 
 ## Repository machine checks
 
@@ -189,11 +193,12 @@ approval for external materials, or final release approval.
 
 ### Final pre-tag phase: readiness of the exact release commit
 
-After the pre-existing ExitSpec, archive, and security blockers are genuinely
-recorded by their named owners, the release owner creates a separate release
-commit. That commit (which is not this development-version PR) changes both
-package-version locations to `0.1.0` while preserving the canonical
-Apache-2.0 license, matching metadata, and current dependency lock. No
+After the remaining ExitSpec and security blockers are genuinely recorded by
+their named owners, and the archive refusal remains recorded, the release owner
+creates a separate release commit. That commit (which is not this
+development-version PR) changes both package-version locations to `0.1.0`
+while preserving the canonical Apache-2.0 license, matching metadata, and
+current dependency lock. No
 `v0.1.0` tag exists yet.
 
 Submit that commit through the branch-protected pull-request path. Its normal
@@ -266,9 +271,9 @@ After all three jobs pass, put the exact release SHA, three CI run URLs, tag
 verification, and remaining external sign-off in the GitHub Release or another
 explicit external immutable release record. Post-tag verification facts belong
 in that external record and must never be added to the annotated tag message.
-This record is not a substitute for ExitSpec outcomes, human security review, owner
-archive approval, or final release approval. Publishing and merging are not
-performed by this preflight.
+This record is not a substitute for ExitSpec outcomes, human security review,
+the recorded owner archive-publication decision, or final release approval.
+Publishing and merging are not performed by this preflight.
 
 Automation cannot prove the ExitSpec importer or `PASS`/`FAIL`/`NOT_PROVEN`
 outcomes, pre-measurement contract chronology, human security approval, owner
