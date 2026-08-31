@@ -24,6 +24,8 @@ def _minimal_repository(root: Path) -> None:
         "uv.lock",
         ".github/workflows/ci.yml",
         "scripts/bootstrap_ci_uv.sh",
+        "scripts/dashboard_gate.sh",
+        "scripts/dashboard_package_gate.sh",
     ):
         (root / relative_path).write_bytes(
             (REPOSITORY_ROOT / relative_path).read_bytes()
@@ -119,6 +121,12 @@ def test_python_ci_uses_the_hash_locked_frozen_environment() -> None:
     bootstrap = (REPOSITORY_ROOT / "scripts/bootstrap_ci_uv.sh").read_text(
         encoding="utf-8"
     )
+    dashboard_gate = (REPOSITORY_ROOT / "scripts/dashboard_gate.sh").read_text(
+        encoding="utf-8"
+    )
+    package_gate = (
+        REPOSITORY_ROOT / "scripts/dashboard_package_gate.sh"
+    ).read_text(encoding="utf-8")
 
     assert workflow.count("cache-dependency-path: uv.lock") == 3
     assert workflow.count("./scripts/bootstrap_ci_uv.sh --extra dev") == 3
@@ -129,6 +137,14 @@ def test_python_ci_uses_the_hash_locked_frozen_environment() -> None:
     )
     assert '"$uv_bin" lock --check' in bootstrap
     assert '"$uv_bin" sync --frozen --no-install-project "$@"' in bootstrap
+    assert 'if "$locked_python" -m pip --version' in bootstrap
+    assert 'install -m 0755 -- "$uv_bin" "$locked_uv"' in bootstrap
+    assert "INFERDROME_UV: .venv/bin/uv" in workflow
+    assert '"$repository_root/scripts/dashboard_package_gate.sh"' in dashboard_gate
+    assert '"$inferdrome_python" -m pip' not in dashboard_gate
+    assert package_gate.count('"$inferdrome_uv" build \\') == 2
+    assert package_gate.count('"$inferdrome_uv" pip install \\') == 1
+    assert '"$inferdrome_python" -m pip' not in package_gate
     assert release_preflight._check_ci_gate_inventory(REPOSITORY_ROOT).status == "PASS"
 
 
@@ -363,6 +379,66 @@ def test_bootstrap_pip_install_fails_closed(tmp_path: Path) -> None:
 
     assert check.status == "FAIL"
     assert "must not install Python dependencies through pip" in check.detail
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "old", "new", "expected_detail"),
+    (
+        (
+            "scripts/bootstrap_ci_uv.sh",
+            'install -m 0755 -- "$uv_bin" "$locked_uv"',
+            'install -m 0755 -- "$uv_bin" ".venv/bin/other"',
+            "exact-version and checksum pinned",
+        ),
+        (
+            "scripts/bootstrap_ci_uv.sh",
+            'if "$locked_python" -m pip --version',
+            'if "$locked_python" -c "pass"',
+            "exact-version and checksum pinned",
+        ),
+        (
+            ".github/workflows/ci.yml",
+            "INFERDROME_UV: .venv/bin/uv",
+            "INFERDROME_UV: uv",
+            "missing locked Python controls",
+        ),
+        (
+            "scripts/dashboard_package_gate.sh",
+            '"$inferdrome_uv" pip install \\',
+            '"$inferdrome_python" -m pip install \\',
+            "must not invoke a pip executable",
+        ),
+        (
+            "scripts/dashboard_package_gate.sh",
+            "  --no-build-isolation \\",
+            "  --config-setting isolated=true \\",
+            "not exact-version, offline, and uv-native",
+        ),
+        (
+            "scripts/dashboard_package_gate.sh",
+            "  --no-index \\",
+            "  --index https://example.invalid/simple \\",
+            "not exact-version, offline, and uv-native",
+        ),
+    ),
+)
+def test_ci_pipless_package_contract_drift_fails_closed(
+    tmp_path: Path,
+    relative_path: str,
+    old: str,
+    new: str,
+    expected_detail: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    path = tmp_path / relative_path
+    original = path.read_text(encoding="utf-8")
+    assert old in original
+    path.write_text(original.replace(old, new, 1), encoding="utf-8")
+
+    check = release_preflight._check_ci_gate_inventory(tmp_path)
+
+    assert check.status == "FAIL"
+    assert expected_detail in check.detail
 
 
 @pytest.mark.parametrize(

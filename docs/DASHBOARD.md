@@ -554,6 +554,9 @@ traffic remains GET-only. The gate then runs the dashboard's Python projection,
 discovery, pairwise comparison, Trial Set, controlled-comparison, API, packaging,
 and server tests. It also builds a wheel, installs that wheel into an isolated
 target, and proves the installed HTML, deep links, API, and referenced assets are
-served. The repository's existing
+served. The sdist, wheel, and target installation use uv 0.8.17 offline with the
+locked environment's build requirements; the environment is intentionally
+pip-less. CI uses its checksum-verified `.venv/bin/uv`, while local runs may use
+`INFERDROME_UV` or uv 0.8.17 on `PATH`. The repository's existing
 `scripts/engineering_gate.sh` remains the authoritative v0.1 evidence pipeline
 gate.

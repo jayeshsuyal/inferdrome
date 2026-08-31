@@ -50,6 +50,15 @@ _PIP_INSTALL_COMMAND_RE = re.compile(
     r"\bpip(?:3(?:\.\d+)*)?\s+install\b",
     re.IGNORECASE,
 )
+_DIRECT_PIP_COMMAND_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:[\"']?\$(?:\{)?inferdrome_python(?:\})?[\"']?|"
+    r"(?:[^\s\"']+/)?python(?:3(?:\.\d+)*)?)\s+-m\s+pip\b"
+    r"|"
+    r"^\s*(?:[^\s\"']+/)?pip(?:3(?:\.\d+)*)?\s+(?:install|wheel)\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
 _UV_SYNC_COMMAND_RE = re.compile(
     r"(?:"
     r"(?:\"\$(?:\{uv_bin\}|uv_bin)\"|\$(?:\{uv_bin\}|uv_bin)|"
@@ -150,6 +159,7 @@ REQUIRED_FILES: tuple[str, ...] = (
     ".github/workflows/ci.yml",
     "scripts/engineering_gate.sh",
     "scripts/dashboard_gate.sh",
+    "scripts/dashboard_package_gate.sh",
     "scripts/deployment_qualification_gate.sh",
     "scripts/bootstrap_ci_uv.sh",
     "scripts/release_preflight.py",
@@ -862,6 +872,11 @@ def _check_ci_gate_inventory(repository_root: Path) -> Check:
             "cache-dependency-path: uv.lock",
             expected_bootstrap[job],
             ".venv/bin/python",
+            *(
+                ("INFERDROME_UV: .venv/bin/uv",)
+                if job == "dashboard"
+                else ()
+            ),
         )
         missing_fragments = tuple(
             fragment for fragment in required_fragments if fragment not in body
@@ -917,6 +932,12 @@ def _check_ci_gate_inventory(repository_root: Path) -> Check:
         '[[ "$("$uv_bin" --version)" == "uv $uv_version" ]]',
         expected_lock,
         expected_sync,
+        'locked_python=".venv/bin/python"',
+        'if "$locked_python" -m pip --version >/dev/null 2>&1; then',
+        'locked_uv=".venv/bin/uv"',
+        'cmp -s -- "$uv_bin" "$locked_uv"',
+        'install -m 0755 -- "$uv_bin" "$locked_uv"',
+        '[[ "$("$locked_uv" --version)" == "uv $uv_version" ]]',
     )
     if any(marker not in bootstrap for marker in bootstrap_markers):
         return Check(
@@ -930,10 +951,85 @@ def _check_ci_gate_inventory(repository_root: Path) -> Check:
             "FAIL",
             "CI uv bootstrap must check lock freshness before frozen sync",
         )
+    for marker in bootstrap_markers[-6:]:
+        if bootstrap.index(marker) < bootstrap.index(expected_sync):
+            return Check(
+                "ci-gate-inventory",
+                "FAIL",
+                "CI must establish its pip-less uv handoff after frozen sync",
+            )
+
+    try:
+        dashboard_gate = (repository_root / "scripts/dashboard_gate.sh").read_text(
+            encoding="utf-8"
+        )
+        package_gate = (
+            repository_root / "scripts/dashboard_package_gate.sh"
+        ).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            f"could not read dashboard packaging gates: {error}",
+        )
+    package_gate_invocation = (
+        '"$repository_root/scripts/dashboard_package_gate.sh"'
+    )
+    if dashboard_gate.count(package_gate_invocation) != 1:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "dashboard gate must invoke the uv-native package gate exactly once",
+        )
+    if (
+        _DIRECT_PIP_COMMAND_RE.search(dashboard_gate) is not None
+        or _DIRECT_PIP_COMMAND_RE.search(package_gate) is not None
+    ):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "dashboard gates must not invoke a pip executable or Python pip module",
+        )
+    package_lines = package_gate.splitlines()
+    required_package_lines = (
+        ('"$inferdrome_uv" build \\', 2),
+        ('"$inferdrome_uv" pip install \\', 1),
+        ("  --offline \\", 3),
+        ("  --no-python-downloads \\", 3),
+        ('  --cache-dir "$uv_cache_root" \\', 3),
+        ("  --sdist \\", 1),
+        ("  --wheel \\", 1),
+        ("  --no-build-isolation \\", 2),
+        ('  --python "$inferdrome_python" \\', 3),
+        ('  --out-dir "$source_dist_root" \\', 1),
+        ('  --out-dir "$wheel_dist_root" \\', 1),
+        ("  --no-index \\", 1),
+        ("  --no-deps \\", 1),
+        ("  --no-build \\", 1),
+        ("  --link-mode copy \\", 1),
+        ('  --target "$install_root" \\', 1),
+    )
+    if (
+        any(
+            package_lines.count(line) != expected_count
+            for line, expected_count in required_package_lines
+        )
+        or len(re.findall(r"\bpip\s+install\b", package_gate, re.IGNORECASE))
+        != 1
+        or 'case "$uv_reported_version" in' not in package_gate
+        or '"uv 0.8.17" | "uv 0.8.17 ("*")")' not in package_gate
+        or '"$repository_root/scripts/verify_dashboard_install.py"' not in package_gate
+    ):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "dashboard package gate is not exact-version, offline, and uv-native",
+        )
     return Check(
         "ci-gate-inventory",
         "PASS",
-        "all three jobs use full-SHA actions and the lock-keyed frozen uv environment",
+        "all three jobs use full-SHA actions and one lock-keyed, pip-less uv "
+        "environment",
     )
 
 

@@ -51,6 +51,7 @@ bash -n scripts/prepare_real_gpu_host.sh
 bash -n scripts/run_real_gpu_capture.sh
 bash -n scripts/bootstrap_ci_uv.sh
 bash -n scripts/dashboard_gate.sh
+bash -n scripts/dashboard_package_gate.sh
 bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/prospective_real_gpu_capture.py

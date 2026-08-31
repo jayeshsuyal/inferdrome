@@ -158,6 +158,7 @@ jobs:
         env:
           CI: "true"
           INFERDROME_PYTHON: .venv/bin/python
+          INFERDROME_UV: .venv/bin/uv
         run: ./scripts/dashboard_gate.sh
 
       - name: Require committed dashboard assets to be current

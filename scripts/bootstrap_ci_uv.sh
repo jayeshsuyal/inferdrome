@@ -72,4 +72,21 @@ uv_bin="$bootstrap_root/uv"
 cd -- "$repository_root"
 "$uv_bin" lock --check
 "$uv_bin" sync --frozen --no-install-project "$@"
-[[ -x .venv/bin/python ]] || fail "frozen sync did not create .venv/bin/python"
+locked_python=".venv/bin/python"
+locked_uv=".venv/bin/uv"
+[[ -d .venv/bin && ! -L .venv/bin && -x "$locked_python" ]] ||
+  fail "frozen sync did not create the expected .venv interpreter"
+if "$locked_python" -m pip --version >/dev/null 2>&1; then
+  fail "the locked environment must remain pip-less"
+fi
+if [[ -e "$locked_uv" || -L "$locked_uv" ]]; then
+  [[ -f "$locked_uv" && ! -L "$locked_uv" ]] ||
+    fail "the locked uv handoff path is unsafe"
+  cmp -s -- "$uv_bin" "$locked_uv" ||
+    fail "the locked uv handoff does not match the verified executable"
+else
+  install -m 0755 -- "$uv_bin" "$locked_uv" ||
+    fail "the verified uv handoff failed"
+fi
+[[ "$("$locked_uv" --version)" == "uv $uv_version" ]] ||
+  fail "the locked uv handoff reported an unexpected version"

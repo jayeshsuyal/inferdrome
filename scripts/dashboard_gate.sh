@@ -28,43 +28,4 @@ fi
 
 export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" -m pytest "$repository_root/tests/dashboard"
-
-wheel_root=$(mktemp -d "${TMPDIR:-/tmp}/inferdrome-dashboard-wheel.XXXXXX")
-cleanup() {
-    rm -rf -- "$wheel_root"
-}
-trap cleanup EXIT
-
-source_dist_root="$wheel_root/source-dist"
-wheel_dist_root="$wheel_root/wheel-dist"
-"$inferdrome_python" -m build \
-    --sdist \
-    --no-isolation \
-    --outdir "$source_dist_root" \
-    "$repository_root"
-source_archives=("$source_dist_root"/inferdrome-*.tar.gz)
-if [[ ${#source_archives[@]} -ne 1 || ! -f "${source_archives[0]}" ]]; then
-    echo "dashboard gate: expected exactly one Inferdrome source distribution" >&2
-    exit 1
-fi
-"$inferdrome_python" -m pip wheel \
-    --no-deps \
-    --no-build-isolation \
-    --wheel-dir "$wheel_dist_root" \
-    "${source_archives[0]}"
-wheel_files=("$wheel_dist_root"/inferdrome-*.whl)
-if [[ ${#wheel_files[@]} -ne 1 || ! -f "${wheel_files[0]}" ]]; then
-    echo "dashboard gate: expected exactly one Inferdrome wheel" >&2
-    exit 1
-fi
-install_root="$wheel_root/install"
-"$inferdrome_python" -m pip install \
-    --no-deps \
-    --target "$install_root" \
-    "${wheel_files[0]}"
-(
-    cd "$wheel_root"
-    PYTHONPATH="$install_root" "$inferdrome_python" \
-        "$repository_root/scripts/verify_dashboard_install.py" \
-        --expected-package-root "$install_root"
-)
+"$repository_root/scripts/dashboard_package_gate.sh"

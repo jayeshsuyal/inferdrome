@@ -22,7 +22,11 @@ change Python dependencies intentionally, edit `pyproject.toml`, run
 `uv lock` with uv 0.8.17, review both files, then repeat `uv lock --check` and
 the frozen sync above. CI checksum-verifies the same exact uv version, checks
 lock freshness, and syncs dependencies with `--frozen --no-install-project`
-before using `.venv/bin/python` with the repository `src` tree.
+before using `.venv/bin/python` with the repository `src` tree. That locked
+environment intentionally has no pip. CI hands the same checksum-verified uv
+binary to `.venv/bin/uv`; local dashboard packaging uses uv 0.8.17 from that
+sibling path or from `INFERDROME_UV`/`PATH` to build and install artifacts
+offline without adding pip to the environment.
 
 On a clean Linux host, install Chromium's system dependencies as part of the
 Playwright step:
