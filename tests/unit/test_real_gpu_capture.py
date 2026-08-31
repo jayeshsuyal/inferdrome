@@ -2238,6 +2238,120 @@ def test_lambda_guard_binds_explicit_instance_to_hostname(
     }
 
 
+def test_guard_arm_failure_immediately_terminates_the_explicit_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance_id = "b" * 32
+    observed: list[tuple[str, str]] = []
+
+    def arm(reference: str, **_kwargs: object) -> SimpleNamespace:
+        observed.append(("arm", reference))
+        raise remote.lambda_gpu_guard.LambdaGuardError(
+            "target resolved but watchdog readiness failed"
+        )
+
+    def terminate_after_arm_failure(target: str) -> SimpleNamespace:
+        observed.append(("terminate", target))
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote.lambda_gpu_guard, "arm_watchdog", arm)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_after_arm_failure",
+        terminate_after_arm_failure,
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@capture.example.test",
+        lambda_billing_started_at=datetime(2026, 8, 18, 20, 0, tzinfo=UTC),
+        lambda_guard_state_root="/tmp/inferdrome-test-guards",
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id=instance_id,
+        max_cost_usd=Decimal("2.58"),
+    )
+
+    with pytest.raises(
+        remote.RemoteCaptureError,
+        match="immediate exact-ID termination confirmed \\(absent\\)",
+    ):
+        remote._arm_lambda_watchdog(args)
+
+    assert observed == [("arm", instance_id), ("terminate", instance_id)]
+
+
+def test_guard_arm_failure_surfaces_unconfirmed_exact_id_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance_id = "b" * 32
+    observed: list[str] = []
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "arm_watchdog",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            remote.lambda_gpu_guard.LambdaGuardError("watchdog readiness failed")
+        ),
+    )
+
+    def fail_termination(target: str) -> SimpleNamespace:
+        observed.append(target)
+        raise remote.lambda_gpu_guard.LambdaGuardError("provider cleanup timeout")
+
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_after_arm_failure",
+        fail_termination,
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@capture.example.test",
+        lambda_billing_started_at=datetime(2026, 8, 18, 20, 0, tzinfo=UTC),
+        lambda_guard_state_root="/tmp/inferdrome-test-guards",
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id=instance_id,
+        max_cost_usd=Decimal("2.58"),
+    )
+
+    with pytest.raises(
+        remote.RemoteCaptureError,
+        match=(
+            r"immediate exact-ID termination was not confirmed.*"
+            r"provider cleanup timeout"
+        ),
+    ):
+        remote._arm_lambda_watchdog(args)
+
+    assert observed == [instance_id]
+
+
+def test_guard_arm_failure_without_explicit_id_does_not_guess_a_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "arm_watchdog",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            remote.lambda_gpu_guard.LambdaGuardError("watchdog readiness failed")
+        ),
+    )
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_after_arm_failure",
+        lambda *_args, **_kwargs: pytest.fail("hostname must not be terminated"),
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@capture.example.test",
+        lambda_billing_started_at=datetime(2026, 8, 18, 20, 0, tzinfo=UTC),
+        lambda_guard_state_root="/tmp/inferdrome-test-guards",
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id=None,
+        max_cost_usd=Decimal("2.58"),
+    )
+
+    with pytest.raises(
+        remote.RemoteCaptureError,
+        match="Lambda cost guard could not be armed: watchdog readiness failed",
+    ):
+        remote._arm_lambda_watchdog(args)
+
+
 def test_qwen3_guard_terminates_target_when_another_instance_is_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
