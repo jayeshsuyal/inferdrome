@@ -7,6 +7,7 @@ from yaml.events import AliasEvent
 from yaml.nodes import MappingNode
 
 from inferdrome.errors import SourceInputError
+from inferdrome.parsing import BoundedParseError, validate_yaml_structure
 
 
 class _StrictSafeLoader(yaml.SafeLoader):
@@ -41,10 +42,17 @@ def load_strict_yaml(content: bytes) -> dict[str, Any]:
         raise SourceInputError("source experiment must be valid UTF-8") from None
 
     try:
+        validate_yaml_structure(text)
         value = yaml.load(text, Loader=_StrictSafeLoader)
     except SourceInputError:
         raise
-    except yaml.YAMLError:
+    except BoundedParseError as error:
+        if "aliases" in str(error):
+            raise SourceInputError("YAML aliases are not supported") from None
+        raise SourceInputError(
+            "source experiment is not valid bounded strict YAML"
+        ) from None
+    except (RecursionError, ValueError, yaml.YAMLError):
         raise SourceInputError("source experiment is not valid strict YAML") from None
     if not isinstance(value, dict):
         raise SourceInputError("source experiment root must be a mapping")

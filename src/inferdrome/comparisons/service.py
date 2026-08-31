@@ -51,8 +51,13 @@ from inferdrome.domain.ids import (
 )
 from inferdrome.domain.metrics import Measurement, frozen_metric_definitions_v1
 from inferdrome.domain.states import EnvironmentCompleteness
-from inferdrome.errors import ControlledComparisonError
+from inferdrome.errors import (
+    ControlledComparisonError,
+    VerificationError,
+    WorkLimitError,
+)
 from inferdrome.immutable import publish_immutable_directory
+from inferdrome.limits import WorkBudget, collect_bounded
 from inferdrome.resolution.canonicalization import execution_fingerprint_projection
 from inferdrome.trials import VerifiedTrialSet, verify_trial_set
 
@@ -129,6 +134,31 @@ def _node_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _assert_single_descriptor_entry(
+    directory_descriptor: int,
+    *,
+    filename: str,
+    label: str,
+) -> None:
+    try:
+        with os.scandir(directory_descriptor) as iterator:
+            entries = collect_bounded(
+                iterator,
+                limit=1,
+                error=lambda: ControlledComparisonError(
+                    f"{label} directory contains undeclared entries"
+                ),
+            )
+    except OSError:
+        raise ControlledComparisonError(
+            f"{label} directory cannot be inspected safely"
+        ) from None
+    if len(entries) != 1 or entries[0].name != filename:
+        raise ControlledComparisonError(
+            f"{label} directory contains undeclared entries"
+        )
+
+
 def _publish_descriptor(
     *,
     root: Path,
@@ -170,6 +200,7 @@ def _load_descriptor(
     model: type[ControlledComparisonPlan] | type[ControlledComparisonResult],
     id_attribute: str,
     label: str,
+    work_budget: WorkBudget | None = None,
 ) -> tuple[ControlledComparisonPlan | ControlledComparisonResult, bytes]:
     selected_path = path.absolute()
     directory_flags = (
@@ -193,16 +224,11 @@ def _load_descriptor(
             raise ControlledComparisonError(
                 f"{label} directory must be a read-only real directory"
             )
-        try:
-            entries = os.listdir(directory_descriptor)
-        except OSError:
-            raise ControlledComparisonError(
-                f"{label} directory cannot be inspected safely"
-            ) from None
-        if entries != [filename]:
-            raise ControlledComparisonError(
-                f"{label} directory contains undeclared entries"
-            )
+        _assert_single_descriptor_entry(
+            directory_descriptor,
+            filename=filename,
+            label=label,
+        )
 
         file_flags = (
             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -228,6 +254,8 @@ def _load_descriptor(
                 raise ControlledComparisonError(
                     f"{label} descriptor is not one bounded read-only file"
                 )
+            if work_budget is not None:
+                work_budget.reserve(bytes_=initial_file.st_size)
             content = bytearray()
             remaining = initial_file.st_size
             while remaining:
@@ -252,9 +280,14 @@ def _load_descriptor(
                 )
         finally:
             os.close(file_descriptor)
-        if os.listdir(directory_descriptor) != [filename] or _node_identity(
-            initial_directory
-        ) != _node_identity(os.fstat(directory_descriptor)):
+        _assert_single_descriptor_entry(
+            directory_descriptor,
+            filename=filename,
+            label=label,
+        )
+        if _node_identity(initial_directory) != _node_identity(
+            os.fstat(directory_descriptor)
+        ):
             raise ControlledComparisonError(
                 f"{label} directory changed during its read"
             )
@@ -266,8 +299,9 @@ def _load_descriptor(
         os.close(directory_descriptor)
     raw_content = bytes(content)
     try:
+        strict_json_value(raw_content, label=f"{label} descriptor")
         descriptor = model.model_validate_json(raw_content)
-    except ValidationError:
+    except (RecursionError, ValueError, ValidationError, VerificationError):
         raise ControlledComparisonError(
             f"{label} descriptor failed contract validation"
         ) from None
@@ -492,6 +526,7 @@ def verify_comparison_plan(
     path: Path,
     *,
     expected_comparison_plan_digest: str | None = None,
+    work_budget: WorkBudget | None = None,
 ) -> VerifiedComparisonPlan:
     """Verify the immutable plan bytes and optional externally retained digest."""
 
@@ -501,6 +536,7 @@ def verify_comparison_plan(
         model=ControlledComparisonPlan,
         id_attribute="comparison_plan_id",
         label="comparison plan",
+        work_budget=work_budget,
     )
     if not isinstance(loaded, ControlledComparisonPlan):
         raise AssertionError("comparison-plan loader returned the wrong model")
@@ -518,6 +554,7 @@ def verify_comparison_plan(
         model=ControlledComparisonPlan,
         id_attribute="comparison_plan_id",
         label="comparison plan",
+        work_budget=work_budget,
     )
     if final != loaded or final_bytes != initial_bytes:
         raise ControlledComparisonError(
@@ -530,9 +567,17 @@ def verify_comparison_plan(
     )
 
 
-def _run_context(analysis: BundleAnalysis) -> _RunContext:
+def _run_context(
+    analysis: BundleAnalysis,
+    *,
+    work_budget: WorkBudget | None = None,
+) -> _RunContext:
     verification = analysis.verification
-    reader = BundleReader(verification.bundle_path, require_immutable=True)
+    reader = BundleReader(
+        verification.bundle_path,
+        require_immutable=True,
+        work_budget=work_budget,
+    )
     role_paths = {
         artifact.role: artifact.path for artifact in verification.descriptor.artifacts
     }
@@ -756,10 +801,15 @@ def _evaluate_result(
     candidate: VerifiedTrialSet,
     comparison_result_id: str,
     created_at: datetime,
+    work_budget: WorkBudget | None = None,
 ) -> ControlledComparisonResult:
     descriptor = plan.descriptor
-    baseline_contexts = tuple(_run_context(member) for member in baseline.members)
-    candidate_contexts = tuple(_run_context(member) for member in candidate.members)
+    baseline_contexts = tuple(
+        _run_context(member, work_budget=work_budget) for member in baseline.members
+    )
+    candidate_contexts = tuple(
+        _run_context(member, work_budget=work_budget) for member in candidate.members
+    )
     all_contexts = (*baseline_contexts, *candidate_contexts)
 
     plan_precedes = all(
@@ -960,6 +1010,8 @@ def _verified_plan_by_id(
     comparison_plans_root: Path,
     comparison_plan_id: str,
     expected_digest: str,
+    *,
+    work_budget: WorkBudget | None = None,
 ) -> VerifiedComparisonPlan:
     selected_id = _validate_id(
         comparison_plan_id,
@@ -973,6 +1025,7 @@ def _verified_plan_by_id(
             root_label="comparison-plans root",
         ),
         expected_comparison_plan_digest=expected_digest,
+        work_budget=work_budget,
     )
 
 
@@ -981,6 +1034,8 @@ def _verified_trial_by_id(
     runs_root: Path,
     trial_set_id: str,
     expected_digest: str,
+    *,
+    work_budget: WorkBudget | None = None,
 ) -> VerifiedTrialSet:
     selected_id = _validate_id(trial_set_id, TrialSetId, label="trial-set ID")
     try:
@@ -992,7 +1047,10 @@ def _verified_trial_by_id(
             ),
             runs_root=runs_root,
             expected_trial_set_digest=expected_digest,
+            work_budget=work_budget,
         )
+    except WorkLimitError:
+        raise
     except ControlledComparisonError:
         raise
     except Exception as error:
@@ -1072,6 +1130,7 @@ def verify_comparison_result(
     trial_sets_root: Path,
     comparison_plans_root: Path,
     expected_comparison_result_digest: str | None = None,
+    work_budget: WorkBudget | None = None,
 ) -> VerifiedComparisonResult:
     """Recalculate a result from its retained plan and trial-set digests."""
 
@@ -1081,6 +1140,7 @@ def verify_comparison_result(
         model=ControlledComparisonResult,
         id_attribute="comparison_result_id",
         label="comparison result",
+        work_budget=work_budget,
     )
     if not isinstance(loaded, ControlledComparisonResult):
         raise AssertionError("comparison-result loader returned the wrong model")
@@ -1096,18 +1156,21 @@ def verify_comparison_result(
         comparison_plans_root,
         loaded.comparison_plan_id,
         loaded.comparison_plan_digest,
+        work_budget=work_budget,
     )
     baseline = _verified_trial_by_id(
         trial_sets_root,
         runs_root,
         loaded.baseline_trial_set.trial_set_id,
         loaded.baseline_trial_set.trial_set_digest,
+        work_budget=work_budget,
     )
     candidate = _verified_trial_by_id(
         trial_sets_root,
         runs_root,
         loaded.candidate_trial_set.trial_set_id,
         loaded.candidate_trial_set.trial_set_digest,
+        work_budget=work_budget,
     )
     try:
         recalculated = _evaluate_result(
@@ -1116,6 +1179,7 @@ def verify_comparison_result(
             candidate=candidate,
             comparison_result_id=loaded.comparison_result_id,
             created_at=loaded.created_at,
+            work_budget=work_budget,
         )
     except (ArithmeticError, ValidationError, ValueError):
         raise ControlledComparisonError(
@@ -1131,6 +1195,7 @@ def verify_comparison_result(
         model=ControlledComparisonResult,
         id_attribute="comparison_result_id",
         label="comparison result",
+        work_budget=work_budget,
     )
     if final != loaded or final_bytes != initial_bytes:
         raise ControlledComparisonError(
@@ -1148,6 +1213,8 @@ def verify_comparison_result(
 
 def inspect_comparison_result_declaration(
     path: Path,
+    *,
+    work_budget: WorkBudget | None = None,
 ) -> ComparisonResultDeclaration:
     """Read immutable result metadata without validating referenced evidence."""
 
@@ -1157,6 +1224,7 @@ def inspect_comparison_result_declaration(
         model=ControlledComparisonResult,
         id_attribute="comparison_result_id",
         label="comparison result",
+        work_budget=work_budget,
     )
     if not isinstance(loaded, ControlledComparisonResult):
         raise AssertionError("comparison-result loader returned the wrong model")

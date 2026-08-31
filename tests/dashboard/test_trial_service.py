@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+import inferdrome.trials.service as trial_service
 from inferdrome.domain.metrics import (
     Aggregation,
     DefinitionId,
@@ -17,7 +18,8 @@ from inferdrome.domain.metrics import (
     RoundingPolicy,
     Unit,
 )
-from inferdrome.errors import TrialSetError
+from inferdrome.errors import TrialSetError, WorkLimitError
+from inferdrome.limits import WorkBudget
 from inferdrome.trials import (
     create_trial_set,
     trial_metric_variations,
@@ -73,6 +75,102 @@ def test_create_verify_and_summarize_same_configuration(
         assert all(item.span == "0" for item in variations)
     finally:
         _make_tree_writable(trial_sets_root)
+
+
+def test_creation_does_not_reverify_after_immutable_publication(
+    tmp_path: Path,
+    run_fake_bundle: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root = tmp_path / "runs"
+    trial_sets_root = tmp_path / "trial-sets"
+    run_ids = (
+        "run-11111111111111111111111111111111",
+        "run-22222222222222222222222222222222",
+    )
+    for run_id in run_ids:
+        run_fake_bundle(runs_root, run_id)
+
+    def unexpected_reverification(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("creation reverified after publication")
+
+    monkeypatch.setattr(
+        trial_service,
+        "verify_trial_set",
+        unexpected_reverification,
+    )
+    try:
+        created = create_trial_set(
+            runs_root=runs_root,
+            trial_sets_root=trial_sets_root,
+            run_ids=run_ids,
+            title="Prepublication verification",
+        )
+
+        assert created.path.is_dir()
+        assert (created.path / "trial-set.json").is_file()
+        assert len(created.members) == 2
+    finally:
+        _make_tree_writable(trial_sets_root)
+
+
+def test_creation_checks_deadline_immediately_before_publication(
+    tmp_path: Path,
+    run_fake_bundle: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root = tmp_path / "runs"
+    trial_sets_root = tmp_path / "trial-sets"
+    run_ids = (
+        "run-11111111111111111111111111111111",
+        "run-22222222222222222222222222222222",
+    )
+    for run_id in run_ids:
+        run_fake_bundle(runs_root, run_id)
+
+    expired = False
+    delegate = WorkBudget(trial_service.TRIAL_SET_CREATION_WORK)
+
+    class ExpiringBudget:
+        def reserve(self, *, units: int = 0, bytes_: int = 0) -> None:
+            delegate.reserve(units=units, bytes_=bytes_)
+
+        def checkpoint(self) -> None:
+            if expired:
+                raise WorkLimitError("test deadline crossed")
+            delegate.checkpoint()
+
+    monkeypatch.setattr(trial_service, "WorkBudget", lambda _limits: ExpiringBudget())
+    canonical_trial_set_bytes = trial_service._canonical_trial_set_bytes
+
+    def expire_after_canonicalization(descriptor: Any) -> bytes:
+        nonlocal expired
+        content = canonical_trial_set_bytes(descriptor)
+        expired = True
+        return content
+
+    def unexpected_publication(**kwargs: Any) -> Any:
+        raise AssertionError("expired creation reached immutable publication")
+
+    monkeypatch.setattr(
+        trial_service,
+        "_canonical_trial_set_bytes",
+        expire_after_canonicalization,
+    )
+    monkeypatch.setattr(
+        trial_service,
+        "publish_immutable_directory",
+        unexpected_publication,
+    )
+
+    with pytest.raises(TrialSetError, match="exceeded its work limits"):
+        create_trial_set(
+            runs_root=runs_root,
+            trial_sets_root=trial_sets_root,
+            run_ids=run_ids,
+            title="Deadline sentinel",
+        )
+    assert not trial_sets_root.exists()
 
 
 def test_creation_rejects_fingerprint_drift(
@@ -240,6 +338,37 @@ def test_verification_requires_immutable_trial_set_directory(
         created.path.chmod(0o700)
 
         with pytest.raises(TrialSetError, match="directory must be read-only"):
+            verify_trial_set(created.path, runs_root=runs_root)
+    finally:
+        _make_tree_writable(trial_sets_root)
+
+
+def test_verification_bounds_undeclared_trial_set_directory_entries(
+    tmp_path: Path,
+    run_fake_bundle: Any,
+) -> None:
+    runs_root = tmp_path / "runs"
+    trial_sets_root = tmp_path / "trial-sets"
+    run_ids = (
+        "run-11111111111111111111111111111111",
+        "run-22222222222222222222222222222222",
+    )
+    for run_id in run_ids:
+        run_fake_bundle(runs_root, run_id)
+
+    try:
+        created = create_trial_set(
+            runs_root=runs_root,
+            trial_sets_root=trial_sets_root,
+            run_ids=run_ids,
+            title="Closed descriptor directory",
+        )
+        created.path.chmod(0o700)
+        (created.path / "undeclared").write_bytes(b"ignored")
+        (created.path / "undeclared").chmod(0o400)
+        created.path.chmod(0o500)
+
+        with pytest.raises(TrialSetError, match="undeclared entries"):
             verify_trial_set(created.path, runs_root=runs_root)
     finally:
         _make_tree_writable(trial_sets_root)

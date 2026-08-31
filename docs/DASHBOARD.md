@@ -163,8 +163,10 @@ from an observed zero or empty value.
 Each page contains at most `limit` combined verified and rejected entries and
 returns `total`, `returned`, `has_more`, and `next_cursor` metadata. The browser
 follows at most five 200-entry pages, matching the 1,000-entry discovery bound;
-each cursor is bound to the ordered run/digest snapshot, so if the index changes
-between pages the request fails closed and asks for a fresh load.
+each cursor pages the same immutable verified run/digest snapshot without
+rescanning or reverifying the corpus. A cursorless request explicitly builds
+and publishes a fresh snapshot; after that refresh, cursors for a changed prior
+snapshot fail closed and ask for a fresh load.
 
 `GET /api/v1/trial-sets` uses the same 1-through-200 page limit and an opaque,
 snapshot-bound cursor. Trial Set discovery examines at most 200 direct entries,
@@ -178,6 +180,26 @@ contract and a snapshot-bound cursor over at most 200 direct plan entries.
 validated direct-child plan ID. Matching result declarations are bounded and
 fully verified before any result data is projected; duplicate or invalid
 results are withheld.
+
+Snapshot construction has explicit aggregate ceilings. Run discovery examines
+at most 1,000 direct entries, Trial Set discovery at most 200, and comparison
+discovery at most 200 plan plus 200 result entries. One dashboard index/app
+instance admits at most eight concurrent snapshot/detail builds, matching the
+dashboard's bounded parallel route loading. A run snapshot receives 1,000
+verification units, a Trial Set snapshot 1,000 units, and a
+controlled-comparison snapshot 2,000 units; each receives at most 4 GiB of
+aggregate verified input and a cooperative 120-second monotonic work window. At
+the eight-operation concurrency ceiling, the combined reserved-input ceiling is
+32 GiB. Trial Set member verification is independently bounded to 100 members,
+4 GiB, and 120 seconds. Trial Set creation performs two prepublication member
+passes under one 200-unit, 4 GiB, 120-second budget and checks the deadline once
+more before creating or publishing the immutable directory. Controlled-
+comparison workspace checks charge the exact opened frozen-input and lifecycle-
+event bytes; lifecycle history is capped at the six events possible in the
+frozen no-retry state graph before sorting.
+Crossing a population, byte, unit, time, or concurrency ceiling aborts the whole
+new snapshot and returns a generic temporary-unavailability response; it never
+publishes a partial index.
 
 Untouched native artifacts remain part of the evidence bundle, but the
 dashboard does not serve arbitrary bundle files. Response-bearing native output

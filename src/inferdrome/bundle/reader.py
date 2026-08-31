@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from inferdrome.errors import VerificationError
+from inferdrome.limits import WorkBudget, collect_bounded
+from inferdrome.parsing import (
+    BoundedParseError,
+    bounded_json_float,
+    bounded_json_int,
+    validate_json_structure,
+)
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -20,6 +27,7 @@ class BundleLimits:
     max_file_bytes: int = 268_435_456
     max_total_bytes: int = 536_870_912
     max_jsonl_line_bytes: int = 8_388_608
+    max_jsonl_records: int = 1_000_000
     max_depth: int = 8
 
     def __post_init__(self) -> None:
@@ -29,6 +37,7 @@ class BundleLimits:
             self.max_file_bytes,
             self.max_total_bytes,
             self.max_jsonl_line_bytes,
+            self.max_jsonl_records,
             self.max_depth,
         )
         if any(
@@ -100,10 +109,12 @@ class BundleReader:
         *,
         limits: BundleLimits | None = None,
         require_immutable: bool = True,
+        work_budget: WorkBudget | None = None,
     ) -> None:
         self.root = root.absolute()
         self.limits = limits or BundleLimits()
         self.require_immutable = require_immutable
+        self.work_budget = work_budget
         self.files: dict[str, ScannedFile] = {}
         self.directories: set[str] = set()
         self.total_bytes = 0
@@ -111,6 +122,8 @@ class BundleReader:
         self._directory_nodes: dict[str, ScannedDirectory] = {}
         self._content_cache: dict[str, bytes] = {}
         self._scan()
+        if self.work_budget is not None:
+            self.work_budget.reserve(bytes_=self.total_bytes)
 
     def _scan(self) -> None:
         try:
@@ -138,7 +151,22 @@ class BundleReader:
                 raise VerificationError("bundle directory depth exceeds limit")
             try:
                 with os.scandir(directory) as iterator:
-                    entries = sorted(iterator, key=lambda entry: entry.name)
+                    remaining_entries = (
+                        self.limits.max_files
+                        + self.limits.max_directories
+                        - len(self.files)
+                        - len(self.directories)
+                    )
+                    entries = sorted(
+                        collect_bounded(
+                            iterator,
+                            limit=remaining_entries,
+                            error=lambda: VerificationError(
+                                "bundle entry count exceeds combined limits"
+                            ),
+                        ),
+                        key=lambda entry: entry.name,
+                    )
             except OSError:
                 raise VerificationError("bundle directory cannot be scanned") from None
             for entry in entries:
@@ -261,6 +289,7 @@ class BundleReader:
             self.root,
             limits=self.limits,
             require_immutable=self.require_immutable,
+            work_budget=self.work_budget,
         )
         if (
             current._root_node != self._root_node
@@ -289,14 +318,17 @@ def strict_json_value(content: bytes, *, label: str) -> Any:
         raise VerificationError(f"{label} contains a non-finite number")
 
     try:
+        validate_json_structure(text)
         return json.loads(
             text,
             object_pairs_hook=unique_object,
             parse_constant=reject_constant,
+            parse_float=bounded_json_float,
+            parse_int=bounded_json_int,
         )
     except VerificationError:
         raise
-    except (json.JSONDecodeError, RecursionError):
+    except (BoundedParseError, json.JSONDecodeError, RecursionError, ValueError):
         raise VerificationError(f"{label} is not valid bounded JSON") from None
 
 
@@ -305,14 +337,53 @@ def strict_jsonl_lines(
     *,
     label: str,
     max_line_bytes: int,
+    max_records: int,
+    expected_records: int | None = None,
 ) -> tuple[bytes, ...]:
+    if (
+        isinstance(max_records, bool)
+        or not isinstance(max_records, int)
+        or max_records <= 0
+    ):
+        raise ValueError("JSONL record limit must be a positive integer")
+    if expected_records is not None and (
+        isinstance(expected_records, bool)
+        or not isinstance(expected_records, int)
+        or expected_records < 0
+    ):
+        raise ValueError("expected JSONL record count must be non-negative")
+    if expected_records is not None and expected_records > max_records:
+        raise VerificationError(f"{label} record contract exceeds limit")
     if not content.endswith(b"\n"):
         raise VerificationError(f"{label} must end with one newline")
-    lines = content.splitlines()
-    if not lines:
+    if not content:
         raise VerificationError(f"{label} cannot be empty")
-    for line in lines:
-        if not line or len(line) > max_line_bytes:
+
+    # Count with constant auxiliary memory and stop on the N+1 sentinel before
+    # the LF-only second pass allocates one object per bounded record.
+    record_count = 0
+    start = 0
+    while start < len(content):
+        end = content.find(b"\n", start)
+        if end < 0:
+            raise VerificationError(f"{label} must end with one newline")
+        line_end = end - 1 if end > start and content[end - 1] == 13 else end
+        record_count += 1
+        if record_count > max_records:
+            raise VerificationError(f"{label} record count exceeds limit")
+        if line_end == start or line_end - start > max_line_bytes:
             raise VerificationError(f"{label} contains an invalid line size")
+        start = end + 1
+    if expected_records is not None and record_count != expected_records:
+        raise VerificationError(f"{label} record count disagrees with its contract")
+
+    lines: list[bytes] = []
+    start = 0
+    for _ in range(record_count):
+        end = content.find(b"\n", start)
+        line_end = end - 1 if end > start and content[end - 1] == 13 else end
+        line = content[start:line_end]
         strict_json_value(line, label=label)
+        lines.append(line)
+        start = end + 1
     return tuple(lines)

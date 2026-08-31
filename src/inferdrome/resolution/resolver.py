@@ -292,7 +292,10 @@ def resolve_experiment(
     ):
         raise ResolutionError("workload digest does not match the expected value")
 
-    prompts = parse_custom_workload(workload_bytes)
+    prompts = parse_custom_workload(
+        workload_bytes,
+        required_prompt_count=source.traffic.measured_requests,
+    )
     selected_run_id = run_id or new_run_id()
     try:
         selected_run_id = TypeAdapter(RunId).validate_python(
@@ -374,7 +377,10 @@ def validate_resolution_result(resolution: ResolutionResult) -> None:
         )
     ):
         raise ResolutionError("resolved execution input is internally inconsistent")
-    prompts = parse_custom_workload(resolution.workload_bytes)
+    prompts = parse_custom_workload(
+        resolution.workload_bytes,
+        required_prompt_count=source.traffic.measured_requests,
+    )
     source_digest = digest_bytes(
         DigestDomain.SOURCE_SPEC,
         resolution.source_bytes,

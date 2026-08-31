@@ -10,7 +10,8 @@ import yaml
 
 from inferdrome.domain.ids import sha256_digest
 from inferdrome.domain.states import IntegrityStatus, RunState
-from inferdrome.errors import WorkspaceError
+from inferdrome.errors import WorkLimitError, WorkspaceError
+from inferdrome.limits import WorkBudget, WorkLimits
 from inferdrome.resolution.resolver import ResolutionResult, resolve_experiment
 from inferdrome.workspace.run_workspace import RunWorkspace
 
@@ -144,6 +145,43 @@ def test_reopen_verifies_metadata_inputs_and_latest_event(tmp_path: Path) -> Non
     assert reopened.current_state().state is RunState.PREFLIGHT
     reopened.transition(RunState.WARMUP)
     assert workspace.current_state().state is RunState.WARMUP
+
+
+def test_reopen_charges_exact_authoritative_workspace_bytes(tmp_path: Path) -> None:
+    workspace = RunWorkspace.reserve(tmp_path / "runs", _resolution(tmp_path))
+    charged_paths = (
+        workspace.control_directory / "resolution.json",
+        *(workspace.path / item.path for item in workspace.metadata.frozen_inputs),
+        workspace.control_directory / "state.json",
+        workspace.control_directory / "events" / "00000000-CREATED.json",
+    )
+    expected_bytes = sum(path.stat().st_size for path in charged_paths)
+    exact_budget = WorkBudget(
+        WorkLimits(max_units=1, max_bytes=expected_bytes, max_seconds=1.0),
+        clock=lambda: 1.0,
+    )
+
+    RunWorkspace.open(workspace.path, work_budget=exact_budget)
+
+    assert exact_budget.bytes == expected_bytes
+
+    bounded_budget = WorkBudget(
+        WorkLimits(max_units=1, max_bytes=expected_bytes - 1, max_seconds=1.0),
+        clock=lambda: 1.0,
+    )
+    with pytest.raises(WorkLimitError, match="byte limit"):
+        RunWorkspace.open(workspace.path, work_budget=bounded_budget)
+    assert bounded_budget.bytes < expected_bytes
+
+
+def test_state_history_is_bounded_before_event_reads(tmp_path: Path) -> None:
+    workspace = RunWorkspace.reserve(tmp_path / "runs", _resolution(tmp_path))
+    events = workspace.control_directory / "events"
+    for index in range(1, 7):
+        (events / f"{index:08d}-UNTRUSTED.json").write_bytes(b"not-json")
+
+    with pytest.raises(WorkspaceError, match="exceeds its event limit"):
+        workspace.current_state()
 
 
 def test_frozen_input_mutation_is_detected_before_transition(tmp_path: Path) -> None:

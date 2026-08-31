@@ -6,7 +6,8 @@ import pytest
 
 import inferdrome.bundle.reader as reader_module
 from inferdrome.bundle.reader import BundleReader
-from inferdrome.errors import VerificationError
+from inferdrome.errors import VerificationError, WorkLimitError
+from inferdrome.limits import WorkBudget, WorkLimits
 
 
 def test_repeated_reads_return_one_snapshot_and_end_check_detects_change(
@@ -66,3 +67,36 @@ def test_unchanged_snapshot_passes_end_check(tmp_path: Path) -> None:
 
     assert reader.read_bytes("artifact.json") == b"{}"
     reader.assert_unchanged()
+
+
+def test_work_budget_charges_each_authoritative_tree_snapshot(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "artifact.json").write_bytes(b"{}")
+    exact_budget = WorkBudget(
+        WorkLimits(max_units=1, max_bytes=4, max_seconds=1.0),
+        clock=lambda: 1.0,
+    )
+
+    reader = BundleReader(
+        tmp_path,
+        require_immutable=False,
+        work_budget=exact_budget,
+    )
+    reader.assert_unchanged()
+
+    assert exact_budget.bytes == 4
+
+    bounded_budget = WorkBudget(
+        WorkLimits(max_units=1, max_bytes=3, max_seconds=1.0),
+        clock=lambda: 1.0,
+    )
+    reader = BundleReader(
+        tmp_path,
+        require_immutable=False,
+        work_budget=bounded_budget,
+    )
+
+    with pytest.raises(WorkLimitError, match="byte limit"):
+        reader.assert_unchanged()
+    assert bounded_budget.bytes == 2

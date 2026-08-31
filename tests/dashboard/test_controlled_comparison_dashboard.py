@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import inferdrome.dashboard.controlled_comparisons as controlled_module
 from inferdrome.comparisons import (
     VerifiedComparisonPlan,
     VerifiedComparisonResult,
@@ -40,6 +41,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FAKE_SOURCE = REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"
 FAKE_WORKLOAD = REPOSITORY_ROOT / "examples" / "workloads" / "fake-smoke.jsonl"
 PLAN_ID = "comparison-plan-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+SECOND_PLAN_ID = "comparison-plan-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 def _capture_complete_synthetic_environment(
@@ -86,12 +88,16 @@ def _make_tree_writable(root: Path) -> None:
         current.chmod(0o700)
 
 
-def _create_pending_plan(root: Path) -> VerifiedComparisonPlan:
+def _create_pending_plan(
+    root: Path,
+    *,
+    comparison_plan_id: str = PLAN_ID,
+) -> VerifiedComparisonPlan:
     source_text = FAKE_SOURCE.read_text(encoding="utf-8")
     sources: list[Path] = []
     for name, concurrency in (("baseline", 2), ("candidate", 4)):
         source_root = root / name
-        (source_root / "workloads").mkdir(parents=True)
+        (source_root / "workloads").mkdir(parents=True, exist_ok=True)
         shutil.copy2(
             FAKE_WORKLOAD,
             source_root / "workloads" / FAKE_WORKLOAD.name,
@@ -133,7 +139,7 @@ def _create_pending_plan(root: Path) -> VerifiedComparisonPlan:
         candidate_resolved_experiment=candidate.resolved_spec,
         candidate_source_spec_digest=candidate.source_spec_digest,
         candidate_execution_fingerprint=candidate.execution_fingerprint,
-        comparison_plan_id=PLAN_ID,
+        comparison_plan_id=comparison_plan_id,
         schedule_seed="00" * 32,
     )
 
@@ -232,6 +238,52 @@ def test_private_publication_stages_are_not_dashboard_artifacts(
         assert len(snapshot.comparisons) == 1
         assert snapshot.rejected == ()
         assert snapshot.page.total == 1
+    finally:
+        _make_tree_writable(tmp_path)
+
+
+def test_limit_one_cursor_pages_reuse_one_verified_comparison_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        _create_pending_plan(tmp_path)
+        _create_pending_plan(tmp_path, comparison_plan_id=SECOND_PLAN_ID)
+        verification_calls = 0
+        authoritative_verify = controlled_module.verify_comparison_plan
+
+        def verify_spy(*args: object, **kwargs: object) -> object:
+            nonlocal verification_calls
+            verification_calls += 1
+            return authoritative_verify(*args, **kwargs)
+
+        monkeypatch.setattr(
+            controlled_module,
+            "verify_comparison_plan",
+            verify_spy,
+        )
+        index = DashboardIndex(
+            tmp_path / "runs",
+            comparison_plans_root=tmp_path / "comparison-plans",
+            comparison_results_root=tmp_path / "comparison-results",
+        )
+
+        first = index.list_controlled_comparisons(limit=1)
+        assert first.page.next_cursor is not None
+        assert verification_calls == 2
+        second = index.list_controlled_comparisons(
+            limit=1,
+            cursor=first.page.next_cursor,
+        )
+
+        assert verification_calls == 2
+        assert second.generated_at == first.generated_at
+        assert second.page.total == first.page.total == 2
+        assert {
+            item.comparison_plan_id
+            for page in (first, second)
+            for item in page.comparisons
+        } == {PLAN_ID, SECOND_PLAN_ID}
     finally:
         _make_tree_writable(tmp_path)
 

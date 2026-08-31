@@ -38,6 +38,7 @@ from inferdrome.domain.experiment import (
 from inferdrome.domain.metrics import Aggregation, Measurement, MetricId, Unit
 from inferdrome.domain.request_record import RequestRecord, RequestStatus
 from inferdrome.errors import VerificationError
+from inferdrome.limits import WorkBudget
 
 _METRIC_LABELS: dict[tuple[MetricId, Aggregation], str] = {
     (MetricId.MEASURED_REQUEST_COUNT, Aggregation.COUNT): "Measured requests",
@@ -95,12 +96,19 @@ def _read_model[ModelT: BaseModel](
         raise VerificationError(f"{label} failed contract validation") from None
 
 
-def _read_records(reader: BundleReader, path: str) -> tuple[RequestRecord, ...]:
+def _read_records(
+    reader: BundleReader,
+    path: str,
+    *,
+    expected_records: int,
+) -> tuple[RequestRecord, ...]:
     content = reader.read_bytes(path)
     lines = strict_jsonl_lines(
         content,
         label="canonical request records",
         max_line_bytes=reader.limits.max_jsonl_line_bytes,
+        max_records=reader.limits.max_jsonl_records,
+        expected_records=expected_records,
     )
     try:
         return tuple(RequestRecord.model_validate_json(line) for line in lines)
@@ -389,19 +397,34 @@ def _signature(model: BaseModel) -> str:
     return canonical_json_bytes(value).decode("utf-8")
 
 
-def load_run_detail(bundle_path: Path) -> RunDetail:
+def load_run_detail(
+    bundle_path: Path,
+    *,
+    work_budget: WorkBudget | None = None,
+) -> RunDetail:
     """Verify, recalculate, and project one immutable evidence bundle."""
 
-    return project_run_detail(recalculate_bundle(bundle_path))
+    return project_run_detail(
+        recalculate_bundle(bundle_path, work_budget=work_budget),
+        work_budget=work_budget,
+    )
 
 
-def project_run_detail(analysis: BundleAnalysis) -> RunDetail:
+def project_run_detail(
+    analysis: BundleAnalysis,
+    *,
+    work_budget: WorkBudget | None = None,
+) -> RunDetail:
     """Project one already verified and recalculated bundle analysis."""
 
     report = analysis.verification
     descriptor = report.descriptor
     role_paths = {artifact.role: artifact.path for artifact in descriptor.artifacts}
-    reader = BundleReader(report.bundle_path, require_immutable=True)
+    reader = BundleReader(
+        report.bundle_path,
+        require_immutable=True,
+        work_budget=work_budget,
+    )
 
     resolved = _read_model(
         reader,
@@ -421,10 +444,18 @@ def project_run_detail(analysis: BundleAnalysis) -> RunDetail:
         EnvironmentManifest,
         label="environment manifest",
     )
-    records = _read_records(reader, role_paths[ArtifactRole.REQUEST_RECORDS])
+    records = _read_records(
+        reader,
+        role_paths[ArtifactRole.REQUEST_RECORDS],
+        expected_records=execution.configured_traffic.measured_requests,
+    )
 
     reader.assert_unchanged()
-    verify_bundle(report.bundle_path, expected_bundle_digest=report.bundle_digest)
+    verify_bundle(
+        report.bundle_path,
+        expected_bundle_digest=report.bundle_digest,
+        work_budget=work_budget,
+    )
 
     metric_views = tuple(
         _metric_view(measurement)

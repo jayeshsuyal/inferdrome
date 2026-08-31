@@ -18,6 +18,12 @@ from inferdrome.bundle import verify_bundle
 from inferdrome.capability_profiles import canonical_document_sha256
 from inferdrome.domain import EvidenceEligibility
 from inferdrome.errors import InferdromeError
+from inferdrome.parsing import (
+    BoundedParseError,
+    bounded_json_float,
+    bounded_json_int,
+    validate_json_structure,
+)
 
 try:
     import scripts.real_gpu_capture as capture
@@ -91,6 +97,8 @@ PROPOSED_FIXTURE_LOCATION = (
 
 _MAX_REVIEW_FILE_BYTES = 16_777_216
 _MAX_REVIEW_TOTAL_BYTES = 268_435_456
+_MAX_JSONL_LINE_BYTES = 8_388_608
+_MAX_JSONL_RECORDS = 1_000_000
 _MAX_PATH_EXAMPLES = 8
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -124,9 +132,9 @@ class PublicationReviewError(RuntimeError):
     """The exact archive could not be completely and safely reviewed."""
 
 
-def _strict_json(path: Path) -> dict[str, Any]:
+def _strict_json_value(content: bytes, *, label: str) -> Any:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = content.decode("utf-8")
 
         def unique(items: list[tuple[str, Any]]) -> dict[str, Any]:
             value: dict[str, Any] = {}
@@ -136,18 +144,80 @@ def _strict_json(path: Path) -> dict[str, Any]:
                 value[key] = item
             return value
 
+        validate_json_structure(text)
         parsed = json.loads(
             text,
             object_pairs_hook=unique,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"non-finite number {token}")
             ),
+            parse_float=bounded_json_float,
+            parse_int=bounded_json_int,
         )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (
+        BoundedParseError,
+        OSError,
+        RecursionError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
+        raise PublicationReviewError(f"{label} is not strict JSON") from None
+    return parsed
+
+
+def _strict_json(path: Path) -> dict[str, Any]:
+    try:
+        metadata = os.lstat(path)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_size > _MAX_REVIEW_FILE_BYTES
+        ):
+            raise OSError
+        content = path.read_bytes()
+    except OSError:
         raise PublicationReviewError(f"{path.name} is not strict JSON") from None
+    parsed = _strict_json_value(content, label=path.name)
     if not isinstance(parsed, dict):
         raise PublicationReviewError(f"{path.name} is not a JSON object")
     return parsed
+
+
+def _strict_jsonl_objects(content: bytes, *, label: str) -> tuple[dict[str, Any], ...]:
+    """Count and line-bound JSONL before constructing any record object."""
+
+    if not content:
+        raise PublicationReviewError(f"{label} is not strict JSONL")
+    record_count = 0
+    start = 0
+    while start < len(content):
+        newline = content.find(b"\n", start)
+        end = len(content) if newline < 0 else newline
+        line_end = end - 1 if end > start and content[end - 1] == 13 else end
+        record_count += 1
+        if (
+            record_count > _MAX_JSONL_RECORDS
+            or line_end == start
+            or line_end - start > _MAX_JSONL_LINE_BYTES
+        ):
+            raise PublicationReviewError(f"{label} is not strict JSONL")
+        if newline < 0:
+            break
+        start = newline + 1
+
+    records: list[dict[str, Any]] = []
+    start = 0
+    for _ in range(record_count):
+        newline = content.find(b"\n", start)
+        end = len(content) if newline < 0 else newline
+        line_end = end - 1 if end > start and content[end - 1] == 13 else end
+        value = _strict_json_value(content[start:line_end], label=label)
+        if not isinstance(value, dict):
+            raise PublicationReviewError(f"{label} is not strict JSONL")
+        records.append(value)
+        start = len(content) if newline < 0 else newline + 1
+    return tuple(records)
 
 
 def _sha256_bytes(content: bytes) -> str:
@@ -284,16 +354,12 @@ def _scan_capture(capture_root: Path) -> dict[str, Any]:
             lowercase = relative.lower()
             if lowercase.endswith("workload.source.jsonl"):
                 prompt_files.append(relative)
-                for line in text.splitlines():
-                    if line:
-                        try:
-                            if not isinstance(json.loads(line), dict):
-                                raise ValueError
-                        except (json.JSONDecodeError, ValueError):
-                            raise PublicationReviewError(
-                                "workload source contains invalid JSONL"
-                            ) from None
-                        prompt_records += 1
+                prompt_records += len(
+                    _strict_jsonl_objects(
+                        content,
+                        label="workload source",
+                    )
+                )
             if lowercase.endswith("benchmark-result.json"):
                 response_files.append(relative)
                 if "/corrupted-bundle-copy/" in lowercase:
@@ -647,18 +713,21 @@ def build_publication_review(
 
 def _request_records(bundle: Path) -> list[dict[str, Any]]:
     path = bundle / "records" / "requests.jsonl"
-    records: list[dict[str, Any]] = []
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line:
-                raise ValueError
-            value = json.loads(line)
-            if not isinstance(value, dict):
-                raise ValueError
-            records.append(value)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        metadata = os.lstat(path)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_size > _MAX_REVIEW_FILE_BYTES
+        ):
+            raise OSError
+        records = _strict_jsonl_objects(
+            path.read_bytes(),
+            label="request records",
+        )
+    except OSError:
         raise PublicationReviewError("request records are not strict JSONL") from None
-    return records
+    return list(records)
 
 
 def _independent_ttft(records: list[dict[str, Any]]) -> tuple[int, int, int]:

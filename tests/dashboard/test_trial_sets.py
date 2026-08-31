@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+import inferdrome.dashboard.trial_sets as trial_sets_module
 from inferdrome.dashboard.api import create_app
 from inferdrome.dashboard.index import DashboardIndex
 from inferdrome.errors import DashboardPaginationError
@@ -152,6 +153,7 @@ def test_trial_set_api_lists_reads_and_rejects_unknown_identity(
 def test_trial_set_pagination_is_snapshot_bound(
     tmp_path: Path,
     run_fake_bundle: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runs_root, run_ids = _two_runs(tmp_path, run_fake_bundle)
     trial_sets_root = tmp_path / "trial-sets"
@@ -168,9 +170,19 @@ def test_trial_set_pagination_is_snapshot_bound(
             runs_root,
             trial_sets_root=trial_sets_root,
         )
+        verification_calls = 0
+        authoritative_verify = trial_sets_module.verify_trial_set
+
+        def verify_spy(*args: object, **kwargs: object) -> object:
+            nonlocal verification_calls
+            verification_calls += 1
+            return authoritative_verify(*args, **kwargs)
+
+        monkeypatch.setattr(trial_sets_module, "verify_trial_set", verify_spy)
         first = index.list_trial_sets(limit=1)
         assert first.page.has_more is True
         assert first.page.next_cursor is not None
+        assert verification_calls == 2
 
         create_trial_set(
             runs_root=runs_root,
@@ -179,11 +191,25 @@ def test_trial_set_pagination_is_snapshot_bound(
             title="Trial 3",
             trial_set_id=f"trial-set-{'3' * 32}",
         )
+        second = index.list_trial_sets(
+            limit=1,
+            cursor=first.page.next_cursor,
+        )
+        assert second.generated_at == first.generated_at
+        assert second.page.total == 2
+        assert verification_calls == 2
+        assert {
+            item.trial_set_id for page in (first, second) for item in page.trial_sets
+        } == {
+            f"trial-set-{'1' * 32}",
+            f"trial-set-{'2' * 32}",
+        }
+
+        refreshed = index.list_trial_sets(limit=1)
+        assert refreshed.page.total == 3
+        assert verification_calls == 5
         with pytest.raises(DashboardPaginationError, match="stale snapshot"):
-            index.list_trial_sets(
-                limit=1,
-                cursor=first.page.next_cursor,
-            )
+            index.list_trial_sets(limit=1, cursor=first.page.next_cursor)
     finally:
         _make_tree_writable(trial_sets_root)
 

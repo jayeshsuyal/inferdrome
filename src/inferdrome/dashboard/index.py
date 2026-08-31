@@ -30,12 +30,18 @@ from inferdrome.dashboard.models import (
 )
 from inferdrome.dashboard.projection import load_run_detail
 from inferdrome.dashboard.trial_sets import TrialSetDashboardIndex
+from inferdrome.dashboard.work import (
+    DashboardLimits,
+    DashboardWorkController,
+)
 from inferdrome.errors import (
     DashboardError,
     DashboardPaginationError,
     DashboardRunNotFound,
     InferdromeError,
+    WorkLimitError,
 )
+from inferdrome.limits import collect_bounded
 
 _RUN_ID = re.compile(r"^run-[0-9a-f]{32}$")
 _SAFE_ENTRY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -49,6 +55,14 @@ _MAX_CURSOR_LENGTH = 128
 class _Candidate:
     entry: str
     bundle_path: Path
+
+
+@dataclass(frozen=True)
+class _VerifiedRunSnapshot:
+    snapshot_id: str
+    generated_at: datetime
+    entries: tuple[RunSummary | RejectedRun, ...]
+    details: tuple[tuple[str, RunDetail], ...]
 
 
 def _entry_label(name: str) -> str:
@@ -124,8 +138,11 @@ class DashboardIndex:
         trial_sets_root: Path | None = None,
         comparison_plans_root: Path | None = None,
         comparison_results_root: Path | None = None,
+        limits: DashboardLimits | None = None,
     ) -> None:
         self.runs_root = runs_root.absolute()
+        self.limits = limits or DashboardLimits()
+        self._work_controller = DashboardWorkController(self.limits)
         selected_trial_sets_root = (
             trial_sets_root.absolute()
             if trial_sets_root is not None
@@ -134,6 +151,8 @@ class DashboardIndex:
         self._trial_sets = TrialSetDashboardIndex(
             selected_trial_sets_root,
             self.runs_root,
+            limits=self.limits,
+            work_controller=self._work_controller,
         )
         selected_comparison_plans_root = (
             comparison_plans_root.absolute()
@@ -150,9 +169,12 @@ class DashboardIndex:
             selected_comparison_results_root,
             selected_trial_sets_root,
             self.runs_root,
+            limits=self.limits,
+            work_controller=self._work_controller,
         )
         self._cache_by_digest: dict[str, RunDetail] = {}
         self._runs: dict[str, RunDetail] = {}
+        self._snapshot: _VerifiedRunSnapshot | None = None
         self._lock = RLock()
 
     def _candidates(self) -> tuple[tuple[_Candidate, ...], tuple[RejectedRun, ...]]:
@@ -174,12 +196,18 @@ class DashboardIndex:
 
         try:
             with os.scandir(self.runs_root) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name)
+                entries = sorted(
+                    collect_bounded(
+                        iterator,
+                        limit=self.limits.max_run_entries,
+                        error=lambda: DashboardError(
+                            "runs root exceeds the dashboard entry limit"
+                        ),
+                    ),
+                    key=lambda item: item.name,
+                )
         except OSError:
             raise DashboardError("runs root could not be scanned") from None
-        if len(entries) > _MAX_DISCOVERED_ENTRIES:
-            raise DashboardError("runs root exceeds the dashboard entry limit")
-
         candidates: list[_Candidate] = []
         rejected: list[RejectedRun] = []
         for entry in entries:
@@ -212,13 +240,32 @@ class DashboardIndex:
         cursor: str | None = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
     ) -> RunIndexResponse:
-        """Rescan and reverify the bounded root before publishing a snapshot."""
+        """Build one verified snapshot, or page the active immutable snapshot."""
 
         if isinstance(limit, bool) or not 1 <= limit <= _MAX_PAGE_LIMIT:
             raise DashboardPaginationError("dashboard page limit is invalid")
         offset, expected_snapshot_id = _decode_cursor(cursor)
-        with self._lock:
-            candidates, discovery_rejections = self._candidates()
+        if expected_snapshot_id is not None:
+            with self._lock:
+                snapshot = self._snapshot
+                if snapshot is None or snapshot.snapshot_id != expected_snapshot_id:
+                    raise DashboardPaginationError(
+                        "dashboard cursor refers to a stale snapshot"
+                    )
+                return self._page(snapshot, offset=offset, limit=limit)
+
+        with self._work_controller.session(
+            self.limits.run_snapshot_work
+        ) as budget:
+            with self._lock:
+                candidate_cache = dict(self._cache_by_digest)
+            try:
+                candidates, discovery_rejections = self._candidates()
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "dashboard run snapshot exceeded its work limits"
+                ) from None
             rejected = list(discovery_rejections)
             run_by_id: dict[str, RunDetail] = {}
             source_by_id: dict[str, str] = {}
@@ -226,17 +273,29 @@ class DashboardIndex:
 
             for candidate in candidates:
                 try:
-                    report = verify_bundle(candidate.bundle_path)
-                    detail = self._cache_by_digest.get(report.bundle_digest)
+                    budget.reserve(units=1)
+                    report = verify_bundle(
+                        candidate.bundle_path,
+                        work_budget=budget,
+                    )
+                    detail = candidate_cache.get(report.bundle_digest)
                     if detail is None:
-                        detail = load_run_detail(candidate.bundle_path)
-                        self._cache_by_digest[report.bundle_digest] = detail
+                        detail = load_run_detail(
+                            candidate.bundle_path,
+                            work_budget=budget,
+                        )
+                        candidate_cache[report.bundle_digest] = detail
                     if (
                         detail.summary.bundle_digest != report.bundle_digest
                         or detail.summary.run_id != report.run_id
                     ):
                         raise DashboardError("verified dashboard cache disagrees")
-                except (InferdromeError, OSError, ValueError):
+                    budget.checkpoint()
+                except WorkLimitError:
+                    raise DashboardError(
+                        "dashboard run snapshot exceeded its work limits"
+                    ) from None
+                except (InferdromeError, OSError, RecursionError, ValueError):
                     rejected.append(
                         RejectedRun(
                             entry=candidate.entry,
@@ -274,10 +333,6 @@ class DashboardIndex:
                 run_by_id[run_id] = detail
                 source_by_id[run_id] = candidate.entry
 
-            self._runs = run_by_id
-            self._cache_by_digest = {
-                detail.summary.bundle_digest: detail for detail in run_by_id.values()
-            }
             summaries = tuple(
                 detail.summary
                 for detail in sorted(
@@ -291,40 +346,69 @@ class DashboardIndex:
                 *tuple(rejected),
             )
             snapshot_id = _snapshot_id(entries)
-            if expected_snapshot_id is not None and expected_snapshot_id != snapshot_id:
-                raise DashboardPaginationError(
-                    "dashboard cursor refers to a stale snapshot"
-                )
-            if offset > len(entries):
-                raise DashboardPaginationError(
-                    "dashboard cursor is outside the current snapshot"
-                )
-            page_entries = entries[offset : offset + limit]
-            next_offset = offset + len(page_entries)
-            has_more = next_offset < len(entries)
-            return RunIndexResponse(
+            try:
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "dashboard run snapshot exceeded its work limits"
+                ) from None
+            snapshot = _VerifiedRunSnapshot(
+                snapshot_id=snapshot_id,
                 generated_at=datetime.now(UTC),
-                runs=tuple(
-                    item for item in page_entries if isinstance(item, RunSummary)
-                ),
-                rejected=tuple(
-                    item for item in page_entries if isinstance(item, RejectedRun)
-                ),
-                page=PageView(
-                    limit=limit,
-                    returned=len(page_entries),
-                    total=len(entries),
-                    has_more=has_more,
-                    next_cursor=(
-                        _encode_cursor(next_offset, snapshot_id) if has_more else None
-                    ),
-                ),
+                entries=entries,
+                details=tuple(run_by_id.items()),
             )
+            with self._lock:
+                self._cache_by_digest = {
+                    detail.summary.bundle_digest: detail
+                    for detail in run_by_id.values()
+                }
+                self._snapshot = snapshot
+                self._runs = dict(snapshot.details)
+            return self._page(snapshot, offset=offset, limit=limit)
+
+    @staticmethod
+    def _page(
+        snapshot: _VerifiedRunSnapshot,
+        *,
+        offset: int,
+        limit: int,
+    ) -> RunIndexResponse:
+        if offset > len(snapshot.entries):
+            raise DashboardPaginationError(
+                "dashboard cursor is outside the current snapshot"
+            )
+        page_entries = snapshot.entries[offset : offset + limit]
+        next_offset = offset + len(page_entries)
+        has_more = next_offset < len(snapshot.entries)
+        return RunIndexResponse(
+            generated_at=snapshot.generated_at,
+            runs=tuple(
+                item for item in page_entries if isinstance(item, RunSummary)
+            ),
+            rejected=tuple(
+                item for item in page_entries if isinstance(item, RejectedRun)
+            ),
+            page=PageView(
+                limit=limit,
+                returned=len(page_entries),
+                total=len(snapshot.entries),
+                has_more=has_more,
+                next_cursor=(
+                    _encode_cursor(next_offset, snapshot.snapshot_id)
+                    if has_more
+                    else None
+                ),
+            ),
+        )
 
     def get_run(self, run_id: str) -> RunDetail:
         if not _RUN_ID.fullmatch(run_id):
             raise DashboardRunNotFound("run is not present in the verified index")
-        self.refresh()
+        with self._lock:
+            has_snapshot = self._snapshot is not None
+        if not has_snapshot:
+            self.refresh()
         with self._lock:
             detail = self._runs.get(run_id)
             if detail is None:
@@ -340,7 +424,10 @@ class DashboardIndex:
             candidate_run_id
         ):
             raise DashboardRunNotFound("run is not present in the verified index")
-        self.refresh()
+        with self._lock:
+            has_snapshot = self._snapshot is not None
+        if not has_snapshot:
+            self.refresh()
         with self._lock:
             baseline = self._runs.get(baseline_run_id)
             candidate = self._runs.get(candidate_run_id)

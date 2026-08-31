@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
+from typing import Final
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -20,13 +21,26 @@ from inferdrome.domain.digests import (
 from inferdrome.domain.ids import RunId, new_trial_set_id
 from inferdrome.domain.metrics import Measurement
 from inferdrome.domain.trial_set import TrialSet, TrialSetMember
-from inferdrome.errors import TrialSetError
+from inferdrome.errors import TrialSetError, WorkLimitError
 from inferdrome.immutable import publish_immutable_directory
+from inferdrome.limits import WorkBudget, WorkLimits, collect_bounded
+from inferdrome.parsing import BoundedParseError, validate_top_level_json_array_limit
 
 _TRIAL_SET_FILENAME = "trial-set.json"
 _MAX_TRIAL_SET_BYTES = 262_144
+_MAX_TRIAL_SET_MEMBERS = 100
 _ROUNDING_QUANTUM = Decimal("0.000001")
 _STATISTICS_PRECISION = 80
+TRIAL_SET_VERIFICATION_WORK: Final = WorkLimits(
+    max_units=_MAX_TRIAL_SET_MEMBERS,
+    max_bytes=4_294_967_296,
+    max_seconds=120.0,
+)
+TRIAL_SET_CREATION_WORK: Final = WorkLimits(
+    max_units=_MAX_TRIAL_SET_MEMBERS * 2,
+    max_bytes=4_294_967_296,
+    max_seconds=120.0,
+)
 
 
 @dataclass(frozen=True)
@@ -81,7 +95,22 @@ def _is_regular_file(path: Path) -> bool:
     return stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode)
 
 
-def _read_regular(path: Path, *, limit: int) -> bytes:
+def _directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_regular(
+    path: Path,
+    *,
+    limit: int,
+    work_budget: WorkBudget | None = None,
+) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -91,17 +120,73 @@ def _read_regular(path: Path, *, limit: int) -> bytes:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > limit:
             raise TrialSetError("trial-set descriptor is not a bounded regular file")
+        identity = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mode,
+            metadata.st_nlink,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        if work_budget is not None:
+            work_budget.reserve(bytes_=metadata.st_size)
         content = bytearray()
-        while len(content) <= limit:
-            chunk = os.read(descriptor, min(65_536, limit + 1 - len(content)))
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
             if not chunk:
-                break
+                raise TrialSetError("trial-set descriptor was truncated")
             content.extend(chunk)
-        if len(content) > limit:
-            raise TrialSetError("trial-set descriptor exceeds its byte limit")
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise TrialSetError("trial-set descriptor grew during verification")
+        final = os.fstat(descriptor)
+        try:
+            path_metadata = os.lstat(path)
+        except OSError:
+            raise TrialSetError(
+                "trial-set descriptor changed during verification"
+            ) from None
+        final_identity = (
+            final.st_dev,
+            final.st_ino,
+            final.st_size,
+            final.st_mode,
+            final.st_nlink,
+            final.st_mtime_ns,
+            final.st_ctime_ns,
+        )
+        path_identity = (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+            path_metadata.st_size,
+            path_metadata.st_mode,
+            path_metadata.st_nlink,
+            path_metadata.st_mtime_ns,
+            path_metadata.st_ctime_ns,
+        )
+        if final_identity != identity or path_identity != identity:
+            raise TrialSetError("trial-set descriptor changed during verification")
         return bytes(content)
     finally:
         os.close(descriptor)
+
+
+def _assert_single_trial_descriptor(directory_descriptor: int) -> None:
+    try:
+        with os.scandir(directory_descriptor) as iterator:
+            entries = collect_bounded(
+                iterator,
+                limit=1,
+                error=lambda: TrialSetError(
+                    "trial-set directory contains undeclared entries"
+                ),
+            )
+    except OSError:
+        raise TrialSetError("trial-set directory cannot be inspected safely") from None
+    if len(entries) != 1 or entries[0].name != _TRIAL_SET_FILENAME:
+        raise TrialSetError("trial-set directory contains undeclared entries")
 
 
 def _validated_run_id(value: str) -> str:
@@ -130,14 +215,23 @@ def _bundle_path_for_run(runs_root: Path, run_id: str) -> Path:
 def _verified_members(
     descriptor: TrialSet,
     runs_root: Path,
+    *,
+    work_budget: WorkBudget | None = None,
 ) -> tuple[BundleAnalysis, ...]:
+    budget = work_budget or WorkBudget(TRIAL_SET_VERIFICATION_WORK)
     analyses: list[BundleAnalysis] = []
     for member in descriptor.members:
         try:
+            bundle_path = _bundle_path_for_run(runs_root, member.run_id)
+            budget.reserve(units=1)
             analysis = recalculate_bundle(
-                _bundle_path_for_run(runs_root, member.run_id),
+                bundle_path,
                 expected_bundle_digest=member.bundle_digest,
+                work_budget=budget,
             )
+            budget.checkpoint()
+        except WorkLimitError:
+            raise
         except TrialSetError:
             raise
         except Exception as error:
@@ -173,7 +267,11 @@ def _verified_members(
     return tuple(analyses)
 
 
-def _load_descriptor(path: Path) -> tuple[TrialSet, bytes]:
+def _load_descriptor(
+    path: Path,
+    *,
+    work_budget: WorkBudget | None = None,
+) -> tuple[TrialSet, bytes]:
     trial_path = path.absolute()
     if not _is_real_directory(trial_path):
         raise TrialSetError("trial-set path must be a real directory")
@@ -183,19 +281,57 @@ def _load_descriptor(path: Path) -> tuple[TrialSet, bytes]:
         raise TrialSetError("trial-set path is unavailable or unsafe") from None
     if directory_mode & 0o222:
         raise TrialSetError("trial-set directory must be read-only")
-    descriptor_path = trial_path / _TRIAL_SET_FILENAME
-    if not _is_regular_file(descriptor_path):
-        raise TrialSetError("trial-set descriptor is unavailable or unsafe")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        mode = stat.S_IMODE(os.lstat(descriptor_path).st_mode)
+        directory_descriptor = os.open(trial_path, directory_flags)
     except OSError:
-        raise TrialSetError("trial-set descriptor is unavailable or unsafe") from None
-    if mode & 0o222:
-        raise TrialSetError("trial-set descriptor must be read-only")
-    content = _read_regular(descriptor_path, limit=_MAX_TRIAL_SET_BYTES)
+        raise TrialSetError("trial-set path is unavailable or unsafe") from None
     try:
+        initial_directory = os.fstat(directory_descriptor)
+        _assert_single_trial_descriptor(directory_descriptor)
+        descriptor_path = trial_path / _TRIAL_SET_FILENAME
+        if not _is_regular_file(descriptor_path):
+            raise TrialSetError("trial-set descriptor is unavailable or unsafe")
+        try:
+            mode = stat.S_IMODE(os.lstat(descriptor_path).st_mode)
+        except OSError:
+            raise TrialSetError(
+                "trial-set descriptor is unavailable or unsafe"
+            ) from None
+        if mode & 0o222:
+            raise TrialSetError("trial-set descriptor must be read-only")
+        content = _read_regular(
+            descriptor_path,
+            limit=_MAX_TRIAL_SET_BYTES,
+            work_budget=work_budget,
+        )
+        _assert_single_trial_descriptor(directory_descriptor)
+        if _directory_identity(os.fstat(directory_descriptor)) != (
+            _directory_identity(initial_directory)
+        ):
+            raise TrialSetError("trial-set directory changed during verification")
+    finally:
+        os.close(directory_descriptor)
+    try:
+        text = content.decode("utf-8")
+        validate_top_level_json_array_limit(
+            text,
+            key="members",
+            max_items=_MAX_TRIAL_SET_MEMBERS,
+        )
         descriptor = TrialSet.model_validate_json(content)
-    except ValidationError:
+    except (
+        BoundedParseError,
+        RecursionError,
+        UnicodeDecodeError,
+        ValueError,
+        ValidationError,
+    ):
         raise TrialSetError("trial-set descriptor failed contract validation") from None
     if trial_path.name != descriptor.trial_set_id:
         raise TrialSetError("trial-set directory and identifier disagree")
@@ -209,20 +345,27 @@ def verify_trial_set(
     *,
     runs_root: Path,
     expected_trial_set_digest: str | None = None,
+    work_budget: WorkBudget | None = None,
 ) -> VerifiedTrialSet:
     """Verify one immutable grouping and independently recalculate every member."""
 
-    descriptor, initial_bytes = _load_descriptor(path)
+    budget = work_budget or WorkBudget(TRIAL_SET_VERIFICATION_WORK)
+    descriptor, initial_bytes = _load_descriptor(path, work_budget=budget)
     trial_set_digest = digest_bytes(DigestDomain.TRIAL_SET, initial_bytes)
     if expected_trial_set_digest is not None and not hmac.compare_digest(
         expected_trial_set_digest,
         trial_set_digest,
     ):
         raise TrialSetError("trial-set digest does not match the expected value")
-    members = _verified_members(descriptor, runs_root)
-    final_descriptor, final_bytes = _load_descriptor(path)
+    members = _verified_members(
+        descriptor,
+        runs_root,
+        work_budget=budget,
+    )
+    final_descriptor, final_bytes = _load_descriptor(path, work_budget=budget)
     if final_descriptor != descriptor or final_bytes != initial_bytes:
         raise TrialSetError("trial-set descriptor changed during verification")
+    budget.checkpoint()
     return VerifiedTrialSet(
         path=path.absolute(),
         descriptor=descriptor,
@@ -249,12 +392,20 @@ def create_trial_set(
     if len(set(selected_ids)) != len(selected_ids):
         raise TrialSetError("trial-set run IDs must be unique")
 
+    budget = WorkBudget(TRIAL_SET_CREATION_WORK)
     analyses: list[BundleAnalysis] = []
     for run_id in selected_ids:
         try:
+            bundle_path = _bundle_path_for_run(runs_root, run_id)
+            budget.reserve(units=1)
             analyses.append(
-                recalculate_bundle(_bundle_path_for_run(runs_root, run_id))
+                recalculate_bundle(bundle_path, work_budget=budget)
             )
+            budget.checkpoint()
+        except WorkLimitError:
+            raise TrialSetError(
+                "trial-set creation exceeded its work limits"
+            ) from None
         except TrialSetError:
             raise
         except Exception as error:
@@ -293,8 +444,20 @@ def create_trial_set(
         )
     except ValidationError:
         raise TrialSetError("trial-set metadata failed contract validation") from None
-    _verified_members(descriptor, runs_root)
+    try:
+        verified_members = _verified_members(
+            descriptor,
+            runs_root,
+            work_budget=budget,
+        )
+    except WorkLimitError:
+        raise TrialSetError("trial-set creation exceeded its work limits") from None
     content = _canonical_trial_set_bytes(descriptor)
+    trial_set_digest = digest_bytes(DigestDomain.TRIAL_SET, content)
+    try:
+        budget.checkpoint()
+    except WorkLimitError:
+        raise TrialSetError("trial-set creation exceeded its work limits") from None
 
     root = trial_sets_root.absolute()
     try:
@@ -314,7 +477,12 @@ def create_trial_set(
         raise TrialSetError("trial-set ID is already reserved") from None
     except (OSError, ValueError) as error:
         raise TrialSetError("trial-set publication failed closed") from error
-    return verify_trial_set(destination, runs_root=runs_root)
+    return VerifiedTrialSet(
+        path=destination,
+        descriptor=descriptor,
+        trial_set_digest=trial_set_digest,
+        members=verified_members,
+    )
 
 
 def _decimal_text(value: Decimal) -> str:

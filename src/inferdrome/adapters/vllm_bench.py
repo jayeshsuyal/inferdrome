@@ -41,6 +41,12 @@ from inferdrome.normalization.vllm_0_26 import (
     VLLM_ADAPTER_VERSION,
     VLLM_VERSION,
 )
+from inferdrome.parsing import (
+    BoundedParseError,
+    bounded_json_float,
+    bounded_json_int,
+    validate_json_structure,
+)
 from inferdrome.qwen3_campaign import (
     QWEN3_8B_PROFILE_ID,
     Qwen3CampaignProfileBinding,
@@ -219,14 +225,17 @@ def _strict_json_object(content: bytes) -> dict[str, Any]:
         raise AdapterError("endpoint preflight response has non-finite numbers")
 
     try:
+        validate_json_structure(text)
         value = json.loads(
             text,
             object_pairs_hook=unique_object,
             parse_constant=reject_constant,
+            parse_float=bounded_json_float,
+            parse_int=bounded_json_int,
         )
     except AdapterError:
         raise
-    except (json.JSONDecodeError, RecursionError):
+    except (BoundedParseError, json.JSONDecodeError, RecursionError, ValueError):
         raise AdapterError("endpoint preflight response is not valid JSON") from None
     if not isinstance(value, dict):
         raise AdapterError("endpoint preflight response must be a JSON object")
@@ -385,7 +394,10 @@ def _validate_dataset(
     if snapshot.sha256 != spec.workload.sha256:
         raise AdapterError("vLLM dataset bytes differ from resolved workload")
     try:
-        prompts = parse_custom_workload(content)
+        prompts = parse_custom_workload(
+            content,
+            required_prompt_count=len(plan.requests),
+        )
     except SourceInputError as error:
         raise AdapterError("vLLM dataset is not valid custom JSONL") from error
     if len(prompts) < len(plan.requests):
@@ -682,14 +694,17 @@ def _strict_invocation_object(content: bytes) -> dict[str, Any]:
         raise AdapterError("vLLM invocation evidence has a non-finite number")
 
     try:
+        validate_json_structure(text)
         value = json.loads(
             text,
             object_pairs_hook=unique_object,
             parse_constant=reject_constant,
+            parse_float=bounded_json_float,
+            parse_int=bounded_json_int,
         )
     except AdapterError:
         raise
-    except (json.JSONDecodeError, RecursionError):
+    except (BoundedParseError, json.JSONDecodeError, RecursionError, ValueError):
         raise AdapterError("vLLM invocation evidence is not valid JSON") from None
     if not isinstance(value, dict):
         raise AdapterError("vLLM invocation evidence must be a JSON object")

@@ -64,6 +64,7 @@ from inferdrome.errors import (
     ReductionError,
     VerificationError,
 )
+from inferdrome.limits import WorkBudget
 from inferdrome.metrics import reduce_measurements
 from inferdrome.normalization import (
     build_vllm_execution_record,
@@ -351,6 +352,7 @@ def verify_bundle(
     expected_bundle_digest: str | None = None,
     limits: BundleLimits | None = None,
     require_immutable: bool = True,
+    work_budget: WorkBudget | None = None,
 ) -> VerificationReport:
     """Verify a closed bundle without mutation, execution, or network access."""
 
@@ -358,6 +360,7 @@ def verify_bundle(
         bundle_path,
         limits=limits,
         require_immutable=require_immutable,
+        work_budget=work_budget,
     )
     descriptor_bytes = reader.read_bytes("bundle.json")
     descriptor = _validated_model(
@@ -437,6 +440,8 @@ def verify_bundle(
         record_bytes,
         label="canonical request records",
         max_line_bytes=reader.limits.max_jsonl_line_bytes,
+        max_records=reader.limits.max_jsonl_records,
+        expected_records=len(plan.requests),
     )
     records_list = []
     for line in record_lines:

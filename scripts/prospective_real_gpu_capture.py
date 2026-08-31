@@ -30,6 +30,12 @@ from inferdrome.bundle import verify_bundle
 from inferdrome.domain.evidence import EvidenceEligibility
 from inferdrome.domain.ids import RunId, Sha256Digest, sha256_digest
 from inferdrome.errors import InferdromeError
+from inferdrome.parsing import (
+    BoundedParseError,
+    bounded_json_float,
+    bounded_json_int,
+    validate_json_structure,
+)
 from inferdrome.resolution import ResolutionResult, resolve_experiment
 from inferdrome.resolution.io import resolve_safe_child
 
@@ -92,14 +98,24 @@ def _strict_json_bytes(content: bytes, *, label: str) -> dict[str, Any]:
                 value[key] = item
             return value
 
+        text = content.decode("utf-8")
+        validate_json_structure(text)
         value = json.loads(
-            content.decode("utf-8"),
+            text,
             object_pairs_hook=unique,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"invalid number: {token}")
             ),
+            parse_float=bounded_json_float,
+            parse_int=bounded_json_int,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (
+        BoundedParseError,
+        RecursionError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
         raise ProspectiveCaptureError(f"{label} is not strict JSON") from None
     if not isinstance(value, dict):
         raise ProspectiveCaptureError(f"{label} must be a JSON object")
