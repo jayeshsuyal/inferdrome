@@ -46,23 +46,24 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          # The bootstrap nests UV_CACHE_DIR under setup-python's cache root.
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: uv.lock
 
-      - name: Install engineering dependencies
-        run: python -m pip install --editable ".[dev]"
+      - name: Install locked engineering dependencies
+        run: ./scripts/bootstrap_ci_uv.sh --extra dev
 
       - name: Run repository release preflight
         env:
           RELEASE_PREFLIGHT_PHASE: ${{ inputs.release_phase || 'auto' }}
         run: >-
-          python scripts/release_preflight.py
+          .venv/bin/python scripts/release_preflight.py
           --phase "$RELEASE_PREFLIGHT_PHASE"
           --repository-only --require-clean
 
       - name: Run the engineering gate
         env:
-          INFERDROME_PYTHON: python
+          INFERDROME_PYTHON: .venv/bin/python
         run: ./scripts/engineering_gate.sh
 
   deployment-qualification:
@@ -79,15 +80,16 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          # The bootstrap nests UV_CACHE_DIR under setup-python's cache root.
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: uv.lock
 
-      - name: Install qualification dependencies
-        run: python -m pip install --editable ".[dev]"
+      - name: Install locked qualification dependencies
+        run: ./scripts/bootstrap_ci_uv.sh --extra dev
 
       - name: Run the deployment qualification gate
         env:
-          INFERDROME_PYTHON: python
+          INFERDROME_PYTHON: .venv/bin/python
           INFERDROME_QUALIFICATION_OUTPUT_ROOT: ${{ runner.temp }}/inferdrome-qualification-output
         run: ./scripts/deployment_qualification_gate.sh
 
@@ -127,8 +129,9 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          # The bootstrap nests UV_CACHE_DIR under setup-python's cache root.
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: uv.lock
 
       - name: Set up Node.js 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -137,9 +140,9 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install Python dashboard dependencies
+      - name: Install locked Python dashboard dependencies
         timeout-minutes: 5
-        run: python -m pip install --editable ".[dev,dashboard]"
+        run: ./scripts/bootstrap_ci_uv.sh --extra dev --extra dashboard
 
       - name: Install frontend dependencies
         timeout-minutes: 5
@@ -154,7 +157,7 @@ jobs:
       - name: Run the dashboard gate
         env:
           CI: "true"
-          INFERDROME_PYTHON: python
+          INFERDROME_PYTHON: .venv/bin/python
         run: ./scripts/dashboard_gate.sh
 
       - name: Require committed dashboard assets to be current

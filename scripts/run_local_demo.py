@@ -158,7 +158,8 @@ def _require_dashboard_runtime(python: str) -> None:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise LocalDemoError(
             "the dashboard runtime is not installed; run "
-            f"`uv sync --extra dev --extra dashboard` first ({detail})"
+            "`uv lock --check` and then "
+            f"`uv sync --frozen --extra dev --extra dashboard` first ({detail})"
         )
 
 

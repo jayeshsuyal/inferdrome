@@ -538,7 +538,8 @@ Install the optional Python runtime and locked frontend dependencies, then run
 the dedicated dashboard gate:
 
 ```bash
-uv sync --extra dev --extra dashboard
+uv lock --check
+uv sync --frozen --extra dev --extra dashboard
 npm ci --prefix frontend
 npm --prefix frontend exec -- playwright install chromium
 INFERDROME_PYTHON=.venv/bin/python ./scripts/dashboard_gate.sh

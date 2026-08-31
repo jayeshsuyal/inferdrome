@@ -5,8 +5,9 @@ Status: **Repository gates defined; external acceptance and sign-off pending**
 This checklist maps the frozen
 [v0.1 definition of done](V0_1_DEFINITION_OF_DONE.md) to reviewable evidence.
 An automated check proves only the boundary it exercises. It cannot substitute
-for independent ExitSpec demonstrations, owner license/publication decisions, a
-security review, or final release sign-off.
+for independent ExitSpec demonstrations, owner archive-publication and
+external-material licensing decisions, a security review, or final release
+sign-off.
 
 ## Automated CI gates
 
@@ -22,9 +23,10 @@ Every pull request and every update to `main` must run all three jobs in
 The workflow uses an auto phase for normal pull-request, merge-queue, and
 `main` events, with explicit phase choices for manual release runs. It uses
 read-only repository permissions, no secrets, bounded job timeouts, exact-
-commit pins for every GitHub Action, lockfile installation for the frontend,
-and retained Playwright traces, screenshots, and videos on failure. Normal
-pull-request CI remains GPU-free.
+commit pins for every GitHub Action, a hash-bearing `uv.lock` with a
+lock-freshness check and frozen Python sync, lockfile installation for the
+frontend, and retained Playwright traces, screenshots, and videos on failure.
+Normal pull-request CI remains GPU-free.
 
 ## Definition-of-done evidence map
 
@@ -40,7 +42,7 @@ pull-request CI remains GPU-free.
 | 8. ExitSpec integration | Independently owned importer, recalculation, decision table, and receipt | External release blocker |
 | 9. Flagship demonstration | Managed runbook, exact A10 handoff, corruption and synthetic rejection demos | Inferdrome producer evidence complete; ExitSpec outcomes pending |
 | 10. Security and privacy | Threat model, bounded readers, adversarial tests, exact-archive publication review | `EXTERNAL_ONLY`; human security and owner publication review pending |
-| 11. Engineering quality | All three CI jobs, packaging smoke, documentation, contribution guidance | License selection pending; `v0.1.0` tag deferred to the release record |
+| 11. Engineering quality | All three CI jobs, packaging smoke, documentation, contribution guidance | Apache-2.0 selected and added; `v0.1.0` tag deferred to the release record |
 
 ## Release-blocking evidence
 
@@ -57,16 +59,17 @@ pull-request CI remains GPU-free.
 - [x] Retain the deterministic GPU capability profile, publication review, and
   handoff manifest. The raw archive remains `EXTERNAL_ONLY` and uncommitted.
 - [ ] Owner decides whether to approve public delivery of the exact archive
-  after license and privacy review.
+  after archive-bound licensing and privacy review.
 - [ ] Complete a human review against `docs/THREAT_MODEL.md` and record the
   reviewer and date.
-- [ ] Select and add the repository license. This checklist deliberately does
-  not make that legal choice on the owner's behalf.
+- [x] Select and add the repository license. The owner selected Apache License
+  2.0 for Inferdrome; `LICENSE`, package metadata, and third-party notices
+  record that choice without licensing external materials or raw archives.
 
 The unchecked items above are pre-existing owner or external blockers: ExitSpec
-outcomes and receipt, archive-publication approval, human security review, and
-the owner's license decision. They must be genuinely recorded before the
-release owner authorizes the final tag.
+outcomes and receipt, archive-publication approval, and human security review.
+They must be genuinely recorded before the release owner authorizes the final
+tag.
 
 ## Repository machine checks
 
@@ -74,7 +77,10 @@ The release preflight checks these conditions on the current `HEAD`; they are
 not manual checklist boxes:
 
 - final phases require both package-version locations to match the phase;
-- final phases require a non-empty regular repository license artifact;
+- every phase requires the exact canonical Apache-2.0 repository license and
+  matching package/repository metadata;
+- every phase requires a present hash-bearing `uv.lock` that matches
+  `pyproject.toml`, plus lock-keyed CI cache and non-editable frozen sync;
 - final phases verify frozen capture producer commit
   `c08b46d9fbd87477f45d130aa3c63615937c4dc3` is an ancestor of `HEAD`;
 - required release files, claim-boundary labels, all three CI jobs, and a clean
@@ -113,7 +119,7 @@ GPU provider and declared instance type:
 GPU demonstration bundle digest:
 ExitSpec receipt digest:
 Security reviewer and date:
-Selected license:
+Selected license: Apache License 2.0 (`Apache-2.0`)
 Release tag: v0.1.0
 ```
 
@@ -163,7 +169,8 @@ From a clean checkout at a development candidate commit, install the locked
 Python and frontend dependencies, then run:
 
 ```bash
-uv sync --extra dev --extra dashboard
+uv lock --check
+uv sync --frozen --extra dev --extra dashboard
 npm ci --prefix frontend
 npx --prefix frontend playwright install chromium
 .venv/bin/python scripts/release_preflight.py \
@@ -177,16 +184,17 @@ package metadata and `src/inferdrome/__init__.py` to remain at
 other or mismatched versions fail closed. The workflow's manual
 `release_phase` input can explicitly run auto, candidate, final-pre-tag, or
 post-tag against a deliberately selected ref. Candidate mode does not claim
-ExitSpec acceptance, archive publication, security sign-off, license
-selection, or final release approval.
+ExitSpec acceptance, archive publication, security sign-off, licensing
+approval for external materials, or final release approval.
 
 ### Final pre-tag phase: readiness of the exact release commit
 
-After the pre-existing ExitSpec, archive, security, and license blockers are
-genuinely recorded by their named owners, the release owner creates a separate
-release commit. That commit (which is not this development-version PR) changes
-both package-version locations to `0.1.0` and includes the owner-selected,
-non-empty repository license artifact. No `v0.1.0` tag exists yet.
+After the pre-existing ExitSpec, archive, and security blockers are genuinely
+recorded by their named owners, the release owner creates a separate release
+commit. That commit (which is not this development-version PR) changes both
+package-version locations to `0.1.0` while preserving the canonical
+Apache-2.0 license, matching metadata, and current dependency lock. No
+`v0.1.0` tag exists yet.
 
 Submit that commit through the branch-protected pull-request path. Its normal
 CI invocation uses `--phase auto`, resolves the exact final versions and
@@ -204,15 +212,16 @@ python scripts/release_preflight.py \
   --phase final-pre-tag --repository-only --require-clean
 ```
 
-It must pass the final version, license-artifact presence, frozen capture
-producer ancestry, clean-checkout, claim-boundary, required-file, CI-inventory,
-and no-existing-tag checks. All three jobs must pass at that exact commit. The
-Engineering checkout fetches the complete repository tag namespace
+It must pass the final version, exact license and metadata, Python lock
+freshness and hashes, frozen capture producer ancestry, clean-checkout,
+claim-boundary, required-file, CI-inventory, and no-existing-tag checks. All
+three jobs must pass at that exact commit. The Engineering checkout fetches
+the complete repository tag namespace
 (`fetch-depth: 0`), so the no-tag check is against actual `refs/tags` rather
 than a shallow clone. The aggregate three-job result is recorded by GitHub,
-not self-verified by the Engineering preflight. The license check proves only
-that an artifact is present; the owner remains responsible for choosing and
-legally approving its contents.
+not self-verified by the Engineering preflight. The license check proves the
+repository bytes and metadata are the recorded Apache-2.0 choice; it does not
+make a legal decision for external materials or authorize archive publication.
 
 For a local release-owner review on the exact final commit, the existing gates
 may be delegated without changing their semantics:
@@ -249,8 +258,9 @@ that checked-out tag:
 ```
 
 Post-tag mode requires `v0.1.0` to resolve to the checked `HEAD`, the final
-version, the license artifact, frozen capture ancestry, and all repository
-gates. The Engineering checkout's complete tag visibility allows this
+version, exact Apache-2.0 artifact and metadata, a current hash-bearing Python
+lock, frozen capture ancestry, and all repository gates. The Engineering
+checkout's complete tag visibility allows this
 `refs/tags/v0.1.0` resolution to be checked against the actual tag namespace.
 After all three jobs pass, put the exact release SHA, three CI run URLs, tag
 verification, and remaining external sign-off in the annotated tag message,
@@ -261,6 +271,7 @@ performed by this preflight.
 
 Automation cannot prove the ExitSpec importer or `PASS`/`FAIL`/`NOT_PROVEN`
 outcomes, pre-measurement contract chronology, human security approval, owner
-license choice, owner archive-publication decision, GitHub check results, or
-final release approval. Those inputs must remain explicit checklist evidence;
-checking a box does not turn them into Inferdrome evidence.
+archive-publication decision, licensing or publication rights for external
+materials, GitHub check results, or final release approval. Those inputs must
+remain explicit checklist evidence; checking a box does not turn them into
+Inferdrome evidence.

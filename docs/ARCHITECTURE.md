@@ -186,12 +186,17 @@ runner GPU requests, and model/runtime/benchmark drift.
 The default mock wrapper retrieves exactly one bounded runner stdout payload via
 `kubectl logs`, validates the synthetic/ineligible output, publishes it locally
 with no replacement, and only then deletes its unique namespace and kind
-cluster. It never relies on `kubectl cp` or `kubectl exec` from a completed
-container. The mock Pod's `emptyDir` is disposable. The GPU template instead
-requires explicit operator-provided read-only model/experiment PVCs and a
-writable evidence PVC; without that PVC, real bundle persistence is unresolved.
-This is a contract/simulation boundary, not a Kubernetes platform, live
-execution, evidence receipt, or GPU claim. See [KUBERNETES_V1.md](KUBERNETES_V1.md).
+cluster. Before image inspection or any kind operation, it rejects ambient
+Docker routing, validates the active context as one bounded canonical local
+Unix/npipe endpoint, and pins that endpoint for all later Docker-provider work.
+It never relies on `kubectl cp` or `kubectl exec` from a completed container.
+The mock Pod's `emptyDir` is disposable. The GPU template instead requires
+explicit operator-provided read-only model/experiment PVCs and a writable
+evidence PVC; without that PVC, real bundle persistence is unresolved. A local
+socket or pipe is not daemon, host, or physical-locality attestation and may
+still terminate at a local proxy. This is a contract/simulation boundary, not a
+Kubernetes platform, live execution, evidence receipt, or GPU claim. See
+[KUBERNETES_V1.md](KUBERNETES_V1.md).
 
 ### Deployment Qualification v1 boundary
 

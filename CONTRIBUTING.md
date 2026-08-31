@@ -6,14 +6,23 @@ fail closed when evidence is missing, malformed, or unsupported.
 
 ## Development environment
 
-Use Python 3.12 and a current Node.js 24 runtime. From the repository root:
+Use Python 3.12, uv 0.8.17, and a current Node.js 24 runtime. From the
+repository root:
 
 ```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --editable ".[dev,dashboard]"
+uv lock --check
+uv sync --frozen --extra dev --extra dashboard
 npm ci --prefix frontend
 npx --prefix frontend playwright install chromium
 ```
+
+The committed `uv.lock` is the Python environment authority. A normal install
+must not rewrite it or replace it with a ranged editable pip resolution. To
+change Python dependencies intentionally, edit `pyproject.toml`, run
+`uv lock` with uv 0.8.17, review both files, then repeat `uv lock --check` and
+the frozen sync above. CI checksum-verifies the same exact uv version, checks
+lock freshness, and syncs dependencies with `--frozen --no-install-project`
+before using `.venv/bin/python` with the repository `src` tree.
 
 On a clean Linux host, install Chromium's system dependencies as part of the
 Playwright step:
@@ -73,3 +82,12 @@ repository owner before opening a public issue containing sensitive details.
 
 The release candidate is tracked in
 [`docs/V0_1_RELEASE_CHECKLIST.md`](docs/V0_1_RELEASE_CHECKLIST.md).
+
+## Contribution licensing
+
+Unless explicitly stated otherwise, contributions accepted into Inferdrome
+are licensed under Apache-2.0. Do not submit material you lack permission to
+license. Third-party assets must retain their notices and license texts; see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Inferdrome's license does
+not cover models, workloads, serving engines, generated output, raw evidence
+archives, or other externally supplied material.
