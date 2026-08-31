@@ -48,6 +48,18 @@ review item and does not complete any external/manual gate.
   qualification (44s) successfully. It is candidate/main CI, not final-pre-tag
   or post-tag release evidence.
 
+## Threat-boundary matrix
+
+| Asset / entry point at `c1668e5` | Enforced controls in scope | Residual / unsupported claim |
+| --- | --- | --- |
+| Evidence archive / Trial Set intake | `src/inferdrome/trials/service.py` requires one direct regular descriptor, no undeclared sibling, stable path/handle identity, and fail-closed descriptor loading; `src/inferdrome/limits.py` and `src/inferdrome/bundle/reader.py` apply byte/unit/deadline and parser bounds before downstream work. | Repository checks validate intake semantics only. They do not prove archive provenance, owner approval, or prospective ExitSpec receipt content. |
+| Evidence authority / controlled comparison | `src/inferdrome/dashboard/comparison.py`, `src/inferdrome/trials/service.py`, and `src/inferdrome/comparisons/service.py` suppress deltas and controlled outcomes unless customer eligibility and shared ExitSpec contract authority are satisfied. | Inferdrome does not mint ExitSpec truth. No repository path can prove prospective `PASS` / `FAIL` / `NOT_PROVEN`, external chronology, or ingestion receipt retention. |
+| Local subprocess + SSH transport | `src/inferdrome/deployment/qualification.py` and `src/inferdrome/execution/subprocess_runner.py` isolate process groups, bound capture, minimize environment inheritance, and kill descendants on timeout; `scripts/capture_real_gpu_over_ssh.py` now bounds optional `ssh-keyscan` output before pin publication (N01) and requires an explicit regular non-symlink identity for all live/dry-run SSH paths (N02). | N01 and N02 are closed as repository defects, but this review did not perform any live SSH exchange or host-contact validation. It does not attest operator key hygiene, remote host legitimacy, or live network behavior. |
+| Provider lifecycle, billing, and cleanup | `scripts/capture_real_gpu_over_ssh.py` guarded interrupt/cleanup boundaries and `src/inferdrome/lambda_gpu_guard.py` termination retention logic keep unresolved termination state explicit rather than silently claiming cleanup. | No provider, GPU, billing, or cleanup action was executed here. This report does not prove present capacity, cost state, termination success, or post-run cleanup in an external account. |
+| Dashboard / API projection and disclosure | `src/inferdrome/dashboard/comparison.py`, `src/inferdrome/dashboard/projection.py`, and `src/inferdrome/domain/experiment.py` reject secret-bearing endpoint roots, enforce comparison authority, and expose only documented allowlisted projection fields; exact-main Dashboard CI passed in run 33367230313. | Dashboard CI proves repository behavior for this commit, not a human privacy sign-off. Allowlisted environment values remain intentional browser disclosure, and no live deployment was reviewed. |
+| Container / Compose / Kubernetes / GCP qualification | `scripts/run_kubernetes_mock_e2e.sh`, `src/inferdrome/kubernetes.py`, `src/inferdrome/deployment/qualification.py`, and GCP guard/dry-run tests restrict local Docker endpoint selection, bound subprocess execution, and fail closed on unsupported qualification state. | Controls qualify repository-side routing and orchestration behavior only. They do not prove a live daemon, cluster, image registry, cloud project, or external cleanup state. |
+| CI / release / publication | `.github/workflows/ci.yml`, `scripts/release_preflight.py`, and `scripts/review_gpu_evidence_publication.py` pin workflow actions, verify dependency-lock and CI inventory constraints, and keep A10 records bound to `EXTERNAL_ONLY`, null producer-side ExitSpec authority, and owner approval required. | Green candidate/main CI is not final-pre-tag or post-tag evidence. No release commit, authorized annotated tag, post-tag verification, GitHub Release, or archive publication/privacy/license-owner decision is claimed complete here. |
+
 ## Repair and CI provenance
 
 | Repair PR | Findings reconciled | Head / merged `main` commit | CI evidence |
@@ -114,17 +126,18 @@ release approval.
 | Evidence | Result |
 | --- | --- |
 | Clean-base resolution after fetch/reset | `HEAD`, `main`, and `origin/main` each resolved to `c1668e5c7fa53ea08146ee0cd4f045b0b317bac8` before the report edit. |
-| `python3.12 scripts/release_preflight.py --phase candidate --repository-only --require-clean` | `REPOSITORY_READY`: required files, exact `0.1.0.dev0` versions, canonical Apache-2.0 artifact/metadata, lock, claim boundaries, CI inventory, and clean base passed; four external/manual items remained `PENDING`. |
-| Finding-focused local matrix | 760 passed, 4 skipped in 182.75s: publication, immutable publication, bounded input/parser, qualification/subprocess, real-GPU transport/guard, resolver/vLLM, Kubernetes, preflight, Compose, GCP guard/dry-run, bundle sealing, and controlled-comparison tests. The four skips require optional `google.cloud.compute_v1`; they are not passes. |
+| Bundled CPython 3.12.13 preflight: `scripts/release_preflight.py --phase candidate --repository-only --require-clean` | `REPOSITORY_READY`: required files, exact `0.1.0.dev0` versions, canonical Apache-2.0 artifact/metadata, lock, claim boundaries, CI inventory, and clean base passed; four external/manual items remained `PENDING`. |
+| Finding-focused local matrix on bundled CPython 3.12.13 | 760 passed, 4 skipped in 182.75s: publication, immutable publication, bounded input/parser, qualification/subprocess, real-GPU transport/guard, resolver/vLLM, Kubernetes, preflight, Compose, GCP guard/dry-run, bundle sealing, and controlled-comparison tests. The four skips require optional `google.cloud.compute_v1`; they are not passes. |
 | Targeted N01/N02 regression selection | 15 passed, 82 deselected from `tests/unit/test_real_gpu_capture.py` for `live_keyscan`, `identity`, or `every_capture_mode`. |
-| `scripts/review_gpu_evidence_publication.py --check-records` | Passed: tracked A10 records and cross-identities valid; metadata-only validation because the raw archive is absent. |
-| Generator/static checks | Public schemas current (11 files); fake goldens current (6 files); `capture_real_gpu_over_ssh.py --check` passed; `compileall` and `bash -n scripts/*.sh` passed. |
+| Bundled CPython 3.12.13 records/static checks | `scripts/review_gpu_evidence_publication.py --check-records` passed with tracked A10 records and cross-identities valid; public schemas current (11 files); fake goldens current (6 files); `capture_real_gpu_over_ssh.py --check` passed; `compileall` and `bash -n scripts/*.sh` passed. |
 | Exact current `main` CI | Run 33367230313 green for Engineering, Dashboard, and Deployment qualification. Dashboard-specific local tests were not collected because the bundled local runtime lacks optional `fastapi`; this is a local environment limitation, not a passing result. |
 
-No dependency was installed or upgraded. The failed local attempt to collect
-dashboard tests with the bundled runtime stopped at missing optional `fastapi`;
-it made no repository change. Dashboard evidence above is therefore the exact
-current-main CI job, not a local dashboard assertion.
+No dependency was installed or upgraded. The focused local validation above was
+run with bundled CPython 3.12.13 because the host `python3` interpreter was not
+suitable for this repository's tooling and lacked `tomllib`. The failed local
+attempt to collect dashboard tests with the bundled runtime stopped at missing
+optional `fastapi`; it made no repository change. Dashboard evidence above is
+therefore the exact current-main CI job, not a local dashboard assertion.
 
 ## Explicit remaining release blockers and operational limits
 
