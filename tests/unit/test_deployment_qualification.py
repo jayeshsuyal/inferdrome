@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+import inferdrome.deployment.qualification as qualification
 from inferdrome.deployment import (
     QUALIFICATION_CLEANUP_ACTION,
     BoundedSubprocessRunner,
@@ -98,6 +99,7 @@ class FakeProcessRunner:
         command = tuple(argv)
         self.calls.append(command)
         assert all(";" not in item and "&&" not in item for item in command)
+        assert env["INFERDROME_VERSION"] == qualification.__version__
         assert "DOCKER_HOST" not in env
         assert "DOCKER_CONTEXT" not in env
         if command[:5] == ("git", "-C", str(REPOSITORY_ROOT), "rev-parse", "--verify"):
@@ -217,6 +219,7 @@ def test_qualification_compose_environment_is_private_and_non_ambient(
     assert environment["HOME"] == str(private_home)
     assert environment["DOCKER_CONFIG"] == str(docker_config)
     assert environment["TMPDIR"] == str(temporary_directory)
+    assert environment["INFERDROME_VERSION"] == qualification.__version__
     assert not list(docker_config.iterdir())
     assert "DOCKER_HOST" not in environment
     assert "DOCKER_CONTEXT" not in environment
@@ -251,6 +254,43 @@ def test_schema_is_current_closed_and_additive() -> None:
                 assert_closed(child)
 
     assert_closed(committed)
+
+
+def test_accepted_compose_requires_version_arg_for_each_service() -> None:
+    raw = (REPOSITORY_ROOT / "compose.yaml").read_bytes()
+    qualification._validate_accepted_compose(raw)
+
+    mutated = raw.replace(
+        b'INFERDROME_VERSION: "${INFERDROME_VERSION:?Inferdrome version is required}"',
+        b"INFERDROME_VERSION: 0.1.0.dev0",
+        1,
+    )
+    with pytest.raises(QualificationError, match="sourced from the package"):
+        qualification._validate_accepted_compose(mutated)
+
+
+def test_final_package_version_flows_to_compose_and_runtime_probe_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(qualification, "__version__", "0.1.0")
+    observed_versions: list[str] = []
+    fake = FakeProcessRunner(
+        on_up=lambda env: observed_versions.append(env["INFERDROME_VERSION"]),
+    )
+
+    execution = qualify_compose_mock(
+        output_root=_root(tmp_path),
+        runner=fake,
+        project_name=PROJECT,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        source_revision=SOURCE_REVISION,
+    )
+
+    assert execution.report.inferdrome_version == "0.1.0"
+    assert json.loads(expected_compose_output_bytes())["runner_version"] == "0.1.0"
+    assert observed_versions == ["0.1.0"]
 
 
 def test_success_binds_exact_inputs_output_images_and_scoped_cleanup(

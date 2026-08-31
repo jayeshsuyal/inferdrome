@@ -9,7 +9,7 @@ services:
       args:
         BUILD_FLAVOR: development
         SOURCE_REPOSITORY_COMMIT: development-unpinned
-        INFERDROME_VERSION: 0.1.0.dev0
+        INFERDROME_VERSION: "${INFERDROME_VERSION:?Inferdrome version is required}"
     command: ["--host", "0.0.0.0", "--port", "8000"]
     user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
     init: true
@@ -45,7 +45,7 @@ services:
       args:
         BUILD_FLAVOR: development
         SOURCE_REPOSITORY_COMMIT: development-unpinned
-        INFERDROME_VERSION: 0.1.0.dev0
+        INFERDROME_VERSION: "${INFERDROME_VERSION:?Inferdrome version is required}"
     entrypoint: ["/opt/inferdrome-runtime/bin/inferdrome-runner-probe"]
     user: "${INFERDROME_COMPOSE_UID:?Compose uid is required}:${INFERDROME_COMPOSE_GID:?Compose gid is required}"
     command:

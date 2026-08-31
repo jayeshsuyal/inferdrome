@@ -136,6 +136,9 @@ RUNTIME_CONTRACT_FILE: Final = (
 )
 _MOCK_ENGINE_IMAGE = "inferdrome/compose-mock:development"
 _RUNNER_IMAGE = "inferdrome/runner:development"
+_COMPOSE_VERSION_ARGUMENT = (
+    "${INFERDROME_VERSION:?Inferdrome version is required}"
+)
 _MOCK_ENDPOINT = "http://mock-engine.internal:8000/v1/chat/completions"
 _MOCK_MODEL = "inferdrome/mock-model"
 _MOCK_PROMPT = "deterministic local Compose smoke"
@@ -1067,6 +1070,14 @@ def _safe_environment(
         raise QualificationError(
             "qualification container identity is invalid", code="IDENTITY_INVALID"
         )
+    if (
+        not isinstance(__version__, str)
+        or len(__version__) > 64
+        or _VERSION_PATTERN.fullmatch(__version__) is None
+    ):
+        raise QualificationError(
+            "package version identity is invalid", code="OBSERVATION_INVALID"
+        )
     for path, label in (
         (private_home, "private HOME"),
         (docker_config, "Docker configuration"),
@@ -1090,6 +1101,7 @@ def _safe_environment(
             "INFERDROME_COMPOSE_UID": str(uid),
             "INFERDROME_COMPOSE_GID": str(gid),
             "INFERDROME_COMPOSE_EVIDENCE_DIR": str(evidence_dir),
+            "INFERDROME_VERSION": __version__,
             "PATH": os.defpath,
             "TMPDIR": str(temporary_directory),
             "XDG_CONFIG_HOME": str(private_home / ".config"),
@@ -1285,6 +1297,17 @@ def _validate_accepted_compose(raw: bytes) -> None:
         raise QualificationError(
             "Compose mock images are not accepted", code="CONTRACT_INVALID"
         )
+    for service in (mock, probe):
+        build = service.get("build")
+        build_args = build.get("args") if isinstance(build, dict) else None
+        if (
+            not isinstance(build_args, dict)
+            or build_args.get("INFERDROME_VERSION") != _COMPOSE_VERSION_ARGUMENT
+        ):
+            raise QualificationError(
+                "Compose build version must be sourced from the package",
+                code="CONTRACT_INVALID",
+            )
     if probe.get("entrypoint") != [
         "/opt/inferdrome-runtime/bin/inferdrome-runner-probe"
     ]:
