@@ -1568,6 +1568,8 @@ def test_qwen3_fake_ssh_retrieval_stops_at_checksum_before_semantics(
     archive_bytes = b"bounded fake archive bytes"
     archive_digest = hashlib.sha256(archive_bytes).hexdigest()
     calls: list[str] = []
+    identity = tmp_path / "id_ed25519"
+    identity.write_bytes(b"synthetic private key")
 
     def fake_run(
         arguments: object,
@@ -1580,6 +1582,9 @@ def test_qwen3_fake_ssh_retrieval_stops_at_checksum_before_semantics(
         if label == "remote GPU preflight":
             assert "StrictHostKeyChecking=yes" in argv
             assert "IdentityAgent=none" in argv
+            assert "IdentitiesOnly=yes" in argv
+            assert argv.count("-i") == 1
+            assert argv[argv.index("-i") + 1] == str(identity)
             assert "NVIDIA A10" in argv[-1]
         elif label == "remote proof pack":
             assert remote._QWEN3_PROFILE_ID in argv[-1]
@@ -1640,7 +1645,7 @@ def test_qwen3_fake_ssh_retrieval_stops_at_checksum_before_semantics(
     result = remote._capture_over_ssh(
         args,
         COMMIT,
-        None,
+        identity,
         source_archive,
         SOURCE_ARCHIVE_SHA256,
         termination_deadline=deadline,
