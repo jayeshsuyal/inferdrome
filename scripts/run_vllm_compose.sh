@@ -20,6 +20,15 @@ fail() {
   exit 2
 }
 
+derive_package_version() {
+  package_version=$(sed -nE \
+    's/^[[:space:]]*__version__[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' \
+    "$repository_root/src/inferdrome/__init__.py")
+  [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || \
+    fail "package version cannot be resolved"
+  export INFERDROME_VERSION="$package_version"
+}
+
 for compose_variable in \
   INFERDROME_COMPOSE_FILE \
   INFERDROME_GPU_COMPOSE_FILE \
@@ -133,6 +142,8 @@ case "$mode" in
     exit 2
     ;;
 esac
+
+derive_package_version
 
 [[ -f "$compose_file" && ! -L "$compose_file" ]] || fail "Compose file is unavailable"
 if [[ "$mode" == "gpu" ]]; then

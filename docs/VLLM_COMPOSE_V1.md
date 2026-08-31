@@ -33,7 +33,9 @@ root, malformed, and out-of-range identities, then checks model/input read
 access and evidence-directory write access using that exact identity before
 Docker starts. The Compose files intentionally require these variables rather
 than silently falling back to root or an unrelated image user; direct Compose
-inspection or execution must export them first. A newly created host evidence
+inspection or execution must export them first. The mock build args also require
+`INFERDROME_VERSION`, which the wrapper derives from the source package before
+starting Compose. A newly created host evidence
 directory with normal `0755` ownership is therefore writable by the configured
 container identity, while a read-only evidence directory fails closed.
 
@@ -101,6 +103,7 @@ The equivalent structural inspection, when Compose is installed, is:
 ```bash
 INFERDROME_COMPOSE_UID="$(id -u)" \
 INFERDROME_COMPOSE_GID="$(id -g)" \
+INFERDROME_VERSION="$(sed -nE 's/^[[:space:]]*__version__[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' src/inferdrome/__init__.py)" \
   docker compose -f compose.yaml config
 ```
 
@@ -111,6 +114,7 @@ non-secret image/path variables and wrapper gate:
 INFERDROME_GPU_COMPOSE_GATE=1 \
 INFERDROME_COMPOSE_UID="$(id -u)" \
 INFERDROME_COMPOSE_GID="$(id -g)" \
+INFERDROME_VERSION="$(sed -nE 's/^[[:space:]]*__version__[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' src/inferdrome/__init__.py)" \
 INFERDROME_VLLM_RUNTIME_IMAGE='vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52' \
 INFERDROME_VLLM_RUNNER_IMAGE='registry.example.invalid/inferdrome-vllm-runner@sha256:<operator-supplied-digest>' \
 INFERDROME_QWEN3_MODEL_PATH='/absolute/path/to/prepared/qwen3-8b' \

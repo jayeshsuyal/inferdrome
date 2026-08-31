@@ -263,9 +263,10 @@ lock, frozen capture ancestry, and all repository gates. The Engineering
 checkout's complete tag visibility allows this
 `refs/tags/v0.1.0` resolution to be checked against the actual tag namespace.
 After all three jobs pass, put the exact release SHA, three CI run URLs, tag
-verification, and remaining external sign-off in the annotated tag message,
-GitHub Release, or another explicit external immutable release record. This
-record is not a substitute for ExitSpec outcomes, human security review, owner
+verification, and remaining external sign-off in the GitHub Release or another
+explicit external immutable release record. Post-tag verification facts belong
+in that external record and must never be added to the annotated tag message.
+This record is not a substitute for ExitSpec outcomes, human security review, owner
 archive approval, or final release approval. Publishing and merging are not
 performed by this preflight.
 

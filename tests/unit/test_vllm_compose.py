@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 import inferdrome.vllm_compose as compose_policy
+from inferdrome import __version__
 from inferdrome.qwen3_campaign import (
     QWEN3_8B_MODEL_ID,
     QWEN3_8B_PROFILE_ID,
@@ -86,6 +87,13 @@ def _valid_preflight_kwargs(tmp_path: Path) -> dict[str, object]:
 def test_default_compose_is_mock_only_and_gpu_free() -> None:
     services = _compose()["services"]
     assert set(services) == {"mock-engine", "synthetic-smoke"}
+    assert [
+        service["build"]["args"]["INFERDROME_VERSION"]
+        for service in services.values()
+    ] == [
+        "${INFERDROME_VERSION:?Inferdrome version is required}",
+        "${INFERDROME_VERSION:?Inferdrome version is required}",
+    ]
     assert all(
         "INFERDROME_COMPOSE_UID:?" in service["user"]
         and "INFERDROME_COMPOSE_GID:?" in service["user"]
@@ -439,6 +447,8 @@ def _fake_docker_bin(tmp_path: Path, *, up_status: int = 17) -> tuple[Path, Path
         '>> "$INFERDROME_TEST_DOCKER_LOG"\n'
         'printf \'compose_disable_env=%s\\n\' "$COMPOSE_DISABLE_ENV_FILE" '
         '>> "$INFERDROME_TEST_DOCKER_LOG"\n'
+        'printf \'inferdrome_version=%s\\n\' "$INFERDROME_VERSION" '
+        '>> "$INFERDROME_TEST_DOCKER_LOG"\n'
         'printf \'%s\\n\' "$*" >> "$INFERDROME_TEST_DOCKER_LOG"\n'
         'case "$*" in\n'
         '  *\'context inspect\'*) printf \'"%s"\\n\' '
@@ -490,6 +500,41 @@ def test_compose_wrapper_mock_targets_only_synthetic_runner_and_cleans_up(
     assert not python_log.exists()
     assert "Traceback" not in completed.stderr
     assert str(tmp_path) not in completed.stderr
+
+
+def test_compose_wrapper_derives_final_package_version(tmp_path: Path) -> None:
+    fake_bin, log_path = _fake_docker_bin(tmp_path)
+    test_repository = tmp_path / "repository"
+    scripts = test_repository / "scripts"
+    package = test_repository / "src" / "inferdrome"
+    scripts.mkdir(parents=True)
+    package.mkdir(parents=True)
+    (scripts / "run_vllm_compose.sh").write_text(
+        (REPOSITORY_ROOT / "scripts" / "run_vllm_compose.sh").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    (scripts / "run_vllm_compose.sh").chmod(0o755)
+    (package / "__init__.py").write_text('__version__ = "0.1.0"\n', encoding="utf-8")
+    (test_repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+    environment["INFERDROME_TEST_DOCKER_LOG"] = str(log_path)
+    environment["INFERDROME_COMPOSE_EVIDENCE_DIR"] = str(tmp_path / "evidence")
+    environment["INFERDROME_VERSION"] = "9.9.9"
+    completed = subprocess.run(
+        ["bash", str(scripts / "run_vllm_compose.sh"), "mock"],
+        cwd=test_repository,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert completed.returncode == 17
+    assert "inferdrome_version=0.1.0" in log_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -578,6 +623,7 @@ def test_compose_wrapper_disables_dotenv_topology_overrides(
     up_line = next(line for line in lines if " up " in line)
     down_line = next(line for line in lines if " down " in line)
     assert "compose_disable_env=1" in lines
+    assert f"inferdrome_version={__version__}" in lines
     assert f"-f {REPOSITORY_ROOT / 'compose.yaml'}" in up_line
     assert "untrusted-compose.yaml" not in "\n".join(lines)
     assert "untrusted-project" not in "\n".join(lines)

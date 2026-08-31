@@ -965,14 +965,22 @@ def test_release_docs_do_not_require_a_post_tag_repository_commit() -> None:
     checklist = (REPOSITORY_ROOT / "docs/V0_1_RELEASE_CHECKLIST.md").read_text(
         encoding="utf-8"
     )
+    normalized = " ".join(checklist.split())
 
     assert "post-tag record commit" not in checklist
     assert "post-tag repository commit" not in checklist
     assert "post-tag verification result must not be added to" in checklist
     assert "already-created annotated tag message" in checklist
+    assert "Post-tag verification facts belong in that external record" in normalized
     assert (
-        "GitHub Release or another explicit external immutable release record"
-        in checklist
+        "After all three jobs pass, put the exact release SHA, three CI run URLs, "
+        "tag verification, and remaining external sign-off in the GitHub Release "
+        "or another explicit external immutable release record."
+        in normalized
+    )
+    assert (
+        "tag verification, and remaining external sign-off in the annotated tag message"
+        not in normalized
     )
     assert "annotated tag message" in checklist
 

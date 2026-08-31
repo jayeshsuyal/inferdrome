@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tomllib
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -235,8 +236,11 @@ def test_packaged_version_mismatch_is_bounded_and_non_disclosing() -> None:
     assert submitted not in str(exc_info.value)
 
 
-def test_repository_development_version_is_accepted() -> None:
-    assert builder._package_version() == "0.1.0.dev0"
+def test_repository_package_version_matches_project_metadata() -> None:
+    project = tomllib.loads(
+        (builder.REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert builder._package_version() == project["project"]["version"]
 
 
 def test_wrapper_rejects_noncanonical_platform_without_docker() -> None:
