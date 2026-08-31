@@ -274,7 +274,7 @@ def test_detached_watchdog_keeps_api_key_out_of_command_and_records(
 
     monkeypatch.setenv(guard.API_KEY_ENVIRONMENT_VARIABLE, API_KEY)
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-enter-watchdog")
-    monkeypatch.setattr(guard.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(guard.platform, "system", lambda: "Linux")
     handle = guard.arm_watchdog(
         "203.0.113.10",
         hourly_rate_usd=Decimal("1.29"),
@@ -287,8 +287,8 @@ def test_detached_watchdog_keeps_api_key_out_of_command_and_records(
         now=lambda: NOW,
     )
 
+    assert len(calls) == 1
     watchdog_arguments, watchdog_options = calls[0]
-    inhibitor_arguments, inhibitor_options = calls[1]
     command = " ".join(watchdog_arguments)
     records = "".join(
         path.read_text(encoding="utf-8")
@@ -308,16 +308,81 @@ def test_detached_watchdog_keeps_api_key_out_of_command_and_records(
     assert watchdog_options["env"]["XDG_CONFIG_HOME"] == "/nonexistent"
     assert watchdog_options["stdout"] == subprocess.DEVNULL
     assert watchdog_options["stderr"] == subprocess.DEVNULL
-    assert inhibitor_arguments == ["/usr/bin/caffeinate", "-w", "4321"]
-    assert guard.API_KEY_ENVIRONMENT_VARIABLE not in inhibitor_options["env"]
-    assert inhibitor_options["stdout"] == subprocess.DEVNULL
-    assert inhibitor_options["stderr"] == subprocess.DEVNULL
+    assert handle.sleep_inhibitor is None
     assert handle.receipt_path.name == "termination-receipt.json"
     assert handle.ready_path.name == "watchdog-ready.json"
     armed = json.loads(
         (handle.state_directory / "guard-armed.json").read_text(encoding="utf-8")
     )
     assert armed["watchdog_ready"] is True
+
+
+def test_macos_sleep_inhibitor_uses_a_fixed_credential_free_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport([{"data": [_instance()]}])
+    client = guard.LambdaCloudClient(API_KEY, transport=transport)
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    resolver_calls: list[str] = []
+    inhibitor = tmp_path / "synthetic-caffeinate"
+    inhibitor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    inhibitor.chmod(0o700)
+    real_resolver = guard.resolve_executable_identity
+    inhibitor_identity = real_resolver(str(inhibitor))
+
+    def fake_resolver(executable: str) -> Any:
+        resolver_calls.append(executable)
+        if executable == "/usr/bin/caffeinate":
+            return inhibitor_identity
+        return real_resolver(executable)
+
+    def fake_popen(arguments: list[str], **kwargs: Any) -> FakeProcess:
+        calls.append((arguments, kwargs))
+        if "--ready-path" in arguments:
+            _publish_ready_from_command(arguments)
+        return FakeProcess(arguments)
+
+    monkeypatch.setenv(guard.API_KEY_ENVIRONMENT_VARIABLE, API_KEY)
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-enter-watchdog")
+    monkeypatch.setattr(guard.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(guard, "resolve_executable_identity", fake_resolver)
+
+    handle = guard.arm_watchdog(
+        "203.0.113.10",
+        hourly_rate_usd=Decimal("1.29"),
+        max_cost_usd=Decimal("2.58"),
+        billing_started_at=NOW,
+        state_root=tmp_path / "guards",
+        expected_endpoint="203.0.113.10",
+        client=client,
+        popen=fake_popen,
+        now=lambda: NOW,
+    )
+
+    assert len(calls) == 2
+    _watchdog_arguments, watchdog_options = calls[0]
+    inhibitor_arguments, inhibitor_options = calls[1]
+    records = "".join(
+        path.read_text(encoding="utf-8")
+        for path in handle.state_directory.glob("*.json")
+    )
+    assert resolver_calls == [sys.executable, "/usr/bin/caffeinate"]
+    assert inhibitor_arguments == [str(inhibitor_identity.path), "-w", "4321"]
+    assert inhibitor_options["executable"] == str(inhibitor_identity.path)
+    assert watchdog_options["env"][guard.API_KEY_ENVIRONMENT_VARIABLE] == API_KEY
+    assert guard.API_KEY_ENVIRONMENT_VARIABLE not in inhibitor_options["env"]
+    assert "UNRELATED_SECRET" not in watchdog_options["env"]
+    assert "UNRELATED_SECRET" not in inhibitor_options["env"]
+    assert all(
+        API_KEY not in argument
+        for arguments, _options in calls
+        for argument in arguments
+    )
+    assert API_KEY not in records
+    assert inhibitor_options["stdout"] == subprocess.DEVNULL
+    assert inhibitor_options["stderr"] == subprocess.DEVNULL
+    assert handle.sleep_inhibitor is not None
 
 
 def test_watchdog_rejects_missing_provider_rate_before_spawning(
@@ -615,7 +680,7 @@ def test_concurrent_termination_receipt_first_writer_wins(tmp_path: Path) -> Non
     assert value["trigger"] == "cost-deadline"
 
 
-def test_confirmed_termination_still_stops_watchdog_when_receipt_fails(
+def test_confirmed_termination_without_inhibitor_stops_watchdog_on_receipt_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = guard.TerminationResult(
@@ -632,6 +697,7 @@ def test_confirmed_termination_still_stops_watchdog_when_receipt_fails(
         instance=SimpleNamespace(instance_id=INSTANCE_ID),
         process=process,
         receipt_path=Path("/unused/termination-receipt.json"),
+        sleep_inhibitor=None,
     )
     monkeypatch.setattr(
         guard,
