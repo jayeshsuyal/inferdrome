@@ -42,6 +42,11 @@ TRIAL_SET_CREATION_WORK: Final = WorkLimits(
     max_bytes=4_294_967_296,
     max_seconds=120.0,
 )
+TRIAL_SET_PUBLICATION_READBACK_WORK: Final = WorkLimits(
+    max_units=1,
+    max_bytes=_MAX_TRIAL_SET_BYTES,
+    max_seconds=5.0,
+)
 
 
 @dataclass(frozen=True)
@@ -394,6 +399,40 @@ def _load_descriptor(
     return descriptor, raw_content
 
 
+def _read_back_published_descriptor(
+    path: Path,
+    *,
+    expected_path: Path,
+    expected_descriptor: TrialSet,
+    expected_content: bytes,
+    expected_digest: str,
+) -> tuple[TrialSet, str]:
+    """Strictly reopen one publication without recalculating member bundles."""
+
+    if path.absolute() != expected_path.absolute():
+        raise TrialSetError("trial-set publication readback failed closed")
+    budget = WorkBudget(TRIAL_SET_PUBLICATION_READBACK_WORK)
+    try:
+        budget.reserve(units=1)
+        descriptor, content = _load_descriptor(expected_path, work_budget=budget)
+        trial_set_digest = digest_bytes(DigestDomain.TRIAL_SET, content)
+        matches_expected = (
+            descriptor == expected_descriptor
+            and hmac.compare_digest(content, expected_content)
+            and hmac.compare_digest(trial_set_digest, expected_digest)
+        )
+        budget.checkpoint()
+    except WorkLimitError:
+        raise TrialSetError(
+            "trial-set publication readback exceeded its work limits"
+        ) from None
+    except TrialSetError:
+        raise TrialSetError("trial-set publication readback failed closed") from None
+    if not matches_expected:
+        raise TrialSetError("trial-set publication readback failed closed")
+    return descriptor, trial_set_digest
+
+
 def verify_trial_set(
     path: Path,
     *,
@@ -507,6 +546,8 @@ def create_trial_set(
     except WorkLimitError:
         raise TrialSetError("trial-set creation exceeded its work limits") from None
     content = _canonical_trial_set_bytes(descriptor)
+    if len(content) > _MAX_TRIAL_SET_BYTES:
+        raise TrialSetError("trial-set descriptor exceeds its byte limit")
     trial_set_digest = digest_bytes(DigestDomain.TRIAL_SET, content)
     try:
         budget.checkpoint()
@@ -520,6 +561,7 @@ def create_trial_set(
         raise TrialSetError("trial-sets root could not be created") from None
     if not _is_real_directory(root):
         raise TrialSetError("trial-sets root must be a real directory")
+    expected_destination = root / descriptor.trial_set_id
     try:
         destination = publish_immutable_directory(
             root=root,
@@ -531,10 +573,17 @@ def create_trial_set(
         raise TrialSetError("trial-set ID is already reserved") from None
     except (OSError, ValueError) as error:
         raise TrialSetError("trial-set publication failed closed") from error
+    published_descriptor, published_digest = _read_back_published_descriptor(
+        destination,
+        expected_path=expected_destination,
+        expected_descriptor=descriptor,
+        expected_content=content,
+        expected_digest=trial_set_digest,
+    )
     return VerifiedTrialSet(
         path=destination,
-        descriptor=descriptor,
-        trial_set_digest=trial_set_digest,
+        descriptor=published_descriptor,
+        trial_set_digest=published_digest,
         members=verified_members,
     )
 

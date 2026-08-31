@@ -198,9 +198,13 @@ shared reservations. Trial Set member verification is independently bounded to
 100 members, 4 GiB, and 120 seconds. Trial Set creation performs two
 prepublication member passes under one 200-unit, 4 GiB, 120-second budget and
 checks the deadline once more before creating or publishing the immutable
-directory. Controlled-comparison workspace checks charge the exact opened
-frozen-input and lifecycle-event bytes; lifecycle history is capped at the six
-events possible in the frozen no-retry state graph before sorting.
+directory. After publication, creation strictly reopens only the canonical
+descriptor under a separate one-unit, 262,144-byte, five-second budget and
+requires its exact bytes, parsed value, path, and domain-separated digest to
+match the prepublication values; member bundles are not recalculated a third
+time. Controlled-comparison workspace checks charge the exact opened frozen-
+input and lifecycle-event bytes; lifecycle history is capped at the six events
+possible in the frozen no-retry state graph before sorting.
 Crossing a population, byte, unit, time, or concurrency ceiling aborts the whole
 new snapshot and returns a generic temporary-unavailability response; it never
 publishes a partial index.
