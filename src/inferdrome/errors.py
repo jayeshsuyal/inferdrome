@@ -37,6 +37,10 @@ class VerificationError(InferdromeError):
     """An offline evidence-bundle integrity invariant failed."""
 
 
+class WorkLimitError(InferdromeError):
+    """A bounded local verification operation exhausted its declared budget."""
+
+
 class TrialSetError(InferdromeError):
     """A repeated-trial grouping could not be created or verified safely."""
 

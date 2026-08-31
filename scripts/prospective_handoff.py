@@ -25,6 +25,14 @@ from typing import Any
 import rfc8785
 import yaml
 
+from inferdrome.limits import collect_bounded
+from inferdrome.parsing import (
+    BoundedParseError,
+    bounded_json_int,
+    validate_json_structure,
+    validate_yaml_structure,
+)
+
 CASE_IDS = (
     "native-p95-under-20ms",
     "native-p95-under-10ms",
@@ -38,6 +46,9 @@ _MAX_SOURCE_BYTES = 512 * 1024
 _MAX_WORKLOAD_BYTES = 64 * 1024 * 1024
 _MAX_HANDOFF_ARCHIVE_BYTES = 128 * 1024 * 1024
 _MAX_HANDOFF_FILES = 12
+_MAX_HANDOFF_DIRECTORIES = 4
+_MAX_HANDOFF_DIRECTORY_DEPTH = 2
+_MAX_HANDOFF_TOTAL_BYTES = 91_227_136
 _MAX_ARCHIVE_MEMBERS = 64
 _P1_SCHEMA_VERSION = "exitspec.inferdrome-prospective-handoff.v1"
 _P1_AUTHORITY_BOUNDARY = "EXIT_SPEC_CUSTOMER_CONFIRMED_HANDOFF_ONLY"
@@ -325,8 +336,10 @@ def _strict_json(content: bytes, *, label: str) -> dict[str, Any]:
         return result
 
     try:
+        text = content.decode("utf-8")
+        validate_json_structure(text)
         value = json.loads(
-            content.decode("utf-8"),
+            text,
             object_pairs_hook=unique,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"invalid number: {token}")
@@ -334,8 +347,15 @@ def _strict_json(content: bytes, *, label: str) -> dict[str, Any]:
             parse_float=lambda token: (_ for _ in ()).throw(
                 ValueError(f"invalid float: {token}")
             ),
+            parse_int=bounded_json_int,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (
+        BoundedParseError,
+        RecursionError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
         raise ProspectiveHandoffError(f"{label} is not strict JSON") from None
     if not isinstance(value, dict):
         raise ProspectiveHandoffError(f"{label} must be a JSON object")
@@ -404,8 +424,16 @@ _UniqueSafeLoader.add_constructor(
 
 def _strict_source_yaml(content: bytes, *, label: str) -> dict[str, Any]:
     try:
-        value = yaml.load(content, Loader=_UniqueSafeLoader)
-    except (UnicodeDecodeError, yaml.YAMLError):
+        text = content.decode("utf-8")
+        validate_yaml_structure(text)
+        value = yaml.load(text, Loader=_UniqueSafeLoader)
+    except (
+        BoundedParseError,
+        RecursionError,
+        UnicodeDecodeError,
+        ValueError,
+        yaml.YAMLError,
+    ):
         raise ProspectiveHandoffError(f"{label} is not strict YAML") from None
     if not isinstance(value, dict):
         raise ProspectiveHandoffError(f"{label} must be a YAML object")
@@ -1020,11 +1048,29 @@ def _walk_inventory(root: Path) -> dict[str, tuple[int, ...]]:
         )
     result: dict[str, tuple[int, ...]] = {"": _identity(root_metadata)}
     regular_file_count = 0
+    directory_count = 0
+    total_file_bytes = 0
     pending = [root]
     while pending:
         directory = pending.pop()
         try:
-            entries = list(os.scandir(directory))
+            with os.scandir(directory) as iterator:
+                remaining_entries = (
+                    _MAX_HANDOFF_FILES
+                    + _MAX_HANDOFF_DIRECTORIES
+                    - regular_file_count
+                    - directory_count
+                )
+                entries = sorted(
+                    collect_bounded(
+                        iterator,
+                        limit=remaining_entries,
+                        error=lambda: ProspectiveHandoffError(
+                            "prospective handoff entry count exceeds its limit"
+                        ),
+                    ),
+                    key=lambda item: item.name,
+                )
         except OSError:
             raise ProspectiveHandoffError(
                 "prospective handoff cannot be enumerated"
@@ -1042,6 +1088,18 @@ def _walk_inventory(root: Path) -> dict[str, tuple[int, ...]]:
                     f"prospective handoff contains a symlink: {relative}"
                 )
             if stat.S_ISDIR(metadata.st_mode):
+                directory_count += 1
+                if directory_count > _MAX_HANDOFF_DIRECTORIES:
+                    raise ProspectiveHandoffError(
+                        "prospective handoff contains an extra path or too many "
+                        "directories"
+                    )
+                if len(PurePosixPath(relative).parts) > (
+                    _MAX_HANDOFF_DIRECTORY_DEPTH
+                ):
+                    raise ProspectiveHandoffError(
+                        "prospective handoff directory depth exceeds its limit"
+                    )
                 result[relative] = _identity(metadata)
                 pending.append(Path(entry.path))
             elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
@@ -1050,12 +1108,17 @@ def _walk_inventory(root: Path) -> dict[str, tuple[int, ...]]:
                     raise ProspectiveHandoffError(
                         "prospective handoff has too many files"
                     )
+                total_file_bytes += metadata.st_size
+                if total_file_bytes > _MAX_HANDOFF_TOTAL_BYTES:
+                    raise ProspectiveHandoffError(
+                        "prospective handoff exceeds its aggregate byte limit"
+                    )
                 result[relative] = _identity(metadata)
             else:
                 raise ProspectiveHandoffError(
                     f"prospective handoff contains an unsafe entry: {relative}"
                 )
-    return result
+    return dict(sorted(result.items()))
 
 
 def _file_path(root: Path, relative: str) -> Path:

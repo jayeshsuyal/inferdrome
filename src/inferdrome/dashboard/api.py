@@ -25,6 +25,7 @@ from inferdrome.dashboard.models import (
 from inferdrome.errors import (
     DashboardAuthError,
     DashboardControlledComparisonNotFound,
+    DashboardError,
     DashboardPaginationError,
     DashboardRunNotFound,
     DashboardTrialSetNotFound,
@@ -168,6 +169,11 @@ def create_app(
                 status_code=400,
                 detail="invalid dashboard pagination cursor",
             ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="dashboard verification work is temporarily unavailable",
+            ) from None
 
     @app.get(
         "/api/v1/runs/{run_id}",
@@ -179,6 +185,11 @@ def create_app(
             return index.get_run(run_id)
         except DashboardRunNotFound:
             raise HTTPException(status_code=404, detail="run not found") from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="dashboard verification work is temporarily unavailable",
+            ) from None
 
     @app.get(
         "/api/v1/compare",
@@ -193,6 +204,11 @@ def create_app(
             return index.compare(baseline_run_id, candidate_run_id)
         except DashboardRunNotFound:
             raise HTTPException(status_code=404, detail="run not found") from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="dashboard verification work is temporarily unavailable",
+            ) from None
 
     @app.get(
         "/api/v1/trial-sets",
@@ -210,6 +226,11 @@ def create_app(
                 status_code=400,
                 detail="invalid trial-set pagination cursor",
             ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="dashboard verification work is temporarily unavailable",
+            ) from None
 
     @app.get(
         "/api/v1/trial-sets/{trial_set_id}",
@@ -223,6 +244,11 @@ def create_app(
             raise HTTPException(
                 status_code=404,
                 detail="trial set not found",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="dashboard verification work is temporarily unavailable",
             ) from None
 
     @app.get(
@@ -244,6 +270,11 @@ def create_app(
                 status_code=400,
                 detail="invalid controlled-comparison pagination cursor",
             ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="dashboard verification work is temporarily unavailable",
+            ) from None
 
     @app.get(
         "/api/v1/controlled-comparisons/{comparison_plan_id}",
@@ -259,6 +290,11 @@ def create_app(
             raise HTTPException(
                 status_code=404,
                 detail="controlled comparison not found",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="dashboard verification work is temporarily unavailable",
             ) from None
 
     selected_static = static_dir or Path(__file__).with_name("static")

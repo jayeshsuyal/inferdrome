@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import inferdrome.dashboard.index as index_module
 import inferdrome.dashboard.projection as projection_module
 from inferdrome.bundle import recalculate_bundle as authoritative_recalculate
 from inferdrome.dashboard.index import DashboardIndex
@@ -101,6 +102,38 @@ def test_every_valid_candidate_is_recalculated_before_indexing(
     assert set(observed) == {
         sealed_fake_bundle.sealed.path,
         sealed_vllm_bundle.sealed.path,
+    }
+
+
+def test_limit_one_cursor_pages_reuse_one_verified_run_snapshot(
+    sealed_fake_bundle: Any,
+    sealed_vllm_bundle: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verification_calls = 0
+    authoritative_verify = index_module.verify_bundle
+
+    def verify_spy(*args: object, **kwargs: object) -> object:
+        nonlocal verification_calls
+        verification_calls += 1
+        return authoritative_verify(*args, **kwargs)
+
+    monkeypatch.setattr(index_module, "verify_bundle", verify_spy)
+    index = DashboardIndex(sealed_fake_bundle.workspace.path.parent)
+
+    first = index.refresh(limit=1)
+    assert first.page.next_cursor is not None
+    assert verification_calls == 2
+    second = index.refresh(cursor=first.page.next_cursor, limit=1)
+
+    assert verification_calls == 2
+    assert second.generated_at == first.generated_at
+    assert second.page.total == first.page.total == 2
+    assert {
+        item.run_id for page in (first, second) for item in page.runs
+    } == {
+        sealed_fake_bundle.workspace.run_id,
+        sealed_vllm_bundle.workspace.run_id,
     }
 
 

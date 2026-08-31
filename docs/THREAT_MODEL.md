@@ -194,7 +194,8 @@ The importer rejects or constrains:
 - duplicate, case-colliding, or Unicode-confusable artifact paths;
 - files not declared by the manifest when policy requires a closed bundle;
 - oversized bundles, files, record counts, and JSONL lines;
-- malformed UTF-8 and duplicate JSON keys;
+- malformed UTF-8, duplicate JSON keys, excessive JSON/YAML structural depth
+  or tokens, and integer tokens over 256 lexical digits;
 - `NaN`, positive infinity, and negative infinity;
 - unsupported schemas and producer versions;
 - duplicate request identifiers and invalid source locators; and
@@ -317,6 +318,21 @@ Every run configures:
 - graceful cancellation followed by forced termination bounds;
 - bounded captured stdout and stderr behavior; and
 - bounded finalization and verification work.
+
+Untrusted bundle and workload JSONL populations are counted and line-bounded
+before record materialization, with a 1,000,000-record ceiling. Custom workloads
+parse and retain only the measured prefix while still counting and line-
+bounding the digest-bound suffix; resolver workload input is capped at 128 MiB.
+Bundle verification admits at most 64 files, 32 directories, eight path levels,
+256 MiB per file, and 512 MiB in aggregate; bundle JSONL lines are capped at
+8 MiB. Prospective-handoff inventory admits at most 12 files, four directories,
+two path levels, and 91,227,136 aggregate bytes before sorting, and its workload
+file is capped at 64 MiB. Structured JSON and YAML are lexically preflighted at
+64 collection levels, 1,000,000 scanner tokens, and 256 integer digits before
+recursive model construction. Dashboard snapshot population, aggregate-byte,
+unit, monotonic-time, and concurrency ceilings are documented in
+[`DASHBOARD.md`](DASHBOARD.md); cursor pages reuse the active verified snapshot,
+and all active dashboard builds share one 3,000-unit and 8 GiB work envelope.
 
 v0.1 performs no automatic retry.
 

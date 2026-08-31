@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import AwareDatetime, Field, ValidationError, model_validator
 
@@ -21,11 +21,14 @@ from inferdrome.domain.states import (
     validate_run_transition,
 )
 from inferdrome.errors import WorkspaceError
+from inferdrome.limits import WorkBudget, collect_bounded
+from inferdrome.parsing import BoundedParseError, validate_json_structure
 from inferdrome.resolution.resolver import ResolutionResult
 
 _CONTROL_DIRECTORY = "control"
 _INPUT_DIRECTORY = "inputs"
 _MAX_CONTROL_FILE_BYTES = 1_048_576
+_MAX_LIFECYCLE_EVENTS: Final = 6
 
 
 class FrozenInputDescriptor(FrozenModel):
@@ -126,25 +129,60 @@ def _replace_file(path: Path, content: bytes) -> None:
             temporary_path.unlink()
 
 
-def _read_regular(path: Path, *, limit: int) -> bytes:
+def _file_identity(file_stat: os.stat_result) -> tuple[int, ...]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mode,
+        file_stat.st_nlink,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _read_regular(
+    path: Path,
+    *,
+    limit: int,
+    work_budget: WorkBudget | None = None,
+) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError:
         raise WorkspaceError("workspace file is missing or unsafe") from None
     try:
-        file_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > limit:
+        initial = os.fstat(descriptor)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size > limit:
             raise WorkspaceError("workspace file is not a bounded regular file")
+        identity = _file_identity(initial)
+        if work_budget is not None:
+            work_budget.reserve(bytes_=initial.st_size)
         content = bytearray()
-        while len(content) <= limit:
-            chunk = os.read(descriptor, min(1_048_576, limit + 1 - len(content)))
+        remaining = initial.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1_048_576, remaining))
             if not chunk:
-                break
+                raise WorkspaceError("workspace file was truncated")
             content.extend(chunk)
-        if len(content) > limit:
-            raise WorkspaceError("workspace file exceeds its expected bound")
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise WorkspaceError("workspace file grew during verification")
+        try:
+            path_stat = os.lstat(path)
+        except OSError:
+            raise WorkspaceError("workspace file changed during verification") from None
+        if (
+            _file_identity(os.fstat(descriptor)) != identity
+            or _file_identity(path_stat) != identity
+        ):
+            raise WorkspaceError("workspace file changed during verification")
         return bytes(content)
+    except WorkspaceError:
+        raise
+    except OSError:
+        raise WorkspaceError("workspace file changed during verification") from None
     finally:
         os.close(descriptor)
 
@@ -250,30 +288,52 @@ class RunWorkspace:
         return workspace
 
     @classmethod
-    def open(cls, run_path: Path) -> "RunWorkspace":
+    def open(
+        cls,
+        run_path: Path,
+        *,
+        work_budget: WorkBudget | None = None,
+    ) -> "RunWorkspace":
         absolute_path = run_path.absolute()
         if absolute_path.is_symlink() or not absolute_path.is_dir():
             raise WorkspaceError("run workspace is unavailable or unsafe")
         metadata_bytes = _read_regular(
             absolute_path / _CONTROL_DIRECTORY / "resolution.json",
             limit=_MAX_CONTROL_FILE_BYTES,
+            work_budget=work_budget,
         )
         try:
+            validate_json_structure(metadata_bytes.decode("utf-8"))
             metadata = ResolutionMetadata.model_validate_json(metadata_bytes)
-        except ValidationError:
+        except (
+            BoundedParseError,
+            RecursionError,
+            UnicodeDecodeError,
+            ValueError,
+            ValidationError,
+        ):
             raise WorkspaceError("resolution metadata is invalid") from None
         if absolute_path.name != metadata.run_id:
             raise WorkspaceError("workspace directory and run ID do not match")
         workspace = cls(absolute_path, metadata)
-        workspace.verify_frozen_inputs()
-        workspace.current_state()
+        workspace.verify_frozen_inputs(work_budget=work_budget)
+        workspace.current_state(work_budget=work_budget)
         return workspace
 
-    def verify_frozen_inputs(self) -> None:
+    def verify_frozen_inputs(
+        self,
+        *,
+        work_budget: WorkBudget | None = None,
+    ) -> None:
         for expected in self.metadata.frozen_inputs:
-            self.read_frozen_input(expected.path)
+            self.read_frozen_input(expected.path, work_budget=work_budget)
 
-    def read_frozen_input(self, relative_path: str) -> bytes:
+    def read_frozen_input(
+        self,
+        relative_path: str,
+        *,
+        work_budget: WorkBudget | None = None,
+    ) -> bytes:
         """Read one declared frozen input after exact metadata verification."""
 
         expected = next(
@@ -298,6 +358,7 @@ class RunWorkspace:
         content = _read_regular(
             path,
             limit=expected.size_bytes + 1,
+            work_budget=work_budget,
         )
         if len(content) != expected.size_bytes:
             raise WorkspaceError("frozen input size changed")
@@ -308,29 +369,63 @@ class RunWorkspace:
     def _state_path(self) -> Path:
         return self.control_directory / "state.json"
 
-    def current_state(self) -> WorkspaceStateRecord:
-        content = _read_regular(self._state_path(), limit=_MAX_CONTROL_FILE_BYTES)
+    def current_state(
+        self,
+        *,
+        work_budget: WorkBudget | None = None,
+    ) -> WorkspaceStateRecord:
+        content = _read_regular(
+            self._state_path(),
+            limit=_MAX_CONTROL_FILE_BYTES,
+            work_budget=work_budget,
+        )
         try:
+            validate_json_structure(content.decode("utf-8"))
             state = WorkspaceStateRecord.model_validate_json(content)
-        except ValidationError:
+        except (
+            BoundedParseError,
+            RecursionError,
+            UnicodeDecodeError,
+            ValueError,
+            ValidationError,
+        ):
             raise WorkspaceError("workspace state is invalid") from None
         if state.run_id != self.run_id:
             raise WorkspaceError("workspace state belongs to a different run")
         events_directory = self.control_directory / "events"
         try:
-            event_paths = sorted(events_directory.iterdir())
+            with os.scandir(events_directory) as iterator:
+                entries = collect_bounded(
+                    iterator,
+                    limit=_MAX_LIFECYCLE_EVENTS,
+                    error=lambda: WorkspaceError(
+                        "workspace state history exceeds its event limit"
+                    ),
+                )
         except OSError:
             raise WorkspaceError("workspace state history is unavailable") from None
+        event_paths = sorted(Path(entry.path) for entry in entries)
         if len(event_paths) != state.sequence_index + 1:
             raise WorkspaceError("workspace state history is incomplete")
 
         previous: WorkspaceStateRecord | None = None
         latest_content = b""
         for expected_index, event_path in enumerate(event_paths):
-            event_content = _read_regular(event_path, limit=_MAX_CONTROL_FILE_BYTES)
+            event_content = _read_regular(
+                event_path,
+                limit=_MAX_CONTROL_FILE_BYTES,
+                work_budget=work_budget,
+            )
             try:
+                validate_json_structure(event_content.decode("utf-8"))
                 event = WorkspaceStateRecord.model_validate_json(event_content)
-            except ValidationError:
+            except (
+                BoundedParseError,
+                RecursionError,
+                UnicodeDecodeError,
+                ValueError,
+                ValidationError,
+            ):
                 raise WorkspaceError("workspace state event is invalid") from None
             expected_name = f"{expected_index:08d}-{event.state.value}.json"
             invalid_identity = (

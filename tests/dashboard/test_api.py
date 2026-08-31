@@ -255,7 +255,7 @@ def test_dashboard_rejects_untrusted_host_headers(tmp_path: Path) -> None:
     assert loopback.status_code == 200
 
 
-def test_run_index_cursor_rejects_a_changed_snapshot(
+def test_run_index_cursor_keeps_snapshot_until_explicit_refresh(
     tmp_path: Path,
     run_fake_bundle: Callable[..., Any],
 ) -> None:
@@ -271,10 +271,20 @@ def test_run_index_cursor_rejects_a_changed_snapshot(
             runs_root,
             "run-66666666666666666666666666666666",
         )
+        second = client.get(
+            "/api/v1/runs",
+            params={"limit": 1, "cursor": cursor},
+        )
+        refreshed = client.get("/api/v1/runs", params={"limit": 1})
         stale = client.get(
             "/api/v1/runs",
             params={"limit": 1, "cursor": cursor},
         )
 
     assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["generated_at"] == first.json()["generated_at"]
+    assert second.json()["page"]["total"] == 2
+    assert refreshed.status_code == 200
+    assert refreshed.json()["page"]["total"] == 3
     assert stale.status_code == 400

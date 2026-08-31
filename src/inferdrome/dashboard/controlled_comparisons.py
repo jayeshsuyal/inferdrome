@@ -33,13 +33,16 @@ from inferdrome.dashboard.models import (
 )
 from inferdrome.dashboard.projection import display_measurement, metric_label
 from inferdrome.dashboard.trial_sets import project_trial_set
+from inferdrome.dashboard.work import DashboardLimits, DashboardWorkController
 from inferdrome.errors import (
     DashboardControlledComparisonNotFound,
     DashboardError,
     DashboardPaginationError,
     InferdromeError,
+    WorkLimitError,
 )
 from inferdrome.immutable import is_internal_staging_entry
+from inferdrome.limits import WorkBudget, collect_bounded
 
 _PLAN_ID = re.compile(r"^comparison-plan-[0-9a-f]{32}$")
 _RESULT_ID = re.compile(r"^comparison-result-[0-9a-f]{32}$")
@@ -73,6 +76,16 @@ _ResultIssue = Literal[
 class _Candidate:
     entry: str
     path: Path
+
+
+@dataclass(frozen=True)
+class _VerifiedComparisonSnapshot:
+    snapshot_id: str
+    generated_at: datetime
+    entries: tuple[
+        ControlledComparisonSummary | RejectedControlledComparison,
+        ...,
+    ]
 
 
 def _entry_label(name: str) -> str:
@@ -199,6 +212,7 @@ def _discover(
     filename: str,
     identifier: re.Pattern[str],
     root_label: str,
+    max_entries: int,
 ) -> tuple[tuple[_Candidate, ...], tuple[RejectedControlledComparison, ...]]:
     if not root.exists():
         return (), ()
@@ -211,16 +225,19 @@ def _discover(
             entries = sorted(
                 (
                     entry
-                    for entry in iterator
+                    for entry in collect_bounded(
+                        iterator,
+                        limit=max_entries,
+                        error=lambda: DashboardError(
+                            f"{root_label} exceeds the entry limit"
+                        ),
+                    )
                     if not is_internal_staging_entry(entry.name)
                 ),
                 key=lambda item: item.name,
             )
     except OSError:
         raise DashboardError(f"{root_label} could not be scanned") from None
-    if len(entries) > _MAX_DISCOVERED_ENTRIES:
-        raise DashboardError(f"{root_label} exceeds the entry limit")
-
     candidates: list[_Candidate] = []
     rejected: list[RejectedControlledComparison] = []
     for entry in entries:
@@ -301,10 +318,18 @@ def _execution_view(
     plan: VerifiedComparisonPlan,
     result: VerifiedComparisonResult | None,
     runs_root: Path,
+    *,
+    work_budget: WorkBudget,
 ) -> ControlledComparisonExecutionView:
     schedule = plan.descriptor.ordered_schedule
     try:
-        progress = inspect_comparison_execution(plan, runs_root)
+        progress = inspect_comparison_execution(
+            plan,
+            runs_root,
+            work_budget=work_budget,
+        )
+    except WorkLimitError:
+        raise
     except (InferdromeError, OSError, ValueError):
         return ControlledComparisonExecutionView(
             status="BLOCKED",
@@ -349,40 +374,59 @@ def _detail(
     result: VerifiedComparisonResult | None,
     runs_root: Path,
     *,
+    work_budget: WorkBudget,
     result_issue: _ResultIssue | None = None,
 ) -> ControlledComparisonDetail:
     expose_trial_set_measurements = (
         result is not None and result.descriptor.status.value == "COMPARABLE"
     )
-    return ControlledComparisonDetail(
-        summary=_summary(
-            plan,
-            result,
-            result_withheld=result_issue is not None,
-        ),
-        plan=ControlledComparisonPlanView.model_validate(
-            plan.descriptor.model_dump(
-                mode="python",
-                exclude={
-                    "baseline_arm": {"resolved_experiment"},
-                    "candidate_arm": {"resolved_experiment"},
-                },
-            )
-        ),
-        execution=_execution_view(plan, result, runs_root),
-        result=None if result is None else result.descriptor,
-        baseline_trial_set=(
-            project_trial_set(result.baseline).summary
-            if expose_trial_set_measurements and result is not None
-            else None
-        ),
-        candidate_trial_set=(
-            project_trial_set(result.candidate).summary
-            if expose_trial_set_measurements and result is not None
-            else None
-        ),
-        result_issue=result_issue,
-    )
+    try:
+        detail = ControlledComparisonDetail(
+            summary=_summary(
+                plan,
+                result,
+                result_withheld=result_issue is not None,
+            ),
+            plan=ControlledComparisonPlanView.model_validate(
+                plan.descriptor.model_dump(
+                    mode="python",
+                    exclude={
+                        "baseline_arm": {"resolved_experiment"},
+                        "candidate_arm": {"resolved_experiment"},
+                    },
+                )
+            ),
+            execution=_execution_view(
+                plan,
+                result,
+                runs_root,
+                work_budget=work_budget,
+            ),
+            result=None if result is None else result.descriptor,
+            baseline_trial_set=(
+                project_trial_set(
+                    result.baseline,
+                    work_budget=work_budget,
+                ).summary
+                if expose_trial_set_measurements and result is not None
+                else None
+            ),
+            candidate_trial_set=(
+                project_trial_set(
+                    result.candidate,
+                    work_budget=work_budget,
+                ).summary
+                if expose_trial_set_measurements and result is not None
+                else None
+            ),
+            result_issue=result_issue,
+        )
+        work_budget.checkpoint()
+    except WorkLimitError:
+        raise DashboardError("comparison detail exceeded its work limits") from None
+    except (InferdromeError, OSError, RecursionError, ValueError):
+        raise DashboardError("comparison detail projection failed closed") from None
+    return detail
 
 
 class ControlledComparisonDashboardIndex:
@@ -394,11 +438,17 @@ class ControlledComparisonDashboardIndex:
         comparison_results_root: Path,
         trial_sets_root: Path,
         runs_root: Path,
+        *,
+        limits: DashboardLimits | None = None,
+        work_controller: DashboardWorkController | None = None,
     ) -> None:
         self.comparison_plans_root = comparison_plans_root.absolute()
         self.comparison_results_root = comparison_results_root.absolute()
         self.trial_sets_root = trial_sets_root.absolute()
         self.runs_root = runs_root.absolute()
+        self.limits = limits or DashboardLimits()
+        self._work_controller = work_controller or DashboardWorkController(self.limits)
+        self._snapshot: _VerifiedComparisonSnapshot | None = None
         self._lock = RLock()
 
     def _plan_candidates(
@@ -409,6 +459,7 @@ class ControlledComparisonDashboardIndex:
             filename="comparison-plan.json",
             identifier=_PLAN_ID,
             root_label="comparison-plans root",
+            max_entries=self.limits.max_comparison_entries_per_root,
         )
 
     def _result_candidates(
@@ -419,11 +470,14 @@ class ControlledComparisonDashboardIndex:
             filename="comparison-result.json",
             identifier=_RESULT_ID,
             root_label="comparison-results root",
+            max_entries=self.limits.max_comparison_entries_per_root,
         )
 
     def _verified_result(
         self,
         declaration: ComparisonResultDeclaration,
+        *,
+        work_budget: WorkBudget | None = None,
     ) -> VerifiedComparisonResult:
         return verify_comparison_result(
             declaration.path,
@@ -431,6 +485,7 @@ class ControlledComparisonDashboardIndex:
             trial_sets_root=self.trial_sets_root,
             comparison_plans_root=self.comparison_plans_root,
             expected_comparison_result_digest=(declaration.comparison_result_digest),
+            work_budget=work_budget,
         )
 
     def refresh(
@@ -442,16 +497,42 @@ class ControlledComparisonDashboardIndex:
         if isinstance(limit, bool) or not 1 <= limit <= _MAX_PAGE_LIMIT:
             raise DashboardPaginationError("comparison page limit is invalid")
         offset, expected_snapshot_id = _decode_cursor(cursor)
-        with self._lock:
-            plan_candidates, plan_rejections = self._plan_candidates()
-            result_candidates, result_rejections = self._result_candidates()
+        if expected_snapshot_id is not None:
+            with self._lock:
+                snapshot = self._snapshot
+                if snapshot is None or snapshot.snapshot_id != expected_snapshot_id:
+                    raise DashboardPaginationError(
+                        "comparison cursor refers to a stale snapshot"
+                    )
+                return self._page(snapshot, offset=offset, limit=limit)
+
+        with self._work_controller.session(
+            self.limits.comparison_snapshot_work
+        ) as budget:
+            try:
+                plan_candidates, plan_rejections = self._plan_candidates()
+                result_candidates, result_rejections = self._result_candidates()
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "comparison snapshot exceeded its work limits"
+                ) from None
             rejected = [*plan_rejections, *result_rejections]
 
             plans: dict[str, VerifiedComparisonPlan] = {}
             for candidate in plan_candidates:
                 try:
-                    verified_plan = verify_comparison_plan(candidate.path)
-                except (InferdromeError, OSError, ValueError):
+                    budget.reserve(units=1)
+                    verified_plan = verify_comparison_plan(
+                        candidate.path,
+                        work_budget=budget,
+                    )
+                    budget.checkpoint()
+                except WorkLimitError:
+                    raise DashboardError(
+                        "comparison snapshot exceeded its work limits"
+                    ) from None
+                except (InferdromeError, OSError, RecursionError, ValueError):
                     rejected.append(_rejected(candidate, "PLAN_VERIFICATION_FAILED"))
                     continue
                 plans[verified_plan.descriptor.comparison_plan_id] = verified_plan
@@ -461,8 +542,17 @@ class ControlledComparisonDashboardIndex:
             ] = {}
             for candidate in result_candidates:
                 try:
-                    declaration = inspect_comparison_result_declaration(candidate.path)
-                except (InferdromeError, OSError, ValueError):
+                    budget.reserve(units=1)
+                    declaration = inspect_comparison_result_declaration(
+                        candidate.path,
+                        work_budget=budget,
+                    )
+                    budget.checkpoint()
+                except WorkLimitError:
+                    raise DashboardError(
+                        "comparison snapshot exceeded its work limits"
+                    ) from None
+                except (InferdromeError, OSError, RecursionError, ValueError):
                     rejected.append(_rejected(candidate, "RESULT_VERIFICATION_FAILED"))
                     continue
                 linked_plan = plans.get(declaration.descriptor.comparison_plan_id)
@@ -504,8 +594,16 @@ class ControlledComparisonDashboardIndex:
                     )
                     continue
                 try:
-                    result = self._verified_result(declaration)
-                except (InferdromeError, OSError, ValueError):
+                    result = self._verified_result(
+                        declaration,
+                        work_budget=budget,
+                    )
+                    budget.checkpoint()
+                except WorkLimitError:
+                    raise DashboardError(
+                        "comparison snapshot exceeded its work limits"
+                    ) from None
+                except (InferdromeError, OSError, RecursionError, ValueError):
                     rejected.append(_rejected(candidate, "RESULT_VERIFICATION_FAILED"))
                     summaries_by_plan[plan_id] = _summary(
                         plan,
@@ -531,89 +629,159 @@ class ControlledComparisonDashboardIndex:
                 ...,
             ] = (*summaries, *tuple(rejected))
             snapshot_id = _snapshot_id(entries)
-            if expected_snapshot_id is not None and expected_snapshot_id != snapshot_id:
-                raise DashboardPaginationError(
-                    "comparison cursor refers to a stale snapshot"
-                )
-            if offset > len(entries):
-                raise DashboardPaginationError(
-                    "comparison cursor is outside the current snapshot"
-                )
-            page_entries = entries[offset : offset + limit]
-            next_offset = offset + len(page_entries)
-            has_more = next_offset < len(entries)
-            return ControlledComparisonIndexResponse(
+            try:
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "comparison snapshot exceeded its work limits"
+                ) from None
+            snapshot = _VerifiedComparisonSnapshot(
+                snapshot_id=snapshot_id,
                 generated_at=datetime.now(UTC),
-                comparisons=tuple(
-                    item
-                    for item in page_entries
-                    if isinstance(item, ControlledComparisonSummary)
-                ),
-                rejected=tuple(
-                    item
-                    for item in page_entries
-                    if isinstance(item, RejectedControlledComparison)
-                ),
-                page=PageView(
-                    limit=limit,
-                    returned=len(page_entries),
-                    total=len(entries),
-                    has_more=has_more,
-                    next_cursor=(
-                        _encode_cursor(next_offset, snapshot_id) if has_more else None
-                    ),
-                ),
+                entries=entries,
             )
+            with self._lock:
+                self._snapshot = snapshot
+            return self._page(snapshot, offset=offset, limit=limit)
+
+    @staticmethod
+    def _page(
+        snapshot: _VerifiedComparisonSnapshot,
+        *,
+        offset: int,
+        limit: int,
+    ) -> ControlledComparisonIndexResponse:
+        if offset > len(snapshot.entries):
+            raise DashboardPaginationError(
+                "comparison cursor is outside the current snapshot"
+            )
+        page_entries = snapshot.entries[offset : offset + limit]
+        next_offset = offset + len(page_entries)
+        has_more = next_offset < len(snapshot.entries)
+        return ControlledComparisonIndexResponse(
+            generated_at=snapshot.generated_at,
+            comparisons=tuple(
+                item
+                for item in page_entries
+                if isinstance(item, ControlledComparisonSummary)
+            ),
+            rejected=tuple(
+                item
+                for item in page_entries
+                if isinstance(item, RejectedControlledComparison)
+            ),
+            page=PageView(
+                limit=limit,
+                returned=len(page_entries),
+                total=len(snapshot.entries),
+                has_more=has_more,
+                next_cursor=(
+                    _encode_cursor(next_offset, snapshot.snapshot_id)
+                    if has_more
+                    else None
+                ),
+            ),
+        )
 
     def get(self, comparison_plan_id: str) -> ControlledComparisonDetail:
         if not _PLAN_ID.fullmatch(comparison_plan_id):
             raise DashboardControlledComparisonNotFound(
                 "comparison is not present in the verified index"
             )
-        plan_path = self.comparison_plans_root / comparison_plan_id
-        try:
-            plan = verify_comparison_plan(plan_path)
-        except (InferdromeError, OSError, ValueError):
-            raise DashboardControlledComparisonNotFound(
-                "comparison is not present in the verified index"
-            ) from None
-
-        result_candidates, _ = self._result_candidates()
-        matching: list[tuple[_Candidate, ComparisonResultDeclaration]] = []
-        for candidate in result_candidates:
+        with self._work_controller.session(
+            self.limits.comparison_snapshot_work
+        ) as budget:
+            plan_path = self.comparison_plans_root / comparison_plan_id
             try:
-                declaration = inspect_comparison_result_declaration(candidate.path)
-            except (InferdromeError, OSError, ValueError):
-                continue
-            if declaration.descriptor.comparison_plan_id != comparison_plan_id:
-                continue
-            matching.append((candidate, declaration))
-        if len(matching) > 1:
+                budget.reserve(units=1)
+                plan = verify_comparison_plan(
+                    plan_path,
+                    work_budget=budget,
+                )
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "comparison detail exceeded its work limits"
+                ) from None
+            except (InferdromeError, OSError, RecursionError, ValueError):
+                raise DashboardControlledComparisonNotFound(
+                    "comparison is not present in the verified index"
+                ) from None
+
+            result_candidates, _ = self._result_candidates()
+            try:
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "comparison detail exceeded its work limits"
+                ) from None
+            matching: list[tuple[_Candidate, ComparisonResultDeclaration]] = []
+            for candidate in result_candidates:
+                try:
+                    budget.reserve(units=1)
+                    declaration = inspect_comparison_result_declaration(
+                        candidate.path,
+                        work_budget=budget,
+                    )
+                    budget.checkpoint()
+                except WorkLimitError:
+                    raise DashboardError(
+                        "comparison detail exceeded its work limits"
+                    ) from None
+                except (InferdromeError, OSError, RecursionError, ValueError):
+                    continue
+                if declaration.descriptor.comparison_plan_id != comparison_plan_id:
+                    continue
+                matching.append((candidate, declaration))
+                if len(matching) == 2:
+                    break
+            if len(matching) > 1:
+                return _detail(
+                    plan,
+                    None,
+                    self.runs_root,
+                    work_budget=budget,
+                    result_issue="DUPLICATE_RESULT_FOR_PLAN",
+                )
+            if not matching:
+                return _detail(
+                    plan,
+                    None,
+                    self.runs_root,
+                    work_budget=budget,
+                )
+            if (
+                matching[0][1].descriptor.comparison_plan_digest
+                != plan.comparison_plan_digest
+            ):
+                return _detail(
+                    plan,
+                    None,
+                    self.runs_root,
+                    work_budget=budget,
+                    result_issue="RESULT_VERIFICATION_FAILED",
+                )
+            try:
+                result = self._verified_result(
+                    matching[0][1],
+                    work_budget=budget,
+                )
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "comparison detail exceeded its work limits"
+                ) from None
+            except (InferdromeError, OSError, RecursionError, ValueError):
+                return _detail(
+                    plan,
+                    None,
+                    self.runs_root,
+                    work_budget=budget,
+                    result_issue="RESULT_VERIFICATION_FAILED",
+                )
             return _detail(
                 plan,
-                None,
+                result,
                 self.runs_root,
-                result_issue="DUPLICATE_RESULT_FOR_PLAN",
+                work_budget=budget,
             )
-        if not matching:
-            return _detail(plan, None, self.runs_root)
-        if (
-            matching[0][1].descriptor.comparison_plan_digest
-            != plan.comparison_plan_digest
-        ):
-            return _detail(
-                plan,
-                None,
-                self.runs_root,
-                result_issue="RESULT_VERIFICATION_FAILED",
-            )
-        try:
-            result = self._verified_result(matching[0][1])
-        except (InferdromeError, OSError, ValueError):
-            return _detail(
-                plan,
-                None,
-                self.runs_root,
-                result_issue="RESULT_VERIFICATION_FAILED",
-            )
-        return _detail(plan, result, self.runs_root)

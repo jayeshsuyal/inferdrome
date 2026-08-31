@@ -43,11 +43,13 @@ from inferdrome.errors import (
     ControlledComparisonExecutionError,
     InferdromeError,
     TrialSetError,
+    WorkLimitError,
 )
 from inferdrome.execution.cancellation import CancellationToken
 from inferdrome.execution.orchestrator import run_resolved_experiment
 from inferdrome.gpu_proof import ManagedVllmConfig
 from inferdrome.immutable import is_internal_staging_entry
+from inferdrome.limits import WorkBudget, collect_bounded
 from inferdrome.resolution import ResolutionResult, resolve_experiment
 from inferdrome.trials import VerifiedTrialSet, create_trial_set, verify_trial_set
 from inferdrome.workspace import RunWorkspace
@@ -332,9 +334,15 @@ def _resolve_arm_source(
 
 def _run_context(
     analysis: BundleAnalysis,
+    *,
+    work_budget: WorkBudget | None = None,
 ) -> tuple[ExperimentSpec, ExecutionRecord]:
     verification = analysis.verification
-    reader = BundleReader(verification.bundle_path, require_immutable=True)
+    reader = BundleReader(
+        verification.bundle_path,
+        require_immutable=True,
+        work_budget=work_budget,
+    )
     role_paths = {
         artifact.role: artifact.path for artifact in verification.descriptor.artifacts
     }
@@ -360,10 +368,14 @@ def _run_context(
 def _verify_completed_run(
     run_path: Path,
     arm: ComparisonArmPlan,
+    *,
+    work_budget: WorkBudget | None = None,
 ) -> _CompletedRun:
     try:
-        workspace = RunWorkspace.open(run_path)
-        state = workspace.current_state()
+        workspace = RunWorkspace.open(run_path, work_budget=work_budget)
+        state = workspace.current_state(work_budget=work_budget)
+    except WorkLimitError:
+        raise
     except InferdromeError as error:
         raise ControlledComparisonExecutionError(
             "planned run workspace failed verification"
@@ -374,8 +386,17 @@ def _verify_completed_run(
             "v1 forbids retries and replacement runs"
         )
     try:
-        analysis = recalculate_bundle(workspace.path / "bundle")
-        verify_bundle_matches_workspace(workspace, analysis)
+        analysis = recalculate_bundle(
+            workspace.path / "bundle",
+            work_budget=work_budget,
+        )
+        verify_bundle_matches_workspace(
+            workspace,
+            analysis,
+            work_budget=work_budget,
+        )
+    except WorkLimitError:
+        raise
     except InferdromeError as error:
         raise ControlledComparisonExecutionError(
             "completed planned run failed independent recalculation"
@@ -404,7 +425,7 @@ def _verify_completed_run(
         raise ControlledComparisonExecutionError(
             "completed planned run does not match its frozen arm"
         )
-    spec, execution = _run_context(analysis)
+    spec, execution = _run_context(analysis, work_budget=work_budget)
     if spec != arm.resolved_experiment:
         raise ControlledComparisonExecutionError(
             "completed planned run resolved specification disagrees"
@@ -461,6 +482,8 @@ def _existing_completed_prefix(
 def inspect_comparison_execution(
     plan: VerifiedComparisonPlan,
     runs_root: Path,
+    *,
+    work_budget: WorkBudget | None = None,
 ) -> ComparisonExecutionProgress:
     """Derive bounded progress without trusting mutable executor state."""
 
@@ -473,6 +496,8 @@ def inspect_comparison_execution(
         )
 
     for slot in plan.descriptor.ordered_schedule:
+        if work_budget is not None:
+            work_budget.reserve(units=1)
         run_path = root / slot.run_id
         if not _path_exists(run_path):
             slots.append(
@@ -495,8 +520,10 @@ def inspect_comparison_execution(
             )
             continue
         try:
-            workspace = RunWorkspace.open(run_path)
-            state = workspace.current_state().state
+            workspace = RunWorkspace.open(run_path, work_budget=work_budget)
+            state = workspace.current_state(work_budget=work_budget).state
+        except WorkLimitError:
+            raise
         except InferdromeError:
             slots.append(
                 PlannedRunProgress(
@@ -521,8 +548,13 @@ def inspect_comparison_execution(
             completed = _verify_completed_run(
                 run_path,
                 _arm_plan(plan.descriptor, slot.arm),
+                work_budget=work_budget,
             )
-        except ControlledComparisonExecutionError:
+            if work_budget is not None:
+                work_budget.checkpoint()
+        except WorkLimitError:
+            raise
+        except InferdromeError:
             slots.append(
                 PlannedRunProgress(
                     sequence_index=slot.sequence_index,
@@ -680,7 +712,13 @@ def _result_paths_for_plan(
             entries = sorted(
                 (
                     entry
-                    for entry in iterator
+                    for entry in collect_bounded(
+                        iterator,
+                        limit=_MAX_RESULT_ENTRIES,
+                        error=lambda: ControlledComparisonExecutionError(
+                            "comparison-results root exceeds the executor entry limit"
+                        ),
+                    )
                     if not is_internal_staging_entry(entry.name)
                 ),
                 key=lambda item: item.name,
@@ -689,11 +727,6 @@ def _result_paths_for_plan(
         raise ControlledComparisonExecutionError(
             "comparison-results root could not be scanned"
         ) from None
-    if len(entries) > _MAX_RESULT_ENTRIES:
-        raise ControlledComparisonExecutionError(
-            "comparison-results root exceeds the executor entry limit"
-        )
-
     matching: list[Path] = []
     for entry in entries:
         if not _RESULT_ID.fullmatch(entry.name):

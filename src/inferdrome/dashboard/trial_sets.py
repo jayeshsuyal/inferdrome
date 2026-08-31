@@ -27,14 +27,17 @@ from inferdrome.dashboard.projection import (
     metric_label,
     project_run_detail,
 )
+from inferdrome.dashboard.work import DashboardLimits, DashboardWorkController
 from inferdrome.domain.metrics import Unit
 from inferdrome.errors import (
     DashboardError,
     DashboardPaginationError,
     DashboardTrialSetNotFound,
     InferdromeError,
+    WorkLimitError,
 )
 from inferdrome.immutable import is_internal_staging_entry
+from inferdrome.limits import WorkBudget, collect_bounded
 from inferdrome.trials import (
     TrialMetricVariation,
     VerifiedTrialSet,
@@ -54,6 +57,14 @@ _MAX_CURSOR_LENGTH = 128
 class _Candidate:
     entry: str
     path: Path
+
+
+@dataclass(frozen=True)
+class _VerifiedTrialSetSnapshot:
+    snapshot_id: str
+    generated_at: datetime
+    entries: tuple[TrialSetSummary | RejectedTrialSet, ...]
+    details: tuple[tuple[str, TrialSetDetail], ...]
 
 
 def _entry_label(name: str) -> str:
@@ -194,10 +205,17 @@ def _environment_drift_fields(details: tuple[RunDetail, ...]) -> tuple[str, ...]
     return tuple(sorted(changed))
 
 
-def project_trial_set(verified: VerifiedTrialSet) -> TrialSetDetail:
+def project_trial_set(
+    verified: VerifiedTrialSet,
+    *,
+    work_budget: WorkBudget | None = None,
+) -> TrialSetDetail:
     """Project one verified grouping without pooling member request records."""
 
-    details = tuple(project_run_detail(member) for member in verified.members)
+    details = tuple(
+        project_run_detail(member, work_budget=work_budget)
+        for member in verified.members
+    )
     descriptor = verified.descriptor
     drift_fields = _environment_drift_fields(details)
     summaries = tuple(detail.summary for detail in details)
@@ -247,11 +265,21 @@ def project_trial_set(verified: VerifiedTrialSet) -> TrialSetDetail:
 class TrialSetDashboardIndex:
     """Read-only index over immutable trial-set descriptors and member bundles."""
 
-    def __init__(self, trial_sets_root: Path, runs_root: Path) -> None:
+    def __init__(
+        self,
+        trial_sets_root: Path,
+        runs_root: Path,
+        *,
+        limits: DashboardLimits | None = None,
+        work_controller: DashboardWorkController | None = None,
+    ) -> None:
         self.trial_sets_root = trial_sets_root.absolute()
         self.runs_root = runs_root.absolute()
+        self.limits = limits or DashboardLimits()
+        self._work_controller = work_controller or DashboardWorkController(self.limits)
         self._details: dict[str, TrialSetDetail] = {}
         self._cache_by_digest: dict[str, TrialSetDetail] = {}
+        self._snapshot: _VerifiedTrialSetSnapshot | None = None
         self._lock = RLock()
 
     def _candidates(
@@ -276,16 +304,19 @@ class TrialSetDashboardIndex:
                 entries = sorted(
                     (
                         entry
-                        for entry in iterator
+                        for entry in collect_bounded(
+                            iterator,
+                            limit=self.limits.max_trial_set_entries,
+                            error=lambda: DashboardError(
+                                "trial-sets root exceeds the entry limit"
+                            ),
+                        )
                         if not is_internal_staging_entry(entry.name)
                     ),
                     key=lambda item: item.name,
                 )
         except OSError:
             raise DashboardError("trial-sets root could not be scanned") from None
-        if len(entries) > _MAX_DISCOVERED_ENTRIES:
-            raise DashboardError("trial-sets root exceeds the entry limit")
-
         candidates: list[_Candidate] = []
         rejected: list[RejectedTrialSet] = []
         for entry in entries:
@@ -325,8 +356,27 @@ class TrialSetDashboardIndex:
         if isinstance(limit, bool) or not 1 <= limit <= _MAX_PAGE_LIMIT:
             raise DashboardPaginationError("trial-set page limit is invalid")
         offset, expected_snapshot_id = _decode_cursor(cursor)
-        with self._lock:
-            candidates, discovery_rejections = self._candidates()
+        if expected_snapshot_id is not None:
+            with self._lock:
+                snapshot = self._snapshot
+                if snapshot is None or snapshot.snapshot_id != expected_snapshot_id:
+                    raise DashboardPaginationError(
+                        "trial-set cursor refers to a stale snapshot"
+                    )
+                return self._page(snapshot, offset=offset, limit=limit)
+
+        with self._work_controller.session(
+            self.limits.trial_set_snapshot_work
+        ) as budget:
+            with self._lock:
+                candidate_cache = dict(self._cache_by_digest)
+            try:
+                candidates, discovery_rejections = self._candidates()
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "trial-set snapshot exceeded its work limits"
+                ) from None
             rejected = list(discovery_rejections)
             detail_by_id: dict[str, TrialSetDetail] = {}
             source_by_id: dict[str, str] = {}
@@ -334,21 +384,35 @@ class TrialSetDashboardIndex:
 
             for candidate in candidates:
                 try:
+                    budget.reserve(units=1)
                     verified = verify_trial_set(
                         candidate.path,
                         runs_root=self.runs_root,
+                        work_budget=budget,
                     )
-                    detail = self._cache_by_digest.get(
-                        verified.trial_set_digest
-                    )
+                    detail = candidate_cache.get(verified.trial_set_digest)
                     if detail is None:
-                        detail = project_trial_set(verified)
+                        detail = project_trial_set(
+                            verified,
+                            work_budget=budget,
+                        )
+                        candidate_cache[verified.trial_set_digest] = detail
                     if (
                         detail.summary.trial_set_digest
                         != verified.trial_set_digest
                     ):
                         raise DashboardError("trial-set cache disagrees")
-                except (InferdromeError, OSError, ValueError) as error:
+                    budget.checkpoint()
+                except WorkLimitError:
+                    raise DashboardError(
+                        "trial-set snapshot exceeded its work limits"
+                    ) from None
+                except (
+                    InferdromeError,
+                    OSError,
+                    RecursionError,
+                    ValueError,
+                ) as error:
                     if "member" in str(error):
                         rejected.append(
                             RejectedTrialSet(
@@ -394,11 +458,6 @@ class TrialSetDashboardIndex:
                 detail_by_id[trial_set_id] = detail
                 source_by_id[trial_set_id] = candidate.entry
 
-            self._details = detail_by_id
-            self._cache_by_digest = {
-                detail.summary.trial_set_digest: detail
-                for detail in detail_by_id.values()
-            }
             summaries = tuple(
                 detail.summary
                 for detail in sorted(
@@ -415,51 +474,71 @@ class TrialSetDashboardIndex:
                 *tuple(rejected),
             )
             snapshot_id = _snapshot_id(entries)
-            if (
-                expected_snapshot_id is not None
-                and expected_snapshot_id != snapshot_id
-            ):
-                raise DashboardPaginationError(
-                    "trial-set cursor refers to a stale snapshot"
-                )
-            if offset > len(entries):
-                raise DashboardPaginationError(
-                    "trial-set cursor is outside the current snapshot"
-                )
-            page_entries = entries[offset : offset + limit]
-            next_offset = offset + len(page_entries)
-            has_more = next_offset < len(entries)
-            return TrialSetIndexResponse(
+            try:
+                budget.checkpoint()
+            except WorkLimitError:
+                raise DashboardError(
+                    "trial-set snapshot exceeded its work limits"
+                ) from None
+            snapshot = _VerifiedTrialSetSnapshot(
+                snapshot_id=snapshot_id,
                 generated_at=datetime.now(UTC),
-                trial_sets=tuple(
-                    item
-                    for item in page_entries
-                    if isinstance(item, TrialSetSummary)
-                ),
-                rejected=tuple(
-                    item
-                    for item in page_entries
-                    if isinstance(item, RejectedTrialSet)
-                ),
-                page=PageView(
-                    limit=limit,
-                    returned=len(page_entries),
-                    total=len(entries),
-                    has_more=has_more,
-                    next_cursor=(
-                        _encode_cursor(next_offset, snapshot_id)
-                        if has_more
-                        else None
-                    ),
-                ),
+                entries=entries,
+                details=tuple(detail_by_id.items()),
             )
+            with self._lock:
+                self._cache_by_digest = {
+                    detail.summary.trial_set_digest: detail
+                    for detail in detail_by_id.values()
+                }
+                self._snapshot = snapshot
+                self._details = dict(snapshot.details)
+            return self._page(snapshot, offset=offset, limit=limit)
+
+    @staticmethod
+    def _page(
+        snapshot: _VerifiedTrialSetSnapshot,
+        *,
+        offset: int,
+        limit: int,
+    ) -> TrialSetIndexResponse:
+        if offset > len(snapshot.entries):
+            raise DashboardPaginationError(
+                "trial-set cursor is outside the current snapshot"
+            )
+        page_entries = snapshot.entries[offset : offset + limit]
+        next_offset = offset + len(page_entries)
+        has_more = next_offset < len(snapshot.entries)
+        return TrialSetIndexResponse(
+            generated_at=snapshot.generated_at,
+            trial_sets=tuple(
+                item for item in page_entries if isinstance(item, TrialSetSummary)
+            ),
+            rejected=tuple(
+                item for item in page_entries if isinstance(item, RejectedTrialSet)
+            ),
+            page=PageView(
+                limit=limit,
+                returned=len(page_entries),
+                total=len(snapshot.entries),
+                has_more=has_more,
+                next_cursor=(
+                    _encode_cursor(next_offset, snapshot.snapshot_id)
+                    if has_more
+                    else None
+                ),
+            ),
+        )
 
     def get(self, trial_set_id: str) -> TrialSetDetail:
         if not _TRIAL_SET_ID.fullmatch(trial_set_id):
             raise DashboardTrialSetNotFound(
                 "trial set is not present in the verified index"
             )
-        self.refresh()
+        with self._lock:
+            has_snapshot = self._snapshot is not None
+        if not has_snapshot:
+            self.refresh()
         with self._lock:
             detail = self._details.get(trial_set_id)
             if detail is None:

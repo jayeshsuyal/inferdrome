@@ -38,6 +38,20 @@ class CaptureError(RuntimeError):
 
 
 def _strict_json_bytes(content: bytes, *, label: str) -> dict[str, Any]:
+    # The failure-record command must remain importable before the prepared
+    # Inferdrome environment exists, so parser helpers are loaded only here.
+    try:
+        from inferdrome.parsing import (
+            BoundedParseError,
+            bounded_json_float,
+            bounded_json_int,
+            validate_json_structure,
+        )
+    except ImportError:
+        raise CaptureError(
+            "Inferdrome is unavailable for strict JSON parsing"
+        ) from None
+
     if not content or len(content) > _MAX_JSON_BYTES:
         raise CaptureError(f"{label} is empty or exceeds its size limit")
     try:
@@ -51,14 +65,23 @@ def _strict_json_bytes(content: bytes, *, label: str) -> dict[str, Any]:
                 value[key] = item
             return value
 
+        validate_json_structure(text)
         value = json.loads(
             text,
             object_pairs_hook=pairs,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"invalid number: {token}")
             ),
+            parse_float=bounded_json_float,
+            parse_int=bounded_json_int,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (
+        BoundedParseError,
+        RecursionError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
         raise CaptureError(f"{label} is not strict JSON") from None
     if not isinstance(value, dict):
         raise CaptureError(f"{label} must be a JSON object")
