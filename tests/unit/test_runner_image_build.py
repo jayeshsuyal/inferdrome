@@ -31,6 +31,9 @@ def test_proof_build_rejects_dirty_relevant_inputs_without_echoing_status(
     assert dirty_marker not in str(exc_info.value)
     assert "--ignored=matching" in captured_commands[0]
     assert "scripts/build_runner_image.py" in captured_commands[0]
+    assert "LICENSE" in captured_commands[0]
+    assert "THIRD_PARTY_NOTICES.md" in captured_commands[0]
+    assert "LICENSES" in captured_commands[0]
 
 
 @pytest.mark.parametrize(
@@ -134,6 +137,9 @@ def test_materialized_proof_context_contains_only_tracked_allowlist() -> None:
         assert (context / "pyproject.toml").is_file()
         assert (context / "uv.lock").is_file()
         assert (context / "README.md").is_file()
+        assert (context / "LICENSE").is_file()
+        assert (context / "THIRD_PARTY_NOTICES.md").is_file()
+        assert (context / "LICENSES").is_dir()
         assert (context / "src").is_dir()
         assert not (context / "scripts").exists()
         assert not any(path.is_symlink() for path in context.rglob("*"))
@@ -308,6 +314,9 @@ def test_specialized_proof_context_is_exact_allowlist() -> None:
         assert (context / "Dockerfile.vllm-benchmark-runner").is_file()
         assert not (context / "Dockerfile").exists()
         assert (context / "uv.lock").is_file()
+        assert (context / "LICENSE").is_file()
+        assert (context / "THIRD_PARTY_NOTICES.md").is_file()
+        assert (context / "LICENSES").is_dir()
         assert (context / "src").is_dir()
         assert not (context / "scripts").exists()
         assert not any(path.is_symlink() for path in context.rglob("*"))

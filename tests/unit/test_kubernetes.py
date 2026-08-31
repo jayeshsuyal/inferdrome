@@ -23,8 +23,10 @@ from inferdrome.kubernetes import (
     KIND_NODE_IMAGE_REFERENCE,
     KIND_VERSION,
     KIND_VERSION_MAX_BYTES,
+    KUBERNETES_MAX_DOCKER_ENDPOINT_BYTES,
     KUBERNETES_MAX_MANIFEST_BYTES,
     KUBERNETES_MAX_YAML_TOKENS,
+    LOCAL_DOCKER_NPIPE_ENDPOINT,
     MOCK_MANIFEST_RELATIVE_PATH,
     KubernetesContractError,
     kubernetes_contract,
@@ -35,6 +37,7 @@ from inferdrome.kubernetes import (
     validate_kubernetes_job,
     validate_kubernetes_manifest,
     validate_kubernetes_server_version,
+    validate_local_docker_endpoint,
     validate_synthetic_output_directory,
     verify_synthetic_output,
 )
@@ -77,9 +80,11 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
     kind = bin_dir / "kind"
     kind.write_text(
         "#!/bin/sh\n"
-        "printf 'kind %s kubeconfig=%s provider=%s network=%s\\n' "
+        "printf 'kind %s kubeconfig=%s provider=%s network=%s "
+        "docker_host=%s docker_context=%s\\n' "
         "\"$*\" \"$KUBECONFIG\" \"${KIND_EXPERIMENTAL_PROVIDER:-}\" "
-        "\"${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}\" "
+        "\"${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}\" \"${DOCKER_HOST:-}\" "
+        "\"${DOCKER_CONTEXT:-}\" "
         ">> \"$INFERDROME_K8S_TEST_LOG\"\n"
         "if [ \"$1\" = --kubeconfig ]; then exit 91; fi\n"
         "if [ \"$1\" = version ]; then "
@@ -142,8 +147,16 @@ def _fake_cluster_bins(root: Path, *, source: Path) -> tuple[Path, Path]:
     docker = bin_dir / "docker"
     docker.write_text(
         "#!/bin/sh\n"
-        "printf 'docker %s\\n' \"$*\" >> \"$INFERDROME_K8S_TEST_LOG\"\n"
-        "exit \"${INFERDROME_K8S_FAIL_DOCKER:-0}\"\n",
+        "printf 'docker %s docker_host=%s docker_context=%s\\n' \"$*\" "
+        '"${DOCKER_HOST:-}" "${DOCKER_CONTEXT:-}" '
+        '>> "$INFERDROME_K8S_TEST_LOG"\n'
+        'case "$1 $2" in\n'
+        "  'context inspect') printf '%s\\n' "
+        '"$INFERDROME_K8S_DOCKER_CONTEXT_JSON"; '
+        'exit "${INFERDROME_K8S_FAIL_DOCKER_CONTEXT:-0}" ;;\n'
+        "  'image inspect') exit \"${INFERDROME_K8S_FAIL_DOCKER:-0}\" ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n",
         encoding="utf-8",
     )
     docker.chmod(0o755)
@@ -161,6 +174,8 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
     private_tmp = tmp_path / "private-tmp"
     private_tmp.mkdir()
     environment = os.environ.copy()
+    environment.pop("DOCKER_HOST", None)
+    environment.pop("DOCKER_CONTEXT", None)
     environment.update(
         {
             "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
@@ -170,6 +185,9 @@ def _run_fake_wrapper(tmp_path: Path, **extra: str) -> subprocess.CompletedProce
             "INFERDROME_K8S_LOG_SOURCE": str(source),
             "INFERDROME_K8S_TEST_LOG": str(log_path),
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
+            "INFERDROME_K8S_DOCKER_CONTEXT_JSON": json.dumps(
+                "unix:///var/run/docker.sock"
+            ),
             "INFERDROME_KUBERNETES_TEST_MODE": "1",
             "INFERDROME_KIND_NODE_IMAGE": KIND_NODE_IMAGE_REFERENCE,
             "INFERDROME_K8S_KIND_VERSION":
@@ -626,6 +644,54 @@ def test_kind_version_rejects_wrong_malformed_multiline_control_and_oversized(
 
 
 @pytest.mark.parametrize(
+    "endpoint",
+    [
+        "unix:///var/run/docker.sock",
+        "unix:///Users/Operator Name/.docker/run/docker.sock",
+        "unix:///run/user/1000/docker.sock",
+        LOCAL_DOCKER_NPIPE_ENDPOINT,
+    ],
+)
+def test_local_docker_endpoint_accepts_exact_unix_and_npipe_transports(
+    endpoint: str,
+) -> None:
+    raw = json.dumps(endpoint, ensure_ascii=False).encode("utf-8") + b"\n"
+    assert validate_local_docker_endpoint(raw) == endpoint
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b"null",
+        b'{"host":"unix:///var/run/docker.sock"}',
+        b' "unix:///var/run/docker.sock"',
+        b'"unix:///var/run/docker.sock" \n',
+        b'"unix:///var/run/docker.sock"\n\n',
+        b'"ssh://audit.invalid/var/run/docker.sock"',
+        b'"tcp://127.0.0.1:2375"',
+        b'"https://127.0.0.1:2376"',
+        b'"unix://relative/docker.sock"',
+        b'"unix:///"',
+        b'"unix:////var/run/docker.sock"',
+        b'"unix:///var/../run/docker.sock"',
+        b'"unix:///var//run/docker.sock"',
+        b'"unix:///var/run/docker.sock?context=remote"',
+        b'"unix:///var/run/docker%2esock"',
+        b'"npipe:////./pipe/alternate_engine"',
+        b'"unix:///var/run/docker.sock\\n"',
+        b'"unix:///' + b"a" * KUBERNETES_MAX_DOCKER_ENDPOINT_BYTES + b'"',
+    ],
+)
+def test_local_docker_endpoint_rejects_remote_ambiguous_and_unbounded_json(
+    raw: bytes,
+) -> None:
+    with pytest.raises(KubernetesContractError) as error:
+        validate_local_docker_endpoint(raw)
+    assert str(error.value) == "Docker endpoint is not an allowed local endpoint"
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         lambda value: value.update({"evidence_eligible": True}),
@@ -674,6 +740,109 @@ def test_synthetic_publication_is_no_replace_and_readback_verified(
     destination.symlink_to(tmp_path / "redirect")
     with pytest.raises(KubernetesContractError):
         publish_synthetic_output(source, destination)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("DOCKER_HOST", "ssh://audit.invalid/var/run/docker.sock"),
+        ("DOCKER_CONTEXT", "audit-remote"),
+    ],
+)
+def test_fake_wrapper_rejects_ambient_docker_routing_before_any_tool_call(
+    tmp_path: Path,
+    variable: str,
+    value: str,
+) -> None:
+    result = _run_fake_wrapper(tmp_path, **{variable: value})
+    assert result.returncode == 2
+    assert result.stderr == (
+        "Kubernetes mock preflight failed: "
+        f"ambient {variable} override is not supported\n"
+    )
+    assert (tmp_path / "commands.log").read_text(encoding="utf-8") == ""
+    assert not (tmp_path / "evidence/runner-output.json").exists()
+
+
+def _assert_only_docker_context_inspection(tmp_path: Path) -> None:
+    lines = (tmp_path / "commands.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("docker context inspect ")
+    assert "docker_host= docker_context=" in lines[0]
+    assert not any(
+        token in lines[0]
+        for token in ("image inspect", "kind ", "kubectl ", "create", "delete")
+    )
+
+
+@pytest.mark.parametrize(
+    "context_json",
+    [
+        json.dumps("ssh://audit.invalid/var/run/docker.sock"),
+        json.dumps("tcp://127.0.0.1:2375"),
+        json.dumps("unix://relative/docker.sock"),
+        json.dumps("unix:////var/run/docker.sock"),
+        json.dumps("npipe:////./pipe/alternate_engine"),
+        "null",
+        '{"host":"unix:///var/run/docker.sock"}',
+        '"unix:///var/run/docker.sock"\nextra',
+        json.dumps("unix:///" + "a" * KUBERNETES_MAX_DOCKER_ENDPOINT_BYTES),
+    ],
+)
+def test_fake_wrapper_rejects_unverified_context_before_image_or_kind_actions(
+    tmp_path: Path,
+    context_json: str,
+) -> None:
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_K8S_DOCKER_CONTEXT_JSON=context_json,
+    )
+    assert result.returncode == 2
+    assert result.stderr == (
+        "Kubernetes mock preflight failed: "
+        "active Docker endpoint could not be verified as local\n"
+    )
+    _assert_only_docker_context_inspection(tmp_path)
+    assert not (tmp_path / "evidence/runner-output.json").exists()
+
+
+def test_fake_wrapper_rejects_failed_context_inspection_before_any_action(
+    tmp_path: Path,
+) -> None:
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_K8S_FAIL_DOCKER_CONTEXT="17",
+    )
+    assert result.returncode == 2
+    _assert_only_docker_context_inspection(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "unix:///var/run/docker.sock",
+        "unix:///Users/operator/.docker/run/docker.sock",
+        "unix:///run/user/1000/docker.sock",
+        LOCAL_DOCKER_NPIPE_ENDPOINT,
+    ],
+)
+def test_fake_wrapper_pins_verified_local_endpoint_for_docker_and_kind(
+    tmp_path: Path,
+    endpoint: str,
+) -> None:
+    result = _run_fake_wrapper(
+        tmp_path,
+        INFERDROME_K8S_DOCKER_CONTEXT_JSON=json.dumps(endpoint),
+    )
+    assert result.returncode == 0, result.stderr
+    lines = (tmp_path / "commands.log").read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("docker context inspect ")
+    assert "docker_host= docker_context=" in lines[0]
+    image_line = next(line for line in lines if line.startswith("docker image inspect"))
+    assert f"docker_host={endpoint} docker_context=" in image_line
+    kind_lines = [line for line in lines if line.startswith("kind ")]
+    assert kind_lines
+    assert all(f"docker_host={endpoint} docker_context=" in line for line in kind_lines)
 
 
 def test_fake_kind_wrapper_retrieves_logs_verifies_and_cleans_exact_resources(
@@ -967,6 +1136,8 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
     private_tmp.mkdir()
     wait_marker = tmp_path / "wait.started"
     environment = os.environ.copy()
+    environment.pop("DOCKER_HOST", None)
+    environment.pop("DOCKER_CONTEXT", None)
     environment.update(
         {
             "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
@@ -976,6 +1147,9 @@ def test_fake_kind_wrapper_interrupt_attempts_cleanup(tmp_path: Path) -> None:
             "INFERDROME_K8S_LOG_SOURCE": str(source),
             "INFERDROME_K8S_TEST_LOG": str(log_path),
             "INFERDROME_K8S_CLUSTER_MARKER": str(tmp_path / "cluster.marker"),
+            "INFERDROME_K8S_DOCKER_CONTEXT_JSON": json.dumps(
+                "unix:///var/run/docker.sock"
+            ),
             "INFERDROME_KIND_NODE_IMAGE": KIND_NODE_IMAGE_REFERENCE,
             "INFERDROME_K8S_INTERRUPT_WAIT": "1",
             "INFERDROME_K8S_WAIT_MARKER": str(wait_marker),

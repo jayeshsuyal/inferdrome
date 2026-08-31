@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -61,6 +62,7 @@ MOCK_OUTPUT_NAME: Final = "runner-output.json"
 KUBERNETES_MAX_MANIFEST_BYTES: Final = 512 * 1024
 KUBERNETES_MAX_OUTPUT_BYTES: Final = 64 * 1024
 KUBERNETES_MAX_VERSION_BYTES: Final = 16 * 1024
+KUBERNETES_MAX_DOCKER_ENDPOINT_BYTES: Final = 1024
 KIND_VERSION_MAX_BYTES: Final = 512
 KUBERNETES_MAX_YAML_DEPTH: Final = 64
 KUBERNETES_MAX_YAML_TOKENS: Final = 20_000
@@ -71,6 +73,7 @@ KIND_NODE_IMAGE_REFERENCE: Final = (
     "050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f"
 )
 KIND_VERSION: Final = "0.29.0"
+LOCAL_DOCKER_NPIPE_ENDPOINT: Final = "npipe:////./pipe/docker_engine"
 KUBERNETES_HEALTH_EXEC_COMMAND: Final = [
     "python",
     "-c",
@@ -94,6 +97,59 @@ class KubernetesContractError(ValueError):
 
 class _UniqueSafeLoader(yaml.SafeLoader):
     pass
+
+
+def validate_local_docker_endpoint(raw: bytes) -> str:
+    """Return one exact transport-local Docker endpoint from bounded JSON."""
+
+    if not raw or len(raw) > KUBERNETES_MAX_DOCKER_ENDPOINT_BYTES:
+        raise KubernetesContractError(
+            "Docker endpoint is not an allowed local endpoint"
+        )
+    payload = raw[:-1] if raw.endswith(b"\n") else raw
+    if (
+        not payload
+        or b"\n" in payload
+        or b"\r" in payload
+        or not payload.startswith(b'"')
+        or not payload.endswith(b'"')
+    ):
+        raise KubernetesContractError(
+            "Docker endpoint is not an allowed local endpoint"
+        )
+    try:
+        value: object = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise KubernetesContractError(
+            "Docker endpoint is not an allowed local endpoint"
+        ) from None
+    if not isinstance(value, str):
+        raise KubernetesContractError(
+            "Docker endpoint is not an allowed local endpoint"
+        )
+    if value == LOCAL_DOCKER_NPIPE_ENDPOINT:
+        return value
+    if not value.startswith("unix:///"):
+        raise KubernetesContractError(
+            "Docker endpoint is not an allowed local endpoint"
+        )
+    socket_path = value.removeprefix("unix://")
+    if (
+        socket_path == "/"
+        or socket_path.startswith("//")
+        or posixpath.normpath(socket_path) != socket_path
+        or any(
+            ord(character) < 0x20
+            or ord(character) == 0x7F
+            or 0xD800 <= ord(character) <= 0xDFFF
+            for character in socket_path
+        )
+        or any(character in socket_path for character in ("\\", "%", "?", "#"))
+    ):
+        raise KubernetesContractError(
+            "Docker endpoint is not an allowed local endpoint"
+        )
+    return value
 
 
 def _construct_unique_mapping(
@@ -1383,6 +1439,7 @@ def main(argv: list[str] | None = None) -> int:
     server_version.add_argument("path", type=Path)
     kind_version = subparsers.add_parser("kind-version")
     kind_version.add_argument("path", type=Path)
+    subparsers.add_parser("docker-endpoint")
     subparsers.add_parser("contract")
     try:
         if arguments := parser.parse_args(argv):
@@ -1421,6 +1478,9 @@ def main(argv: list[str] | None = None) -> int:
                     label="kind version",
                 )
                 print(f"kind version: {validate_kind_version(raw)}")
+            elif arguments.command == "docker-endpoint":
+                raw = sys.stdin.buffer.read(KUBERNETES_MAX_DOCKER_ENDPOINT_BYTES + 1)
+                print(validate_local_docker_endpoint(raw))
             else:
                 sys.stdout.buffer.write(_pretty(kubernetes_contract()))
     except KubernetesContractError as error:
@@ -1439,11 +1499,13 @@ __all__ = [
     "KUBERNETES_FROZEN_CAMPAIGN_ENDPOINT",
     "KUBERNETES_HEALTH_EXEC_COMMAND",
     "KUBERNETES_LOOPBACK_ENDPOINT",
+    "KUBERNETES_MAX_DOCKER_ENDPOINT_BYTES",
     "KUBERNETES_MAX_MANIFEST_BYTES",
     "KUBERNETES_MAX_OUTPUT_BYTES",
     "KUBERNETES_MAX_VERSION_BYTES",
     "KUBERNETES_MAX_YAML_TOKENS",
     "KUBERNETES_MIN_VERSION",
+    "LOCAL_DOCKER_NPIPE_ENDPOINT",
     "MOCK_ENGINE_IMAGE",
     "MOCK_JOB_NAME",
     "MOCK_MANIFEST_RELATIVE_PATH",
@@ -1458,6 +1520,7 @@ __all__ = [
     "validate_kubernetes_job",
     "validate_kubernetes_manifest",
     "validate_kubernetes_server_version",
+    "validate_local_docker_endpoint",
     "validate_synthetic_output_destination",
     "validate_synthetic_output_directory",
     "verify_synthetic_output",

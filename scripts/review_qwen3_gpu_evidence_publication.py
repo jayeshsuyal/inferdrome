@@ -58,6 +58,9 @@ CAPABILITY_PROFILE_COMMIT = "6cb774d210940073347f9045bb15611aa9e9cf27"
 PUBLICATION_REVIEW_COMMIT: str | None = (
     "68854817da3ddd5a0b667f703960744cd6669e25"
 )
+# Frozen input from the exact historical review. Later checkout state must not
+# rewrite the sealed publication review or imply archive publication rights.
+REPOSITORY_LICENSE_PRESENT_AT_REVIEW = False
 
 ARCHIVE_SIZE_BYTES = 321_010
 ARCHIVE_SHA256 = (
@@ -327,11 +330,7 @@ def build_publication_review(
         or detectors["binary_or_non_utf8"]["path_count"]
         or detectors["unreviewed_oversized_files"]["path_count"]
     )
-    repository_has_license = any(
-        path.is_file()
-        for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "NOTICE*")
-        for path in REPOSITORY_ROOT.glob(pattern)
-    )
+    repository_has_license = REPOSITORY_LICENSE_PRESENT_AT_REVIEW
     unresolved_license_codes = [
         "GENERATED_OUTPUT_LICENSE_REVIEW_REQUIRED",
         "MODEL_LICENSE_RECORD_NOT_RETAINED",

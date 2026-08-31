@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from urllib.error import URLError
 
@@ -16,6 +19,23 @@ from inferdrome.runner import RunnerError, build_parser, run_endpoint_request
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPOSITORY_ROOT / "Dockerfile"
 DOCKERIGNORE = REPOSITORY_ROOT / ".dockerignore"
+APACHE_2_LICENSE_SHA256 = (
+    "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+)
+PROJECT_LICENSE_FILE_PATTERNS = {
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES/*.txt",
+}
+PACKAGED_LICENSE_FILES = {
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES/ISC-Lucide.txt",
+    "LICENSES/MIT-React.txt",
+    "LICENSES/MIT-Vite.txt",
+    "LICENSES/OFL-1.1-IBM-Plex-Mono.txt",
+    "LICENSES/OFL-1.1-Instrument-Sans.txt",
+}
 
 
 def test_runner_dockerfile_has_pinned_base_non_root_and_locked_install() -> None:
@@ -27,6 +47,8 @@ def test_runner_dockerfile_has_pinned_base_non_root_and_locked_install() -> None
     assert all(re.search(r"@sha256:[0-9a-f]{64}$", image) for image in from_images)
     assert "python:3.12.12-slim-bookworm@sha256:" in from_images[0]
     assert "COPY pyproject.toml uv.lock README.md ./" in dockerfile
+    assert "COPY LICENSE THIRD_PARTY_NOTICES.md ./" in dockerfile
+    assert "COPY LICENSES ./LICENSES" in dockerfile
     assert "uv sync --frozen --no-dev --no-editable" in dockerfile
     assert "ADD --checksum=sha256:" in dockerfile
     assert "UV_VERSION" not in dockerfile
@@ -45,7 +67,50 @@ def test_runner_dockerfile_has_pinned_base_non_root_and_locked_install() -> None
         "COPY --from=builder --chown=10001:10001 "
         "/opt/inferdrome-runtime /opt/inferdrome-runtime"
     ) in dockerfile
+    assert "/usr/share/licenses/inferdrome/" in dockerfile
     assert "/opt/inferdrome-runtime/bin/inferdrome --version" in dockerfile
+
+
+def test_package_license_metadata_and_notices_are_pinned() -> None:
+    metadata = tomllib.loads(
+        (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    assert metadata["license"] == "Apache-2.0"
+    assert set(metadata["license-files"]) == PROJECT_LICENSE_FILE_PATTERNS
+    assert metadata["urls"] == {
+        "Repository": "https://github.com/jayeshsuyal/inferdrome"
+    }
+    assert hashlib.sha256((REPOSITORY_ROOT / "LICENSE").read_bytes()).hexdigest() == (
+        APACHE_2_LICENSE_SHA256
+    )
+
+    for relative_path in PACKAGED_LICENSE_FILES:
+        assert (REPOSITORY_ROOT / relative_path).is_file()
+
+    lock = json.loads(
+        (REPOSITORY_ROOT / "frontend/package-lock.json").read_text(encoding="utf-8")
+    )
+    runtime_licenses = {
+        "@fontsource-variable/instrument-sans": ("5.3.0", "OFL-1.1"),
+        "@fontsource/ibm-plex-mono": ("5.3.0", "OFL-1.1"),
+        "lucide-react": ("0.468.0", "ISC"),
+        "react": ("19.2.8", "MIT"),
+        "react-dom": ("19.2.8", "MIT"),
+        "scheduler": ("0.27.0", "MIT"),
+        "vite": ("7.3.6", "MIT"),
+    }
+    notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    for package_name, (version, license_name) in runtime_licenses.items():
+        locked = lock["packages"][f"node_modules/{package_name}"]
+        assert (locked["version"], locked["license"]) == (version, license_name)
+        assert package_name in notices
+        assert version in notices
+
+    dashboard_bundles = list(
+        (REPOSITORY_ROOT / "src/inferdrome/dashboard/static/assets").glob("index-*.js")
+    )
+    assert len(dashboard_bundles) == 1
+    assert '"modulepreload"' in dashboard_bundles[0].read_text(encoding="utf-8")
 
 
 def test_runner_dockerfile_has_proof_identity_labels_and_no_serving_engine() -> None:
@@ -69,6 +134,24 @@ def test_runner_dockerfile_has_proof_identity_labels_and_no_serving_engine() -> 
     assert "linux/amd64" in (
         REPOSITORY_ROOT / "scripts/build_runner_image.py"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "Dockerfile",
+        "Dockerfile.compose-mock",
+        "Dockerfile.vllm-benchmark-runner",
+    ),
+)
+def test_inferdrome_images_retain_project_and_dashboard_licenses(
+    filename: str,
+) -> None:
+    dockerfile = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
+    assert "LICENSE" in dockerfile
+    assert "THIRD_PARTY_NOTICES.md" in dockerfile
+    assert "LICENSES" in dockerfile
+    assert "/usr/share/licenses/inferdrome" in dockerfile
 
 
 def test_runner_dockerfile_does_not_declare_secret_shaped_build_inputs() -> None:
@@ -113,6 +196,13 @@ def test_runner_build_context_is_deny_by_default_and_excludes_host_state() -> No
     ):
         assert excluded in dockerignore
     for allowed in ("!Dockerfile", "!pyproject.toml", "!uv.lock", "!src/"):
+        assert allowed in dockerignore
+    for allowed in (
+        "!LICENSE",
+        "!THIRD_PARTY_NOTICES.md",
+        "!LICENSES/",
+        "!LICENSES/**",
+    ):
         assert allowed in dockerignore
 
 

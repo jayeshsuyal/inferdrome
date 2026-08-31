@@ -382,13 +382,15 @@ disclose prompts, generated responses, stdout/stderr, package inventory,
 absolute paths, one private host-network address repeated across server logs,
 GPU UUIDs, and process identifiers.
 
-The result is `EXTERNAL_ONLY`, not `APPROVED_PUBLIC`: the repository has no
-selected license, the archive does not retain owner-approved license records
-for the model, workload, vLLM, and generated output, and the owner has not
-approved public delivery. Therefore `capture.tar.gz` remains ignored and was
-neither committed nor uploaded. The proposed future release-asset URL and exact
-required checksum are recorded in the handoff manifest; vendoring the same
-reviewed bytes in ExitSpec remains an alternative owner decision.
+The result remains `EXTERNAL_ONLY`, not `APPROVED_PUBLIC`. At review time the
+repository had no selected license; the owner has since selected Apache-2.0
+for Inferdrome source and package metadata. That later repository choice does
+not alter the reviewed archive, provide its missing owner-approved license
+records for the model, workload, vLLM, and generated output, or approve public
+delivery. Therefore `capture.tar.gz` remains ignored and was neither committed
+nor uploaded. The proposed future release-asset URL and exact required checksum
+are recorded in the handoff manifest; vendoring the same reviewed bytes in
+ExitSpec remains an alternative owner decision.
 
 Re-run the complete review and independently recalculate the 100/100 native
 TTFT population and nearest-rank p95 of `14,797,213 ns` with:
@@ -396,6 +398,10 @@ TTFT population and nearest-rank p95 of `14,797,213 ns` with:
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/review_gpu_evidence_publication.py --check
 ```
+
+That deterministic recheck freezes the repository-license fact recorded by the
+historical review; the current Apache-2.0 file does not recategorize or rewrite
+the sealed review.
 
 The handoff explicitly records a null producer-side ExitSpec contract digest
 and `RETROSPECTIVE` chronology. A future contract can be frozen before
@@ -437,6 +443,10 @@ PYTHONPATH=src .venv/bin/python \
   scripts/review_qwen3_gpu_evidence_publication.py --check
 ```
 
+The historical A10 and A100 review renderers likewise freeze their review-time
+repository-license fact, so a current checkout cannot silently authorize or
+rewrite an `EXTERNAL_ONLY` record.
+
 Open that same verified bundle in the loopback-only dashboard:
 
 ```bash
@@ -446,10 +456,13 @@ PYTHONPATH=src .venv/bin/python \
 
 The archive remains `EXTERNAL_ONLY` because owner publication approval and
 archive-bound repository, model, workload, vLLM, and generated-output license
-decisions are unresolved. Public CI validates the committed record shapes and
-cross-digests; it does not claim to possess or reverify ignored local bytes.
-This spike closes A10 runtime compatibility for the exact profile only. It is
-not a cross-GPU result or an Inferdrome acceptance verdict.
+decisions are unresolved. Apache-2.0 now covers Inferdrome repository-authored
+source and package metadata, but it neither rewrites that sealed archive nor
+licenses its external materials or generated output. Public CI validates the
+committed record shapes and cross-digests; it does not claim to possess or
+reverify ignored local bytes. This spike closes A10 runtime compatibility for
+the exact profile only. It is not a cross-GPU result or an Inferdrome
+acceptance verdict.
 
 ## Exact managed server launch
 
