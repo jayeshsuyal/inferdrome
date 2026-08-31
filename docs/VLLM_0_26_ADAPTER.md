@@ -65,9 +65,11 @@ strictly parsed result are embedded in canonical invocation evidence, so the
 offline verifier can replay the model-list parse and cross-bind the
 `server.model_id` environment claim without network access.
 
-Endpoint URLs are already constrained by the public experiment contract: HTTP
-or HTTPS only, with no user information, query, or fragment. v0.1 does not
-support secret-bearing endpoint arguments or authorization headers.
+Endpoint URLs are already constrained by the public experiment contract: a
+root HTTP or HTTPS base URL with only an optional trailing slash, and no other
+path, user information, query, or fragment. The adapter rechecks that contract
+before constructing either preflight requests or producer arguments. v0.1 does
+not support secret-bearing endpoint arguments or authorization headers.
 
 ## Exact invocation contract
 

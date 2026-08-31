@@ -14,9 +14,10 @@ runtime-unproven; neither pack launched a cloud instance or produced a receipt.
 A separate GET-only exact-capacity watcher now validates each implemented
 provider description, rate, capacity region, and zero-active-instance boundary
 without granting launch authority. Both reviewed raw archives remain
-EXTERNAL_ONLY; owner
-license/publication decisions, security sign-off, ExitSpec outcomes, and
-release work remain open.**
+EXTERNAL_ONLY; owner archive-publication decisions, external-material license
+reviews, security sign-off, ExitSpec outcomes, and release work remain open.
+The owner-selected Apache-2.0 repository license does not close those separate
+archive boundaries.**
 
 Next campaign checkpoint: **After a fresh read-only preflight and separate
 explicit operator launch decision, execute the exact Qwen3-8B same-model
@@ -365,9 +366,11 @@ invalidate the sealed bundles.
 Producer publication closure on 2026-08-20 adds a standalone closed
 `inferdrome.local-gpu-proof.v1` schema, composite managed-vLLM profile,
 conformance mutations, exact-archive review, and deterministic handoff. The
-review finds no secret, email, or public-IP detector matches and classifies the
-unchanged archive `EXTERNAL_ONLY` because owner approval and multiple license
-records remain unresolved. Raw bytes were not committed or uploaded.
+review finds no secret, email, or public-IP detector matches. Its recorded
+decision remains `EXTERNAL_ONLY`; owner approval and archive-bound model,
+workload, vLLM, and generated-output license records remain unresolved. Raw
+bytes were not committed or uploaded, and the later Apache-2.0 repository
+license does not authorize their publication.
 
 A100 execution-pack closure on 2026-08-22 adds a zero-spend, fail-closed path
 for the Qwen3-8B same-model hardware-control assignment. It binds exactly one
@@ -398,9 +401,10 @@ no H100 evidence or cross-GPU result.
 
 Still required to close the external acceptance boundary: run the separately
 owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations against the exact
-handoff and retain its receipt. The owner must separately choose a repository
-license and approve or reject public archive delivery. Ordinary attached
-endpoint runs deliberately remain `INELIGIBLE`.
+handoff and retain its receipt. Apache-2.0 is selected for Inferdrome itself;
+the owner must separately approve or reject public archive delivery and resolve
+licenses for the archive's external materials. Ordinary attached endpoint runs
+deliberately remain `INELIGIBLE`.
 
 ## PR 8 — v0.1 hardening and release
 
@@ -421,10 +425,11 @@ library boundaries used by tests. The release shield runs the engineering,
 deployment-qualification, and populated-dashboard gates in GitHub Actions and
 maps remaining evidence in
 `V0_1_RELEASE_CHECKLIST.md`. The genuine GPU producer evidence is complete;
-ExitSpec demonstrations, human security sign-off, license selection, owner
-archive-publication decision, and the release tag remain open. Remaining polish
-is tracked by the offline release preflight and existing gates rather than by
-adding new product scope.
+Apache-2.0 is selected for the repository, while ExitSpec demonstrations,
+human security sign-off, external-material licensing, the owner
+archive-publication decision, and the release tag remain open. Remaining
+polish is tracked by the offline release preflight and existing gates rather
+than by adding new product scope.
 
 Gate:
 

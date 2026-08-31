@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -190,16 +191,37 @@ class FakeProcessRunner:
         ).read_bytes()
 
 
-def test_qualification_compose_environment_disables_implicit_dotenv_loading() -> None:
+def test_qualification_compose_environment_is_private_and_non_ambient(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "evidence"
+    private_home = tmp_path / "home"
+    docker_config = tmp_path / "docker-config"
+    temporary_directory = tmp_path / "tmp"
+    for directory in (evidence, private_home, docker_config, temporary_directory):
+        directory.mkdir()
+    monkeypatch.setenv("LAMBDA_CLOUD_API_KEY", "synthetic-placeholder")
+    monkeypatch.setenv("DOCKER_HOST", "ssh://synthetic.invalid/docker.sock")
+    monkeypatch.setenv("PATH", "/synthetic/ambient/bin")
     environment = _safe_environment(
         uid=os.getuid(),
         gid=os.getgid(),
-        evidence_dir=Path("/tmp/inferdrome-qualification-evidence"),
+        evidence_dir=evidence,
+        private_home=private_home,
+        docker_config=docker_config,
+        temporary_directory=temporary_directory,
     )
 
     assert environment["COMPOSE_DISABLE_ENV_FILE"] == "1"
+    assert environment["HOME"] == str(private_home)
+    assert environment["DOCKER_CONFIG"] == str(docker_config)
+    assert environment["TMPDIR"] == str(temporary_directory)
+    assert not list(docker_config.iterdir())
     assert "DOCKER_HOST" not in environment
     assert "DOCKER_CONTEXT" not in environment
+    assert "LAMBDA_CLOUD_API_KEY" not in environment
+    assert "/synthetic/ambient/bin" not in environment["PATH"]
 
 
 def _root(tmp_path: Path) -> Path:
@@ -534,6 +556,79 @@ def test_bounded_subprocess_terminates_timed_out_process() -> None:
         timeout_seconds=0.1,
     )
     assert result.returncode == 124
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.parametrize(
+    ("held_stream", "timeout_seconds"),
+    [("stdout", 1.0), ("stderr", 1.0), ("stdout", 30.0)],
+    ids=["stdout", "stderr", "large-execution-budget"],
+)
+def test_bounded_subprocess_kills_pipe_holding_descendant_group(
+    tmp_path: Path,
+    held_stream: str,
+    timeout_seconds: float,
+) -> None:
+    state_path = tmp_path / f"{held_stream}-descendant.txt"
+    descendant = "\n".join(
+        (
+            "import os",
+            "import signal",
+            "import sys",
+            "import time",
+            "from pathlib import Path",
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            "Path(sys.argv[1]).write_text(",
+            "    f'{os.getpid()}:{os.getpgrp()}', encoding='ascii'",
+            ")",
+            "time.sleep(5)",
+        )
+    )
+    stdout = "sys.stdout" if held_stream == "stdout" else "subprocess.DEVNULL"
+    stderr = "sys.stderr" if held_stream == "stderr" else "subprocess.DEVNULL"
+    direct_child = "\n".join(
+        (
+            "import os",
+            "import subprocess",
+            "import sys",
+            "import time",
+            f"descendant = {descendant!r}",
+            "subprocess.Popen(",
+            "    [sys.executable, '-c', descendant, sys.argv[1]],",
+            f"    stdout={stdout},",
+            f"    stderr={stderr},",
+            ")",
+            "ready_deadline = time.monotonic() + 0.5",
+            "while not os.path.exists(sys.argv[1]):",
+            "    if time.monotonic() >= ready_deadline:",
+            "        raise SystemExit(3)",
+            "    time.sleep(0.001)",
+        )
+    )
+
+    started = time.monotonic()
+    result = BoundedSubprocessRunner().run(
+        [sys.executable, "-c", direct_child, str(state_path)],
+        env={},
+        timeout_seconds=timeout_seconds,
+    )
+    elapsed = time.monotonic() - started
+
+    _descendant_pid, process_group = (
+        int(value) for value in state_path.read_text(encoding="ascii").split(":")
+    )
+    group_deadline = time.monotonic() + 1.0
+    group_is_alive = True
+    while group_is_alive and time.monotonic() < group_deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            group_is_alive = False
+        else:
+            time.sleep(0.01)
+    assert result.returncode == 124
+    assert elapsed < 1.75
+    assert group_is_alive is False
 
 
 def test_cancellation_after_up_is_cleaned_and_not_published(tmp_path: Path) -> None:

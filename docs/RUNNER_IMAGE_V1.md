@@ -35,12 +35,21 @@ are explicitly not proof identities. The committed `uv.lock` is installed with
 or replace the lock. The uv bootstrap is the fixed Linux/amd64 `0.8.17`
 release archive verified by its committed SHA-256 checksum.
 
+The Inferdrome package declares the SPDX expression `Apache-2.0` and includes
+the canonical project `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the retained
+license texts for bundled dashboard runtime assets. Each Inferdrome image copies
+the same material to `/usr/share/licenses/inferdrome`. Apache-2.0 describes the
+Inferdrome project work; it does not relicense container bases, Python or
+frontend dependencies, serving engines, models, workloads, generated output,
+or evidence archives.
+
 For a proof-shaped build, use the clean-context wrapper. It refuses modified,
 deleted, staged, untracked, or ignored files in the Docker allowlist
-(`Dockerfile`, `.dockerignore`, `pyproject.toml`, `uv.lock`, `README.md`, and
-`src`) and also checks the wrapper itself (`scripts/build_runner_image.py`) as
-a trust-root input. It derives the full commit and package version and passes
-the canonical GPU target platform:
+(`Dockerfile`, `.dockerignore`, `pyproject.toml`, `uv.lock`, `README.md`,
+`LICENSE`, `THIRD_PARTY_NOTICES.md`, `LICENSES`, and `src`) and also checks the
+wrapper itself (`scripts/build_runner_image.py`) as a trust-root input. It
+derives the full commit and package version and passes the canonical GPU target
+platform:
 
 ```bash
 python scripts/build_runner_image.py \
@@ -136,9 +145,10 @@ of Docker must be reported as unavailable rather than treated as a passing
 image build.
 
 The `.dockerignore` denies the repository by default and allowlists only the
-Dockerfile, lock/configuration files, README, and source package. It also
-explicitly excludes common editor, cache, bytecode, and package-metadata host
-artifacts as defense in depth. Git history, virtual environments, credentials,
-model/cache directories, raw evidence, test fixtures, and host artifacts are
-excluded from the build context. These patterns are not a substitute for the
-proof wrapper's exact `HEAD` archive.
+Dockerfile, lock/configuration files, README, project and third-party license
+materials, and source package. It also explicitly excludes common editor,
+cache, bytecode, and package-metadata host artifacts as defense in depth. Git
+history, virtual environments, credentials, model/cache directories, raw
+evidence, test fixtures, and host artifacts are excluded from the build
+context. These patterns are not a substitute for the proof wrapper's exact
+`HEAD` archive.

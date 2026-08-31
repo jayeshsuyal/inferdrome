@@ -9,11 +9,12 @@ import pytest
 import yaml
 
 from inferdrome.domain.digests import DigestDomain, digest_bytes
-from inferdrome.domain.experiment import NativeOutputSensitivity
+from inferdrome.domain.experiment import AttachedVllmTarget, NativeOutputSensitivity
 from inferdrome.domain.ids import sha256_digest
 from inferdrome.domain.request_plan import DigestOnlyPrompt, InlinePrompt
 from inferdrome.domain.states import Replayability
 from inferdrome.errors import ResolutionError, SourceInputError
+from inferdrome.execution.orchestrator import run_experiment
 from inferdrome.resolution.resolver import (
     resolve_experiment,
     validate_resolution_result,
@@ -265,6 +266,56 @@ def test_secret_bearing_urls_fail_without_echoing_secret(
     with pytest.raises(SourceInputError) as caught:
         resolve_experiment(source_path, run_id=RUN_ID)
     assert "topsecret" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://127.0.0.1:8000/synthetic-marker",
+        "http://127.0.0.1:8000/.",
+        "http://127.0.0.1:8000/%2e",
+        "http://127.0.0.1:8000/a/..",
+        "http://127.0.0.1:8000//nested",
+        "http://127.0.0.1:8000\\synthetic-marker",
+        "http://synthetic\\marker.example.test",
+        "http://synthetic marker.example.test",
+        "http://synthetic%2fmarker.example.test",
+        "http://127.0.0.1:8000\n",
+    ],
+)
+def test_endpoint_paths_fail_before_workspace_reservation(
+    tmp_path: Path,
+    endpoint: str,
+) -> None:
+    source_path, _, _ = _write_source(tmp_path, endpoint=endpoint)
+    runs_root = tmp_path / "runs"
+
+    with pytest.raises(SourceInputError) as caught:
+        run_experiment(source_path, runs_root=runs_root, run_id=RUN_ID)
+
+    assert "synthetic-marker" not in str(caught.value)
+    assert not runs_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "canonical"),
+    [
+        ("http://127.0.0.1:8000", "http://127.0.0.1:8000/"),
+        ("http://127.0.0.1:8000/", "http://127.0.0.1:8000/"),
+        ("https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443/"),
+    ],
+)
+def test_root_endpoint_forms_preserve_canonical_semantics(
+    tmp_path: Path,
+    endpoint: str,
+    canonical: str,
+) -> None:
+    source_path, _, _ = _write_source(tmp_path, endpoint=endpoint)
+
+    result = resolve_experiment(source_path, run_id=RUN_ID)
+
+    assert isinstance(result.resolved_spec.target, AttachedVllmTarget)
+    assert str(result.resolved_spec.target.endpoint) == canonical
 
 
 def test_strict_mode_requires_model_and_tokenizer_revisions(tmp_path: Path) -> None:

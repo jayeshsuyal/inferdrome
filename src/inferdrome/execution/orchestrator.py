@@ -3,6 +3,8 @@
 import hmac
 import os
 import stat
+import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,8 +60,16 @@ from inferdrome.errors import (
     ResolutionError,
 )
 from inferdrome.execution.cancellation import CancellationToken
-from inferdrome.execution.managed_vllm import ManagedVllmServer
-from inferdrome.execution.subprocess_runner import ProcessCapture, ProcessTermination
+from inferdrome.execution.managed_vllm import (
+    ManagedVllmServer,
+    managed_process_environment,
+)
+from inferdrome.execution.subprocess_runner import (
+    ExecutableIdentity,
+    ProcessCapture,
+    ProcessTermination,
+    resolve_executable_identity,
+)
 from inferdrome.gpu_proof import LocalGpuProof, ManagedVllmConfig
 from inferdrome.metrics import ReductionResult, reduce_measurements
 from inferdrome.normalization import (
@@ -284,11 +294,24 @@ def _run_vllm(
 
     managed_server: ManagedVllmServer | None = None
     local_gpu_proof: LocalGpuProof | None = None
-    managed_environment = None
+    process_environment: Mapping[str, str] | None = None
+    producer_executable: ExecutableIdentity | None = None
     try:
         if managed_config is None:
+            producer_executable = resolve_executable_identity(
+                "vllm",
+                search_path=str(Path(sys.executable).absolute().parent),
+            )
+            process_environment = managed_process_environment(
+                executable_path=str(producer_executable.path),
+                home_directory=workspace.path,
+            )
             preflight = preflight_attached_endpoint(spec.target)
-            version = probe_vllm_version(cwd=workspace.path)
+            version = probe_vllm_version(
+                cwd=workspace.path,
+                environment=process_environment,
+                executable_identity=producer_executable,
+            )
         else:
             managed_server = ManagedVllmServer.start(
                 spec,
@@ -299,13 +322,15 @@ def _run_vllm(
                 cancellation=cancellation,
             )
             preflight, local_gpu_proof = managed_server.wait_until_ready()
-            managed_environment = managed_server.process_environment
+            process_environment = managed_server.process_environment
+            producer_executable = managed_server.producer_executable_identity
             version = probe_vllm_version(
                 cwd=workspace.path,
                 executable=(
                     local_gpu_proof.producer_distribution.executable_path
                 ),
-                environment=managed_environment,
+                environment=process_environment,
+                executable_identity=producer_executable,
             )
         cancellation.raise_if_requested()
         invocation = build_vllm_invocation(
@@ -345,7 +370,8 @@ def _run_vllm(
             resolution.request_plan,
             execution_fingerprint=resolution.execution_fingerprint,
             cancellation=cancellation,
-            environment=managed_environment,
+            environment=process_environment,
+            executable_identity=producer_executable,
         )
         _write_capture_file(
             capture_directory / "stdout.log",

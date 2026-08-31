@@ -156,9 +156,11 @@ release-blocking.
 - A GPU is not required for normal pull-request tests.
 - At least one opt-in real-GPU smoke test produces a stored example bundle.
 - Documentation commands are tested or copied from executable demo scripts.
-- A repository license is selected and added by the owner, contribution
-  guidance is present, and a tagged `v0.1.0` release identifies the reviewed
-  commit.
+- The owner-selected Apache License 2.0 is added for Inferdrome with matching
+  package metadata and scoped third-party notices, contribution guidance is
+  present, and a tagged `v0.1.0` release identifies the reviewed commit. This
+  repository license does not resolve archive-bound or external-material
+  licensing and publication decisions.
 
 ## Release sign-off
 

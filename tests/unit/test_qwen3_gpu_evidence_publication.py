@@ -131,6 +131,8 @@ def test_qwen3_public_summary_omits_provider_endpoint_and_instance_identity() ->
 def test_qwen3_publication_review_is_external_only_without_detector_rejection() -> None:
     review = _load("publication-review.json")
 
+    assert (publication.REPOSITORY_ROOT / "LICENSE").is_file()
+    assert publication.REPOSITORY_LICENSE_PRESENT_AT_REVIEW is False
     assert review["publication_status"] == "EXTERNAL_ONLY"
     assert review["detector_results"]["secret_shaped_values"]["status"] == (
         "NO_DETECTOR_MATCHES"

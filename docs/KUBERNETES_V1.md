@@ -51,11 +51,22 @@ INFERDROME_KUBERNETES_OUTPUT_DIR="$PWD/.inferdrome-kubernetes/evidence" \
 ```
 
 The wrapper is guarded by an explicit confirmation and requires `kind`,
-`kubectl`, and prebuilt development images. It creates one unique local kind
-cluster and namespace, applies only the checked-in Job, waits for completion,
-captures exactly one bounded `kubectl logs` payload from the completed runner,
-validates the canonical output as `synthetic_only=true` and
-`evidence_eligible=false`, and publishes it locally with no replacement.
+`kubectl`, and prebuilt development images. Before invoking any Docker or kind
+operation, it rejects non-empty ambient `DOCKER_HOST` and `DOCKER_CONTEXT`
+overrides. Its first Docker call is a read-only inspection of the active
+context. The returned JSON is strictly bounded and must identify either a
+canonical absolute `unix:///...` socket or the exact Windows
+`npipe:////./pipe/docker_engine` endpoint. The wrapper then pins that verified
+endpoint as its own `DOCKER_HOST`; any other, malformed, or unbounded result
+fails before image inspection, cluster inventory, creation, or deletion.
+
+Select the intended local Docker context before running the wrapper and leave
+`DOCKER_HOST` and `DOCKER_CONTEXT` unset. Canonical Docker Desktop and rootless
+Unix socket paths remain supported. The wrapper creates one unique kind cluster
+and namespace, applies only the checked-in Job, waits for completion, captures
+exactly one bounded `kubectl logs` payload from the completed runner, validates
+the canonical output as `synthetic_only=true` and `evidence_eligible=false`,
+and publishes it locally with no replacement.
 It does not use `kubectl cp` or `kubectl exec`: a completed container cannot be
 exec'd safely, and the Pod's `emptyDir` is explicitly disposable. The output
 is published outside the cluster before the wrapper deletes its exact
@@ -70,10 +81,10 @@ real local-cluster gate is `UNRUN`, not a successful smoke.
 The wrapper requires the exact official kind v0.29.0 Kubernetes 1.33.1 node
 image `kindest/node:v1.33.1@sha256:050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f`.
 An `INFERDROME_KIND_NODE_IMAGE` override, if supplied, must equal that exact
-reference. It verifies the image with local Docker before creating a cluster
-and validates the executable's bounded `kind version` output as exactly
-`kind v0.29.0` before reading inventory or allocating a cluster. It also
-checks the actual server version after creation. It forces kind's Docker
+reference. It verifies the image through the pinned local endpoint before
+creating a cluster and requires the executable's bounded `kind version` output
+to be exactly `kind v0.29.0` before reading inventory or allocating a cluster.
+It also checks the actual server version after creation. It forces kind's Docker
 provider and removes the ambient Docker-network override, so the inspected
 image/provider cannot diverge. It uses a private temporary
 `KUBECONFIG`; `kind get`, `kind load`, and `kind delete` use the exported
@@ -81,6 +92,12 @@ context, while the private path is passed to `kind create cluster` in its
 supported subcommand position. A failed create is never treated as ownership
 of a pre-existing name; the wrapper reports cleanup status 70 when ownership
 cannot be established. No ambient kubeconfig or cluster is used.
+
+This endpoint check proves only that Docker and kind were routed through one
+transport-local Unix socket or named pipe. It does not attest the daemon, the
+host, physical locality behind a forwarding socket, or the absence of a local
+proxy. The exercise remains synthetic and evidence-ineligible; it is not
+Kubernetes execution evidence or a platform qualification.
 
 ## GPU/vLLM template
 

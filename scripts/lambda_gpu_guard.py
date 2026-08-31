@@ -29,6 +29,9 @@ from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from inferdrome.errors import AdapterError
+from inferdrome.execution.subprocess_runner import resolve_executable_identity
+
 API_BASE_URL = "https://cloud.lambda.ai/api/v1"
 API_KEY_ENVIRONMENT_VARIABLE = "LAMBDA_CLOUD_API_KEY"
 _API_USER_AGENT = "Inferdrome-Lambda-Guard/1.0"
@@ -138,6 +141,7 @@ class WatchdogHandle:
     ready_path: Path
     state_directory: Path
     client: LambdaCloudClient
+    sleep_inhibitor: subprocess.Popen[bytes] | None = None
 
 
 JsonTransport = Callable[[str, str, object | None, str, float], object]
@@ -360,23 +364,40 @@ def _watchdog_environment() -> dict[str, str]:
     if not _valid_api_key(api_key):
         raise LambdaGuardError(f"{API_KEY_ENVIRONMENT_VARIABLE} is missing or invalid")
     allowed = (
-        "HOME",
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "LANG",
         "LC_ALL",
         "NO_PROXY",
-        "PATH",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
-        "TMPDIR",
         "https_proxy",
         "http_proxy",
         "no_proxy",
     )
     environment = {name: os.environ[name] for name in allowed if name in os.environ}
+    environment.update(
+        {
+            "HOME": "/nonexistent",
+            "TMPDIR": "/nonexistent",
+            "XDG_CACHE_HOME": "/nonexistent",
+            "XDG_CONFIG_HOME": "/nonexistent",
+        }
+    )
     environment[API_KEY_ENVIRONMENT_VARIABLE] = api_key
     return environment
+
+
+def _sleep_inhibitor_environment() -> dict[str, str]:
+    """Build a credential-free environment for the optional macOS helper."""
+
+    return {
+        name: value
+        for name in ("LANG", "LC_ALL")
+        if (value := os.environ.get(name)) is not None
+        and len(value) <= 4_096
+        and "\x00" not in value
+    }
 
 
 def parse_instance_id(value: str) -> str:
@@ -617,7 +638,6 @@ def arm_watchdog(
     state_directory.chmod(0o700)
     receipt_path = state_directory / "termination-receipt.json"
     ready_path = state_directory / "watchdog-ready.json"
-    log_path = state_directory / "watchdog.log"
     armed_path = state_directory / "guard-armed.json"
     readiness_token = secrets.token_hex(16)
     command = [
@@ -647,26 +667,25 @@ def arm_watchdog(
         "--readiness-token",
         readiness_token,
     ]
-    caffeinate = shutil.which("caffeinate") if platform.system() == "Darwin" else None
-    if caffeinate is not None:
-        command = [caffeinate, "-i", *command]
-    process: subprocess.Popen[bytes] | None = None
     try:
-        descriptor = os.open(
-            log_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
+        executable_identity = resolve_executable_identity(command[0])
+    except AdapterError:
+        raise LambdaGuardError(
+            "Lambda termination watchdog executable is unavailable"
+        ) from None
+    process: subprocess.Popen[bytes] | None = None
+    sleep_inhibitor: subprocess.Popen[bytes] | None = None
+    try:
+        process = popen(
+            command,
+            executable=str(executable_identity.path),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_watchdog_environment(),
+            start_new_session=True,
+            close_fds=True,
         )
-        with os.fdopen(descriptor, "wb") as log:
-            process = popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                env=_watchdog_environment(),
-                start_new_session=True,
-                close_fds=True,
-            )
         _wait_for_watchdog_ready(
             process,
             ready_path=ready_path,
@@ -676,6 +695,27 @@ def arm_watchdog(
             sleeper=sleeper,
             monotonic=monotonic,
         )
+        if platform.system() == "Darwin":
+            try:
+                inhibitor_executable = resolve_executable_identity(
+                    "/usr/bin/caffeinate"
+                )
+                sleep_inhibitor = popen(
+                    [
+                        str(inhibitor_executable.path),
+                        "-w",
+                        str(process.pid),
+                    ],
+                    executable=str(inhibitor_executable.path),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=_sleep_inhibitor_environment(),
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            except (AdapterError, OSError):
+                sleep_inhibitor = None
         _write_json_exclusive(
             armed_path,
             {
@@ -693,6 +733,11 @@ def arm_watchdog(
                 _stop_watchdog(process)
             except LambdaGuardError as cleanup_error:
                 stop_error = cleanup_error
+        if sleep_inhibitor is not None:
+            try:
+                _stop_watchdog(sleep_inhibitor)
+            except LambdaGuardError as cleanup_error:
+                stop_error = stop_error or cleanup_error
         if stop_error is not None:
             raise LambdaGuardError(
                 "Lambda watchdog startup failed and its process could not be stopped; "
@@ -713,6 +758,7 @@ def arm_watchdog(
         ready_path=ready_path,
         state_directory=state_directory,
         client=selected_client,
+        sleep_inhibitor=sleep_inhibitor,
     )
 
 
@@ -738,6 +784,12 @@ def terminate_guarded_instance(
         _stop_watchdog(handle.process)
     except LambdaGuardError as error:
         finalization_errors.append(str(error))
+    sleep_inhibitor = getattr(handle, "sleep_inhibitor", None)
+    if sleep_inhibitor is not None:
+        try:
+            _stop_watchdog(sleep_inhibitor)
+        except LambdaGuardError as error:
+            finalization_errors.append(str(error))
     if finalization_errors:
         raise LambdaGuardFinalizationError(
             "Lambda termination was confirmed, but local guard finalization failed: "
@@ -745,6 +797,43 @@ def terminate_guarded_instance(
             result=result,
         )
     return result
+
+
+def retain_unresolved_termination(
+    handle: WatchdogHandle,
+    *,
+    trigger: str = "controller-finally",
+) -> Path:
+    """Retain a secret-free marker while the fallback watchdog stays armed."""
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", trigger):
+        raise LambdaGuardError("Lambda unresolved termination trigger is invalid")
+    try:
+        watchdog_armed = handle.process.poll() is None
+    except (AttributeError, OSError):
+        watchdog_armed = False
+    path = handle.state_directory / "termination-unresolved.json"
+    record = {
+        "instance_id": handle.instance.instance_id,
+        "observed_at": _timestamp(datetime.now(UTC)),
+        "record_kind": "OPERATIONAL_RECORD_NOT_PROVIDER_ATTESTATION",
+        "schema_version": "inferdrome.lambda-termination-unresolved.v1",
+        "status": "UNRESOLVED",
+        "trigger": trigger,
+        "watchdog_armed": watchdog_armed,
+    }
+    if _write_json_exclusive(path, record, allow_existing=True):
+        return path
+    existing = _read_json_record(path, label="Lambda unresolved termination record")
+    if (
+        existing is None
+        or existing.get("instance_id") != handle.instance.instance_id
+        or existing.get("schema_version")
+        != "inferdrome.lambda-termination-unresolved.v1"
+        or existing.get("status") != "UNRESOLVED"
+    ):
+        raise LambdaGuardError("Lambda unresolved termination record is invalid")
+    return path
 
 
 def watch_until_deadline(

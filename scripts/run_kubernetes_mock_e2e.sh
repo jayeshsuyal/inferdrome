@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Explicit local-kind contract smoke for the synthetic Kubernetes Job.
 #
-# This wrapper never uses an ambient context.  It creates one unique kind
-# cluster and namespace, retrieves exactly one bounded runner log payload,
-# verifies/publishes it locally with no replacement, then removes only the
+# This wrapper rejects ambient Docker routing, verifies and pins the active
+# context's transport-local endpoint, then creates one unique kind cluster and
+# namespace.  It retrieves exactly one bounded runner log payload,
+# verifies/publishes it locally with no replacement, and removes only the
 # resources it created.
 
 set -Eeuo pipefail
@@ -46,6 +47,11 @@ done
   usage >&2
   exit 2
 }
+for docker_variable in DOCKER_HOST DOCKER_CONTEXT; do
+  [[ -z "${!docker_variable:-}" ]] || \
+    fail "ambient $docker_variable override is not supported"
+done
+unset DOCKER_HOST DOCKER_CONTEXT
 [[ -f "$manifest" && ! -L "$manifest" ]] || fail "mock manifest is unavailable"
 [[ "$output_dir" = /* ]] || fail "output directory must be absolute"
 if [[ -e "$output_dir" && ( ! -d "$output_dir" || -L "$output_dir" ) ]]; then
@@ -97,6 +103,14 @@ canonical_kind_node_image=$(
 kind_node_image=${INFERDROME_KIND_NODE_IMAGE:-$canonical_kind_node_image}
 [[ "$kind_node_image" == "$canonical_kind_node_image" ]] || \
   fail "the pinned kind node image is not approved"
+verified_docker_endpoint=$(
+  "$docker_bin" context inspect \
+    --format '{{json (index .Endpoints "docker").Host}}' 2>/dev/null |
+    PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+      "$inferdrome_python" -m inferdrome.kubernetes docker-endpoint 2>/dev/null
+) || fail "active Docker endpoint could not be verified as local"
+export DOCKER_HOST="$verified_docker_endpoint"
+unset DOCKER_CONTEXT
 "$docker_bin" image inspect "$kind_node_image" >/dev/null 2>&1 || \
   fail "the pinned kind node image is not present locally"
 
@@ -182,8 +196,9 @@ server_version_file="$state_dir/server-version.json"
 (umask 077 && : >"$kubeconfig") || fail "private kubeconfig could not be created"
 chmod 600 "$kubeconfig" || fail "private kubeconfig could not be secured"
 export KUBECONFIG="$kubeconfig"
-# Do not inherit kind's alternate provider or network override.  The Docker
-# image inspection above and every kind operation must use the same provider.
+# Do not inherit kind's alternate provider or network override.  The pinned
+# DOCKER_HOST above binds image inspection and every kind operation to the same
+# verified transport-local endpoint and Docker provider.
 export KIND_EXPERIMENTAL_PROVIDER=docker
 unset KIND_EXPERIMENTAL_DOCKER_NETWORK
 

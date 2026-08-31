@@ -11,7 +11,8 @@ integrity policy.
 ## Installation and entry points
 
 ```bash
-uv sync
+uv lock --check
+uv sync --frozen
 uv run inferdrome --version
 ```
 
@@ -308,7 +309,8 @@ is in [CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md).
 Install the optional runtime and start the loopback-only dashboard:
 
 ```bash
-uv sync --extra dashboard
+uv lock --check
+uv sync --frozen --extra dashboard
 uv run inferdrome dashboard \
   --runs-root runs \
   --trial-sets-root trial-sets \
