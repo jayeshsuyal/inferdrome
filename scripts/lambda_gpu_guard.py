@@ -351,6 +351,25 @@ class LambdaCloudClient:
             )
 
 
+def terminate_after_arm_failure(
+    instance_id: str,
+    *,
+    client: LambdaCloudClient | None = None,
+) -> TerminationResult:
+    """Terminate one explicit target when watchdog setup did not complete.
+
+    This deliberately accepts only a canonical instance ID.  It does not infer a
+    target from an SSH endpoint, and it does not create a local watchdog record:
+    callers use it only before ownership of a watchdog handle exists.
+    """
+
+    selected_instance_id = parse_instance_id(instance_id)
+    selected_client = (
+        client if client is not None else LambdaCloudClient.from_environment()
+    )
+    return selected_client.terminate_and_wait(selected_instance_id)
+
+
 def _valid_api_key(value: str) -> bool:
     return (
         bool(value)

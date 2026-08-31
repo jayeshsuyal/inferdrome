@@ -2854,6 +2854,31 @@ def _effective_remote_timeout(
     return bounded
 
 
+def _raise_after_lambda_guard_arm_failure(
+    args: argparse.Namespace,
+    arm_error: lambda_gpu_guard.LambdaGuardError,
+) -> None:
+    """Fail closed after trying exact-ID cleanup for an unarmed target."""
+
+    instance_id = getattr(args, "lambda_instance_id", None)
+    if not isinstance(instance_id, str):
+        raise RemoteCaptureError(
+            f"Lambda cost guard could not be armed: {arm_error}"
+        ) from None
+    try:
+        termination = lambda_gpu_guard.terminate_after_arm_failure(instance_id)
+    except lambda_gpu_guard.LambdaGuardError as termination_error:
+        raise RemoteCaptureError(
+            "Lambda cost guard could not be armed; immediate exact-ID termination "
+            "was not confirmed: "
+            f"{termination_error}; guard arming error: {arm_error}"
+        ) from None
+    raise RemoteCaptureError(
+        "Lambda cost guard could not be armed; immediate exact-ID termination "
+        f"confirmed ({termination.final_status}); guard arming error: {arm_error}"
+    ) from None
+
+
 def _transfer_deadline(
     *,
     termination_deadline: datetime,
@@ -2904,9 +2929,7 @@ def _arm_lambda_watchdog(
             ),
         )
     except lambda_gpu_guard.LambdaGuardError as error:
-        raise RemoteCaptureError(
-            f"Lambda cost guard could not be armed: {error}"
-        ) from None
+        _raise_after_lambda_guard_arm_failure(args, error)
     if _qwen3_profile_requested(args) or _prospective_requested(args):
         policy = _qwen3_tier_policy(args) if _qwen3_profile_requested(args) else None
         expected_instance_type = args.lambda_instance_type_name

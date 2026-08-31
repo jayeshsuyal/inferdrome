@@ -1121,6 +1121,101 @@ def test_post_termination_archive_mutation_is_rejected_before_extraction(
         )
 
 
+@pytest.mark.parametrize(
+    ("termination_confirms", "error_pattern"),
+    [
+        (
+            True,
+            "immediate exact-ID termination confirmed \\(absent\\)",
+        ),
+        (
+            False,
+            (
+                r"immediate exact-ID termination was not confirmed.*"
+                r"provider cleanup timeout"
+            ),
+        ),
+    ],
+    ids=["confirmed", "unconfirmed"],
+)
+def test_prospective_guard_arm_failure_terminates_exact_target_before_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    termination_confirms: bool,
+    error_pattern: str,
+) -> None:
+    instance_id = "b" * 32
+    args = _prospective_args(
+        tmp_path,
+        lambda_billing_started_at=datetime(2026, 8, 27, 10, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd="1.00",
+        lambda_instance_id=instance_id,
+        lambda_instance_type_name="gpu_1x_a10",
+        max_cost_usd="1.00",
+    )
+    snapshot = _snapshot()
+    archive = handoff.create_handoff_archive(snapshot, tmp_path / "handoff.tar.gz")
+    events: list[str] = []
+    monkeypatch.setattr(
+        remote.prospective_handoff,
+        "snapshot_handoff",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        remote.prospective_handoff,
+        "create_handoff_archive",
+        lambda *_args, **_kwargs: archive,
+    )
+    monkeypatch.setattr(
+        remote, "_validate_prospective_snapshot", lambda *_args, **_kwargs: None
+    )
+
+    def source_archive(path: Path, _commit: str, **_kwargs: object) -> tuple[str, int]:
+        events.append("source")
+        path.write_bytes(SOURCE_BYTES)
+        return SOURCE_DIGEST, len(SOURCE_BYTES)
+
+    def arm(reference: str, **kwargs: object) -> object:
+        events.append(f"arm:{reference}")
+        assert kwargs["expected_endpoint"] == "prepared.example.test"
+        raise remote.lambda_gpu_guard.LambdaGuardError(
+            "target resolved but watchdog readiness failed"
+        )
+
+    def terminate_after_arm_failure(target: str) -> SimpleNamespace:
+        events.append(f"terminate:{target}")
+        if not termination_confirms:
+            raise remote.lambda_gpu_guard.LambdaGuardError("provider cleanup timeout")
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote, "_create_source_archive", source_archive)
+    monkeypatch.setattr(remote.lambda_gpu_guard, "arm_watchdog", arm)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_after_arm_failure",
+        terminate_after_arm_failure,
+    )
+    monkeypatch.setattr(
+        remote,
+        "_capture_prospective_over_ssh",
+        lambda *_args, **_kwargs: pytest.fail(
+            "guard arming failure must block SSH capture"
+        ),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "guard arming failure must not invoke SSH or SCP"
+        ),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match=error_pattern):
+        remote._capture_prospective_with_handoff(args, COMMIT, tmp_path / "id")
+
+    assert events == ["source", f"arm:{instance_id}", f"terminate:{instance_id}"]
+
+
 def test_prospective_remote_failure_finalizes_guard_without_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

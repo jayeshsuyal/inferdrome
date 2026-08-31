@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import errno
 import json
 import subprocess
@@ -235,6 +236,31 @@ def test_termination_is_confirmed_by_provider_absence() -> None:
         "/instance-operations/terminate",
         {"instance_ids": [INSTANCE_ID]},
     )
+
+
+def test_arm_failure_cleanup_targets_only_the_explicit_instance_id() -> None:
+    result = guard.TerminationResult(
+        instance_id=INSTANCE_ID,
+        final_status="absent",
+        request_sent=True,
+        confirmed_at=NOW,
+    )
+    observed: list[str] = []
+    client = SimpleNamespace(
+        terminate_and_wait=lambda instance_id: observed.append(instance_id) or result
+    )
+
+    assert guard.terminate_after_arm_failure(INSTANCE_ID, client=client) is result
+    assert observed == [INSTANCE_ID]
+
+
+def test_arm_failure_cleanup_rejects_a_noncanonical_target_before_client_use() -> None:
+    client = SimpleNamespace(
+        terminate_and_wait=lambda _instance_id: pytest.fail("invalid ID must not run")
+    )
+
+    with pytest.raises(argparse.ArgumentTypeError, match="instance ID"):
+        guard.terminate_after_arm_failure("gpu.example.test", client=client)
 
 
 def test_failed_termination_request_is_rechecked_before_failure() -> None:
