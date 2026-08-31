@@ -84,6 +84,17 @@ real evidence. The GPU template requires an operator-provided evidence PVC;
 without independent PVC and retrieval verification, persistence and evidence
 eligibility remain unknown.
 
+Before its first Docker or kind operation, the wrapper rejects non-empty
+ambient `DOCKER_HOST` and `DOCKER_CONTEXT` routing. Its first Docker operation
+is a bounded, read-only active-context inspection whose JSON result must be one
+canonical absolute `unix:///...` endpoint or the exact supported Windows
+Docker named pipe. It then pins that value for image inspection and every kind
+operation. A rejected or unreadable endpoint fails before image inventory,
+cluster inventory, creation, or deletion. This proves transport-local routing,
+not daemon identity, host identity, or physical locality: a local socket can
+still terminate at a proxy. The output remains `SYNTHETIC_ONLY` and
+evidence-ineligible.
+
 ### Docker Compose qualification boundary
 
 The qualification command is an operationally local orchestration boundary,
@@ -93,7 +104,11 @@ canonical parsing, exact contract comparisons, and source-cleanliness checks.
 It rejects remote Docker contexts, public/host networking, privileged or
 GPU-shaped Compose escape hatches, and runner/engine topology drift. Its
 subprocess interface is an argv vector with a small allowlisted environment,
-bounded output/diagnostics, no shell, and bounded timeout termination.
+bounded output/diagnostics, no shell, a private `HOME` and empty Docker
+configuration, and one hard deadline covering execution, pipe draining,
+process-group termination, and final joins. Docker is selected from fixed
+system and Homebrew tool directories and its absolute file identity is
+rechecked before each start.
 
 Every started workflow has one generated project identity. Cleanup uses that
 identity, fixed Compose file, and a private project-derived image override;
@@ -163,10 +178,12 @@ can return internally consistent false observations.
 
 ### Secret leakage through configured inputs
 
-The resolver rejects user-info and query secrets in endpoint URLs. Invocation
-capture uses a structured argument vector and redacts configured secret-bearing
-arguments. Environment capture is allowlist-based rather than a dump of the
-process environment.
+The resolver accepts only root HTTP(S) endpoint base URLs and rejects every
+other path, user information, query, and fragment before reserving a workspace.
+The adapter rechecks the root-only contract before request, argument-vector,
+and evidence construction. Invocation capture uses a structured argument vector
+and redacts configured secret-bearing arguments. Environment capture is
+allowlist-based rather than a dump of the process environment.
 
 ### Unsafe bundle import
 
@@ -255,6 +272,12 @@ unless the run's sensitivity policy explicitly permits it.
 Redaction failures make the bundle ineligible rather than silently deleting a
 sealed native artifact.
 
+Producer stdout and stderr remain byte-exact only when they contain no
+credential-shaped material. A credential-shaped assignment, bearer value,
+signed-query value, URL user information, or private-key header fails producer
+capture before those bytes can be sealed. Operational qualification/helper
+errors are redacted or suppressed instead of being copied into evidence.
+
 ### Exact A10 archive publication review
 
 The 2026-08-20 A10 review is recorded at
@@ -266,12 +289,24 @@ were detected. Prompts, generated responses, diagnostics, package inventory,
 absolute paths, a private host-network address, GPU UUIDs, and process
 identifiers remain present because the archive was not rewritten.
 
-The classification is `EXTERNAL_ONLY`. Missing owner-approved repository,
-model, workload, vLLM, and generated-output license decisions block
-`APPROVED_PUBLIC`, as does the absence of explicit owner publication approval.
-The raw archive therefore remains ignored and local. This technical result is
-not legal advice and does not replace the final human security and privacy
-review.
+The classification is `EXTERNAL_ONLY`. The archived review recorded that no
+owner-approved repository, model, workload, vLLM, or generated-output license
+decision was available at review time. The owner has since selected
+Apache-2.0 for Inferdrome itself, but that does not license the archive-bound
+model, workload, vLLM, or generated output and does not supply explicit owner
+publication approval. The recorded decision is unchanged, and the raw archive
+remains ignored and local. This technical result is not legal advice and does
+not replace the final human security and privacy review.
+
+An archive-independent engineering-gate check strictly loads the two tracked
+A10 records without duplicate keys, rejects unknown nested fields, pins both
+canonical-document hashes, and validates their archive, review, profile,
+schema, run, history, and handoff cross-identities. It also fixes
+`EXTERNAL_ONLY`, requires owner approval to remain outstanding, requires
+retrospective chronology, and requires both Inferdrome acceptance and the
+producer-side ExitSpec contract authority fields to remain null. This metadata
+gate runs even when the ignored raw archive is absent; it does not publish,
+rewrite, authorize, or substitute for review of that archive.
 
 ## Availability controls
 
@@ -296,7 +331,8 @@ file is capped at 64 MiB. Structured JSON and YAML are lexically preflighted at
 64 collection levels, 1,000,000 scanner tokens, and 256 integer digits before
 recursive model construction. Dashboard snapshot population, aggregate-byte,
 unit, monotonic-time, and concurrency ceilings are documented in
-[`DASHBOARD.md`](DASHBOARD.md); cursor pages reuse the active verified snapshot.
+[`DASHBOARD.md`](DASHBOARD.md); cursor pages reuse the active verified snapshot,
+and all active dashboard builds share one 3,000-unit and 8 GiB work envelope.
 
 v0.1 performs no automatic retry.
 

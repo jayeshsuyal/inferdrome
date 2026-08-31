@@ -107,6 +107,8 @@ def test_a100_operational_summary_omits_provider_instance_identity() -> None:
 def test_a100_publication_review_is_external_only() -> None:
     review = _load("publication-review.json")
 
+    assert (publication.REPOSITORY_ROOT / "LICENSE").is_file()
+    assert publication.REPOSITORY_LICENSE_PRESENT_AT_REVIEW is False
     assert review["publication_status"] == "EXTERNAL_ONLY"
     assert review["raw_archive_modified"] is False
     assert review["detector_results"]["secret_shaped_values"]["status"] == (

@@ -42,6 +42,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FAKE_SOURCE = REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"
 FAKE_WORKLOAD = REPOSITORY_ROOT / "examples" / "workloads" / "fake-smoke.jsonl"
 PLAN_ID = "comparison-plan-99999999999999999999999999999999"
+CONTRACT_DIGEST = f"sha256:{'c' * 64}"
 
 
 def _capture_complete_synthetic_environment(
@@ -97,7 +98,9 @@ def _make_tree_writable(root: Path) -> None:
 
 
 def _source_pair(root: Path) -> tuple[Path, Path]:
-    source_text = FAKE_SOURCE.read_text(encoding="utf-8")
+    source_text = FAKE_SOURCE.read_text(encoding="utf-8") + (
+        f"\nlinks:\n  exitspec_contract_digest: {CONTRACT_DIGEST}\n"
+    )
     sources = []
     for name, concurrency in (("baseline", 2), ("candidate", 4)):
         source_root = root / name
@@ -196,6 +199,7 @@ def _execute(
 def test_executor_runs_the_exact_schedule_and_finalizes_every_artifact(
     tmp_path: Path,
     _complete_environment: None,
+    emulated_customer_eligible_recalculation: None,
 ) -> None:
     try:
         plan, baseline_source, candidate_source = _create_plan(tmp_path)
@@ -384,6 +388,7 @@ def test_original_input_mutation_after_first_slot_cannot_change_frozen_execution
     tmp_path: Path,
     _complete_environment: None,
     monkeypatch: pytest.MonkeyPatch,
+    emulated_customer_eligible_recalculation: None,
 ) -> None:
     import inferdrome.comparisons.executor as executor_module
 
@@ -603,6 +608,7 @@ def test_cancellation_between_trial_sets_resumes_from_complete_evidence(
     tmp_path: Path,
     _complete_environment: None,
     monkeypatch: pytest.MonkeyPatch,
+    emulated_customer_eligible_recalculation: None,
 ) -> None:
     import inferdrome.comparisons.executor as executor_module
 

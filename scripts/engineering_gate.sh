@@ -33,6 +33,7 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/watch_lambda_gpu_capacity.py \
   --gpu-tier h100-80gb-pcie \
   --check
+"$inferdrome_python" scripts/review_gpu_evidence_publication.py --check-records
 "$inferdrome_python" scripts/review_qwen3_gpu_evidence_publication.py --check-records
 "$inferdrome_python" scripts/review_qwen3_a100_sxm4_evidence.py --check-records
 qwen3_evidence_archive="$repository_root/gpu-proof-retrieved/20260821T203940Z-058482df4737-68efd4f4/capture.tar.gz"
@@ -49,7 +50,9 @@ if [[ -f "$a100_evidence_archive" ]]; then
 fi
 bash -n scripts/prepare_real_gpu_host.sh
 bash -n scripts/run_real_gpu_capture.sh
+bash -n scripts/bootstrap_ci_uv.sh
 bash -n scripts/dashboard_gate.sh
+bash -n scripts/dashboard_package_gate.sh
 bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/real_gpu_capture.py
 "$inferdrome_python" -m py_compile scripts/prospective_real_gpu_capture.py

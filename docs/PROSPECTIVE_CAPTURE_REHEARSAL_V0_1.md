@@ -266,8 +266,9 @@ printf 'host_key_sha256=%s\n' "$HOST_KEY_SHA256"
 
 The live controller copies those bytes into its private staging directory and
 uses `StrictHostKeyChecking=yes`, `UserKnownHostsFile=<staged-pin>`,
-`IdentitiesOnly=yes`, `ForwardAgent=no`, `ProxyCommand=none`, `ProxyJump=none`,
-and `-F /dev/null`. Supplying `--host-key-file` avoids the controller's
+`IdentitiesOnly=yes`, `IdentityAgent=none`, `ForwardAgent=no`,
+`ProxyCommand=none`, `ProxyJump=none`, and `-F /dev/null` from the first
+SSH/SCP handshake. Supplying `--host-key-file` avoids the controller's
 `ssh-keyscan` branch. Do not substitute the rehearsal fixture's fake key line
 for a live host key.
 
@@ -398,7 +399,7 @@ cleanup and must not describe a successful non-guarded run as cost-bounded.
 | Identity or pinned host-key input unavailable | No SSH attempted | Supply regular local files and independently record the raw-byte host-key digest |
 | Dry run rejects the source archive pin | No SSH/provider work | Recreate the archive from the exact clean commit; do not weaken the pin |
 | Lambda guard cannot arm, rate/endpoint/type differs, or multiple active targets exist | Fail closed; guarded path attempts termination when its safety logic is engaged | Keep the watchdog/guard receipt, confirm provider state independently, and do not continue |
-| Remote host preflight or prospective wrapper fails | No eligible capture claim | Retain diagnostics; guarded path must confirm termination; non-guarded operator terminates the host |
+| Remote host preflight or prospective wrapper fails | No eligible capture claim | Child output is suppressed; retain local staging, have the guarded path confirm termination, and have the non-guarded operator terminate the host |
 | Retrieved archive size or digest differs | No extraction or semantic verification | Retain the bounded diagnostics and restart from a fresh clean transport |
 | Provider termination is not confirmed | Do not extract, verify, or publish | Leave the watchdog armed, escalate through the provider's normal control plane, and wait for confirmation |
 | Offline verification rejects a retrieved session | No `EXTERNAL_ONLY` promotion | Preserve the archive and receipts as failed diagnostics; do not hand-edit metadata |

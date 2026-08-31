@@ -29,7 +29,10 @@ SCHEDULE_SEED = "0" * 64
 RUN_ID_PATTERN = re.compile(r"^run-[0-9a-f]{32}$")
 COMMAND_TIMEOUT_SECONDS = 300
 MAX_STATE_BYTES = 1024 * 1024
-EXPECTED_UNSATISFIED_CONTROLS = ("COMPLETE_EQUAL_OBSERVED_ENVIRONMENT",)
+EXPECTED_UNSATISFIED_CONTROLS = (
+    "COMPLETE_EQUAL_OBSERVED_ENVIRONMENT",
+    "OUTCOME_COVERAGE_AND_SEMANTICS",
+)
 
 
 class LocalDemoError(RuntimeError):
@@ -158,7 +161,8 @@ def _require_dashboard_runtime(python: str) -> None:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise LocalDemoError(
             "the dashboard runtime is not installed; run "
-            f"`uv sync --extra dev --extra dashboard` first ({detail})"
+            "`uv lock --check` and then "
+            f"`uv sync --frozen --extra dev --extra dashboard` first ({detail})"
         )
 
 
@@ -583,7 +587,8 @@ def _print_handoff(summary: Mapping[str, Any]) -> None:
         flush=True,
     )
     print(
-        "Expected withheld control: COMPLETE_EQUAL_OBSERVED_ENVIRONMENT",
+        "Expected withheld controls: "
+        "COMPLETE_EQUAL_OBSERVED_ENVIRONMENT, OUTCOME_COVERAGE_AND_SEMANTICS",
         flush=True,
     )
     print(f"Workspace: {summary['workspace']}", flush=True)

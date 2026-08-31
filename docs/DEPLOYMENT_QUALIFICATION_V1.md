@@ -67,6 +67,17 @@ checkout and requires the exact same revision observed before the workflow.
 Failed, drifted, or interrupted attempts publish no report. Docker failure
 diagnostics are bounded and redacted before they are printed.
 
+Docker and Compose are resolved once from fixed system/Homebrew search
+directories and every later start must match that absolute filesystem
+identity. Each child receives a small environment with a qualification-private
+`HOME`, `TMPDIR`, and initially empty `DOCKER_CONFIG`; ambient Docker contexts,
+credential helpers, cloud variables, and the operator's `PATH` are not passed.
+Process runtime, pipe draining, descendant process-group termination, and final
+reader joins share one monotonic hard deadline. A leader that exits while a
+descendant still holds stdout or stderr is a timeout failure; TERM/KILL and
+final joins use a small fixed grace inside that deadline, and the controller
+never closes a stream underneath a live reader.
+
 The report is always `SYNTHETIC_ONLY` with `evidence_eligible=false`,
 `provider_execution=NOT_PERFORMED`, `gpu_execution=NOT_PERFORMED`,
 `deployment_receipt_issued=false`, and `evidence_published=false`. It contains

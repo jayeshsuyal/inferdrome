@@ -14,9 +14,10 @@ runtime-unproven; neither pack launched a cloud instance or produced a receipt.
 A separate GET-only exact-capacity watcher now validates each implemented
 provider description, rate, capacity region, and zero-active-instance boundary
 without granting launch authority. Both reviewed raw archives remain
-EXTERNAL_ONLY; owner
-license/publication decisions, security sign-off, ExitSpec outcomes, and
-release work remain open.**
+EXTERNAL_ONLY; owner archive-publication decisions, external-material license
+reviews, security sign-off, ExitSpec outcomes, and release work remain open.
+The owner-selected Apache-2.0 repository license does not close those separate
+archive boundaries.**
 
 Next campaign checkpoint: **After a fresh read-only preflight and separate
 explicit operator launch decision, execute the exact Qwen3-8B same-model
@@ -352,17 +353,24 @@ breaker rather than an exact provider-billing guarantee.
 Capture completion on 2026-08-20: one Lambda Stack 24.04 A10 archive contains a
 verified single-run proof and a verified four-run controlled comparison. Every
 comparison bundle is customer-eligible with complete observed environment
-evidence, all controls are satisfied, and the result is `COMPARABLE`. Archive
-verification is anchored to commit `c08b46d9fbd87477f45d130aa3c63615937c4dc3`
-and runs in an isolated temporary directory so source-workspace permission
-rewrites cannot weaken or spuriously invalidate the sealed bundles.
+evidence, and the preserved historical result records `COMPARABLE` under the
+former neutral measurement-compatibility policy. Its producer ExitSpec digest
+is null, so that label is non-authoritative and the current authority gate would
+produce `INCOMPARABLE` with no outcomes; see
+[REAL_GPU_PROOF.md](REAL_GPU_PROOF.md#publication-review-and-exitspec-handoff).
+Archive verification is anchored to commit
+`c08b46d9fbd87477f45d130aa3c63615937c4dc3` and runs in an isolated temporary
+directory so source-workspace permission rewrites cannot weaken or spuriously
+invalidate the sealed bundles.
 
 Producer publication closure on 2026-08-20 adds a standalone closed
 `inferdrome.local-gpu-proof.v1` schema, composite managed-vLLM profile,
 conformance mutations, exact-archive review, and deterministic handoff. The
-review finds no secret, email, or public-IP detector matches and classifies the
-unchanged archive `EXTERNAL_ONLY` because owner approval and multiple license
-records remain unresolved. Raw bytes were not committed or uploaded.
+review finds no secret, email, or public-IP detector matches. Its recorded
+decision remains `EXTERNAL_ONLY`; owner approval and archive-bound model,
+workload, vLLM, and generated-output license records remain unresolved. Raw
+bytes were not committed or uploaded, and the later Apache-2.0 repository
+license does not authorize their publication.
 
 A100 execution-pack closure on 2026-08-22 adds a zero-spend, fail-closed path
 for the Qwen3-8B same-model hardware-control assignment. It binds exactly one
@@ -393,9 +401,10 @@ no H100 evidence or cross-GPU result.
 
 Still required to close the external acceptance boundary: run the separately
 owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations against the exact
-handoff and retain its receipt. The owner must separately choose a repository
-license and approve or reject public archive delivery. Ordinary attached
-endpoint runs deliberately remain `INELIGIBLE`.
+handoff and retain its receipt. Apache-2.0 is selected for Inferdrome itself;
+the owner must separately approve or reject public archive delivery and resolve
+licenses for the archive's external materials. Ordinary attached endpoint runs
+deliberately remain `INELIGIBLE`.
 
 ## PR 8 — v0.1 hardening and release
 
@@ -416,10 +425,11 @@ library boundaries used by tests. The release shield runs the engineering,
 deployment-qualification, and populated-dashboard gates in GitHub Actions and
 maps remaining evidence in
 `V0_1_RELEASE_CHECKLIST.md`. The genuine GPU producer evidence is complete;
-ExitSpec demonstrations, human security sign-off, license selection, owner
-archive-publication decision, and the release tag remain open. Remaining polish
-is tracked by the offline release preflight and existing gates rather than by
-adding new product scope.
+Apache-2.0 is selected for the repository, while ExitSpec demonstrations,
+human security sign-off, external-material licensing, the owner
+archive-publication decision, and the release tag remain open. Remaining
+polish is tracked by the offline release preflight and existing gates rather
+than by adding new product scope.
 
 Gate:
 
@@ -447,7 +457,8 @@ Deliver:
 - bounded bundle discovery without a database;
 - authoritative Python verification and recalculation before projection;
 - Runs, Run detail, Compare, and Evidence views;
-- bounded and redacted browser-facing projections;
+- bounded, allowlisted browser-facing projections with documented exclusion,
+  transformation, and verbatim-disclosure policy;
 - pairwise comparison with explicit, deterministic comparability reasons;
 - neutral arithmetic deltas without better-or-worse claims; and
 - one ordinary display path for synthetic, attached-endpoint, and real-GPU

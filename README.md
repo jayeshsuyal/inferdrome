@@ -24,9 +24,11 @@ launch evidence, and permits customer eligibility only when offline
 cross-verification succeeds. One genuine A10 single-run and four-run comparison
 archive is independently verified and pinned by a standalone capability profile,
 an `EXTERNAL_ONLY` publication review, and a deterministic handoff manifest.
-The raw archive remains local pending owner license/privacy approval. Independent
-acceptance remains a separate consumer boundary; it is not implemented inside
-this repository.
+The Inferdrome repository is Apache-2.0 licensed, but that choice does not
+license the model, workload, vLLM, generated output, or raw archive. The raw
+archive remains local pending its separate owner licensing, privacy, and
+publication approvals. Independent acceptance remains a separate consumer
+boundary; it is not implemented inside this repository.
 
 The frozen Qwen3-8B BF16 profile has now also completed one genuine bounded A10
 capability spike: 96/96 measured requests succeeded, the independently
@@ -61,9 +63,9 @@ Release status is intentionally mixed: genuine Linux/NVIDIA captures are
 producer-side evidence; the Docker Compose qualification is local synthetic
 qualification; Lambda/GCP/Kubernetes surfaces are dry-run, reference, or
 simulation boundaries; and ExitSpec acceptance, human security review, license
-selection, archive publication, and final release approval remain external or
-owner-controlled inputs. The repository is not release-ready merely because a
-local gate or a genuine measurement passes.
+decisions for external materials, archive publication, and final release
+approval remain external or owner-controlled inputs. The repository is not
+release-ready merely because a local gate or a genuine measurement passes.
 
 The provider-neutral deployment layer begins with a strict, non-executing
 [`inferdrome.deployment.v1` contract](docs/DEPLOYMENT_SPEC_V1.md). It pins
@@ -135,10 +137,12 @@ plan and result contracts, bringing the public schema count to eleven. The
 initial design is intentionally narrow: two arms, one typed
 `traffic.concurrency` treatment, 2–100 permuted run pairs, one frozen primary
 outcome, complete-case paired arithmetic, and no uncertainty estimate. A result
-is `COMPARABLE` only when every planned bundle, schedule, fingerprint,
-allowlisted environment field, and outcome semantic verifies; otherwise all
-outcome arithmetic is suppressed. Predeclaration is `OPERATOR_ATTESTED`, not
-trusted proof of chronology, and comparability is not causality or acceptance.
+is `COMPARABLE` only when all run IDs are distinct, every member is
+`CUSTOMER_ELIGIBLE`, both arms and all bundles share one non-null ExitSpec
+contract identity, and every planned bundle, schedule, fingerprint, allowlisted
+environment field, and outcome semantic verifies; otherwise all outcome
+arithmetic is suppressed. Predeclaration is `OPERATOR_ATTESTED`, not trusted
+proof of chronology, and comparability is not causality or acceptance.
 
 The third v0.2 vertical slice adds a fail-closed executor for that frozen
 design without adding another public schema. One command verifies the retained
@@ -153,7 +157,8 @@ attestation or portable evidence.
 Install the pinned Python environment first:
 
 ```bash
-uv sync --extra dev --extra dashboard
+uv lock --check
+uv sync --frozen --extra dev --extra dashboard
 ```
 
 The offline candidate preflight checks repository-owned release inputs and
@@ -223,7 +228,8 @@ uv run inferdrome comparison-plan execute \
 Install the optional dashboard runtime and inspect those bundles locally:
 
 ```bash
-uv sync --extra dashboard
+uv lock --check
+uv sync --frozen --extra dashboard
 uv run inferdrome dashboard \
   --runs-root runs --trial-sets-root trial-sets \
   --comparison-plans-root comparison-plans \
@@ -349,6 +355,20 @@ provider-neutral.
 - [Architecture decision records](docs/adr/README.md)
 - [Pinned-vLLM capability spike](spikes/vllm-0.26.0/README.md)
 - [Contribution guide](CONTRIBUTING.md)
+
+## License
+
+Inferdrome's repository-authored source and packaged Python project are
+licensed under the [Apache License 2.0](LICENSE). Packaged dashboard assets
+retain the licenses listed in [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+This repository license does not grant or imply rights to separately supplied
+models or tokenizers, benchmark workloads or datasets, vLLM or other serving
+engines, generated output, user content, raw evidence archives, container base
+images, or other external materials. Those materials remain subject to their
+own terms and approvals. In particular, the reviewed A10 raw archive remains
+ignored, local, and `EXTERNAL_ONLY`; adding Apache-2.0 to Inferdrome does not
+authorize its publication.
 
 ## Naming
 

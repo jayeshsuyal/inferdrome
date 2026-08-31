@@ -8,7 +8,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import shutil
 import stat
 import sys
 import threading
@@ -36,8 +35,10 @@ from inferdrome.execution.cancellation import (
     CancellationToken,
 )
 from inferdrome.execution.subprocess_runner import (
+    ExecutableIdentity,
     ProcessCapture,
     ProcessTermination,
+    resolve_executable_identity,
     run_captured_process,
 )
 from inferdrome.gpu_proof import (
@@ -67,6 +68,53 @@ _MAX_SNAPSHOT_FILES = 100_000
 _MAX_SNAPSHOT_BYTES = 137_438_953_472
 _MAX_DISTRIBUTION_BYTES = 17_179_869_184
 _EXCLUDED_SNAPSHOT_DIRECTORY = ".cache"
+_MANAGED_INHERITED_ENVIRONMENT_NAMES = ("LANG", "LC_ALL")
+_MANAGED_SYSTEM_PATH = (
+    "/usr/local/cuda/bin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+)
+_NVIDIA_TOOL_SEARCH_PATH = os.pathsep.join(
+    (
+        "/usr/local/cuda/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/local/bin",
+    )
+)
+
+
+def _fixed_cuda_runtime_environment() -> dict[str, str]:
+    """Return standard, non-ambient CUDA loader locations for the proof host."""
+
+    architecture = platform.machine()
+    if architecture == "x86_64":
+        driver_directory = "/usr/lib/x86_64-linux-gnu"
+    elif architecture == "aarch64":
+        driver_directory = "/usr/lib/aarch64-linux-gnu"
+    else:
+        raise AdapterError("managed CUDA environment architecture is unsupported")
+    library_directories = (
+        "/usr/local/cuda/lib64",
+        "/usr/local/cuda/compat",
+        driver_directory,
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib64",
+        "/lib",
+    )
+    return {
+        "CUDA_HOME": "/usr/local/cuda",
+        "CUDA_MODULE_LOADING": "LAZY",
+        "CUDA_PATH": "/usr/local/cuda",
+        "LD_LIBRARY_PATH": os.pathsep.join(library_directories),
+        "LIBRARY_PATH": "/usr/local/cuda/lib64",
+        "TRITON_LIBCUDA_PATH": driver_directory,
+    }
 
 ProcessRunner = Callable[..., ProcessCapture]
 PreflightProbe = Callable[..., EndpointPreflightCapture]
@@ -80,8 +128,10 @@ def managed_process_environment(
     *,
     executable_path: str,
     source: Mapping[str, str] | None = None,
+    home_directory: Path | None = None,
+    include_cuda_runtime: bool = False,
 ) -> Mapping[str, str]:
-    """Build the sealed vLLM environment, including its sibling tools."""
+    """Build the allowlisted vLLM environment, including its sibling tools."""
 
     inherited = os.environ if source is None else source
     executable = Path(executable_path)
@@ -89,29 +139,36 @@ def managed_process_environment(
         ord(character) < 32 for character in executable_path
     ):
         raise AdapterError("managed vLLM executable path is unsafe")
-    override_names = {
-        item.partition("=")[0] for item in MANAGED_PROCESS_ENVIRONMENT_OVERRIDES
-    }
-    environment = {
-        name: value
-        for name, value in inherited.items()
-        if not name.startswith("VLLM_") and name not in override_names
-    }
+    selected_home = home_directory or Path("/nonexistent")
+    if (
+        not selected_home.is_absolute()
+        or "\x00" in str(selected_home)
+        or len(str(selected_home).encode("utf-8")) > 4_096
+    ):
+        raise AdapterError("managed vLLM private HOME is unsafe")
+    environment: dict[str, str] = {}
+    for name in _MANAGED_INHERITED_ENVIRONMENT_NAMES:
+        value = inherited.get(name)
+        if value is None:
+            continue
+        if len(value) > 4_096 or "\x00" in value:
+            raise AdapterError("managed vLLM environment value is unsafe")
+        environment[name] = value
+    if not isinstance(include_cuda_runtime, bool):
+        raise AdapterError("managed CUDA environment selection is invalid")
+    if include_cuda_runtime:
+        environment.update(_fixed_cuda_runtime_environment())
     for item in MANAGED_PROCESS_ENVIRONMENT_OVERRIDES:
         name, separator, value = item.partition("=")
         if not name or separator != "=" or not value:
             raise AssertionError("invalid managed process environment policy")
         environment[name] = value
+    environment["HOME"] = str(selected_home)
+    environment["TMPDIR"] = str(selected_home)
+    environment["XDG_CACHE_HOME"] = str(selected_home / ".cache")
     executable_directory = str(executable.parent)
-    inherited_path = environment.get("PATH", "")
-    path_entries = (
-        inherited_path.split(os.pathsep) if inherited_path else []
-    )
     environment["PATH"] = os.pathsep.join(
-        (
-            executable_directory,
-            *(entry for entry in path_entries if entry != executable_directory),
-        )
+        dict.fromkeys((executable_directory, *_MANAGED_SYSTEM_PATH))
     )
     return MappingProxyType(environment)
 
@@ -572,37 +629,40 @@ def _successful_query(process: ProcessCapture, *, label: str) -> None:
         raise AdapterError(f"{label} did not complete successfully")
 
 
-def _resolve_nvidia_smi() -> tuple[str, str]:
-    executable_text = shutil.which("nvidia-smi")
-    if executable_text is None:
-        raise AdapterError("managed vLLM requires nvidia-smi")
+def _resolve_nvidia_smi() -> tuple[ExecutableIdentity, str]:
     try:
-        executable = Path(executable_text).resolve(strict=True)
-        executable_stat = os.lstat(executable)
-    except (OSError, RuntimeError):
+        executable = resolve_executable_identity(
+            "nvidia-smi",
+            search_path=_NVIDIA_TOOL_SEARCH_PATH,
+        )
+        executable_stat = os.lstat(executable.path)
+    except (AdapterError, OSError, RuntimeError):
         raise AdapterError("nvidia-smi cannot be inspected") from None
     digest, _ = _hash_regular_file(
-        executable,
+        executable.path,
         _file_identity(executable_stat),
         label="nvidia-smi executable",
     )
-    return str(executable), digest
+    return executable, digest
 
 
 def _collect_gpu_inventory(
-    nvidia_smi_path: str,
+    nvidia_smi: ExecutableIdentity,
     indices: tuple[int, ...],
     *,
     cwd: Path,
     process_runner: ProcessRunner,
+    environment: Mapping[str, str],
 ) -> tuple[tuple[GpuDeviceEvidence, ...], tuple[str, ...], str]:
-    argv = gpu_inventory_argv(nvidia_smi_path, indices)
+    argv = gpu_inventory_argv(str(nvidia_smi.path), indices)
     process = process_runner(
         argv,
         cwd=cwd,
         max_runtime_seconds=30,
         output_limit_bytes=_MAX_QUERY_BYTES,
+        environment=environment,
         merge_stderr=True,
+        executable_identity=nvidia_smi,
     )
     _successful_query(process, label="GPU inventory query")
     output = _decode_query_output(process.stdout, label="GPU inventory output")
@@ -725,16 +785,38 @@ class ManagedVllmServer:
                 revision=tokenizer_revision,
             )
         self._distribution = collect_vllm_distribution_identity()
+        self._producer_executable = resolve_executable_identity(
+            self._distribution.executable_path
+        )
+        producer_digest, _ = _hash_regular_file(
+            self._producer_executable.path,
+            _FileIdentity(
+                device=self._producer_executable.device,
+                inode=self._producer_executable.inode,
+                mode=self._producer_executable.mode,
+                links=self._producer_executable.links,
+                size=self._producer_executable.size,
+                modified_ns=self._producer_executable.modified_ns,
+                changed_ns=self._producer_executable.changed_ns,
+            ),
+            label="managed vLLM executable",
+        )
+        if producer_digest != self._distribution.executable_sha256:
+            raise AdapterError("managed vLLM executable identity changed")
         self._process_environment = managed_process_environment(
             executable_path=self._distribution.executable_path,
+            home_directory=self._cwd,
+            include_cuda_runtime=True,
         )
-        self._nvidia_smi_path, self._nvidia_smi_sha256 = _resolve_nvidia_smi()
+        self._nvidia_smi, self._nvidia_smi_sha256 = _resolve_nvidia_smi()
+        self._nvidia_smi_path = str(self._nvidia_smi.path)
         self._gpus, self._gpu_query_argv, self._gpu_query_stdout = (
             _collect_gpu_inventory(
-                self._nvidia_smi_path,
+                self._nvidia_smi,
                 config.gpu_indices,
                 cwd=self._cwd,
                 process_runner=process_runner,
+                environment=self._process_environment,
             )
         )
         (
@@ -798,6 +880,10 @@ class ManagedVllmServer:
     def process_environment(self) -> Mapping[str, str]:
         return self._process_environment
 
+    @property
+    def producer_executable_identity(self) -> ExecutableIdentity:
+        return self._producer_executable
+
     def _observe_start(self, pid: int, started_at: datetime) -> None:
         with self._lock:
             self._pid = pid
@@ -823,6 +909,7 @@ class ManagedVllmServer:
                 environment=self._process_environment,
                 merge_stderr=False,
                 on_start=self._observe_start,
+                executable_identity=self._producer_executable,
             )
             with self._lock:
                 self._capture = capture
@@ -871,7 +958,9 @@ class ManagedVllmServer:
             cwd=self._cwd,
             max_runtime_seconds=30,
             output_limit_bytes=_MAX_QUERY_BYTES,
+            environment=self._process_environment,
             merge_stderr=True,
+            executable_identity=self._nvidia_smi,
         )
         _successful_query(process, label="GPU compute-process query")
         output = _decode_query_output(

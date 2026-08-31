@@ -114,6 +114,8 @@ destination, inspect the exact workflow without making a network connection:
 .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   <user@gpu-host> \
   --identity-file <private-key-path> \
+  --host-key-file <pinned-known-hosts-path> \
+  --host-key-sha256 <sha256-of-exact-known-hosts-bytes> \
   --expected-commit "$(git rev-parse HEAD)" \
   --dry-run
 ```
@@ -124,6 +126,8 @@ Then start the capture by removing `--dry-run`:
 .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   <user@gpu-host> \
   --identity-file <private-key-path> \
+  --host-key-file <pinned-known-hosts-path> \
+  --host-key-sha256 <sha256-of-exact-known-hosts-bytes> \
   --expected-commit "$(git rev-parse HEAD)"
 ```
 
@@ -164,6 +168,8 @@ export LAMBDA_CLOUD_API_KEY
 .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   ubuntu@<public-ip> \
   --identity-file <private-key-path> \
+  --host-key-file <pinned-known-hosts-path> \
+  --host-key-sha256 <sha256-of-exact-known-hosts-bytes> \
   --expected-commit "$(git rev-parse HEAD)" \
   --lambda-hourly-rate-usd 1.29 \
   --max-cost-usd 2.58 \
@@ -183,12 +189,19 @@ The controller fails before SSH if the guard cannot be armed. It reports the
 detached watchdog as armed only after the child publishes a validated readiness
 record; startup failure removes false armed state. The watchdog holds the
 buffered termination deadline and calls Lambda's termination API even if the
-capture controller fails. On macOS it runs beneath `caffeinate -i` so idle sleep
-does not silently suspend the timer. The controller also calls the same
-termination API immediately in `finally` after success, failure, or
-interruption, polls until the instance is absent or terminal, and only then
-disarms the fallback. The API key remains in process environment, never in the
-watchdog argument vector or its operational receipts.
+capture controller fails. On macOS a separately launched, fixed
+`/usr/bin/caffeinate -w <watchdog-pid>` helper inhibits idle sleep without
+receiving the provider key. Every guarded mode translates SIGINT/SIGTERM into
+the same `finally` cleanup; signals are deferred while watchdog ownership is
+being established or provider finalization is already in progress. The
+controller calls the termination API immediately, polls until the instance is
+absent or terminal, and only then disarms the fallback. If confirmation fails,
+it retains an immutable `UNRESOLVED` state record, does not disarm the
+watchdog, and records whether that watchdog is still live; failure to retain
+that state is itself surfaced as a hard error. The API key is limited to the
+provider controller and direct Python
+watchdog child. It is absent from Git/SSH/SCP/GPU/producer and sleep-inhibitor
+children, argument vectors, operational receipts, and child logs.
 
 This is a strong local circuit breaker, not an exact billing cap or availability
 guarantee. Provider billing granularity, API latency, network loss, or laptop
@@ -215,16 +228,20 @@ The controller:
 9. independently extracts and verifies the archive in an isolated system
    temporary directory, including the single bundle, all four comparison
    bundles, both Trial Sets, the frozen plan, and the comparison result; and
-10. when Lambda protection is configured, confirms provider termination on
-    every controller exit path.
+10. when Lambda protection is configured, attempts and polls provider
+    termination after normal completion, handled failures, SIGINT, and SIGTERM,
+    retaining explicit unresolved state with the fallback watchdog armed if
+    confirmation fails. Abrupt controller death relies on that detached
+    watchdog.
 
-The first SSH connection uses `StrictHostKeyChecking=accept-new` with a
-capture-specific `known_hosts` file. Its digest is retained in the local
-retrieval receipt. This is SSH trust-on-first-use, not cloud hardware
-attestation. If the provider exposes the expected host key through a separate
-authenticated channel, pass the lowercase hex digest of the exact
-capture-specific `known_hosts` bytes as `--host-key-sha256` to replace that
-trust-on-first-use check with an explicit pin.
+Before any SSH or SCP process starts, the controller materializes exact
+`known_hosts` bytes from `--host-key-file` (recommended) or `ssh-keyscan` and
+requires their raw-byte SHA-256 to match the independently retained lowercase
+`--host-key-sha256` pin. Every handshake, including the first, uses
+`StrictHostKeyChecking=yes`, the capture-specific `UserKnownHostsFile`, and
+`IdentityAgent=none`; the user's SSH agent, configuration, proxy, forwarding,
+and environment are unavailable. This authenticates the pinned SSH host key,
+not cloud hardware.
 
 Successful captures are retained beneath the ignored
 `gpu-proof-retrieved/` directory. A failed host run is explicitly labeled
@@ -365,24 +382,47 @@ disclose prompts, generated responses, stdout/stderr, package inventory,
 absolute paths, one private host-network address repeated across server logs,
 GPU UUIDs, and process identifiers.
 
-The result is `EXTERNAL_ONLY`, not `APPROVED_PUBLIC`: the repository has no
-selected license, the archive does not retain owner-approved license records
-for the model, workload, vLLM, and generated output, and the owner has not
-approved public delivery. Therefore `capture.tar.gz` remains ignored and was
-neither committed nor uploaded. The proposed future release-asset URL and exact
-required checksum are recorded in the handoff manifest; vendoring the same
-reviewed bytes in ExitSpec remains an alternative owner decision.
+The result remains `EXTERNAL_ONLY`, not `APPROVED_PUBLIC`. At review time the
+repository had no selected license; the owner has since selected Apache-2.0
+for Inferdrome source and package metadata. That later repository choice does
+not alter the reviewed archive, provide its missing owner-approved license
+records for the model, workload, vLLM, and generated output, or approve public
+delivery. Therefore `capture.tar.gz` remains ignored and was neither committed
+nor uploaded. The proposed future release-asset URL and exact required checksum
+are recorded in the handoff manifest; vendoring the same reviewed bytes in
+ExitSpec remains an alternative owner decision.
 
-Re-run the complete review and independently recalculate the 100/100 native
-TTFT population and nearest-rank p95 of `14,797,213 ns` with:
+The engineering gate always validates both tracked records, their duplicate-free
+closed JSON shapes, fixed canonical-document hashes, cross-document identities,
+profile/schema pins, `EXTERNAL_ONLY` owner-required state, retrospective
+chronology, and null Inferdrome/ExitSpec authority without requiring the raw
+archive:
+
+```bash
+PYTHONPATH=src .venv/bin/python \
+  scripts/review_gpu_evidence_publication.py --check-records
+```
+
+When the exact external archive is available locally, re-run the complete
+archive review and independently recalculate the 100/100 native TTFT population
+and nearest-rank p95 of `14,797,213 ns` with:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/review_gpu_evidence_publication.py --check
 ```
 
+That deterministic recheck freezes the repository-license fact recorded by the
+historical review; the current Apache-2.0 file does not recategorize or rewrite
+the sealed review.
+
 The handoff explicitly records a null producer-side ExitSpec contract digest
 and `RETROSPECTIVE` chronology. A future contract can be frozen before
 evaluation, but this capture does not prove that contract preceded measurement.
+Its preserved `comparison_context.status: COMPARABLE` is a historical, neutral
+measurement-compatibility label, not an evidence-authoritative comparison or
+an ExitSpec outcome. Under the current authority gate, the same null contract
+identity would produce `INCOMPARABLE` and withhold all controlled outcomes; the
+immutable handoff record remains unchanged.
 The capture producer commit, later profile/publication commits, and eventual
 merge commit are separate identities; the eventual owner merge must preserve
 `c08b46d9fbd87477f45d130aa3c63615937c4dc3` as an ancestor rather than
@@ -420,6 +460,10 @@ PYTHONPATH=src .venv/bin/python \
   scripts/review_qwen3_gpu_evidence_publication.py --check
 ```
 
+The historical A10 and A100 review renderers likewise freeze their review-time
+repository-license fact, so a current checkout cannot silently authorize or
+rewrite an `EXTERNAL_ONLY` record.
+
 Open that same verified bundle in the loopback-only dashboard:
 
 ```bash
@@ -429,10 +473,13 @@ PYTHONPATH=src .venv/bin/python \
 
 The archive remains `EXTERNAL_ONLY` because owner publication approval and
 archive-bound repository, model, workload, vLLM, and generated-output license
-decisions are unresolved. Public CI validates the committed record shapes and
-cross-digests; it does not claim to possess or reverify ignored local bytes.
-This spike closes A10 runtime compatibility for the exact profile only. It is
-not a cross-GPU result or an Inferdrome acceptance verdict.
+decisions are unresolved. Apache-2.0 now covers Inferdrome repository-authored
+source and package metadata, but it neither rewrites that sealed archive nor
+licenses its external materials or generated output. Public CI validates the
+committed record shapes and cross-digests; it does not claim to possess or
+reverify ignored local bytes. This spike closes A10 runtime compatibility for
+the exact profile only. It is not a cross-GPU result or an Inferdrome
+acceptance verdict.
 
 ## Exact managed server launch
 
@@ -490,16 +537,18 @@ Managed server diagnostics remain in the private run workspace, while the
 launch and allowlisted proof needed for offline verification are sealed in the
 producer invocation artifact.
 
-The managed server, version probe, and benchmark also share one process
-environment policy. Inferdrome removes every inherited `VLLM_*` override and
-forces `VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`,
+The managed server, version probe, benchmark, and `nvidia-smi` probes share
+validated absolute executable identities and one minimal process environment.
+Inferdrome does not inherit compiler, loader, cloud, SSH-agent, or arbitrary
+shell variables. It supplies fixed standard CUDA/tool/library locations on the
+Linux proof host, a run-private `HOME`, and forces
+`VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`,
 `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_OFFLINE=1`, and
-`TRANSFORMERS_OFFLINE=1`. It also places the directory containing the verified
-vLLM executable first on `PATH`, so child tools such as `ninja` resolve from the
-same prepared Python environment before any ambient host tool. The policy
-identifier and exact overrides are sealed with the server proof so ambient
-vLLM configuration cannot silently alter the demonstration or enable producer
-telemetry.
+`TRANSFORMERS_OFFLINE=1`. The verified vLLM directory and fixed system/CUDA
+directories form `PATH`; the operator's ambient `PATH`, `LD_LIBRARY_PATH`,
+`CC`, and `CXX` are ignored. The policy identifier and exact overrides are
+sealed with the server proof. Credential-shaped producer output fails closed
+before sealing rather than silently changing the upstream bytes.
 
 ## Run the proof and rejection demonstrations
 
@@ -566,10 +615,12 @@ status and bounded outcome, and successful resume reverification. A fresh proof
 is expected to execute all four planned runs; the second invocation must report
 all four as reused and none as executed.
 
-`COMPARABLE` is emitted only if every frozen and observed v1 control is
-satisfied. A fully verified `INCOMPARABLE` result is still a successful proof
-of the evidence pipeline and contains no outcome estimate. Neither status is a
-winner label, causal claim, significance claim, or ExitSpec acceptance result.
+`COMPARABLE` is emitted only if all run IDs are distinct, every member is
+`CUSTOMER_ELIGIBLE`, both planned arms and all bundles share one non-null
+ExitSpec contract digest, and every frozen and observed v1 control is satisfied.
+A fully verified `INCOMPARABLE` result is still a successful proof of the
+evidence pipeline and contains no outcome estimate. Neither status is a winner
+label, causal claim, significance claim, or ExitSpec acceptance result.
 
 Inspect the finished proof through the locked read-only dashboard by replacing
 `<proof-directory>` with the directory containing the printed receipt:

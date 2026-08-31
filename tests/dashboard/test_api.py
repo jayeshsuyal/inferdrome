@@ -54,7 +54,8 @@ def test_list_detail_and_compare_routes_return_verified_projections(
     assert detail_response.status_code == 200
     assert detail_response.json()["summary"]["run_id"] == BASELINE_RUN_ID
     assert compare_response.status_code == 200
-    assert compare_response.json()["status"] == "COMPARABLE"
+    assert compare_response.json()["status"] == "INCOMPARABLE"
+    assert compare_response.json()["metric_deltas"] == []
 
     serialized = json.dumps(
         {

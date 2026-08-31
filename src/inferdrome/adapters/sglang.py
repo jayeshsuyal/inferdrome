@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -36,6 +37,7 @@ from inferdrome.execution.cancellation import TerminationPolicy
 from inferdrome.execution.subprocess_runner import (
     ProcessCapture,
     ProcessTermination,
+    resolve_executable_identity,
     run_captured_process,
 )
 
@@ -503,6 +505,14 @@ def probe_sglang_version(
         raise AdapterError("SGLang version probe directory is invalid")
     if not _EXECUTABLE.fullmatch(python_executable):
         raise AdapterError("SGLang version probe executable is invalid")
+    executable_identity = resolve_executable_identity(
+        python_executable,
+        search_path=(
+            str(Path(sys.executable).absolute().parent)
+            if not Path(python_executable).is_absolute()
+            else None
+        ),
+    )
     process = process_runner(
         (
             python_executable,
@@ -522,6 +532,7 @@ def probe_sglang_version(
             "PYTHONSAFEPATH": "1",
         },
         merge_stderr=True,
+        executable_identity=executable_identity,
     )
     if process.termination is not ProcessTermination.EXITED or process.exit_status != 0:
         raise AdapterError("SGLang version probe did not complete successfully")

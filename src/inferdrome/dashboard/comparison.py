@@ -50,6 +50,31 @@ def _hard_incompatibilities(
     baseline: RunDetail,
     candidate: RunDetail,
 ) -> list[str]:
+    reasons: list[str] = []
+    if baseline.summary.run_id == candidate.summary.run_id:
+        reasons.append("A run cannot be compared with itself.")
+
+    customer_eligible = "CUSTOMER_ELIGIBLE"
+    if any(
+        detail.summary.evidence_eligibility != customer_eligible
+        or detail.verification.evidence_eligibility != customer_eligible
+        for detail in (baseline, candidate)
+    ):
+        reasons.append(
+            "Evidence-authoritative comparison requires CUSTOMER_ELIGIBLE "
+            "evidence for both runs."
+        )
+
+    baseline_exitspec = baseline.digests.exitspec_contract_digest
+    candidate_exitspec = candidate.digests.exitspec_contract_digest
+    if baseline_exitspec is None or candidate_exitspec is None:
+        reasons.append(
+            "Evidence-authoritative comparison requires both runs to declare "
+            "an ExitSpec contract identity."
+        )
+    elif baseline_exitspec != candidate_exitspec:
+        reasons.append("ExitSpec contract identities differ.")
+
     baseline_contract = baseline.comparison_contract
     candidate_contract = candidate.comparison_contract
     checks = (
@@ -99,7 +124,7 @@ def _hard_incompatibilities(
             "Measurement semantics differ.",
         ),
     )
-    reasons = [reason for left, right, reason in checks if left != right]
+    reasons.extend(reason for left, right, reason in checks if left != right)
 
     baseline_semantics = {
         metric.key: (

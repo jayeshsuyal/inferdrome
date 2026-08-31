@@ -1,13 +1,19 @@
 """Resolved experiment contract for v0.1."""
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
+    AfterValidator,
     AnyHttpUrl,
+    BeforeValidator,
     Field,
     NonNegativeInt,
     PositiveInt,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -38,14 +44,67 @@ class NativeOutputSensitivity(StrEnum):
     NON_SENSITIVE_FIXTURE = "NON_SENSITIVE_FIXTURE"
 
 
+def _endpoint_input_must_be_root(value: Any) -> Any:
+    """Reject path spellings before URL normalization can erase them."""
+
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        raise ValueError("endpoint URL is invalid") from None
+    if (
+        "\\" in value
+        or "%" in parsed.netloc
+        or "@" in parsed.netloc
+        or any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in value
+        )
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError("endpoint must be a root URL")
+    return value
+
+
+def _endpoint_must_be_secret_free_root(value: AnyHttpUrl) -> AnyHttpUrl:
+    """Recheck the normalized URL as a defense against parser edge cases."""
+
+    if value.username is not None or value.password is not None:
+        raise ValueError("endpoint user information is forbidden")
+    if value.query is not None or value.fragment is not None:
+        raise ValueError("endpoint query strings and fragments are forbidden")
+    if value.path not in {None, "", "/"}:
+        raise ValueError("endpoint must be a root URL")
+    return value
+
+
 SecretFreeHttpUrl = Annotated[
     AnyHttpUrl,
+    BeforeValidator(_endpoint_input_must_be_root),
+    AfterValidator(_endpoint_must_be_secret_free_root),
     Field(
         json_schema_extra={
-            "pattern": r"^https?://[^/?#@]+(?:/[^?#]*)?$",
+            "pattern": (
+                r"^(?![\s\S]*[\r\n])[Hh][Tt][Tt][Pp][Ss]?://"
+                r"(?:\[[0-9A-Fa-f:.]+\]|[^:/?#@%\\\s\x00-\x1f\x7f]+)"
+                r"(?::(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|"
+                r"65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/?$"
+            ),
         }
     ),
 ]
+_SECRET_FREE_HTTP_URL_ADAPTER = TypeAdapter(SecretFreeHttpUrl)
+
+
+def validated_endpoint_base_url(value: object) -> str:
+    """Return the canonical root base URL or fail without echoing input."""
+
+    try:
+        endpoint = _SECRET_FREE_HTTP_URL_ADAPTER.validate_python(value, strict=True)
+    except ValidationError:
+        raise ValueError("endpoint must be a secret-free root HTTP(S) URL") from None
+    return str(endpoint).removesuffix("/")
 
 
 class ExperimentIdentity(FrozenModel):
@@ -88,15 +147,17 @@ class AttachedVllmTarget(FrozenModel):
     model_revision: OpaqueName | None
     tokenizer_revision: OpaqueName | None
     engine_version: SemanticVersion | None
+    _validated_endpoint_identity: AnyHttpUrl | None = PrivateAttr(default=None)
 
-    @field_validator("endpoint")
-    @classmethod
-    def endpoint_must_not_carry_secrets(cls, value: AnyHttpUrl) -> AnyHttpUrl:
-        if value.username is not None or value.password is not None:
-            raise ValueError("endpoint user information is forbidden")
-        if value.query is not None or value.fragment is not None:
-            raise ValueError("endpoint query strings and fragments are forbidden")
-        return value
+    @model_validator(mode="after")
+    def bind_validated_endpoint_identity(self) -> Self:
+        """Bind adapters to the exact endpoint object that passed validation."""
+
+        self._validated_endpoint_identity = self.endpoint
+        return self
+
+    def endpoint_validation_is_bound(self) -> bool:
+        return self._validated_endpoint_identity is self.endpoint
 
 
 class SyntheticTarget(FrozenModel):

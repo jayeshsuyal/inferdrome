@@ -7,6 +7,8 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime
 
 COPY pyproject.toml uv.lock README.md ./
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
+COPY LICENSES ./LICENSES
 COPY src ./src
 
 # The uv bootstrap is a fixed Linux/amd64 release archive with an exact
@@ -58,6 +60,8 @@ RUN /usr/sbin/useradd --uid 10001 --create-home --home-dir /home/inferdrome \
     && chown -R 10001:10001 /evidence /tmp/inferdrome /home/inferdrome
 
 COPY --from=builder --chown=10001:10001 /opt/inferdrome-runtime /opt/inferdrome-runtime
+COPY --from=builder /build/LICENSE /build/THIRD_PARTY_NOTICES.md /usr/share/licenses/inferdrome/
+COPY --from=builder /build/LICENSES /usr/share/licenses/inferdrome/LICENSES
 
 # Proof/release labels must describe the package actually copied into the
 # image, not merely a caller-supplied string.

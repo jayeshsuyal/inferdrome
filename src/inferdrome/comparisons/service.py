@@ -50,7 +50,7 @@ from inferdrome.domain.ids import (
     new_trial_set_id,
 )
 from inferdrome.domain.metrics import Measurement, frozen_metric_definitions_v1
-from inferdrome.domain.states import EnvironmentCompleteness
+from inferdrome.domain.states import EnvironmentCompleteness, EvidenceEligibility
 from inferdrome.errors import (
     ControlledComparisonError,
     VerificationError,
@@ -794,6 +794,58 @@ def _build_outcomes(
     return True, tuple(outcomes)
 
 
+def _controlled_outcome_authority_satisfied(
+    plan: VerifiedComparisonPlan,
+    baseline: VerifiedTrialSet,
+    candidate: VerifiedTrialSet,
+) -> bool:
+    """Require eligible evidence under one exact contract before outcome math."""
+
+    if any(
+        trial.comparison_authority.scope != "CONTROLLED_OUTCOME_ELIGIBLE"
+        for trial in (baseline, candidate)
+    ):
+        return False
+    plan_contracts = (
+        plan.descriptor.baseline_arm.resolved_experiment.links.exitspec_contract_digest,
+        plan.descriptor.candidate_arm.resolved_experiment.links.exitspec_contract_digest,
+    )
+    member_descriptors = tuple(
+        analysis.verification.descriptor
+        for trial in (baseline, candidate)
+        for analysis in trial.members
+    )
+    member_run_ids = tuple(
+        analysis.verification.run_id
+        for trial in (baseline, candidate)
+        for analysis in trial.members
+    )
+    member_contracts = tuple(
+        descriptor.digests.exitspec_contract_digest
+        for descriptor in member_descriptors
+    )
+    if (
+        len(set(member_run_ids)) != len(member_run_ids)
+        or any(
+            descriptor.evidence_eligibility
+            is not EvidenceEligibility.CUSTOMER_ELIGIBLE
+            for descriptor in member_descriptors
+        )
+        or any(contract is None for contract in (*plan_contracts, *member_contracts))
+    ):
+        return False
+    shared_contracts = {
+        contract
+        for contract in (*plan_contracts, *member_contracts)
+        if contract is not None
+    }
+    return len(shared_contracts) == 1 and all(
+        trial.comparison_authority.exitspec_contract_digest
+        in shared_contracts
+        for trial in (baseline, candidate)
+    )
+
+
 def _evaluate_result(
     *,
     plan: VerifiedComparisonPlan,
@@ -811,6 +863,11 @@ def _evaluate_result(
         _run_context(member, work_budget=work_budget) for member in candidate.members
     )
     all_contexts = (*baseline_contexts, *candidate_contexts)
+    outcome_authority = _controlled_outcome_authority_satisfied(
+        plan,
+        baseline,
+        candidate,
+    )
 
     plan_precedes = all(
         descriptor.created_at < context.execution.started_at for context in all_contexts
@@ -924,11 +981,14 @@ def _evaluate_result(
         environment_ok,
     )
 
-    outcome_ok, outcomes = _build_outcomes(
-        descriptor,
-        baseline_contexts,
-        candidate_contexts,
-    )
+    if outcome_authority:
+        outcome_ok, outcomes = _build_outcomes(
+            descriptor,
+            baseline_contexts,
+            candidate_contexts,
+        )
+    else:
+        outcome_ok, outcomes = False, ()
     outcome_check = _control_check(
         ControlCheckId.OUTCOME_COVERAGE_AND_SEMANTICS,
         outcome_ok,

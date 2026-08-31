@@ -3,7 +3,7 @@
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import AnyHttpUrl, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from inferdrome.domain.base import FrozenModel
 from inferdrome.domain.experiment import (
@@ -67,15 +67,6 @@ class SourceAttachedVllmTarget(FrozenModel):
     model_revision: OpaqueName | None = None
     tokenizer_revision: OpaqueName | None = None
     engine_version: SemanticVersion | None = None
-
-    @field_validator("endpoint")
-    @classmethod
-    def endpoint_must_not_carry_secrets(cls, value: AnyHttpUrl) -> AnyHttpUrl:
-        if value.username is not None or value.password is not None:
-            raise ValueError("endpoint user information is forbidden")
-        if value.query is not None or value.fragment is not None:
-            raise ValueError("endpoint query strings and fragments are forbidden")
-        return value
 
 
 class SourceSyntheticTarget(FrozenModel):

@@ -18,6 +18,7 @@ from inferdrome.domain.metrics import (
     RoundingPolicy,
     Unit,
 )
+from inferdrome.domain.states import EvidenceEligibility
 from inferdrome.errors import TrialSetError, WorkLimitError
 from inferdrome.limits import WorkBudget
 from inferdrome.trials import (
@@ -69,6 +70,13 @@ def test_create_verify_and_summarize_same_configuration(
         assert reloaded.descriptor.members[1].run_id == second_id
         assert reloaded.descriptor.reducer_version == "1.0.0"
         assert reloaded.trial_set_digest.startswith("sha256:")
+        assert reloaded.comparison_authority.scope == (
+            "DESCRIPTIVE_ONLY_NON_AUTHORITATIVE"
+        )
+        assert set(reloaded.comparison_authority.issues) == {
+            "EVIDENCE_NOT_CUSTOMER_ELIGIBLE",
+            "EXITSPEC_CONTRACT_IDENTITY_MISSING",
+        }
         variations = trial_metric_variations(reloaded)
         assert variations
         assert all(item.available_run_count == 2 for item in variations)
@@ -229,6 +237,68 @@ def test_creation_rejects_different_experiment_identity(
             run_ids=(first_id, second_id),
             title="Mixed experiment identity",
         )
+
+
+def test_cross_contract_trial_set_remains_explicitly_non_authoritative(
+    tmp_path: Path,
+    run_fake_bundle: Any,
+) -> None:
+    runs_root = tmp_path / "runs"
+    trial_sets_root = tmp_path / "trial-sets"
+    first_id = "run-11111111111111111111111111111111"
+    second_id = "run-22222222222222222222222222222222"
+    run_fake_bundle(
+        runs_root,
+        first_id,
+        exitspec_contract_digest=f"sha256:{'a' * 64}",
+    )
+    run_fake_bundle(
+        runs_root,
+        second_id,
+        exitspec_contract_digest=f"sha256:{'b' * 64}",
+    )
+
+    try:
+        created = create_trial_set(
+            runs_root=runs_root,
+            trial_sets_root=trial_sets_root,
+            run_ids=(first_id, second_id),
+            title="Cross-contract descriptive exploration",
+        )
+        reloaded = verify_trial_set(created.path, runs_root=runs_root)
+
+        assert reloaded.comparison_authority.scope == (
+            "DESCRIPTIVE_ONLY_NON_AUTHORITATIVE"
+        )
+        assert "EXITSPEC_CONTRACT_IDENTITY_MISMATCH" in (
+            reloaded.comparison_authority.issues
+        )
+        assert reloaded.comparison_authority.exitspec_contract_digest is None
+    finally:
+        _make_tree_writable(trial_sets_root)
+
+
+def test_customer_eligible_matching_contracts_pass_trial_authority_gate() -> None:
+    contract_digest = f"sha256:{'c' * 64}"
+    analyses = tuple(
+        SimpleNamespace(
+            verification=SimpleNamespace(
+                descriptor=SimpleNamespace(
+                    evidence_eligibility=EvidenceEligibility.CUSTOMER_ELIGIBLE,
+                    digests=SimpleNamespace(
+                        exitspec_contract_digest=contract_digest
+                    ),
+                )
+            )
+        )
+        for _ in range(2)
+    )
+
+    authority = trial_service._comparison_authority(cast(Any, analyses))
+
+    assert authority.scope == "CONTROLLED_OUTCOME_ELIGIBLE"
+    assert authority.exitspec_contract_digest == contract_digest
+    assert authority.issues == ()
 
 
 def test_creation_wraps_invalid_public_metadata(

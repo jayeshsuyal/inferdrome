@@ -1,11 +1,13 @@
 """Attached endpoint preflight and vLLM invocation stay exact and secret-free."""
 
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import AnyHttpUrl
 
 import inferdrome.adapters.vllm_bench as vllm_bench_module
 from inferdrome.adapters.vllm_bench import (
@@ -22,22 +24,20 @@ from inferdrome.adapters.vllm_bench import (
 from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.domain.experiment import (
     AttachedVllmTarget,
+    ExperimentSpec,
     RequestRateTraffic,
 )
 from inferdrome.domain.ids import sha256_digest
 from inferdrome.errors import AdapterError
 from inferdrome.execution import ProcessCapture, ProcessTermination
+from inferdrome.execution.subprocess_runner import resolve_executable_identity
 from inferdrome.resolution import ResolutionResult, resolve_experiment
 from inferdrome.resolution.canonicalization import execution_fingerprint
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "fixtures" / "vllm" / "v0_26"
 SPIKE_FIXTURE = (
-    REPOSITORY_ROOT
-    / "spikes"
-    / "vllm-0.26.0"
-    / "fixtures"
-    / "client-macos-empty"
+    REPOSITORY_ROOT / "spikes" / "vllm-0.26.0" / "fixtures" / "client-macos-empty"
 )
 RUN_ID = "run-88888888888888888888888888888888"
 
@@ -69,6 +69,21 @@ def _preflight(resolution: ResolutionResult) -> EndpointPreflightCapture:
             body=response,
         ),
     )
+
+
+def _spec_with_unvalidated_endpoint(
+    resolution: ResolutionResult,
+    endpoint: str,
+) -> ExperimentSpec:
+    target = resolution.resolved_spec.target
+    assert isinstance(target, AttachedVllmTarget)
+    bypassed_target = AttachedVllmTarget.model_construct(
+        **{
+            **target.model_dump(mode="python"),
+            "endpoint": AnyHttpUrl(endpoint),
+        }
+    )
+    return resolution.resolved_spec.model_copy(update={"target": bypassed_target})
 
 
 def _option_value(argv: tuple[str, ...], option: str) -> str:
@@ -147,6 +162,106 @@ def test_preflight_rejects_unusable_endpoint_evidence(
         )
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://127.0.0.1:18083/synthetic-marker",
+        "http://127.0.0.1:18083/.",
+        "http://127.0.0.1:18083/%2e",
+        "http://127.0.0.1:18083/synthetic-marker/..",
+    ],
+)
+def test_endpoint_path_is_rejected_before_transport_construction(
+    endpoint: str,
+) -> None:
+    resolution = _resolution()
+    spec = _spec_with_unvalidated_endpoint(resolution, endpoint)
+    assert isinstance(spec.target, AttachedVllmTarget)
+    transport_called = False
+
+    def transport(_url: str, _timeout: float, _limit: int) -> HttpResponse:
+        nonlocal transport_called
+        transport_called = True
+        raise AssertionError("invalid endpoint reached transport")
+
+    with pytest.raises(AdapterError) as caught:
+        preflight_attached_endpoint(spec.target, transport=transport)
+
+    assert transport_called is False
+    assert "synthetic-marker" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://127.0.0.1:18083/synthetic-marker",
+        "http://127.0.0.1:18083/%2e",
+    ],
+)
+def test_endpoint_path_is_rejected_before_argv_or_evidence_serialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    resolution = _resolution()
+    spec = _spec_with_unvalidated_endpoint(resolution, endpoint)
+    fingerprint = resolution.execution_fingerprint
+    argv_called = False
+    evidence_called = False
+
+    def build_argv(*_args: Any, **_kwargs: Any) -> tuple[str, ...]:
+        nonlocal argv_called
+        argv_called = True
+        raise AssertionError("invalid endpoint reached argv construction")
+
+    def serialize(*_args: Any, **_kwargs: Any) -> bytes:
+        nonlocal evidence_called
+        evidence_called = True
+        raise AssertionError("invalid endpoint reached evidence serialization")
+
+    monkeypatch.setattr(vllm_bench_module, "_build_argv", build_argv)
+    monkeypatch.setattr(vllm_bench_module, "_canonical_invocation_bytes", serialize)
+
+    with pytest.raises(AdapterError) as caught:
+        build_vllm_invocation(
+            spec,
+            resolution.request_plan,
+            _paths(tmp_path),
+            execution_fingerprint=fingerprint,
+            preflight=_preflight(resolution),
+        )
+
+    assert argv_called is False
+    assert evidence_called is False
+    assert "synthetic-marker" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://127.0.0.1:18083/synthetic-marker",
+        "http://127.0.0.1:18083/synthetic-marker/..",
+    ],
+)
+def test_argv_builder_rechecks_unvalidated_endpoint_path(
+    tmp_path: Path,
+    endpoint: str,
+) -> None:
+    resolution = _resolution()
+    spec = _spec_with_unvalidated_endpoint(resolution, endpoint)
+
+    with pytest.raises(AdapterError) as caught:
+        vllm_bench_module._build_argv(
+            spec,
+            resolution.request_plan,
+            _paths(tmp_path),
+            {},
+            executable="vllm",
+        )
+
+    assert "synthetic-marker" not in str(caught.value)
+
+
 def test_invocation_round_trips_against_frozen_inputs(tmp_path: Path) -> None:
     resolution = _resolution()
     paths = _paths(tmp_path)
@@ -167,9 +282,7 @@ def test_invocation_round_trips_against_frozen_inputs(tmp_path: Path) -> None:
     assert invocation.argv[:3] == ("vllm", "bench", "serve")
     assert validated == invocation
     assert invocation.paths == paths
-    assert _option_value(invocation.argv, "--base-url") == (
-        "http://127.0.0.1:18083"
-    )
+    assert _option_value(invocation.argv, "--base-url") == ("http://127.0.0.1:18083")
     assert _option_value(invocation.argv, "--model") == "inferdrome/mock-model"
     assert _option_value(invocation.argv, "--num-prompts") == "4"
     assert _option_value(invocation.argv, "--num-warmups") == "2"
@@ -194,6 +307,41 @@ def test_invocation_round_trips_against_frozen_inputs(tmp_path: Path) -> None:
     assert invocation.evidence_bytes == canonical_json_bytes(
         json.loads(invocation.evidence_bytes)
     )
+
+
+def test_optional_root_slash_does_not_change_invocation_evidence(
+    tmp_path: Path,
+) -> None:
+    resolution = _resolution()
+    target = resolution.resolved_spec.target
+    assert isinstance(target, AttachedVllmTarget)
+    slash_target = AttachedVllmTarget.model_validate(
+        {
+            **target.model_dump(mode="json"),
+            "endpoint": "http://127.0.0.1:18083/",
+        }
+    )
+    slash_spec = resolution.resolved_spec.model_copy(update={"target": slash_target})
+    assert slash_spec == resolution.resolved_spec
+    paths = _paths(tmp_path)
+
+    without_slash = build_vllm_invocation(
+        resolution.resolved_spec,
+        resolution.request_plan,
+        paths,
+        execution_fingerprint=resolution.execution_fingerprint,
+        preflight=_preflight(resolution),
+    )
+    with_slash = build_vllm_invocation(
+        slash_spec,
+        resolution.request_plan,
+        paths,
+        execution_fingerprint=resolution.execution_fingerprint,
+        preflight=_preflight(resolution),
+    )
+
+    assert with_slash.argv == without_slash.argv
+    assert with_slash.evidence_bytes == without_slash.evidence_bytes
 
 
 def test_request_rate_invocation_uses_explicit_rate_controls(tmp_path: Path) -> None:
@@ -256,9 +404,7 @@ def test_changed_invocation_evidence_fails_closed(
     if mutation == "arguments":
         argv[argv.index("--max-concurrency") + 1] = "3"
     elif mutation == "metadata":
-        value["metadata"]["inferdrome_run_id"] = (
-            "run-99999999999999999999999999999999"
-        )
+        value["metadata"]["inferdrome_run_id"] = "run-99999999999999999999999999999999"
     elif mutation == "preflight_response":
         value["endpoint_preflight"]["response_base64"] = "e30="
     elif mutation == "preflight_result":
@@ -421,6 +567,7 @@ def test_version_probe_preserves_raw_merged_output(tmp_path: Path) -> None:
     raw = (SPIKE_FIXTURE / "producer-version.txt").read_bytes()
     calls: list[dict[str, Any]] = []
     environment = {"VLLM_NO_USAGE_STATS": "1"}
+    executable_identity = resolve_executable_identity(sys.executable)
 
     def runner(argv: tuple[str, ...], **kwargs: Any) -> ProcessCapture:
         calls.append(kwargs)
@@ -430,6 +577,7 @@ def test_version_probe_preserves_raw_merged_output(tmp_path: Path) -> None:
         cwd=tmp_path.resolve(),
         process_runner=runner,
         environment=environment,
+        executable_identity=executable_identity,
     )
 
     assert capture.observed_version == "0.26.0+empty"
@@ -438,6 +586,7 @@ def test_version_probe_preserves_raw_merged_output(tmp_path: Path) -> None:
     assert calls[0]["merge_stderr"] is True
     assert calls[0]["output_limit_bytes"] == 65_536
     assert calls[0]["environment"] == environment
+    assert calls[0]["executable_identity"] is executable_identity
 
 
 def test_benchmark_capture_preserves_untouched_native_and_streams(
@@ -451,11 +600,10 @@ def test_benchmark_capture_preserves_untouched_native_and_streams(
         execution_fingerprint=resolution.execution_fingerprint,
         preflight=_preflight(resolution),
     )
-    native_bytes = (
-        SPIKE_FIXTURE / "native" / "benchmark-result.json"
-    ).read_bytes()
+    native_bytes = (SPIKE_FIXTURE / "native" / "benchmark-result.json").read_bytes()
     calls: list[dict[str, Any]] = []
     environment = {"VLLM_NO_USAGE_STATS": "1"}
+    executable_identity = resolve_executable_identity(sys.executable)
 
     def runner(argv: tuple[str, ...], **kwargs: Any) -> ProcessCapture:
         calls.append(kwargs)
@@ -474,6 +622,7 @@ def test_benchmark_capture_preserves_untouched_native_and_streams(
         execution_fingerprint=resolution.execution_fingerprint,
         process_runner=runner,
         environment=environment,
+        executable_identity=executable_identity,
     )
 
     assert capture.native_result_bytes == native_bytes
@@ -484,6 +633,7 @@ def test_benchmark_capture_preserves_untouched_native_and_streams(
     assert calls[0]["merge_stderr"] is False
     assert calls[0]["cwd"] == invocation.paths.result_directory
     assert calls[0]["environment"] == environment
+    assert calls[0]["executable_identity"] is executable_identity
 
 
 def test_failed_benchmark_capture_keeps_diagnostics_without_native_guess(

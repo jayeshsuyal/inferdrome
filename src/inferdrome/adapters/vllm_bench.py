@@ -26,12 +26,14 @@ from inferdrome.domain.experiment import (
     ExperimentSpec,
     RequestRateTraffic,
     VllmExecution,
+    validated_endpoint_base_url,
 )
 from inferdrome.domain.ids import OpaqueName, Sha256Digest, sha256_digest
 from inferdrome.domain.request_plan import InlinePrompt, RequestPlan
 from inferdrome.errors import AdapterError, SourceInputError
 from inferdrome.execution.cancellation import CancellationToken, TerminationPolicy
 from inferdrome.execution.subprocess_runner import (
+    ExecutableIdentity,
     ProcessCapture,
     ProcessTermination,
     run_captured_process,
@@ -242,6 +244,19 @@ def _strict_json_object(content: bytes) -> dict[str, Any]:
     return value
 
 
+def _validated_target_base_url(target: AttachedVllmTarget) -> str:
+    try:
+        endpoint = target.endpoint
+    except AttributeError:
+        raise AdapterError("attached endpoint base URL is invalid") from None
+    if not target.endpoint_validation_is_bound():
+        raise AdapterError("attached endpoint base URL is invalid")
+    try:
+        return validated_endpoint_base_url(str(endpoint))
+    except (TypeError, ValueError):
+        raise AdapterError("attached endpoint base URL is invalid") from None
+
+
 def preflight_attached_endpoint(
     target: AttachedVllmTarget,
     *,
@@ -250,11 +265,11 @@ def preflight_attached_endpoint(
 ) -> EndpointPreflightCapture:
     if (
         isinstance(timeout_seconds, bool)
-        or not isinstance(timeout_seconds, (int, float))
+        or not isinstance(timeout_seconds, int | float)
         or not 0 < timeout_seconds <= 60
     ):
         raise AdapterError("endpoint preflight timeout is outside limits")
-    endpoint = str(target.endpoint).rstrip("/")
+    endpoint = _validated_target_base_url(target)
     url = f"{endpoint}/v1/models"
     try:
         response = (transport or _default_transport)(
@@ -476,8 +491,8 @@ def _build_argv(
 ) -> tuple[str, ...]:
     if not isinstance(spec.target, AttachedVllmTarget):
         raise AdapterError("vLLM invocation requires an attached target")
+    endpoint = _validated_target_base_url(spec.target)
     require_qwen3_campaign_profile(spec, capability_profile_id)
-    endpoint = str(spec.target.endpoint).rstrip("/")
     argv = [
         executable,
         "bench",
@@ -909,6 +924,7 @@ def probe_vllm_version(
     process_runner: ProcessRunner = run_captured_process,
     termination_policy: TerminationPolicy | None = None,
     environment: Mapping[str, str] | None = None,
+    executable_identity: ExecutableIdentity | None = None,
 ) -> VllmVersionProbeCapture:
     """Capture and validate the pinned producer identity before benchmarking."""
 
@@ -920,6 +936,7 @@ def probe_vllm_version(
         termination_policy=termination_policy,
         environment=environment,
         merge_stderr=True,
+        executable_identity=executable_identity,
     )
     if (
         process.termination is not ProcessTermination.EXITED
@@ -1028,6 +1045,7 @@ def execute_vllm_benchmark(
     process_runner: ProcessRunner = run_captured_process,
     termination_policy: TerminationPolicy | None = None,
     environment: Mapping[str, str] | None = None,
+    executable_identity: ExecutableIdentity | None = None,
     output_limit_bytes: int = 67_108_864,
     native_result_limit_bytes: int = 268_435_456,
 ) -> VllmBenchmarkCapture:
@@ -1077,6 +1095,7 @@ def execute_vllm_benchmark(
         termination_policy=termination_policy,
         environment=environment,
         merge_stderr=False,
+        executable_identity=executable_identity,
     )
     _require_dataset_unchanged(
         invocation.paths.dataset_path,

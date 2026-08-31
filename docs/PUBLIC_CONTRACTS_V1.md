@@ -129,8 +129,11 @@ YAML shape. Defaults, producer identity, bounded execution limits, target,
 traffic, measurement semantics, sensitivity, and acceptance linkage are
 explicit before measurement starts.
 
-Attached endpoint URLs permit only `http` or `https` and reject user
-information, query strings, and fragments. This prevents API keys and similar
+Attached endpoint URLs are root base URLs only: they permit `http` or `https`,
+accept an optional trailing slash, and reject every other path, user
+information, query string, and fragment. Rejection happens before workspace,
+request, argument-vector, or evidence construction; an unsupported path is
+never sanitized into canonical evidence. This prevents API keys and similar
 secrets from entering canonical evidence through a URL. vLLM detailed native
 output is always classified as response-content-bearing. vLLM `0.26.0` has no
 per-request timeout option; v0.1 therefore promises only the total runtime and
@@ -309,17 +312,21 @@ and derives six closed controls covering local plan order, exact membership,
 observed schedule, declared fingerprint difference, complete and equal
 observed-v1 environment, and outcome coverage and semantics.
 
-All controls must be `SATISFIED` for `COMPARABLE`. Any failure produces
-`INCOMPARABLE` and the schema requires every outcome, arm summary, paired
-difference, and estimate to be absent. A comparable estimate is the Decimal
-arithmetic mean of equal-weight candidate-minus-baseline run-pair differences,
-rounded half-even to six places. Separate request populations are never pooled.
+Before those controls can authorize outcome arithmetic, all run IDs must be
+distinct, every member must be `CUSTOMER_ELIGIBLE`, and the planned arms and
+member bundles must share one non-null ExitSpec contract digest. All controls
+must then be `SATISFIED` for `COMPARABLE`. Any failure produces `INCOMPARABLE`
+and the schema requires every outcome, arm summary, paired difference, and
+estimate to be absent. A comparable estimate is the Decimal arithmetic mean of
+equal-weight candidate-minus-baseline run-pair differences, rounded half-even
+to six places. Separate request populations are never pooled.
 
 The plan digest and result digest hash exact canonical descriptor bytes under
 their respective domains and remain out of band. They anchor received bytes;
 they do not prove execution truth or chronology. `COMPARABLE` covers only the
-declared and observed `OBSERVED_V1_ALLOWLIST_ONLY` scope. It does not mean
-causal, significant, preferred, customer-eligible, or accepted. See
+declared and observed `OBSERVED_V1_ALLOWLIST_ONLY` scope. Customer eligibility
+is a prerequisite, not an acceptance conclusion; the state does not mean
+causal, significant, preferred, or accepted. See
 [CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md) and
 [ADR 0008](adr/0008-add-operator-attested-controlled-comparisons.md).
 

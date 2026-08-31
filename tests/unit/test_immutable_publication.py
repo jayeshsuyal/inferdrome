@@ -3,6 +3,7 @@
 import errno
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,40 @@ def test_existing_artifact_is_never_replaced(
         assert published.joinpath("descriptor.json").read_bytes() == (
             b'{"version":1}\n'
         )
+    finally:
+        _make_tree_writable(tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin syscall contract")
+def test_darwin_no_replace_has_no_check_then_rename_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        source = tmp_path / "source"
+        destination = tmp_path / "destination"
+        source.mkdir()
+        destination.mkdir()
+        source.joinpath("staged").write_bytes(b"staged")
+        source.joinpath("staged").chmod(0o400)
+        source.chmod(0o500)
+        destination_identity = os.lstat(destination)
+
+        def forbidden_path_operation(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("Darwin no-replace must be one exclusive syscall")
+
+        with monkeypatch.context() as context:
+            context.setattr(immutable.os, "lstat", forbidden_path_operation)
+            context.setattr(immutable.os, "rename", forbidden_path_operation)
+            with pytest.raises(FileExistsError):
+                immutable._rename_no_replace(source, destination)
+
+        final_destination = os.lstat(destination)
+        assert (final_destination.st_dev, final_destination.st_ino) == (
+            destination_identity.st_dev,
+            destination_identity.st_ino,
+        )
+        assert source.joinpath("staged").read_bytes() == b"staged"
     finally:
         _make_tree_writable(tmp_path)
 

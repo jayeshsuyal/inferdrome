@@ -188,15 +188,19 @@ instance admits at most eight concurrent snapshot/detail builds, matching the
 dashboard's bounded parallel route loading. A run snapshot receives 1,000
 verification units, a Trial Set snapshot 1,000 units, and a
 controlled-comparison snapshot 2,000 units; each receives at most 4 GiB of
-aggregate verified input and a cooperative 120-second monotonic work window. At
-the eight-operation concurrency ceiling, the combined reserved-input ceiling is
-32 GiB. Trial Set member verification is independently bounded to 100 members,
-4 GiB, and 120 seconds. Trial Set creation performs two prepublication member
-passes under one 200-unit, 4 GiB, 120-second budget and checks the deadline once
-more before creating or publishing the immutable directory. Controlled-
-comparison workspace checks charge the exact opened frozen-input and lifecycle-
-event bytes; lifecycle history is capped at the six events possible in the
-frozen no-retry state graph before sorting.
+aggregate verified input and a cooperative 120-second monotonic work window.
+All active builds share one 3,000-unit and 8 GiB aggregate work envelope, so
+eight lightweight route builds may coexist but cannot reserve 32 GiB or 16,000
+units. The shared envelope admits the intended largest page load: one 1,000-unit
+global run snapshot plus one 2,000-unit route-specific operation, with both
+retaining their 4 GiB individual ceiling. Completed operations release their
+shared reservations. Trial Set member verification is independently bounded to
+100 members, 4 GiB, and 120 seconds. Trial Set creation performs two
+prepublication member passes under one 200-unit, 4 GiB, 120-second budget and
+checks the deadline once more before creating or publishing the immutable
+directory. Controlled-comparison workspace checks charge the exact opened
+frozen-input and lifecycle-event bytes; lifecycle history is capped at the six
+events possible in the frozen no-retry state graph before sorting.
 Crossing a population, byte, unit, time, or concurrency ceiling aborts the whole
 new snapshot and returns a generic temporary-unavailability response; it never
 publishes a partial index.
@@ -204,15 +208,23 @@ publishes a partial index.
 Untouched native artifacts remain part of the evidence bundle, but the
 dashboard does not serve arbitrary bundle files. Response-bearing native output
 is excluded from browser projections by default. Request prompts, generated
-responses, producer stdout, producer stderr, environment values, invocation
-arguments, and endpoint metadata are displayed only through specific fields
-with documented redaction and sensitivity handling.
+responses, producer stdout, producer stderr, invocation arguments, and endpoint
+metadata are displayed only through specific fields with documented exclusion,
+projection, and sensitivity handling.
+
+Allowlisted environment field values are an intentional verbatim browser
+disclosure. The dashboard applies no secret-pattern or display-time redaction to
+those values, so operators must treat every captured value as public to anyone
+who can access the local dashboard and must never place credentials in an
+allowlisted field. This disclosure policy changes neither the sealed evidence
+bytes nor their sensitivity declaration.
 
 Attached-endpoint identity is projected only as a domain-separated SHA-256
 identity digest. The raw endpoint URL is not included in browser responses.
 
-Redaction is a display operation. It never rewrites the native artifact or
-downgrades the bundle's response-content sensitivity classification.
+Browser projection is read-only. Exclusion and display-only transformations,
+including attached-endpoint identity hashing, never rewrite native artifacts or
+downgrade the bundle's response-content sensitivity classification.
 
 Controlled-comparison detail exposes the frozen treatment, arm identities,
 source and execution digests, memberships, schedule, and analysis policy. It
@@ -380,10 +392,12 @@ status. A valid immutable result remains visible even if later local workspace
 inspection is blocked or unavailable; the dashboard never fabricates completed
 slots from the existence of that result.
 
-`COMPARABLE` means the declared and observed v1 controls matched. It does not
-prove chronology, authorship, causality, significance, preference, complete
-real-world confounder control, customer eligibility, or acceptance. The full
-contract is in [CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md).
+`COMPARABLE` means the declared and observed v1 controls matched and every arm
+member was customer-eligible under the same non-null ExitSpec contract
+identity. It still does not prove chronology, authorship, causality,
+significance, preference, complete real-world confounder control, or an
+ExitSpec acceptance outcome. The full contract is in
+[CONTROLLED_COMPARISONS.md](CONTROLLED_COMPARISONS.md).
 
 ## Pairwise comparison contract
 
@@ -397,6 +411,7 @@ Every pair receives one of three conceptual outcomes:
 
 The policy evaluates, where relevant:
 
+- distinct baseline and candidate run identities;
 - metric identifier and definition version;
 - unit, population, aggregation, rounding, and quantile method;
 - reducer and canonical-record contract versions;
@@ -405,11 +420,18 @@ The policy evaluates, where relevant:
 - model and tokenizer identity;
 - target and execution configuration;
 - environment completeness and material hardware or software context; and
-- evidence eligibility, integrity, and missing observations.
+- evidence eligibility, integrity, and missing observations; and
+- one matching, non-null ExitSpec contract identity.
 
 Comparability policy is versioned and deterministic. The UI cannot override an
 incomparable result. A context change being visible does not make it controlled,
 causal, or acceptable.
+
+Synthetic or otherwise ineligible evidence, a self-comparison, a missing
+ExitSpec identity, or differing ExitSpec identities always produces
+`INCOMPARABLE` and suppresses every delta. The dashboard does not relabel those
+cases as evidence-authoritative comparison; retrospective run-level exploration
+belongs only in explicitly `DESCRIPTIVE_ONLY` Trial Set views.
 
 The verified execution fingerprint is part of the comparison contract. Every
 fingerprint input is either checked as a hard measurement contract or projected
@@ -502,8 +524,8 @@ The initial dashboard contract is satisfied only when:
 2. A corrupted or inconsistent bundle exposes no usable measurement projection.
 3. Completed bundle bytes are unchanged by discovery and inspection.
 4. Arbitrary paths and unsafe filesystem nodes cannot be read through the UI.
-5. Browser responses obey documented projection, pagination, size, and redaction
-   limits.
+5. Browser responses obey documented projection, pagination, size, exclusion,
+   transformation, and verbatim-disclosure limits.
 6. Incomparable pairs show reasons and no deltas.
 7. Comparable deltas use neutral semantics and make no acceptance claim.
 8. Runs, Run detail, Compare, and Evidence work across empty, partial,
@@ -524,12 +546,16 @@ The initial dashboard contract is satisfied only when:
     `OPERATOR_ATTESTED` beside `PREDECLARED`.
 16. A controlled result is projected only after the plan, both Trial Sets, and
     every member bundle verify against retained digests.
-17. Any unsatisfied comparison control suppresses all outcome arithmetic.
-18. Comparable paired points preserve one equal-weight scalar per planned run
+17. Controlled outcome arithmetic additionally requires distinct run IDs,
+    customer-eligible evidence, and one non-null ExitSpec contract identity
+    shared by both planned arms and every member bundle.
+18. Any unsatisfied comparison or authority control suppresses all outcome
+    arithmetic.
+19. Comparable paired points preserve one equal-weight scalar per planned run
     and never imply confidence, causality, preference, or acceptance.
-19. Operational schedule progress labels a slot verified only after workspace,
+20. Operational schedule progress labels a slot verified only after workspace,
     bundle, arm, and prefix checks succeed.
-20. Progress remains GET-only local observation and never becomes execution
+21. Progress remains GET-only local observation and never becomes execution
     attestation, trusted chronology, or a substitute for a result artifact.
 
 ## Reviewed genuine-GPU dashboard
@@ -560,7 +586,8 @@ Install the optional Python runtime and locked frontend dependencies, then run
 the dedicated dashboard gate:
 
 ```bash
-uv sync --extra dev --extra dashboard
+uv lock --check
+uv sync --frozen --extra dev --extra dashboard
 npm ci --prefix frontend
 npm --prefix frontend exec -- playwright install chromium
 INFERDROME_PYTHON=.venv/bin/python ./scripts/dashboard_gate.sh
@@ -575,6 +602,9 @@ traffic remains GET-only. The gate then runs the dashboard's Python projection,
 discovery, pairwise comparison, Trial Set, controlled-comparison, API, packaging,
 and server tests. It also builds a wheel, installs that wheel into an isolated
 target, and proves the installed HTML, deep links, API, and referenced assets are
-served. The repository's existing
+served. The sdist, wheel, and target installation use uv 0.8.17 offline with the
+locked environment's build requirements; the environment is intentionally
+pip-less. CI uses its checksum-verified `.venv/bin/uv`, while local runs may use
+`INFERDROME_UV` or uv 0.8.17 on `PATH`. The repository's existing
 `scripts/engineering_gate.sh` remains the authoritative v0.1 evidence pipeline
 gate.

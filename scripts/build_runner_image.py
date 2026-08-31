@@ -23,6 +23,9 @@ RELEVANT_BUILD_INPUTS = (
     "pyproject.toml",
     "uv.lock",
     "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES",
     "src",
     # The wrapper is a trust-root input. It is checked for cleanliness but is
     # deliberately not copied into the Docker build context.
@@ -34,6 +37,9 @@ ARCHIVE_BUILD_INPUTS = (
     "pyproject.toml",
     "uv.lock",
     "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES",
     "src",
 )
 VLLM_RELEVANT_BUILD_INPUTS = (
@@ -42,6 +48,9 @@ VLLM_RELEVANT_BUILD_INPUTS = (
     "pyproject.toml",
     "uv.lock",
     "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES",
     "src",
     # The wrapper is checked as a trust-root input but is not archived.
     "scripts/build_runner_image.py",
@@ -52,6 +61,9 @@ VLLM_ARCHIVE_BUILD_INPUTS = (
     "pyproject.toml",
     "uv.lock",
     "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES",
     "src",
 )
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
