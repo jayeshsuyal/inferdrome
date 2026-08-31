@@ -23,7 +23,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -98,6 +98,8 @@ _PROSPECTIVE_POST_REMOTE_BUDGET_SECONDS = 300
 _PROSPECTIVE_MAX_PATH_DEPTH = 32
 _PROSPECTIVE_MAX_IMPLICIT_DIRECTORIES = 1_024
 _MAX_PRIVATE_KEY_BLOCK_BYTES = 1_048_576
+_MAX_PINNED_KNOWN_HOSTS_BYTES = 1_048_576
+_MAX_KEYSCAN_DIAGNOSTIC_BYTES = 8_192
 _PRIVATE_KEY_LABELS = (
     b"EC PRIVATE KEY",
     b"ENCRYPTED PRIVATE KEY",
@@ -290,6 +292,148 @@ def _run(
         suffix = f": {detail}" if detail else ""
         raise RemoteCaptureError(f"{label} failed{suffix}")
     return completed
+
+
+def _kill_isolated_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Immediately stop the isolated child group without retaining its output."""
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        with suppress(ProcessLookupError):
+            process.kill()
+
+
+def _run_bounded_capture(
+    arguments: Sequence[str],
+    *,
+    label: str,
+    stdout_limit: int,
+    stderr_limit: int,
+    timeout: float,
+    check: bool = True,
+) -> subprocess.CompletedProcess[bytes]:
+    """Capture a small local helper result with independent per-stream bounds.
+
+    The process is isolated so either stream exceeding its cap can terminate the
+    complete child group before unbounded bytes are retained or interpreted.
+    """
+
+    if (
+        not arguments
+        or any(
+            not isinstance(argument, str)
+            or not argument
+            or "\x00" in argument
+            or len(argument.encode("utf-8")) > 65_536
+            for argument in arguments
+        )
+    ):
+        raise RemoteCaptureError(f"{label} has an invalid argument vector")
+    if (
+        isinstance(stdout_limit, bool)
+        or not isinstance(stdout_limit, int)
+        or isinstance(stderr_limit, bool)
+        or not isinstance(stderr_limit, int)
+        or stdout_limit < 1
+        or stderr_limit < 1
+        or timeout <= 0
+    ):
+        raise RemoteCaptureError(f"{label} has invalid output bounds")
+    try:
+        executable = _local_executable(arguments[0])
+    except AdapterError:
+        raise RemoteCaptureError(f"{label} executable is unavailable") from None
+
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    completed_safely = False
+    try:
+        process = subprocess.Popen(
+            list(arguments),
+            executable=str(executable.path),
+            env=_local_child_environment(executable),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise OSError("capture pipes are unavailable")
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        stdout = bytearray()
+        stderr = bytearray()
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(arguments, timeout)
+            events = selector.select(remaining)
+            if not events:
+                raise subprocess.TimeoutExpired(arguments, timeout)
+            for key, _mask in events:
+                chunk = os.read(key.fileobj.fileno(), 65_536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                content, limit = (
+                    (stdout, stdout_limit)
+                    if key.data == "stdout"
+                    else (stderr, stderr_limit)
+                )
+                if len(content) + len(chunk) > limit:
+                    _kill_isolated_process_group(process)
+                    raise RemoteCaptureError(
+                        f"{label} exceeded its configured output byte limit"
+                    )
+                content.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(arguments, timeout)
+        returncode = process.wait(timeout=remaining)
+        captured_stdout = redact_subprocess_diagnostics(bytes(stdout))
+        captured_stderr = redact_subprocess_diagnostics(bytes(stderr))
+        completed = subprocess.CompletedProcess(
+            list(arguments),
+            returncode,
+            captured_stdout,
+            captured_stderr,
+        )
+        if check and completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            if len(detail) > 500:
+                detail = detail[:500] + "…"
+            suffix = f": {detail}" if detail else ""
+            raise RemoteCaptureError(f"{label} failed{suffix}")
+        completed_safely = True
+        return completed
+    except (OSError, subprocess.TimeoutExpired):
+        raise RemoteCaptureError(f"{label} could not complete") from None
+    finally:
+        if selector is not None:
+            selector.close()
+        if process is not None:
+            if not completed_safely:
+                _kill_isolated_process_group(process)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    with suppress(OSError):
+                        stream.close()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                _kill_isolated_process_group(process)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    raise RemoteCaptureError(
+                        f"{label} cleanup did not complete"
+                    ) from None
 
 
 def _local_executable(name: str) -> ExecutableIdentity:
@@ -1764,11 +1908,11 @@ def _prepare_pinned_known_hosts(
         content, _identity = prospective_handoff._read_regular_once(
             host_key_file,
             label="operator host-key file",
-            maximum_bytes=1_048_576,
+            maximum_bytes=_MAX_PINNED_KNOWN_HOSTS_BYTES,
         )
     else:
         host = _destination_host(destination)
-        result = _run(
+        result = _run_bounded_capture(
             [
                 "ssh-keyscan",
                 "-T",
@@ -1778,7 +1922,8 @@ def _prepare_pinned_known_hosts(
                 host,
             ],
             label="pinned SSH host-key scan",
-            capture_output=True,
+            stdout_limit=_MAX_PINNED_KNOWN_HOSTS_BYTES,
+            stderr_limit=_MAX_KEYSCAN_DIAGNOSTIC_BYTES,
             timeout=30,
         )
         content = result.stdout

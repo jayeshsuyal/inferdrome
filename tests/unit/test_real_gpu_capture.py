@@ -201,6 +201,112 @@ def test_mismatched_host_pin_fails_before_ssh_or_scp(
     assert calls == []
 
 
+def _write_synthetic_keyscan(
+    tmp_path: Path,
+    *,
+    stdout: bytes,
+    stderr: bytes = b"",
+    repeat: bool = False,
+    pid_path: Path | None = None,
+) -> Path:
+    executable = tmp_path / "synthetic-keyscan"
+    executable.write_text(
+        "#!" + sys.executable + "\n"
+        "import os\n"
+        + (
+            f"open({str(pid_path)!r}, 'w', encoding='ascii').write(str(os.getpid()))\n"
+            if pid_path is not None
+            else ""
+        )
+        + f"stdout = {stdout!r}\n"
+        + f"stderr = {stderr!r}\n"
+        + "while True:\n"
+        + "    if stdout:\n"
+        + "        os.write(1, stdout)\n"
+        + "    if stderr:\n"
+        + "        os.write(2, stderr)\n"
+        + "    if not "
+        + repr(repeat)
+        + ":\n"
+        + "        break\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
+def _assert_synthetic_child_is_reaped(pid: int) -> None:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    pytest.fail("bounded keyscan child was not terminated")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    (
+        (b"synthetic-keyscan-secret\n" * 4_096, b""),
+        (b"", b"API_KEY synthetic-keyscan-secret\n" * 1_024),
+    ),
+    ids=("stdout", "stderr"),
+)
+def test_live_keyscan_overflow_fails_before_host_pin_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: bytes,
+    stderr: bytes,
+) -> None:
+    pid_path = tmp_path / "flooding-keyscan.pid"
+    executable = _write_synthetic_keyscan(
+        tmp_path,
+        stdout=stdout,
+        stderr=stderr,
+        repeat=True,
+        pid_path=pid_path,
+    )
+    identity = remote.resolve_executable_identity(str(executable))
+    monkeypatch.setattr(remote, "_local_executable", lambda _name: identity)
+    known_hosts = tmp_path / "known-hosts"
+
+    with pytest.raises(remote.RemoteCaptureError, match="output byte limit") as caught:
+        remote._prepare_pinned_known_hosts(
+            destination="operator@host.example.test",
+            known_hosts=known_hosts,
+            host_key_file=None,
+            expected_digest=HOST_KEY_DIGEST,
+            port=22,
+        )
+
+    assert "synthetic-keyscan-secret" not in str(caught.value)
+    assert not known_hosts.exists()
+    _assert_synthetic_child_is_reaped(int(pid_path.read_text(encoding="ascii")))
+
+
+def test_live_keyscan_accepts_bounded_pinned_host_key_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = _write_synthetic_keyscan(tmp_path, stdout=HOST_KEY_BYTES)
+    identity = remote.resolve_executable_identity(str(executable))
+    monkeypatch.setattr(remote, "_local_executable", lambda _name: identity)
+    known_hosts = tmp_path / "known-hosts"
+
+    actual = remote._prepare_pinned_known_hosts(
+        destination="operator@host.example.test",
+        known_hosts=known_hosts,
+        host_key_file=None,
+        expected_digest=HOST_KEY_DIGEST,
+        port=22,
+    )
+
+    assert known_hosts.read_bytes() == HOST_KEY_BYTES
+    assert actual == "sha256:" + HOST_KEY_DIGEST
+
+
 def test_every_capture_mode_requires_an_explicit_host_key_pin() -> None:
     with pytest.raises(remote.RemoteCaptureError, match="host-key-sha256"):
         remote._validate_capture_mode(
