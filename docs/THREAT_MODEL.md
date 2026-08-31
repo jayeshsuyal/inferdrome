@@ -84,6 +84,17 @@ real evidence. The GPU template requires an operator-provided evidence PVC;
 without independent PVC and retrieval verification, persistence and evidence
 eligibility remain unknown.
 
+Before its first Docker or kind operation, the wrapper rejects non-empty
+ambient `DOCKER_HOST` and `DOCKER_CONTEXT` routing. Its first Docker operation
+is a bounded, read-only active-context inspection whose JSON result must be one
+canonical absolute `unix:///...` endpoint or the exact supported Windows
+Docker named pipe. It then pins that value for image inspection and every kind
+operation. A rejected or unreadable endpoint fails before image inventory,
+cluster inventory, creation, or deletion. This proves transport-local routing,
+not daemon identity, host identity, or physical locality: a local socket can
+still terminate at a proxy. The output remains `SYNTHETIC_ONLY` and
+evidence-ineligible.
+
 ### Docker Compose qualification boundary
 
 The qualification command is an operationally local orchestration boundary,
@@ -265,12 +276,14 @@ were detected. Prompts, generated responses, diagnostics, package inventory,
 absolute paths, a private host-network address, GPU UUIDs, and process
 identifiers remain present because the archive was not rewritten.
 
-The classification is `EXTERNAL_ONLY`. Missing owner-approved repository,
-model, workload, vLLM, and generated-output license decisions block
-`APPROVED_PUBLIC`, as does the absence of explicit owner publication approval.
-The raw archive therefore remains ignored and local. This technical result is
-not legal advice and does not replace the final human security and privacy
-review.
+The classification is `EXTERNAL_ONLY`. The archived review recorded that no
+owner-approved repository, model, workload, vLLM, or generated-output license
+decision was available at review time. The owner has since selected
+Apache-2.0 for Inferdrome itself, but that does not license the archive-bound
+model, workload, vLLM, or generated output and does not supply explicit owner
+publication approval. The recorded decision is unchanged, and the raw archive
+remains ignored and local. This technical result is not legal advice and does
+not replace the final human security and privacy review.
 
 ## Availability controls
 

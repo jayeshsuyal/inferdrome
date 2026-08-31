@@ -7,6 +7,8 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime
 
 COPY pyproject.toml uv.lock README.md ./
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
+COPY LICENSES ./LICENSES
 COPY src ./src
 
 # The application dependency graph is installed only from the committed lock.
@@ -41,6 +43,8 @@ WORKDIR /opt/inferdrome-source
 # runs `vllm serve`.
 USER root
 COPY --from=inferdrome-dependencies --chown=2000:0 /opt/inferdrome-runtime /opt/inferdrome-runtime
+COPY --from=inferdrome-dependencies /build/LICENSE /build/THIRD_PARTY_NOTICES.md /usr/share/licenses/inferdrome/
+COPY --from=inferdrome-dependencies /build/LICENSES /usr/share/licenses/inferdrome/LICENSES
 RUN test "$(/opt/inferdrome-runtime/bin/python -c 'from inferdrome import __version__; print(__version__)')" = "${INFERDROME_VERSION}" \
     && /opt/inferdrome-runtime/bin/python -c 'import jsonschema, pydantic, yaml, rfc8785' \
     && test "$(python -c 'import vllm; print(vllm.__version__.split("+")[0])')" = "0.26.0" \

@@ -12,6 +12,7 @@ post-tag.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
@@ -31,13 +32,52 @@ FINAL_TAG = "v0.1.0"
 CAPTURE_PRODUCER_COMMIT = "c08b46d9fbd87477f45d130aa3c63615937c4dc3"
 CheckStatus = Literal["PASS", "FAIL", "PENDING", "MANUAL", "SKIPPED"]
 
-LICENSE_FILENAMES: tuple[str, ...] = (
-    "LICENSE",
-    "LICENSE.md",
-    "LICENSE.txt",
-    "COPYING",
-    "COPYING.md",
-    "COPYING.txt",
+APACHE_LICENSE_EXPRESSION = "Apache-2.0"
+APACHE_LICENSE_SHA256 = (
+    "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+)
+REPOSITORY_URL = "https://github.com/jayeshsuyal/inferdrome"
+UV_LOCK_VERSION = 1
+UV_LOCK_REVISION = 3
+PROJECT_REQUIRES_PYTHON = ">=3.12,<3.13"
+LOCK_REQUIRES_PYTHON = "==3.12.*"
+PYPI_REGISTRY_URL = "https://pypi.org/simple"
+_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+_NORMALIZED_EXTRA_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FULL_ACTION_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PIP_INSTALL_COMMAND_RE = re.compile(
+    r"\bpip(?:3(?:\.\d+)*)?\s+install\b",
+    re.IGNORECASE,
+)
+_DIRECT_PIP_COMMAND_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:[\"']?\$(?:\{)?inferdrome_python(?:\})?[\"']?|"
+    r"(?:[^\s\"']+/)?python(?:3(?:\.\d+)*)?)\s+-m\s+pip\b"
+    r"|"
+    r"^\s*(?:[^\s\"']+/)?pip(?:3(?:\.\d+)*)?\s+(?:install|wheel)\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+_UV_SYNC_COMMAND_RE = re.compile(
+    r"(?:"
+    r"(?:\"\$(?:\{uv_bin\}|uv_bin)\"|\$(?:\{uv_bin\}|uv_bin)|"
+    r"\"[^\"\n]+/uv\"|(?:[A-Za-z0-9_.${}/-]+/)?uv)\s+sync\b"
+    r"|"
+    r"(?:\"[^\"\n]+/python(?:3(?:\.\d+)*)?\"|"
+    r"(?:[A-Za-z0-9_.${}/-]+/)?python(?:3(?:\.\d+)*)?)"
+    r"\s+-m\s+uv\s+sync\b"
+    r")"
+)
+_UV_LOCK_COMMAND_RE = re.compile(
+    r"(?:"
+    r"(?:\"\$(?:\{uv_bin\}|uv_bin)\"|\$(?:\{uv_bin\}|uv_bin)|"
+    r"\"[^\"\n]+/uv\"|(?:[A-Za-z0-9_.${}/-]+/)?uv)\s+lock\b"
+    r"|"
+    r"(?:\"[^\"\n]+/python(?:3(?:\.\d+)*)?\"|"
+    r"(?:[A-Za-z0-9_.${}/-]+/)?python(?:3(?:\.\d+)*)?)"
+    r"\s+-m\s+uv\s+lock\b"
+    r")"
 )
 
 
@@ -53,6 +93,28 @@ class ManualItem:
     name: str
     marker: str
     owner: str
+
+
+def _uv_sync_command_lines(text: str) -> tuple[str, ...]:
+    """Return non-comment lines that directly invoke ``uv sync``."""
+
+    return tuple(
+        line.strip()
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+        and _UV_SYNC_COMMAND_RE.search(line) is not None
+    )
+
+
+def _uv_lock_command_lines(text: str) -> tuple[str, ...]:
+    """Return non-comment lines that directly invoke ``uv lock``."""
+
+    return tuple(
+        line.strip()
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+        and _UV_LOCK_COMMAND_RE.search(line) is not None
+    )
 
 
 MANUAL_RELEASE_ITEMS: tuple[ManualItem, ...] = (
@@ -84,9 +146,11 @@ MANUAL_RELEASE_ITEMS: tuple[ManualItem, ...] = (
 )
 
 REQUIRED_FILES: tuple[str, ...] = (
+    "LICENSE",
     "README.md",
     "CONTRIBUTING.md",
     "pyproject.toml",
+    "uv.lock",
     "src/inferdrome/__init__.py",
     "docs/PRODUCT.md",
     "docs/ROADMAP.md",
@@ -95,7 +159,9 @@ REQUIRED_FILES: tuple[str, ...] = (
     ".github/workflows/ci.yml",
     "scripts/engineering_gate.sh",
     "scripts/dashboard_gate.sh",
+    "scripts/dashboard_package_gate.sh",
     "scripts/deployment_qualification_gate.sh",
+    "scripts/bootstrap_ci_uv.sh",
     "scripts/release_preflight.py",
 )
 
@@ -136,7 +202,7 @@ DOCUMENT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "docs/V0_1_DEFINITION_OF_DONE.md",
         (
             "separately owned",
-            "A repository license is selected and added",
+            "owner-selected Apache License 2.0 is added",
             "release-blocking",
         ),
     ),
@@ -182,9 +248,7 @@ def _read_package_versions(repository_root: Path) -> tuple[str | None, str | Non
 
 
 def _check_version(repository_root: Path, *, phase: Phase) -> Check:
-    expected_version = (
-        DEVELOPMENT_VERSION if phase == "candidate" else FINAL_VERSION
-    )
+    expected_version = DEVELOPMENT_VERSION if phase == "candidate" else FINAL_VERSION
     try:
         versions = _read_package_versions(repository_root)
     except (
@@ -335,32 +399,289 @@ def _resolve_phase(
     )
 
 
-def _check_license_artifact(repository_root: Path, *, phase: Phase) -> Check:
-    if phase == "candidate":
-        return Check(
-            "license-artifact",
-            "SKIPPED",
-            "not required for development candidates; owner decides the license",
-        )
-    present: list[str] = []
-    for filename in LICENSE_FILENAMES:
-        path = repository_root / filename
-        try:
-            if path.is_file() and not path.is_symlink() and path.stat().st_size > 0:
-                present.append(filename)
-        except OSError:
-            continue
-    if not present:
-        return Check(
-            "license-artifact",
-            "FAIL",
-            "final phases require one non-empty regular license artifact "
-            f"({', '.join(LICENSE_FILENAMES)})",
-        )
+def _check_license_artifact(repository_root: Path) -> Check:
+    license_path = repository_root / "LICENSE"
+    pyproject_path = repository_root / "pyproject.toml"
+    try:
+        if license_path.is_symlink() or not license_path.is_file():
+            raise ValueError("LICENSE must be a regular repository file")
+        license_bytes = license_path.read_bytes()
+        if hashlib.sha256(license_bytes).hexdigest() != APACHE_LICENSE_SHA256:
+            raise ValueError("LICENSE is not the canonical Apache License 2.0 file")
+        license_text = license_bytes.decode("utf-8")
+        if (
+            "Apache License\n                           Version 2.0, January 2004"
+            not in license_text
+            or "http://www.apache.org/licenses/" not in license_text
+            or "END OF TERMS AND CONDITIONS" not in license_text
+            or "APPENDIX: How to apply the Apache License to your work."
+            not in license_text
+        ):
+            raise ValueError("LICENSE is not the canonical Apache License 2.0 text")
+        with pyproject_path.open("rb") as source:
+            pyproject = tomllib.load(source)
+        project = pyproject.get("project")
+        if not isinstance(project, dict):
+            raise ValueError("pyproject project metadata is unavailable")
+        if project.get("license") != APACHE_LICENSE_EXPRESSION:
+            raise ValueError("project license expression must be Apache-2.0")
+        license_files = project.get("license-files")
+        if not isinstance(license_files, list) or "LICENSE" not in license_files:
+            raise ValueError("project license-files must include LICENSE")
+        project_urls = project.get("urls")
+        if not isinstance(project_urls, dict):
+            raise ValueError("project URLs are unavailable")
+        if project_urls.get("Repository") != REPOSITORY_URL:
+            raise ValueError("project Repository URL is not canonical")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        tomllib.TOMLDecodeError,
+    ) as error:
+        return Check("license-artifact", "FAIL", str(error))
     return Check(
         "license-artifact",
         "PASS",
-        f"final phase license artifact present: {present[0]}",
+        "canonical Apache-2.0 artifact and package metadata are present",
+    )
+
+
+def _normalize_package_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _canonical_project_requirement(value: object) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 256:
+        raise ValueError("project dependency metadata is invalid")
+    match = _PACKAGE_NAME_RE.match(value)
+    if match is None:
+        raise ValueError("project dependency metadata is invalid")
+    name = _normalize_package_name(match.group())
+    suffix = value[match.end() :]
+    if any(character.isspace() for character in suffix) or ";" in suffix:
+        raise ValueError("project dependency syntax requires lock-check support")
+    if suffix and suffix[0] not in "[<>=!~":
+        raise ValueError("project dependency metadata is invalid")
+    return name + suffix
+
+
+def _locked_requirement(value: object) -> tuple[str, str | None]:
+    if not isinstance(value, dict):
+        raise ValueError("locked project dependency metadata is invalid")
+    if set(value) - {"name", "specifier", "marker", "extras"}:
+        raise ValueError("locked project dependency metadata has unknown fields")
+    name = value.get("name")
+    if not isinstance(name, str) or _PACKAGE_NAME_RE.fullmatch(name) is None:
+        raise ValueError("locked project dependency name is invalid")
+    requirement = _normalize_package_name(name)
+    extras = value.get("extras", [])
+    if not isinstance(extras, list) or any(
+        not isinstance(extra, str) or _NORMALIZED_EXTRA_RE.fullmatch(extra) is None
+        for extra in extras
+    ):
+        raise ValueError("locked project dependency extras are invalid")
+    if extras:
+        requirement += "[" + ",".join(extras) + "]"
+    specifier = value.get("specifier", "")
+    if not isinstance(specifier, str) or any(
+        character.isspace() for character in specifier
+    ):
+        raise ValueError("locked project dependency specifier is invalid")
+    requirement += specifier
+    marker = value.get("marker")
+    if marker is not None and not isinstance(marker, str):
+        raise ValueError("locked project dependency marker is invalid")
+    return requirement, marker
+
+
+def _locked_dependency_names(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError("locked dependency inventory is invalid")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) - {"name", "marker"}:
+            raise ValueError("locked dependency inventory is invalid")
+        name = item.get("name")
+        if not isinstance(name, str) or _PACKAGE_NAME_RE.fullmatch(name) is None:
+            raise ValueError("locked dependency inventory is invalid")
+        if "marker" in item and not isinstance(item["marker"], str):
+            raise ValueError("locked dependency inventory is invalid")
+        names.append(_normalize_package_name(name))
+    return tuple(sorted(names))
+
+
+def _requirement_name(requirement: str) -> str:
+    match = _PACKAGE_NAME_RE.match(requirement)
+    if match is None:
+        raise ValueError("project dependency metadata is invalid")
+    return _normalize_package_name(match.group())
+
+
+def _check_python_dependency_lock(repository_root: Path) -> Check:
+    pyproject_path = repository_root / "pyproject.toml"
+    lock_path = repository_root / "uv.lock"
+    try:
+        if lock_path.is_symlink() or not lock_path.is_file():
+            raise ValueError("uv.lock must be a committed regular file")
+        with pyproject_path.open("rb") as source:
+            pyproject = tomllib.load(source)
+        with lock_path.open("rb") as source:
+            lock = tomllib.load(source)
+        if lock.get("version") != UV_LOCK_VERSION:
+            raise ValueError("uv.lock version is unsupported")
+        if lock.get("revision") != UV_LOCK_REVISION:
+            raise ValueError("uv.lock revision is unsupported")
+        project = pyproject.get("project")
+        build_system = pyproject.get("build-system")
+        if not isinstance(project, dict) or not isinstance(build_system, dict):
+            raise ValueError("pyproject dependency metadata is unavailable")
+        if project.get("requires-python") != PROJECT_REQUIRES_PYTHON:
+            raise ValueError("pyproject Python requirement drifted")
+        if lock.get("requires-python") != LOCK_REQUIRES_PYTHON:
+            raise ValueError("uv.lock Python requirement drifted")
+        project_name = project.get("name")
+        project_version = project.get("version")
+        if project_name != "inferdrome" or not isinstance(project_version, str):
+            raise ValueError("pyproject package identity is invalid")
+        dependencies = project.get("dependencies")
+        optional_dependencies = project.get("optional-dependencies")
+        build_requirements = build_system.get("requires")
+        if not isinstance(dependencies, list) or not isinstance(
+            optional_dependencies, dict
+        ):
+            raise ValueError("pyproject dependency metadata is invalid")
+        if not isinstance(build_requirements, list):
+            raise ValueError("pyproject build requirements are invalid")
+        expected_requirements = [
+            (_canonical_project_requirement(requirement), None)
+            for requirement in dependencies
+        ]
+        expected_optional_names: dict[str, tuple[str, ...]] = {}
+        for extra, requirements in optional_dependencies.items():
+            if (
+                not isinstance(extra, str)
+                or _NORMALIZED_EXTRA_RE.fullmatch(extra) is None
+                or not isinstance(requirements, list)
+            ):
+                raise ValueError("pyproject optional dependency metadata is invalid")
+            canonical_requirements = tuple(
+                _canonical_project_requirement(requirement)
+                for requirement in requirements
+            )
+            expected_requirements.extend(
+                (requirement, f"extra == '{extra}'")
+                for requirement in canonical_requirements
+            )
+            expected_optional_names[extra] = tuple(
+                sorted(
+                    _requirement_name(requirement)
+                    for requirement in canonical_requirements
+                )
+            )
+        dev_requirements = {
+            requirement
+            for requirement, marker in expected_requirements
+            if marker == "extra == 'dev'"
+        }
+        for requirement in build_requirements:
+            if _canonical_project_requirement(requirement) not in dev_requirements:
+                raise ValueError(
+                    "build requirements must be represented in the locked dev extra"
+                )
+        packages = lock.get("package")
+        if not isinstance(packages, list) or not packages:
+            raise ValueError("uv.lock package inventory is invalid")
+        roots = [
+            package
+            for package in packages
+            if isinstance(package, dict) and package.get("name") == "inferdrome"
+        ]
+        if len(roots) != 1:
+            raise ValueError("uv.lock must contain exactly one Inferdrome root")
+        root = roots[0]
+        if root.get("version") != project_version or root.get("source") != {
+            "editable": "."
+        }:
+            raise ValueError("uv.lock root identity is stale")
+        metadata = root.get("metadata")
+        if not isinstance(metadata, dict):
+            raise ValueError("uv.lock root metadata is unavailable")
+        actual_requirements = metadata.get("requires-dist")
+        if not isinstance(actual_requirements, list):
+            raise ValueError("uv.lock direct requirement metadata is unavailable")
+
+        def requirement_sort_key(item: tuple[str, str | None]) -> tuple[str, str]:
+            return item[0], item[1] or ""
+
+        if sorted(
+            (_locked_requirement(item) for item in actual_requirements),
+            key=requirement_sort_key,
+        ) != sorted(expected_requirements, key=requirement_sort_key):
+            raise ValueError("uv.lock is stale relative to pyproject dependencies")
+        expected_extras = tuple(optional_dependencies)
+        provides_extras = metadata.get("provides-extras")
+        if (
+            not isinstance(provides_extras, list)
+            or tuple(provides_extras) != expected_extras
+        ):
+            raise ValueError("uv.lock optional dependency metadata is stale")
+        if _locked_dependency_names(root.get("dependencies")) != tuple(
+            sorted(_requirement_name(requirement) for requirement in dependencies)
+        ):
+            raise ValueError("uv.lock root dependency inventory is stale")
+        locked_optional = root.get("optional-dependencies")
+        if not isinstance(locked_optional, dict) or set(locked_optional) != set(
+            expected_extras
+        ):
+            raise ValueError("uv.lock optional dependency inventory is stale")
+        for extra, expected_names in expected_optional_names.items():
+            if _locked_dependency_names(locked_optional.get(extra)) != expected_names:
+                raise ValueError("uv.lock optional dependency inventory is stale")
+        artifact_count = 0
+        registry_package_count = 0
+        for package in packages:
+            if not isinstance(package, dict):
+                raise ValueError("uv.lock package inventory is invalid")
+            if package is root:
+                continue
+            source = package.get("source")
+            if source != {"registry": PYPI_REGISTRY_URL}:
+                raise ValueError(
+                    "uv.lock contains an unsupported or unhashed package source"
+                )
+            registry_package_count += 1
+            artifacts: list[object] = []
+            if "sdist" in package:
+                artifacts.append(package["sdist"])
+            wheels = package.get("wheels", [])
+            if not isinstance(wheels, list):
+                raise ValueError("uv.lock wheel inventory is invalid")
+            artifacts.extend(wheels)
+            if not artifacts:
+                raise ValueError("uv.lock registry package has no hashed artifact")
+            for artifact in artifacts:
+                if not isinstance(artifact, dict):
+                    raise ValueError("uv.lock artifact metadata is invalid")
+                digest = artifact.get("hash")
+                url = artifact.get("url")
+                if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+                    raise ValueError("uv.lock contains an unhashed artifact")
+                if not isinstance(url, str) or not url.startswith("https://"):
+                    raise ValueError("uv.lock artifact URL is not HTTPS")
+                artifact_count += 1
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        tomllib.TOMLDecodeError,
+    ) as error:
+        return Check("python-dependency-lock", "FAIL", str(error))
+    return Check(
+        "python-dependency-lock",
+        "PASS",
+        f"uv.lock matches project metadata; {registry_package_count} registry "
+        f"packages expose {artifact_count} SHA-256-bound artifacts",
     )
 
 
@@ -468,22 +789,247 @@ def _check_ci_gate_inventory(repository_root: Path) -> Check:
     except (OSError, UnicodeError) as error:
         return Check("ci-gate-inventory", "FAIL", f"could not read workflow: {error}")
 
-    required_jobs = (
-        "  engineering:",
-        "  deployment-qualification:",
-        "  dashboard:",
-    )
-    missing = tuple(job for job in required_jobs if job not in workflow)
+    required_jobs = ("engineering", "deployment-qualification", "dashboard")
+    missing = tuple(job for job in required_jobs if f"  {job}:" not in workflow)
     if missing:
         return Check(
             "ci-gate-inventory",
             "FAIL",
             "workflow is missing jobs: " + ", ".join(missing),
         )
+    if "pull_request_target:" in workflow:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "workflow must not use pull_request_target",
+        )
+    permission_blocks = re.findall(r"(?m)^\s*permissions:\s*$", workflow)
+    if (
+        len(permission_blocks) != 1
+        or re.search(r"(?m)^permissions:\n  contents: read\s*$", workflow) is None
+        or re.search(r"(?m)^\s*[^#\s][^:\n]*:\s*write\s*$", workflow) is not None
+    ):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "workflow permissions must remain contents: read",
+        )
+    for match in re.finditer(r"(?m)^\s*uses:\s*([^\s#]+)", workflow):
+        invocation = match.group(1)
+        if invocation.startswith("./"):
+            continue
+        if "@" not in invocation:
+            return Check(
+                "ci-gate-inventory",
+                "FAIL",
+                f"workflow action {invocation} is not pinned to a full commit SHA",
+            )
+        action, reference = invocation.rsplit("@", maxsplit=1)
+        if _FULL_ACTION_SHA_RE.fullmatch(reference) is None:
+            return Check(
+                "ci-gate-inventory",
+                "FAIL",
+                f"workflow action {action} is not pinned to a full commit SHA",
+            )
+    if _PIP_INSTALL_COMMAND_RE.search(workflow) is not None:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "workflow must not install Python dependencies through pip",
+        )
+    if "--editable" in workflow or "cache-dependency-path: pyproject.toml" in workflow:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "workflow must not replace the locked Python environment",
+        )
+    if _uv_sync_command_lines(workflow):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "workflow must not run uv sync outside the frozen CI bootstrap",
+        )
+    if _uv_lock_command_lines(workflow):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "workflow must not run uv lock outside the checked CI bootstrap",
+        )
+
+    job_bodies: dict[str, str] = {}
+    for index, job in enumerate(required_jobs):
+        body = workflow.split(f"  {job}:", maxsplit=1)[1]
+        if index + 1 < len(required_jobs):
+            body = body.split(f"  {required_jobs[index + 1]}:", maxsplit=1)[0]
+        job_bodies[job] = body
+    expected_bootstrap = {
+        "engineering": "./scripts/bootstrap_ci_uv.sh --extra dev",
+        "deployment-qualification": "./scripts/bootstrap_ci_uv.sh --extra dev",
+        "dashboard": ("./scripts/bootstrap_ci_uv.sh --extra dev --extra dashboard"),
+    }
+    for job, body in job_bodies.items():
+        required_fragments = (
+            "cache-dependency-path: uv.lock",
+            expected_bootstrap[job],
+            ".venv/bin/python",
+            *(
+                ("INFERDROME_UV: .venv/bin/uv",)
+                if job == "dashboard"
+                else ()
+            ),
+        )
+        missing_fragments = tuple(
+            fragment for fragment in required_fragments if fragment not in body
+        )
+        if missing_fragments:
+            return Check(
+                "ci-gate-inventory",
+                "FAIL",
+                f"{job} job is missing locked Python controls: "
+                + ", ".join(missing_fragments),
+            )
+        if body.index(expected_bootstrap[job]) > body.index(".venv/bin/python"):
+            return Check(
+                "ci-gate-inventory",
+                "FAIL",
+                f"{job} job does not sync before using the locked environment",
+            )
+    try:
+        bootstrap = (repository_root / "scripts/bootstrap_ci_uv.sh").read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeError) as error:
+        return Check(
+            "ci-gate-inventory", "FAIL", f"could not read uv bootstrap: {error}"
+        )
+    if _PIP_INSTALL_COMMAND_RE.search(bootstrap) is not None:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "CI uv bootstrap must not install Python dependencies through pip",
+        )
+    expected_lock = '"$uv_bin" lock --check'
+    if _uv_lock_command_lines(bootstrap) != (expected_lock,):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "CI uv bootstrap must contain exactly one uv lock --check command",
+        )
+    expected_sync = '"$uv_bin" sync --frozen --no-install-project "$@"'
+    if _uv_sync_command_lines(bootstrap) != (expected_sync,):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "CI uv bootstrap must contain exactly one frozen uv sync command",
+        )
+    bootstrap_markers = (
+        'readonly uv_version="0.8.17"',
+        'readonly uv_archive_sha256="920cbcaad514cc185634f6f0dcd71df5e8f4ee4456d'
+        '440a22e0f8c0f142a8203"',
+        "https://github.com/astral-sh/uv/releases/download/${uv_version}/",
+        "sha256sum --check --strict",
+        'export UV_CACHE_DIR="${pip_cache_root%/}/inferdrome-uv"',
+        '[[ "$("$uv_bin" --version)" == "uv $uv_version" ]]',
+        expected_lock,
+        expected_sync,
+        'locked_python=".venv/bin/python"',
+        'if "$locked_python" -m pip --version >/dev/null 2>&1; then',
+        'locked_uv=".venv/bin/uv"',
+        'cmp -s -- "$uv_bin" "$locked_uv"',
+        'install -m 0755 -- "$uv_bin" "$locked_uv"',
+        '[[ "$("$locked_uv" --version)" == "uv $uv_version" ]]',
+    )
+    if any(marker not in bootstrap for marker in bootstrap_markers):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "CI uv bootstrap is not exact-version and checksum pinned",
+        )
+    if bootstrap.index(expected_lock) > bootstrap.index(expected_sync):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "CI uv bootstrap must check lock freshness before frozen sync",
+        )
+    for marker in bootstrap_markers[-6:]:
+        if bootstrap.index(marker) < bootstrap.index(expected_sync):
+            return Check(
+                "ci-gate-inventory",
+                "FAIL",
+                "CI must establish its pip-less uv handoff after frozen sync",
+            )
+
+    try:
+        dashboard_gate = (repository_root / "scripts/dashboard_gate.sh").read_text(
+            encoding="utf-8"
+        )
+        package_gate = (
+            repository_root / "scripts/dashboard_package_gate.sh"
+        ).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            f"could not read dashboard packaging gates: {error}",
+        )
+    package_gate_invocation = (
+        '"$repository_root/scripts/dashboard_package_gate.sh"'
+    )
+    if dashboard_gate.count(package_gate_invocation) != 1:
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "dashboard gate must invoke the uv-native package gate exactly once",
+        )
+    if (
+        _DIRECT_PIP_COMMAND_RE.search(dashboard_gate) is not None
+        or _DIRECT_PIP_COMMAND_RE.search(package_gate) is not None
+    ):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "dashboard gates must not invoke a pip executable or Python pip module",
+        )
+    package_lines = package_gate.splitlines()
+    required_package_lines = (
+        ('"$inferdrome_uv" build \\', 2),
+        ('"$inferdrome_uv" pip install \\', 1),
+        ("  --offline \\", 3),
+        ("  --no-python-downloads \\", 3),
+        ('  --cache-dir "$uv_cache_root" \\', 3),
+        ("  --sdist \\", 1),
+        ("  --wheel \\", 1),
+        ("  --no-build-isolation \\", 2),
+        ('  --python "$inferdrome_python" \\', 3),
+        ('  --out-dir "$source_dist_root" \\', 1),
+        ('  --out-dir "$wheel_dist_root" \\', 1),
+        ("  --no-index \\", 1),
+        ("  --no-deps \\", 1),
+        ("  --no-build \\", 1),
+        ("  --link-mode copy \\", 1),
+        ('  --target "$install_root" \\', 1),
+    )
+    if (
+        any(
+            package_lines.count(line) != expected_count
+            for line, expected_count in required_package_lines
+        )
+        or len(re.findall(r"\bpip\s+install\b", package_gate, re.IGNORECASE))
+        != 1
+        or 'case "$uv_reported_version" in' not in package_gate
+        or '"uv 0.8.17" | "uv 0.8.17 ("*")")' not in package_gate
+        or '"$repository_root/scripts/verify_dashboard_install.py"' not in package_gate
+    ):
+        return Check(
+            "ci-gate-inventory",
+            "FAIL",
+            "dashboard package gate is not exact-version, offline, and uv-native",
+        )
     return Check(
         "ci-gate-inventory",
         "PASS",
-        "engineering, deployment qualification, and dashboard jobs are defined",
+        "all three jobs use full-SHA actions and one lock-keyed, pip-less uv "
+        "environment",
     )
 
 
@@ -612,7 +1158,8 @@ def _run_preflight_for_phase(
     checks.extend(
         (
             _check_version(repository_root, phase=resolved_phase),
-            _check_license_artifact(repository_root, phase=resolved_phase),
+            _check_license_artifact(repository_root),
+            _check_python_dependency_lock(repository_root),
         )
     )
     checks.extend(

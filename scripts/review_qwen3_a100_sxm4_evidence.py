@@ -57,6 +57,9 @@ DEFAULT_OUTPUT_DIRECTORY = (
 CAPTURE_PRODUCER_COMMIT = "a02bfd7c3f8bd0f734da0e84d476bcfa905fec4b"
 CAPABILITY_PROFILE_COMMIT = "6cb774d210940073347f9045bb15611aa9e9cf27"
 PUBLICATION_REVIEW_COMMIT: str | None = None
+# Frozen input from the exact historical review. Later checkout state must not
+# rewrite the sealed publication review or imply archive publication rights.
+REPOSITORY_LICENSE_PRESENT_AT_REVIEW = False
 PUBLICATION_REVIEW_SHA256: str | None = (
     "sha256:f2616b08b526cb7346457dec585a98b5918e2c246b03faab9335a8a358e74208"
 )
@@ -330,11 +333,7 @@ def build_publication_review(
         or detectors["binary_or_non_utf8"]["path_count"]
         or detectors["unreviewed_oversized_files"]["path_count"]
     )
-    repository_has_license = any(
-        path.is_file()
-        for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "NOTICE*")
-        for path in REPOSITORY_ROOT.glob(pattern)
-    )
+    repository_has_license = REPOSITORY_LICENSE_PRESENT_AT_REVIEW
     unresolved = [
         "GENERATED_OUTPUT_LICENSE_REVIEW_REQUIRED",
         "MODEL_LICENSE_RECORD_NOT_RETAINED",

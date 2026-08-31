@@ -50,6 +50,8 @@ def test_publication_decision_table_is_fail_closed(
 def test_exact_archive_review_remains_external_only() -> None:
     review = _load("publication-review.json")
 
+    assert (REPOSITORY_ROOT / "LICENSE").is_file()
+    assert publication.REPOSITORY_LICENSE_PRESENT_AT_REVIEW is False
     assert review["publication_status"] == "EXTERNAL_ONLY"
     assert review["archive"]["sha256"] == publication.ARCHIVE_SHA256
     assert review["archive"]["compressed_size_bytes"] == 689_272

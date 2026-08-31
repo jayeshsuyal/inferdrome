@@ -16,7 +16,8 @@ preferred configuration.
 Prepare the local development runtime once:
 
 ```bash
-uv sync --extra dev --extra dashboard
+uv lock --check
+uv sync --frozen --extra dev --extra dashboard
 ```
 
 Then, from the repository root, run:
