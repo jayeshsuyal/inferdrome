@@ -1289,9 +1289,9 @@ def _require_checkout(expected_commit: str | None) -> str:
     return commit
 
 
-def _require_identity(path_text: str | None) -> Path | None:
+def _require_identity(path_text: str | None) -> Path:
     if path_text is None:
-        return None
+        raise RemoteCaptureError("capture requires explicit --identity-file")
     path = Path(path_text).expanduser().absolute()
     try:
         metadata = os.lstat(path)
@@ -1316,6 +1316,8 @@ def _ssh_options(
     known_hosts: Path,
     port: int,
 ) -> list[str]:
+    if identity is None:
+        raise RemoteCaptureError("SSH transport requires an explicit identity file")
     options = [
         "-F",
         "/dev/null",
@@ -1353,9 +1355,11 @@ def _ssh_options(
         "RequestTTY=no",
         "-p",
         str(port),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        str(identity),
     ]
-    if identity is not None:
-        options.extend(["-o", "IdentitiesOnly=yes", "-i", str(identity)])
     return options
 
 
@@ -1365,6 +1369,8 @@ def _scp_options(
     known_hosts: Path,
     port: int,
 ) -> list[str]:
+    if identity is None:
+        raise RemoteCaptureError("SCP transport requires an explicit identity file")
     options = _ssh_options(
         identity=identity,
         known_hosts=known_hosts,
@@ -2670,6 +2676,8 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
 
     if getattr(args, "host_key_sha256", None) is None:
         raise RemoteCaptureError("capture requires explicit --host-key-sha256")
+    if getattr(args, "identity_file", None) is None:
+        raise RemoteCaptureError("capture requires explicit --identity-file")
 
     if _prospective_requested(args):
         if (
@@ -2680,7 +2688,6 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
                 "prospective capture cannot use the managed Qwen3 profile"
             )
         required = {
-            "identity_file": getattr(args, "identity_file", None),
             "host_key_sha256": getattr(args, "host_key_sha256", None),
             "prospective_handoff_root": getattr(args, "prospective_handoff_root", None),
             "expected_handoff_manifest_sha256": getattr(
@@ -2773,10 +2780,6 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
     if getattr(args, "lambda_instance_type_name", None) is None:
         raise RemoteCaptureError(
             "Qwen3 capability capture requires --lambda-instance-type-name"
-        )
-    if args.identity_file is None:
-        raise RemoteCaptureError(
-            "Qwen3 capability capture requires an explicit SSH identity file"
         )
     if args.startup_timeout_seconds != _QWEN3_STARTUP_TIMEOUT_SECONDS:
         raise RemoteCaptureError(

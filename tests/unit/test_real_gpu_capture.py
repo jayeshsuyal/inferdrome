@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -131,8 +132,10 @@ def test_optional_host_identity_digest_is_strict_lowercase_hex() -> None:
 def test_ssh_transport_ignores_user_config_and_disables_forwarding(
     tmp_path: Path,
 ) -> None:
+    identity = tmp_path / "id_ed25519"
+    identity.write_bytes(b"synthetic private key")
     options = remote._ssh_options(
-        identity=tmp_path / "id_ed25519",
+        identity=identity,
         known_hosts=tmp_path / "known-hosts",
         port=22,
     )
@@ -148,15 +151,53 @@ def test_ssh_transport_ignores_user_config_and_disables_forwarding(
     assert "ProxyCommand=none" in rendered
     assert "ProxyJump=none" in rendered
     assert "IdentitiesOnly=yes" in rendered
-    scp_rendered = " ".join(
-        remote._scp_options(
+    scp_options = remote._scp_options(
+        identity=identity,
+        known_hosts=tmp_path / "known-hosts",
+        port=22,
+    )
+    scp_rendered = " ".join(scp_options)
+    assert "IdentityAgent=none" in scp_rendered
+    assert "StrictHostKeyChecking=yes" in scp_rendered
+    for transport_options in (options, scp_options):
+        assert transport_options.count("-i") == 1
+        identity_index = transport_options.index("-i")
+        assert transport_options[identity_index - 2 : identity_index + 2] == [
+            "-o",
+            "IdentitiesOnly=yes",
+            "-i",
+            str(identity),
+        ]
+
+
+@pytest.mark.parametrize("builder", [remote._ssh_options, remote._scp_options])
+def test_ssh_and_scp_options_reject_omitted_identity(
+    builder: Callable[..., list[str]],
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(remote.RemoteCaptureError, match="explicit identity"):
+        builder(
             identity=None,
             known_hosts=tmp_path / "known-hosts",
             port=22,
         )
-    )
-    assert "IdentityAgent=none" in scp_rendered
-    assert "StrictHostKeyChecking=yes" in scp_rendered
+
+
+def test_identity_file_must_be_explicit_regular_and_non_symlink(
+    tmp_path: Path,
+) -> None:
+    identity = tmp_path / "id_ed25519"
+    identity.write_bytes(b"synthetic private key")
+    identity_link = tmp_path / "identity-link"
+    identity_link.symlink_to(identity)
+
+    assert remote._require_identity(str(identity)) == identity
+    with pytest.raises(remote.RemoteCaptureError, match="explicit --identity-file"):
+        remote._require_identity(None)
+    with pytest.raises(remote.RemoteCaptureError, match="regular, non-symlink"):
+        remote._require_identity(str(tmp_path))
+    with pytest.raises(remote.RemoteCaptureError, match="regular, non-symlink"):
+        remote._require_identity(str(identity_link))
 
 
 def test_mismatched_host_pin_fails_before_ssh_or_scp(
@@ -315,6 +356,95 @@ def test_every_capture_mode_requires_an_explicit_host_key_pin() -> None:
                 prospective=False,
             )
         )
+
+
+@pytest.mark.parametrize(
+    "mode_arguments",
+    [
+        [],
+        ["--managed-capability-profile", remote._QWEN3_PROFILE_ID],
+        ["--prospective"],
+    ],
+    ids=["legacy", "managed-qwen3", "prospective"],
+)
+@pytest.mark.parametrize("dry_run", [False, True], ids=["live", "dry-run"])
+def test_every_capture_mode_rejects_omitted_identity_before_action(
+    mode_arguments: list[str],
+    dry_run: bool,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actions: list[str] = []
+    arguments = [
+        "capture_real_gpu_over_ssh.py",
+        "ubuntu@gpu.example.test",
+        "--host-key-sha256",
+        HOST_KEY_DIGEST,
+        *mode_arguments,
+    ]
+    if dry_run:
+        arguments.append("--dry-run")
+
+    monkeypatch.setattr(sys, "argv", arguments)
+    monkeypatch.setattr(remote, "_static_check", lambda: None)
+    monkeypatch.setattr(
+        remote,
+        "_require_checkout",
+        lambda _expected: actions.append("checkout") or COMMIT,
+    )
+    monkeypatch.setattr(
+        remote,
+        "_capture",
+        lambda *_args: actions.append("capture") or Path("/unexpected"),
+    )
+    monkeypatch.setattr(
+        remote,
+        "_dry_run",
+        lambda *_args: actions.append("dry-run"),
+    )
+
+    assert remote.main() == 1
+    assert "capture requires explicit --identity-file" in capsys.readouterr().err
+    assert actions == []
+
+
+def test_check_and_offline_finalization_do_not_require_identity(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remote, "_static_check", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["capture_real_gpu_over_ssh.py", "--check"])
+    assert remote.main() == 0
+    assert "real-GPU remote capture assets: OK" in capsys.readouterr().out
+
+    finalized: list[tuple[Path, str, Path]] = []
+    capture_path = tmp_path / "retained-capture"
+    guard_path = tmp_path / "retained-guard"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "capture_real_gpu_over_ssh.py",
+            "--resume-qwen3-finalization",
+            str(capture_path),
+            "--expected-commit",
+            COMMIT,
+            "--lambda-guard-state-directory",
+            str(guard_path),
+        ],
+    )
+    monkeypatch.setattr(remote, "_require_checkout", lambda _expected: COMMIT)
+    monkeypatch.setattr(
+        remote,
+        "_resume_qwen3_finalization",
+        lambda path, *, commit, guard_state_directory: finalized.append(
+            (path, commit, guard_state_directory)
+        ),
+    )
+
+    assert remote.main() == 0
+    assert finalized == [(capture_path, COMMIT, guard_path)]
 
 
 def test_local_helpers_drop_provider_and_agent_environment(
