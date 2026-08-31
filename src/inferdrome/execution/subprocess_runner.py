@@ -1,6 +1,8 @@
 """Bounded no-shell subprocess execution with exact diagnostic capture."""
 
 import os
+import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -12,7 +14,7 @@ from enum import StrEnum
 from math import isfinite
 from pathlib import Path
 from time import monotonic
-from typing import IO
+from typing import IO, Final
 
 from inferdrome.errors import AdapterError
 from inferdrome.execution.cancellation import (
@@ -22,6 +24,44 @@ from inferdrome.execution.cancellation import (
     terminate_bounded,
 )
 
+_EXECUTABLE_MAX_BYTES: Final = 17_179_869_184
+_TRUSTED_EXECUTABLE_SEARCH_PATH: Final = os.pathsep.join(
+    dict.fromkeys(
+        (
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            *os.defpath.split(os.pathsep),
+        )
+    )
+)
+_CREDENTIAL_ASSIGNMENT_PATTERN: Final = re.compile(
+    rb"(?i)([\"']?(?:(?:[a-z0-9]+[_-])*(?:api[ _-]?key|access[ _-]?key|"
+    rb"access[ _-]?key[ _-]?id|account[ _-]?key|auth[ _-]?config|jwt|"
+    rb"connection[ _-]?string|"
+    rb"(?:api|access|auth|bearer|refresh|session|id)[ _-]?token|"
+    rb"client[ _-]?secret|credentials?|password|passwd|private[ _-]?key|"
+    rb"secret(?:[ _-]?key)?)|authorization|proxy-authorization)[\"']?"
+    rb"(?:\s*(?:=|:)\s*|\s+))[^\r\n]+"
+)
+_GENERIC_TOKEN_ASSIGNMENT_PATTERN: Final = re.compile(
+    rb"(?i)([\"']?(?:(?:[a-z0-9]+[_-])+token|token)[\"']?"
+    rb"(?:\s*(?:=|:)\s*|\s+))(?=[^\r\n,;]{8,}(?:[\r\n,;]|$))[^\r\n,;]+"
+)
+_URL_CREDENTIAL_PATTERN: Final = re.compile(
+    rb"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"
+)
+_BEARER_CREDENTIAL_PATTERN: Final = re.compile(
+    rb"(?i)(\bbearer\s+)[a-z0-9._~+/-]{8,}={0,2}"
+)
+_QUERY_CREDENTIAL_PATTERN: Final = re.compile(
+    rb"(?i)([?&](?:api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|"
+    rb"client[_-]?secret|sig|signature|x-amz-(?:credential|signature|security-token)|"
+    rb"x-goog-(?:credential|signature))=)[^&#\s]+"
+)
+_PEM_PRIVATE_KEY_HEADER_PATTERN: Final = re.compile(
+    rb"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----"
+)
+
 
 class ProcessTermination(StrEnum):
     EXITED = "EXITED"
@@ -29,6 +69,20 @@ class ProcessTermination(StrEnum):
     DEADLINE = "DEADLINE"
     OUTPUT_LIMIT = "OUTPUT_LIMIT"
     ORPHANED_DESCENDANTS = "ORPHANED_DESCENDANTS"
+
+
+@dataclass(frozen=True)
+class ExecutableIdentity:
+    """One validated absolute executable identity reused across process starts."""
+
+    path: Path
+    device: int
+    inode: int
+    mode: int
+    links: int
+    size: int
+    modified_ns: int
+    changed_ns: int
 
 
 @dataclass(frozen=True)
@@ -43,6 +97,128 @@ class ProcessCapture:
 
 
 ProcessStartObserver = Callable[[int, datetime], None]
+
+
+def _executable_metadata(path: Path) -> tuple[int, int, int, int, int, int, int]:
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        raise AdapterError("subprocess executable is unavailable") from None
+    if (
+        path.is_symlink()
+        or not path.is_absolute()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink < 1
+        or not 1 <= metadata.st_size <= _EXECUTABLE_MAX_BYTES
+        or not os.access(path, os.X_OK)
+    ):
+        raise AdapterError("subprocess executable is unsafe")
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def resolve_executable_identity(
+    executable: str,
+    *,
+    search_path: str | None = None,
+) -> ExecutableIdentity:
+    """Resolve one executable once and bind its stable filesystem identity."""
+
+    if (
+        not isinstance(executable, str)
+        or not executable
+        or len(executable.encode("utf-8")) > 4_096
+        or any(ord(character) < 32 for character in executable)
+    ):
+        raise AdapterError("subprocess executable name is invalid")
+    candidate: str | None
+    if Path(executable).is_absolute():
+        candidate = executable
+    elif os.sep in executable or (os.altsep is not None and os.altsep in executable):
+        raise AdapterError("subprocess executable path must be absolute")
+    else:
+        candidate = shutil.which(
+            executable,
+            path=(
+                _TRUSTED_EXECUTABLE_SEARCH_PATH
+                if search_path is None
+                else search_path
+            ),
+        )
+    if candidate is None:
+        raise AdapterError("subprocess executable is unavailable")
+    try:
+        path = Path(candidate).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise AdapterError("subprocess executable is unavailable") from None
+    metadata = _executable_metadata(path)
+    return ExecutableIdentity(path, *metadata)
+
+
+def _validate_executable_identity(identity: ExecutableIdentity) -> None:
+    if not isinstance(identity, ExecutableIdentity):
+        raise AdapterError("subprocess executable identity is invalid")
+    if _executable_metadata(identity.path) != (
+        identity.device,
+        identity.inode,
+        identity.mode,
+        identity.links,
+        identity.size,
+        identity.modified_ns,
+        identity.changed_ns,
+    ):
+        raise AdapterError("subprocess executable identity changed")
+
+
+def _minimal_process_environment(
+    identity: ExecutableIdentity,
+    cwd: Path,
+) -> dict[str, str]:
+    environment = {
+        name: value
+        for name in ("LANG", "LC_ALL")
+        if (value := os.environ.get(name)) is not None
+        and len(value) <= 4_096
+        and "\x00" not in value
+    }
+    system_path = os.defpath.split(os.pathsep)
+    environment["PATH"] = os.pathsep.join(
+        dict.fromkeys((str(identity.path.parent), *system_path))
+    )
+    environment.update(
+        {
+            "HOME": str(cwd),
+            "TMPDIR": str(cwd),
+            "XDG_CACHE_HOME": str(cwd / ".cache"),
+            "XDG_CONFIG_HOME": str(cwd / ".config"),
+        }
+    )
+    return environment
+
+
+def redact_subprocess_diagnostics(content: bytes) -> bytes:
+    """Redact credential-shaped values before child diagnostics are retained."""
+
+    if _PEM_PRIVATE_KEY_HEADER_PATTERN.search(content) is not None:
+        return b"[REDACTED PRIVATE KEY]\n"
+    redacted = _URL_CREDENTIAL_PATTERN.sub(rb"\1[REDACTED]@", content)
+    redacted = _CREDENTIAL_ASSIGNMENT_PATTERN.sub(rb"\1[REDACTED]", redacted)
+    redacted = _GENERIC_TOKEN_ASSIGNMENT_PATTERN.sub(rb"\1[REDACTED]", redacted)
+    redacted = _BEARER_CREDENTIAL_PATTERN.sub(rb"\1[REDACTED]", redacted)
+    return _QUERY_CREDENTIAL_PATTERN.sub(rb"\1[REDACTED]", redacted)
+
+
+def diagnostics_contain_credentials(content: bytes) -> bool:
+    """Detect credential-shaped output without retaining or echoing its value."""
+
+    return redact_subprocess_diagnostics(content) != content
 
 
 class _ProcessGroup:
@@ -145,7 +321,7 @@ def _validate_process_inputs(
         raise AdapterError("subprocess working directory must be a real directory")
     if (
         isinstance(max_runtime_seconds, bool)
-        or not isinstance(max_runtime_seconds, (int, float))
+        or not isinstance(max_runtime_seconds, int | float)
         or not isfinite(max_runtime_seconds)
         or not 0 < max_runtime_seconds <= 86_400
     ):
@@ -179,6 +355,7 @@ def run_captured_process(
     environment: Mapping[str, str] | None = None,
     merge_stderr: bool = False,
     on_start: ProcessStartObserver | None = None,
+    executable_identity: ExecutableIdentity | None = None,
 ) -> ProcessCapture:
     """Run one process without a shell and bound time plus captured output."""
 
@@ -192,6 +369,11 @@ def run_captured_process(
     selected_cancellation = cancellation or CancellationToken()
     selected_cancellation.raise_if_requested()
     selected_policy = termination_policy or TerminationPolicy()
+    selected_executable = executable_identity or resolve_executable_identity(argv[0])
+    _validate_executable_identity(selected_executable)
+    selected_environment = _minimal_process_environment(selected_executable, cwd)
+    if environment is not None:
+        selected_environment.update(environment)
     started_at = datetime.now(UTC)
     started_monotonic = monotonic()
     stderr_target: int = subprocess.STDOUT if merge_stderr else subprocess.PIPE
@@ -199,7 +381,8 @@ def run_captured_process(
         process = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=(dict(environment) if environment is not None else None),
+            env=selected_environment,
+            executable=str(selected_executable.path),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=stderr_target,
@@ -284,13 +467,18 @@ def run_captured_process(
         termination = ProcessTermination.OUTPUT_LIMIT
 
     ended_at = datetime.now(UTC)
+    stdout = bytes(stdout_drain.content)
     stderr = b"" if merge_stderr else bytes(drains[1].content)
+    if diagnostics_contain_credentials(stdout) or diagnostics_contain_credentials(
+        stderr
+    ):
+        raise AdapterError("subprocess diagnostics contain credential-shaped output")
     return ProcessCapture(
         argv=argv,
         started_at=started_at,
         ended_at=ended_at,
         exit_status=exit_status,
         termination=termination,
-        stdout=bytes(stdout_drain.content),
+        stdout=stdout,
         stderr=stderr,
     )

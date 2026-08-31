@@ -40,8 +40,10 @@ from inferdrome.execution.cancellation import (
 )
 from inferdrome.execution.managed_vllm import snapshot_directory_identity
 from inferdrome.execution.subprocess_runner import (
+    ExecutableIdentity,
     ProcessCapture,
     ProcessTermination,
+    resolve_executable_identity,
 )
 from inferdrome.gpu_proof import (
     MANAGED_PROCESS_ENVIRONMENT_OVERRIDES,
@@ -66,6 +68,17 @@ FAILED_RUN_ID = "run-ffffffffffffffffffffffffffffffff"
 INTERRUPTED_RUN_ID = "run-abababababababababababababababab"
 MANAGED_RUN_ID = "run-34343434343434343434343434343434"
 MANAGED_GPU_UUID = "GPU-bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+
+
+def _fake_executable_identity(
+    directory: Path,
+    *,
+    name: str = "vllm",
+) -> ExecutableIdentity:
+    executable = directory / name
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    return resolve_executable_identity(str(executable))
 
 
 def test_fake_orchestrator_executes_seals_and_verifies(tmp_path: Path) -> None:
@@ -182,6 +195,12 @@ def test_attached_vllm_orchestrator_preserves_real_shape_without_network_or_gpu(
         "preflight_attached_endpoint",
         lambda _target: preflight,
     )
+    executable_identity = _fake_executable_identity(tmp_path)
+    monkeypatch.setattr(
+        orchestrator,
+        "resolve_executable_identity",
+        lambda *_args, **_kwargs: executable_identity,
+    )
 
     started_at = datetime(2026, 8, 6, 2, 0, tzinfo=UTC)
     ended_at = datetime(2026, 8, 6, 2, 1, tzinfo=UTC)
@@ -194,14 +213,16 @@ def test_attached_vllm_orchestrator_preserves_real_shape_without_network_or_gpu(
         stdout=b"0.26.0\n",
         stderr=b"",
     )
-    monkeypatch.setattr(
-        orchestrator,
-        "probe_vllm_version",
-        lambda **_kwargs: VllmVersionProbeCapture(
+    probe_kwargs: dict[str, object] = {}
+
+    def probe(**kwargs: object) -> VllmVersionProbeCapture:
+        probe_kwargs.update(kwargs)
+        return VllmVersionProbeCapture(
             process=version_process,
             observed_version="0.26.0",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(orchestrator, "probe_vllm_version", probe)
 
     spike_native_path = (
         REPOSITORY_ROOT
@@ -213,7 +234,10 @@ def test_attached_vllm_orchestrator_preserves_real_shape_without_network_or_gpu(
         / "benchmark-result.json"
     )
 
-    def execute(invocation: object, *_args: object, **_kwargs: object) -> object:
+    execute_kwargs: dict[str, object] = {}
+
+    def execute(invocation: object, *_args: object, **kwargs: object) -> object:
+        execute_kwargs.update(kwargs)
         metadata = dict(invocation.metadata)  # type: ignore[attr-defined]
         tokenizer_path = str(invocation.paths.tokenizer_path)  # type: ignore[attr-defined]
         native = json.loads(spike_native_path.read_bytes())
@@ -270,6 +294,8 @@ def test_attached_vllm_orchestrator_preserves_real_shape_without_network_or_gpu(
     )
     assert (capture_directory / "stderr.log").read_bytes() == b""
     assert (capture_directory / "exit-status.txt").read_bytes() == b"0\n"
+    assert probe_kwargs["executable_identity"] is executable_identity
+    assert execute_kwargs["executable_identity"] is executable_identity
 
 
 def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
@@ -298,6 +324,7 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
     model_path.mkdir()
     (model_path / "config.json").write_text("{}\n")
     tokenizer_path = REPOSITORY_ROOT / "spikes" / "vllm-0.26.0" / "tokenizer"
+    executable_identity = _fake_executable_identity(tmp_path)
     model_snapshot = snapshot_directory_identity(
         model_path,
         kind="model",
@@ -315,7 +342,7 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
         file_count=100,
         total_bytes=1_000_000,
         hash_policy="installed-wheel-files-v1",
-        executable_path="/opt/inferdrome-gpu/bin/vllm",
+        executable_path=str(executable_identity.path),
         executable_sha256=f"sha256:{'5' * 64}",
         source_wheel_filename=(
             "vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl"
@@ -414,6 +441,10 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
                 for item in MANAGED_PROCESS_ENVIRONMENT_OVERRIDES
             }
 
+        @property
+        def producer_executable_identity(self) -> ExecutableIdentity:
+            return executable_identity
+
         def assert_running(self) -> None:
             return None
 
@@ -441,14 +472,16 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
         stdout=b"0.26.0\n",
         stderr=b"",
     )
-    monkeypatch.setattr(
-        orchestrator,
-        "probe_vllm_version",
-        lambda **_kwargs: VllmVersionProbeCapture(
+    probe_kwargs: dict[str, object] = {}
+
+    def probe(**kwargs: object) -> VllmVersionProbeCapture:
+        probe_kwargs.update(kwargs)
+        return VllmVersionProbeCapture(
             process=version_process,
             observed_version="0.26.0",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(orchestrator, "probe_vllm_version", probe)
     spike_native_path = (
         REPOSITORY_ROOT
         / "spikes"
@@ -459,7 +492,10 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
         / "benchmark-result.json"
     )
 
-    def execute(invocation: object, *_args: object, **_kwargs: object) -> object:
+    execute_kwargs: dict[str, object] = {}
+
+    def execute(invocation: object, *_args: object, **kwargs: object) -> object:
+        execute_kwargs.update(kwargs)
         metadata = dict(invocation.metadata)  # type: ignore[attr-defined]
         tokenizer = str(invocation.paths.tokenizer_path)  # type: ignore[attr-defined]
         native = json.loads(spike_native_path.read_bytes())
@@ -529,6 +565,8 @@ def test_managed_vllm_orchestrator_seals_only_proof_backed_customer_evidence(
     assert (capture_directory / "server-termination.txt").read_bytes() == (
         b"CANCELLED\n"
     )
+    assert probe_kwargs["executable_identity"] is executable_identity
+    assert execute_kwargs["executable_identity"] is executable_identity
 
 
 def test_invalid_run_option_does_not_reserve_workspace(tmp_path: Path) -> None:

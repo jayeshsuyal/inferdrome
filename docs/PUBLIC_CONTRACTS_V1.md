@@ -129,8 +129,11 @@ YAML shape. Defaults, producer identity, bounded execution limits, target,
 traffic, measurement semantics, sensitivity, and acceptance linkage are
 explicit before measurement starts.
 
-Attached endpoint URLs permit only `http` or `https` and reject user
-information, query strings, and fragments. This prevents API keys and similar
+Attached endpoint URLs are root base URLs only: they permit `http` or `https`,
+accept an optional trailing slash, and reject every other path, user
+information, query string, and fragment. Rejection happens before workspace,
+request, argument-vector, or evidence construction; an unsupported path is
+never sanitized into canonical evidence. This prevents API keys and similar
 secrets from entering canonical evidence through a URL. vLLM detailed native
 output is always classified as response-content-bearing. vLLM `0.26.0` has no
 per-request timeout option; v0.1 therefore promises only the total runtime and

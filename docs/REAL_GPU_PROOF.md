@@ -114,6 +114,8 @@ destination, inspect the exact workflow without making a network connection:
 .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   <user@gpu-host> \
   --identity-file <private-key-path> \
+  --host-key-file <pinned-known-hosts-path> \
+  --host-key-sha256 <sha256-of-exact-known-hosts-bytes> \
   --expected-commit "$(git rev-parse HEAD)" \
   --dry-run
 ```
@@ -124,6 +126,8 @@ Then start the capture by removing `--dry-run`:
 .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   <user@gpu-host> \
   --identity-file <private-key-path> \
+  --host-key-file <pinned-known-hosts-path> \
+  --host-key-sha256 <sha256-of-exact-known-hosts-bytes> \
   --expected-commit "$(git rev-parse HEAD)"
 ```
 
@@ -164,6 +168,8 @@ export LAMBDA_CLOUD_API_KEY
 .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   ubuntu@<public-ip> \
   --identity-file <private-key-path> \
+  --host-key-file <pinned-known-hosts-path> \
+  --host-key-sha256 <sha256-of-exact-known-hosts-bytes> \
   --expected-commit "$(git rev-parse HEAD)" \
   --lambda-hourly-rate-usd 1.29 \
   --max-cost-usd 2.58 \
@@ -183,12 +189,19 @@ The controller fails before SSH if the guard cannot be armed. It reports the
 detached watchdog as armed only after the child publishes a validated readiness
 record; startup failure removes false armed state. The watchdog holds the
 buffered termination deadline and calls Lambda's termination API even if the
-capture controller fails. On macOS it runs beneath `caffeinate -i` so idle sleep
-does not silently suspend the timer. The controller also calls the same
-termination API immediately in `finally` after success, failure, or
-interruption, polls until the instance is absent or terminal, and only then
-disarms the fallback. The API key remains in process environment, never in the
-watchdog argument vector or its operational receipts.
+capture controller fails. On macOS a separately launched, fixed
+`/usr/bin/caffeinate -w <watchdog-pid>` helper inhibits idle sleep without
+receiving the provider key. Every guarded mode translates SIGINT/SIGTERM into
+the same `finally` cleanup; signals are deferred while watchdog ownership is
+being established or provider finalization is already in progress. The
+controller calls the termination API immediately, polls until the instance is
+absent or terminal, and only then disarms the fallback. If confirmation fails,
+it retains an immutable `UNRESOLVED` state record, does not disarm the
+watchdog, and records whether that watchdog is still live; failure to retain
+that state is itself surfaced as a hard error. The API key is limited to the
+provider controller and direct Python
+watchdog child. It is absent from Git/SSH/SCP/GPU/producer and sleep-inhibitor
+children, argument vectors, operational receipts, and child logs.
 
 This is a strong local circuit breaker, not an exact billing cap or availability
 guarantee. Provider billing granularity, API latency, network loss, or laptop
@@ -215,16 +228,20 @@ The controller:
 9. independently extracts and verifies the archive in an isolated system
    temporary directory, including the single bundle, all four comparison
    bundles, both Trial Sets, the frozen plan, and the comparison result; and
-10. when Lambda protection is configured, confirms provider termination on
-    every controller exit path.
+10. when Lambda protection is configured, attempts and polls provider
+    termination after normal completion, handled failures, SIGINT, and SIGTERM,
+    retaining explicit unresolved state with the fallback watchdog armed if
+    confirmation fails. Abrupt controller death relies on that detached
+    watchdog.
 
-The first SSH connection uses `StrictHostKeyChecking=accept-new` with a
-capture-specific `known_hosts` file. Its digest is retained in the local
-retrieval receipt. This is SSH trust-on-first-use, not cloud hardware
-attestation. If the provider exposes the expected host key through a separate
-authenticated channel, pass the lowercase hex digest of the exact
-capture-specific `known_hosts` bytes as `--host-key-sha256` to replace that
-trust-on-first-use check with an explicit pin.
+Before any SSH or SCP process starts, the controller materializes exact
+`known_hosts` bytes from `--host-key-file` (recommended) or `ssh-keyscan` and
+requires their raw-byte SHA-256 to match the independently retained lowercase
+`--host-key-sha256` pin. Every handshake, including the first, uses
+`StrictHostKeyChecking=yes`, the capture-specific `UserKnownHostsFile`, and
+`IdentityAgent=none`; the user's SSH agent, configuration, proxy, forwarding,
+and environment are unavailable. This authenticates the pinned SSH host key,
+not cloud hardware.
 
 Successful captures are retained beneath the ignored
 `gpu-proof-retrieved/` directory. A failed host run is explicitly labeled
@@ -490,16 +507,18 @@ Managed server diagnostics remain in the private run workspace, while the
 launch and allowlisted proof needed for offline verification are sealed in the
 producer invocation artifact.
 
-The managed server, version probe, and benchmark also share one process
-environment policy. Inferdrome removes every inherited `VLLM_*` override and
-forces `VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`,
+The managed server, version probe, benchmark, and `nvidia-smi` probes share
+validated absolute executable identities and one minimal process environment.
+Inferdrome does not inherit compiler, loader, cloud, SSH-agent, or arbitrary
+shell variables. It supplies fixed standard CUDA/tool/library locations on the
+Linux proof host, a run-private `HOME`, and forces
+`VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`,
 `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_OFFLINE=1`, and
-`TRANSFORMERS_OFFLINE=1`. It also places the directory containing the verified
-vLLM executable first on `PATH`, so child tools such as `ninja` resolve from the
-same prepared Python environment before any ambient host tool. The policy
-identifier and exact overrides are sealed with the server proof so ambient
-vLLM configuration cannot silently alter the demonstration or enable producer
-telemetry.
+`TRANSFORMERS_OFFLINE=1`. The verified vLLM directory and fixed system/CUDA
+directories form `PATH`; the operator's ambient `PATH`, `LD_LIBRARY_PATH`,
+`CC`, and `CXX` are ignored. The policy identifier and exact overrides are
+sealed with the server proof. Credential-shaped producer output fails closed
+before sealing rather than silently changing the upstream bytes.
 
 ## Run the proof and rejection demonstrations
 

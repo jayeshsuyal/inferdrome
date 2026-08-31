@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import errno
 import json
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -262,25 +264,17 @@ def test_detached_watchdog_keeps_api_key_out_of_command_and_records(
 ) -> None:
     transport = FakeTransport([{"data": [_instance()]}])
     client = guard.LambdaCloudClient(API_KEY, transport=transport)
-    captured: dict[str, Any] = {}
+    calls: list[tuple[list[str], dict[str, Any]]] = []
 
     def fake_popen(arguments: list[str], **kwargs: Any) -> FakeProcess:
-        captured["arguments"] = arguments
-        captured["environment"] = kwargs["env"]
-        _publish_ready_from_command(arguments)
+        calls.append((arguments, kwargs))
+        if "--ready-path" in arguments:
+            _publish_ready_from_command(arguments)
         return FakeProcess(arguments)
 
     monkeypatch.setenv(guard.API_KEY_ENVIRONMENT_VARIABLE, API_KEY)
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-enter-watchdog")
     monkeypatch.setattr(guard.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(
-        guard.shutil,
-        "which",
-        lambda executable: (
-            "/usr/bin/caffeinate" if executable == "caffeinate" else None
-        ),
-    )
-
     handle = guard.arm_watchdog(
         "203.0.113.10",
         hourly_rate_usd=Decimal("1.29"),
@@ -293,16 +287,31 @@ def test_detached_watchdog_keeps_api_key_out_of_command_and_records(
         now=lambda: NOW,
     )
 
-    command = " ".join(captured["arguments"])
+    watchdog_arguments, watchdog_options = calls[0]
+    inhibitor_arguments, inhibitor_options = calls[1]
+    command = " ".join(watchdog_arguments)
     records = "".join(
         path.read_text(encoding="utf-8")
         for path in handle.state_directory.glob("*.json")
     )
-    assert captured["arguments"][:2] == ["/usr/bin/caffeinate", "-i"]
+    assert watchdog_arguments[0] == sys.executable
+    assert watchdog_options["executable"] == str(
+        guard.resolve_executable_identity(sys.executable).path
+    )
     assert API_KEY not in command
     assert API_KEY not in records
-    assert captured["environment"][guard.API_KEY_ENVIRONMENT_VARIABLE] == API_KEY
-    assert "UNRELATED_SECRET" not in captured["environment"]
+    assert watchdog_options["env"][guard.API_KEY_ENVIRONMENT_VARIABLE] == API_KEY
+    assert "UNRELATED_SECRET" not in watchdog_options["env"]
+    assert watchdog_options["env"]["HOME"] == "/nonexistent"
+    assert "PATH" not in watchdog_options["env"]
+    assert watchdog_options["env"]["TMPDIR"] == "/nonexistent"
+    assert watchdog_options["env"]["XDG_CONFIG_HOME"] == "/nonexistent"
+    assert watchdog_options["stdout"] == subprocess.DEVNULL
+    assert watchdog_options["stderr"] == subprocess.DEVNULL
+    assert inhibitor_arguments == ["/usr/bin/caffeinate", "-w", "4321"]
+    assert guard.API_KEY_ENVIRONMENT_VARIABLE not in inhibitor_options["env"]
+    assert inhibitor_options["stdout"] == subprocess.DEVNULL
+    assert inhibitor_options["stderr"] == subprocess.DEVNULL
     assert handle.receipt_path.name == "termination-receipt.json"
     assert handle.ready_path.name == "watchdog-ready.json"
     armed = json.loads(
@@ -640,6 +649,28 @@ def test_confirmed_termination_still_stops_watchdog_when_receipt_fails(
         guard.terminate_guarded_instance(handle)
 
     assert stopped == [process]
+
+
+def test_unconfirmed_provider_termination_keeps_watchdog_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeProcess([])
+    handle = SimpleNamespace(
+        client=SimpleNamespace(
+            terminate_and_wait=lambda _instance_id: (_ for _ in ()).throw(
+                guard.LambdaGuardError("synthetic provider failure")
+            )
+        ),
+        instance=SimpleNamespace(instance_id=INSTANCE_ID),
+        process=process,
+    )
+    stopped: list[FakeProcess] = []
+    monkeypatch.setattr(guard, "_stop_watchdog", stopped.append)
+
+    with pytest.raises(guard.LambdaGuardError, match="synthetic provider failure"):
+        guard.terminate_guarded_instance(handle)
+
+    assert stopped == []
 
 
 def test_watchdog_shutdown_treats_process_lookup_race_as_stopped(
