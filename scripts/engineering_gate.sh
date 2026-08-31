@@ -33,6 +33,7 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/watch_lambda_gpu_capacity.py \
   --gpu-tier h100-80gb-pcie \
   --check
+"$inferdrome_python" scripts/review_gpu_evidence_publication.py --check-records
 "$inferdrome_python" scripts/review_qwen3_gpu_evidence_publication.py --check-records
 "$inferdrome_python" scripts/review_qwen3_a100_sxm4_evidence.py --check-records
 qwen3_evidence_archive="$repository_root/gpu-proof-retrieved/20260821T203940Z-058482df4737-68efd4f4/capture.tar.gz"

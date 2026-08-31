@@ -32,13 +32,16 @@ result, independently reverifies the result, prints the claim boundary, and
 opens the loopback dashboard at `http://127.0.0.1:8787`. Press Ctrl-C to stop
 the server.
 
-The controlled result is intentionally `INCOMPARABLE`. Five controls close,
-while `COMPLETE_EQUAL_OBSERVED_ENVIRONMENT` remains unsatisfied because the
-synthetic producer has no locally verified distribution digest. Inferdrome
+The controlled result is intentionally `INCOMPARABLE`. Four controls close.
+`COMPLETE_EQUAL_OBSERVED_ENVIRONMENT` remains unsatisfied because the synthetic
+producer has no locally verified distribution digest, and
+`OUTCOME_COVERAGE_AND_SEMANTICS` remains unsatisfied because synthetic evidence
+with no ExitSpec identity cannot authorize outcome arithmetic. Inferdrome
 therefore publishes no controlled outcome estimate. This is a useful
 fail-closed demonstration, not a broken run. The separate pairwise Compare view
-still shows clearly labeled descriptive arithmetic and configuration diffs; it
-does not upgrade the controlled result.
+also returns `INCOMPARABLE`, shows the bounded eligibility/contract reasons and
+configuration context, and suppresses all deltas. Neutral run-level exploration
+remains available only in explicitly `DESCRIPTIVE_ONLY` Trial Set views.
 
 The second invocation does not create replacement runs. It requires the
 retained plan digest, verifies the existing immutable artifacts, and reuses all
@@ -68,10 +71,11 @@ Use a five-minute walkthrough:
    and eligibility as separate facts.
 4. Open **Trial sets** to show equal-per-run variation without pooling requests.
 5. Open **Comparisons** and the local product demo plan to show the predeclared
-   treatment, frozen schedule, five satisfied controls, the unsatisfied complete
-   environment control, and the withheld controlled estimate.
-6. Open **Compare two runs** to show the clearly labeled pairwise descriptive
-   metric and configuration diff, including baseline/candidate swapping.
+   treatment, frozen schedule, four satisfied controls, the unsatisfied
+   `COMPLETE_EQUAL_OBSERVED_ENVIRONMENT` and
+   `OUTCOME_COVERAGE_AND_SEMANTICS` controls, and the withheld estimate.
+6. Open **Compare two runs** to show the explicit synthetic/missing-contract
+   incompatibility reasons, configuration context, and suppressed deltas.
 7. Close on the boundary: the same workflow accepts real managed-GPU bundles,
    but this recording contains no genuine GPU receipt.
 
@@ -109,11 +113,12 @@ Use this as a read-aloud guide while moving through the routes above:
 3. **1:45 — Descriptive versus controlled comparison.** “Compare two runs is a
    descriptive, non-causal check. The controlled comparison adds a predeclared
    treatment, frozen schedule, equal per-run weighting, and explicit controls.
-   This demo intentionally ends `INCOMPARABLE`: five controls are satisfied, but
-   the complete equal observed environment control is not. Inferdrome therefore
-   withholds the controlled outcome estimate while still showing the immutable
-   schedule and bounded reasons. That is a successful fail-closed behavior, not
-   a winner or a recommendation.”
+   This demo intentionally ends `INCOMPARABLE`: four controls are satisfied,
+   while `COMPLETE_EQUAL_OBSERVED_ENVIRONMENT` and
+   `OUTCOME_COVERAGE_AND_SEMANTICS` are not.
+   Inferdrome therefore withholds the controlled outcome estimate while still
+   showing the immutable schedule and bounded reasons. That is a successful
+   fail-closed behavior, not a winner or a recommendation.”
 
 4. **2:45 — Deployment layer.** “Docker changes the packaging and runtime
    boundary: the runner image and serving runtime remain separate, and the local

@@ -134,9 +134,12 @@ verifying the existing artifact.
 
 These controls automate the workflow but do not upgrade its claims:
 `PREDECLARED` remains `OPERATOR_ATTESTED`, Trial Sets remain `RETROSPECTIVE`,
-synthetic runs remain `SYNTHETIC_ONLY`, and `COMPARABLE` remains a neutral
-point-estimate eligibility state rather than causality, preference, or
-acceptance.
+and synthetic or otherwise ineligible runs remain non-authoritative. They can
+support explicitly `DESCRIPTIVE_ONLY` Trial Set exploration, but they cannot
+produce `COMPARABLE` controlled outcomes. An authoritative point estimate also
+requires one matching non-null ExitSpec contract identity across both planned
+arms and every member bundle; even then, `COMPARABLE` remains a neutral state
+rather than causality, preference, or acceptance.
 
 ## Result contract and controls
 
@@ -144,6 +147,14 @@ acceptance.
 Set digests. Result creation requires the operator to supply all three retained
 digests. Verification recalculates every member bundle before deriving the
 result.
+
+Before outcome arithmetic, the service applies an additional fail-closed
+authority prerequisite without changing the frozen v1 schema. All baseline and
+candidate run IDs must be distinct, every member must be `CUSTOMER_ELIGIBLE`,
+and both planned arms plus every member bundle must bind the same non-null
+ExitSpec contract digest. Failure leaves the result `INCOMPARABLE`, marks the
+existing outcome-coverage control unsatisfied, and publishes no arm means,
+paired differences, estimate, or outcome rows.
 
 Six controls are closed and ordered:
 
@@ -167,10 +178,11 @@ All six `SATISFIED` states produce `COMPARABLE`. Any `UNSATISFIED` state
 produces `INCOMPARABLE`. The result stores only closed unsatisfied-control codes;
 authoritative free-form result prose is not part of the contract.
 
-`COMPARABLE` is deliberately narrow: the declared and observed v1 controls
-matched. `OBSERVED_V1_ALLOWLIST_ONLY` means unobserved real-world confounders
-may still exist. Neither term means causal, significant, preferred, accepted,
-or customer-eligible.
+`COMPARABLE` is deliberately narrow: the authority prerequisite and declared
+and observed v1 controls matched. `OBSERVED_V1_ALLOWLIST_ONLY` means unobserved
+real-world confounders may still exist. Customer eligibility is a prerequisite,
+not an acceptance conclusion; neither term means causal, significant,
+preferred, or accepted.
 
 ## Deterministic estimator
 

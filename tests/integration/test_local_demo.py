@@ -64,7 +64,8 @@ def test_local_demo_prepares_then_reuses_the_exact_verified_schedule(
         assert first["schema_version"] == "inferdrome.local-demo-summary.v1"
         assert first_comparison["status"] == "INCOMPARABLE"
         assert first_comparison["unsatisfied_controls"] == [
-            "COMPLETE_EQUAL_OBSERVED_ENVIRONMENT"
+            "COMPLETE_EQUAL_OBSERVED_ENVIRONMENT",
+            "OUTCOME_COVERAGE_AND_SEMANTICS",
         ]
         assert first_comparison["planned_run_count"] == 4
         assert len(first_comparison["executed_run_ids"]) == 4

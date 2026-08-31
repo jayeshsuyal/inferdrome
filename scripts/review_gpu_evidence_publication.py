@@ -43,6 +43,12 @@ ARCHIVE_SHA256 = (
 CAPTURE_MANIFEST_SHA256 = (
     "sha256:1d4ea1e251c5a84a104333ab8579d580838701a70cc38b64b68c88f66266e0cb"
 )
+PUBLICATION_REVIEW_SHA256 = (
+    "sha256:7f1b3be53695e9e3a2009eb28ce008bb2486ae882e52364e26bece770a6d33ff"
+)
+HANDOFF_MANIFEST_SHA256 = (
+    "sha256:bc90ac7d0044b32556ce8e78181635f2a2d218e3de7a793062e5dc2b3d6cd4bd"
+)
 RUN_ID = "run-533c9f5f783958fb6077069a6c577144"
 BUNDLE_DIGEST = (
     "sha256:bae216f2165eb06ae2e0f14d3cd852f8e0ebb381bf1f68c71072769b3c0c1675"
@@ -74,6 +80,12 @@ EXECUTION_FINGERPRINT = (
 SOURCE_SPEC_DIGEST = (
     "sha256:4b43fc218cb4d4a260dc70b92ff3a263fbbec2e8224f6f11cb748128931dce97"
 )
+MANAGED_PROFILE_SHA256 = (
+    "sha256:9d03b5d0822ed829ddbfa4c87c75530885b9ad51ee2c0cb7c5e31a075996fe34"
+)
+LOCAL_PROOF_SCHEMA_SHA256 = (
+    "sha256:cf83bbdea2bba4c30b8f0e2c5f34f34a4077501207881fdbdab021571d665547"
+)
 EXPECTED_REQUEST_COUNT = 100
 EXPECTED_SUCCESS_COUNT = 100
 EXPECTED_TTFT_P95_NS = 14_797_213
@@ -92,8 +104,6 @@ PROPOSED_FIXTURE_LOCATION = (
 _MAX_REVIEW_FILE_BYTES = 16_777_216
 _MAX_REVIEW_TOTAL_BYTES = 268_435_456
 _MAX_PATH_EXAMPLES = 8
-_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _GPU_UUID = re.compile(r"\bGPU-[0-9A-Za-z-]{8,120}\b")
 _ABSOLUTE_PATH = re.compile(
     r"(?<![A-Za-z0-9:])/(?:tmp|usr|opt|home|var|Users)/[^\s\"'<>]*"
@@ -124,7 +134,21 @@ class PublicationReviewError(RuntimeError):
     """The exact archive could not be completely and safely reviewed."""
 
 
-def _strict_json(path: Path) -> dict[str, Any]:
+def _contains_floating_number(value: Any) -> bool:
+    if isinstance(value, float):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_floating_number(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_floating_number(item) for item in value)
+    return False
+
+
+def _strict_json(
+    path: Path,
+    *,
+    require_deterministic_render: bool = False,
+) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
 
@@ -147,6 +171,14 @@ def _strict_json(path: Path) -> dict[str, Any]:
         raise PublicationReviewError(f"{path.name} is not strict JSON") from None
     if not isinstance(parsed, dict):
         raise PublicationReviewError(f"{path.name} is not a JSON object")
+    if require_deterministic_render and (
+        _contains_floating_number(parsed)
+        or text
+        != json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ):
+        raise PublicationReviewError(
+            f"{path.name} is not deterministic committed JSON"
+        )
     return parsed
 
 
@@ -911,27 +943,107 @@ def build_handoff_manifest(
     }
 
 
-def validate_handoff_manifest(value: Any) -> bool:
-    """Validate the exact immutable anchors of the committed handoff manifest."""
+def _is_exact_closed_record(
+    value: Any,
+    *,
+    fields: set[str],
+    sha256: str,
+) -> bool:
+    """Reject any root or nested field/value outside one frozen record."""
 
-    if not isinstance(value, dict) or set(value) != {
-        "acceptance_boundary",
-        "archive",
-        "capability_profile",
-        "comparison_context",
-        "contract_binding",
-        "fixture_delivery",
-        "history_provenance",
-        "publication_review",
-        "rejection_facts",
-        "run",
-        "schema_version",
-    }:
+    try:
+        return bool(
+            isinstance(value, dict)
+            and set(value) == fields
+            and not _contains_floating_number(value)
+            and canonical_document_sha256(value) == sha256
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_publication_review(value: Any) -> bool:
+    """Validate every field and immutable identity in the committed A10 review."""
+
+    if not _is_exact_closed_record(
+        value,
+        fields={
+            "archive",
+            "archive_integrity_and_safety",
+            "content_review",
+            "decision_reasons",
+            "detector_results",
+            "findings",
+            "license_review",
+            "owner_publication_approval_required",
+            "publication_status",
+            "raw_archive_modified",
+            "review_limits",
+            "review_method",
+            "schema_version",
+            "scope",
+        },
+        sha256=PUBLICATION_REVIEW_SHA256,
+    ):
+        return False
+    try:
+        licenses = value["license_review"]
+        return bool(
+            value["schema_version"]
+            == "inferdrome.gpu-evidence-publication-review.v1"
+            and value["scope"] == "exact_archive_bytes"
+            and value["archive"]
+            == {
+                "compressed_size_bytes": ARCHIVE_SIZE_BYTES,
+                "sha256": ARCHIVE_SHA256,
+            }
+            and value["archive_integrity_and_safety"]["capture_manifest_sha256"]
+            == CAPTURE_MANIFEST_SHA256
+            and value["archive_integrity_and_safety"]["isolated_verification"] is True
+            and value["publication_status"] == "EXTERNAL_ONLY"
+            and value["owner_publication_approval_required"] is True
+            and value["raw_archive_modified"] is False
+            and all(
+                licenses[field] is False
+                for field in (
+                    "generated_output_license_resolved",
+                    "model_license_resolved",
+                    "repository_license_present",
+                    "vllm_license_resolved",
+                    "workload_publication_license_resolved",
+                )
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def validate_handoff_manifest(value: Any) -> bool:
+    """Validate every field and immutable identity in the committed A10 handoff."""
+
+    if not _is_exact_closed_record(
+        value,
+        fields={
+            "acceptance_boundary",
+            "archive",
+            "capability_profile",
+            "comparison_context",
+            "contract_binding",
+            "fixture_delivery",
+            "history_provenance",
+            "publication_review",
+            "rejection_facts",
+            "run",
+            "schema_version",
+        },
+        sha256=HANDOFF_MANIFEST_SHA256,
+    ):
         return False
     try:
         history = value["history_provenance"]
         profile = value["capability_profile"]
         review = value["publication_review"]
+        run = value["run"]
         return bool(
             value["schema_version"] == "inferdrome.gpu-evidence-handoff.v1"
             and value["archive"]
@@ -941,33 +1053,77 @@ def validate_handoff_manifest(value: Any) -> bool:
                 "compressed_size_bytes": ARCHIVE_SIZE_BYTES,
                 "sha256": ARCHIVE_SHA256,
             }
-            and value["run"]["run_id"] == RUN_ID
-            and value["run"]["bundle_digest"] == BUNDLE_DIGEST
-            and value["run"]["workload_sha256"] == WORKLOAD_SHA256
-            and value["run"]["ttft"]["independently_expected_value"]
-            == EXPECTED_TTFT_P95_NS
+            and value["comparison_context"]
+            == {
+                "comparison_plan_digest": (
+                    "sha256:25dd7f87d02572b6c3f992014944241595e8240d7301a58cba55da11eae1c60e"
+                ),
+                "comparison_plan_id": (
+                    "comparison-plan-5f4abd9b24ab717e910b166c5b793038"
+                ),
+                "comparison_result_digest": (
+                    "sha256:6943eb577b368f036b4536626076d7b7a4f23caf8df7f839e5a1248dbaae774a"
+                ),
+                "comparison_result_id": (
+                    "comparison-result-5f4abd9b24ab717e910b166c5b793038"
+                ),
+                "status": "COMPARABLE",
+            }
+            and run["run_id"] == RUN_ID
+            and run["bundle_digest"] == BUNDLE_DIGEST
+            and run["execution_fingerprint"] == EXECUTION_FINGERPRINT
+            and run["metric_definitions_digest"] == METRIC_DEFINITIONS_DIGEST
+            and run["request_plan_digest"] == REQUEST_PLAN_DIGEST
+            and run["source_spec_digest"] == SOURCE_SPEC_DIGEST
+            and run["workload_sha256"] == WORKLOAD_SHA256
+            and run["model"] == {"id": MODEL_ID, "revision": MODEL_REVISION}
+            and run["tokenizer"] == {"id": MODEL_ID, "revision": MODEL_REVISION}
+            and run["request_population"]
+            == {
+                "measured_requests": EXPECTED_REQUEST_COUNT,
+                "successful_requests": EXPECTED_SUCCESS_COUNT,
+                "ttft_samples": EXPECTED_SUCCESS_COUNT,
+            }
+            and run["ttft"]["independently_expected_value"] == EXPECTED_TTFT_P95_NS
             and profile["commit"] == CAPABILITY_PROFILE_COMMIT
-            and _DIGEST.fullmatch(profile["managed_profile"]["sha256"])
-            and _DIGEST.fullmatch(profile["local_gpu_proof_schema"]["sha256"])
-            and review["publication_status"]
-            in {"APPROVED_PUBLIC", "EXTERNAL_ONLY", "REJECTED"}
-            and _DIGEST.fullmatch(review["sha256"])
+            and profile["managed_profile"]
+            == {
+                "identity": "inferdrome.managed-vllm-0.26-evidence-profile.v1",
+                "path": "profiles/v1/managed-vllm-0.26-evidence-profile.json",
+                "sha256": MANAGED_PROFILE_SHA256,
+            }
+            and profile["local_gpu_proof_schema"]
+            == {
+                "identity": "inferdrome.local-gpu-proof.v1",
+                "path": "profiles/v1/local-gpu-proof.schema.json",
+                "sha256": LOCAL_PROOF_SCHEMA_SHA256,
+            }
+            and review
+            == {
+                "owner_publication_approval_required": True,
+                "path": "evidence/gpu/2026-08-20-a10/publication-review.json",
+                "publication_status": "EXTERNAL_ONLY",
+                "sha256": PUBLICATION_REVIEW_SHA256,
+            }
             and history["capture_producer_commit"] == CAPTURE_PRODUCER_COMMIT
             and history["capability_profile_commit"] == CAPABILITY_PROFILE_COMMIT
-            and (
-                history["publication_review_commit"] is None
-                or _COMMIT.fullmatch(history["publication_review_commit"])
-            )
+            and history["publication_review_commit"] == PUBLICATION_REVIEW_COMMIT
             and history["eventual_merge_commit"] is None
-            and value["contract_binding"]["producer_exitspec_contract_digest"]
-            is None
+            and value["contract_binding"]["producer_exitspec_contract_digest"] is None
             and value["contract_binding"]["chronology"] == "RETROSPECTIVE"
-            and value["acceptance_boundary"]["inferdrome_acceptance_verdict"]
-            is None
+            and value["contract_binding"]["required_consumer_mode"]
+            == "EXTERNAL_RECEIPT_BINDING"
+            and value["acceptance_boundary"]["inferdrome_acceptance_verdict"] is None
+            and value["acceptance_boundary"]["current_status"]
+            == "PENDING_EXTERNAL_EXITSPEC"
             and value["fixture_delivery"]["publication_state"]
             == "BLOCKED_PENDING_OWNER_APPROVAL"
+            and value["fixture_delivery"]["required_sha256"] == ARCHIVE_SHA256
+            and value["rejection_facts"]["synthetic"]["run_id"] == SYNTHETIC_RUN_ID
+            and value["rejection_facts"]["synthetic"]["verified_eligibility"]
+            == "SYNTHETIC_ONLY"
         )
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         return False
 
 
@@ -1023,12 +1179,83 @@ def render_outputs(archive: Path) -> dict[Path, bytes]:
         raise PublicationReviewError(
             "isolated publication review directory is unavailable"
         ) from None
-    if not validate_handoff_manifest(handoff):
-        raise PublicationReviewError("rendered handoff manifest failed validation")
+    if not validate_publication_review(review) or not validate_handoff_manifest(
+        handoff
+    ):
+        raise PublicationReviewError("rendered publication records failed validation")
     return {
         DEFAULT_OUTPUT_DIRECTORY / "handoff-manifest.json": _render(handoff),
         DEFAULT_OUTPUT_DIRECTORY / "publication-review.json": _render(review),
     }
+
+
+def _load_committed(name: str, *, directory: Path) -> dict[str, Any]:
+    return _strict_json(
+        directory / name,
+        require_deterministic_render=True,
+    )
+
+
+def check_committed_records(directory: Path | None = None) -> int:
+    """Validate the tracked A10 records without requiring the external archive."""
+
+    record_directory = DEFAULT_OUTPUT_DIRECTORY if directory is None else directory
+    try:
+        review = _load_committed(
+            "publication-review.json",
+            directory=record_directory,
+        )
+        handoff = _load_committed(
+            "handoff-manifest.json",
+            directory=record_directory,
+        )
+        managed_profile = _strict_json(
+            PROFILE_PATH,
+            require_deterministic_render=True,
+        )
+        local_proof_schema = _strict_json(
+            LOCAL_PROOF_SCHEMA_PATH,
+            require_deterministic_render=True,
+        )
+    except PublicationReviewError as error:
+        print(f"A10 publication records: {error}")
+        return 1
+
+    try:
+        review_digest = canonical_document_sha256(review)
+        valid = bool(
+            validate_publication_review(review)
+            and validate_handoff_manifest(handoff)
+            and review_digest == PUBLICATION_REVIEW_SHA256
+            and canonical_document_sha256(handoff) == HANDOFF_MANIFEST_SHA256
+            and handoff["publication_review"]["sha256"] == review_digest
+            and handoff["publication_review"]["publication_status"]
+            == review["publication_status"]
+            and handoff["publication_review"][
+                "owner_publication_approval_required"
+            ]
+            is review["owner_publication_approval_required"]
+            and handoff["archive"]["sha256"] == review["archive"]["sha256"]
+            and handoff["archive"]["compressed_size_bytes"]
+            == review["archive"]["compressed_size_bytes"]
+            and handoff["archive"]["capture_manifest_sha256"]
+            == review["archive_integrity_and_safety"]["capture_manifest_sha256"]
+            and canonical_document_sha256(managed_profile)
+            == MANAGED_PROFILE_SHA256
+            and canonical_document_sha256(local_proof_schema)
+            == LOCAL_PROOF_SCHEMA_SHA256
+            and handoff["capability_profile"]["managed_profile"]["sha256"]
+            == MANAGED_PROFILE_SHA256
+            and handoff["capability_profile"]["local_gpu_proof_schema"]["sha256"]
+            == LOCAL_PROOF_SCHEMA_SHA256
+        )
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        print("A10 publication records are invalid or cross-identity drifted")
+        return 1
+    print("A10 publication records and cross-identities are valid")
+    return 0
 
 
 def _write_outputs(outputs: dict[Path, bytes]) -> int:
@@ -1065,16 +1292,24 @@ def _parse_args() -> argparse.Namespace:
         description="Review the exact A10 archive without rewriting it"
     )
     parser.add_argument("archive", nargs="?", default=str(DEFAULT_ARCHIVE))
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--check",
         action="store_true",
         help="fail when committed review or handoff bytes differ",
+    )
+    modes.add_argument(
+        "--check-records",
+        action="store_true",
+        help="validate committed metadata when the EXTERNAL_ONLY archive is absent",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    if args.check_records:
+        return check_committed_records()
     try:
         outputs = render_outputs(Path(args.archive))
     except (OSError, PublicationReviewError, capture.CaptureError) as error:

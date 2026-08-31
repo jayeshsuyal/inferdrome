@@ -3,7 +3,7 @@
 import json
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -421,3 +421,55 @@ def sealed_vllm_bundle(tmp_path: Path) -> Iterator[SealedVllmFixture]:
         yield fixture
     finally:
         _make_tree_writable(workspace.path)
+
+
+@pytest.fixture
+def emulated_customer_eligible_recalculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emulate an already-verified eligible descriptor for downstream gates."""
+
+    from inferdrome.trials import service as trial_service
+
+    original = trial_service.recalculate_bundle
+
+    def recalculate(*args: object, **kwargs: object) -> object:
+        analysis = original(*args, **kwargs)  # type: ignore[arg-type]
+        descriptor = analysis.verification.descriptor.model_copy(
+            update={"evidence_eligibility": EvidenceEligibility.CUSTOMER_ELIGIBLE}
+        )
+        return replace(
+            analysis,
+            verification=replace(
+                analysis.verification,
+                descriptor=descriptor,
+            ),
+        )
+
+    monkeypatch.setattr(trial_service, "recalculate_bundle", recalculate)
+
+
+@pytest.fixture
+def emulated_ineligible_recalculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emulate an explicitly INELIGIBLE verifier result downstream."""
+
+    from inferdrome.trials import service as trial_service
+
+    original = trial_service.recalculate_bundle
+
+    def recalculate(*args: object, **kwargs: object) -> object:
+        analysis = original(*args, **kwargs)  # type: ignore[arg-type]
+        descriptor = analysis.verification.descriptor.model_copy(
+            update={"evidence_eligibility": EvidenceEligibility.INELIGIBLE}
+        )
+        return replace(
+            analysis,
+            verification=replace(
+                analysis.verification,
+                descriptor=descriptor,
+            ),
+        )
+
+    monkeypatch.setattr(trial_service, "recalculate_bundle", recalculate)

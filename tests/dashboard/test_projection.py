@@ -7,7 +7,9 @@ from typing import Any
 import inferdrome.dashboard.projection as projection_module
 from inferdrome.bundle import recalculate_bundle as authoritative_recalculate
 from inferdrome.dashboard.projection import display_measurement, load_run_detail
+from inferdrome.domain.environment import EnvironmentFieldName
 from inferdrome.domain.metrics import Unit
+from inferdrome.environment_capture import capture_fake_environment
 
 
 def _measurement_map(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], Any]:
@@ -154,6 +156,39 @@ def test_attached_endpoint_is_exposed_only_as_an_identity_digest(
     assert endpoint not in serialized
     assert context["target.endpoint_identity"].startswith("sha256:")
     assert len(context["target.endpoint_identity"]) == len("sha256:") + 64
+
+
+def test_allowlisted_environment_values_are_intentional_verbatim_disclosures(
+    tmp_path: Any,
+    run_fake_bundle: Callable[..., Any],
+    monkeypatch: Any,
+    as_public_json: Callable[[object], Any],
+) -> None:
+    disclosed_value = "api_key=sk-test-sensitive-shaped-but-not-a-secret"
+
+    def capture_with_sensitive_shaped_value(**kwargs: Any) -> object:
+        environment = capture_fake_environment(**kwargs)
+        fields = tuple(
+            field.model_copy(update={"value": disclosed_value})
+            if field.name is EnvironmentFieldName.SERVER_MODEL_ID
+            else field
+            for field in environment.fields
+        )
+        return environment.model_copy(update={"fields": fields})
+
+    monkeypatch.setattr(
+        "inferdrome.execution.orchestrator.capture_fake_environment",
+        capture_with_sensitive_shaped_value,
+    )
+    result = run_fake_bundle(
+        tmp_path / "runs",
+        "run-f13f13f13f13f13f13f13f13f13f13f1",
+    )
+
+    detail = as_public_json(load_run_detail(result.sealed_bundle.path))
+    environment = {field["name"]: field["value"] for field in detail["environment"]}
+
+    assert environment[EnvironmentFieldName.SERVER_MODEL_ID.value] == disclosed_value
 
 
 def test_detail_projection_always_uses_authoritative_recalculation(

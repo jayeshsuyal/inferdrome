@@ -477,9 +477,9 @@ available in v1.
 Trial Set and comparison descriptors use private same-root staging followed by
 frozen no-replace publication and parent-directory fsync. Private stages are
 excluded from discovery and cannot reserve a public identity. On Linux the
-publish primitive uses `renameat2(RENAME_NOREPLACE)`; on macOS cooperating
-publishers serialize a destination check and rename beneath a local
-publication lock. Neither mechanism claims protection from hostile same-user
+publish primitive uses `renameat2(RENAME_NOREPLACE)`; on macOS it uses
+`renamex_np(RENAME_EXCL)`. Both are single atomic no-replace operations on the
+local filesystem. Neither mechanism claims protection from hostile same-user
 filesystem mutation or distributed-filesystem behavior.
 
 Dashboard progress is recomputed from plan slots, run workspaces, and verified
