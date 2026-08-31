@@ -139,3 +139,8 @@ and `--lambda-guard-state-root`). Its provider termination confirmation is
 recorded before local semantic verification. `--dry-run` performs the local
 snapshot, exact archive construction, and static currentness checks only; it
 does not run `ssh-keyscan`, SSH, a provider API, or a GPU workload.
+
+Before any live SSH/SCP handshake, the controller verifies the exact staged
+`known_hosts` bytes against `--host-key-sha256`, enables strict host-key
+checking, and sets `IdentityAgent=none`; ambient SSH configuration and agents
+are not consulted.

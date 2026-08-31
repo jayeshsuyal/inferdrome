@@ -7,10 +7,15 @@ import io
 import json
 import os
 import re
+import select
+import signal
 import subprocess
 import sys
 import tarfile
+import time
+from contextlib import suppress
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +29,16 @@ SOURCE_BYTES = b"exact source archive"
 SOURCE_DIGEST = "sha256:" + hashlib.sha256(SOURCE_BYTES).hexdigest()
 HOST_KEY_BYTES = b"[prepared.example.test]:22 ssh-ed25519 AAAA\n"
 HOST_KEY_DIGEST = hashlib.sha256(HOST_KEY_BYTES).hexdigest()
+
+
+def _waitpid_bounded(pid: int, *, timeout_seconds: float = 3.0) -> int:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            return status
+        time.sleep(0.01)
+    raise AssertionError("signal-test child did not exit within the bound")
 
 
 def _snapshot() -> handoff.HandoffSnapshot:
@@ -347,10 +362,13 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
         return "sha256:" + HOST_KEY_DIGEST
 
     monkeypatch.setattr(remote, "_prepare_pinned_known_hosts", prepare)
-    monkeypatch.setattr(remote.shutil, "which", lambda _name: "/bin/tool")
+    local_identity = remote.resolve_executable_identity(sys.executable)
+    monkeypatch.setattr(remote, "_local_executable", lambda _name: local_identity)
 
     def run(arguments: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
         argv = [str(item) for item in arguments]  # type: ignore[arg-type]
+        assert "StrictHostKeyChecking=yes" in argv
+        assert "IdentityAgent=none" in argv
         if argv[0] == "scp":
             events.append(
                 "upload-source"
@@ -363,8 +381,11 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
 
     monkeypatch.setattr(remote, "_run", run)
 
-    def bounded(_arguments: object, destination: Path, **_kwargs: object) -> None:
+    def bounded(arguments: object, destination: Path, **_kwargs: object) -> None:
         events.append("metadata")
+        argv = [str(item) for item in arguments]  # type: ignore[arg-type]
+        assert "StrictHostKeyChecking=yes" in argv
+        assert "IdentityAgent=none" in argv
         destination.write_text(
             json.dumps(
                 {
@@ -376,8 +397,11 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
             )
         )
 
-    def exact(_arguments: object, destination: Path, **_kwargs: object) -> None:
+    def exact(arguments: object, destination: Path, **_kwargs: object) -> None:
         events.append("archive")
+        argv = [str(item) for item in arguments]  # type: ignore[arg-type]
+        assert "StrictHostKeyChecking=yes" in argv
+        assert "IdentityAgent=none" in argv
         destination.write_bytes(b"archive")
 
     monkeypatch.setattr(remote, "_download_bounded_remote_file", bounded)
@@ -424,8 +448,101 @@ def test_pinned_host_material_is_prepared_before_first_ssh(
         identity=identity,
         known_hosts=tmp_path / "known",
         port=22,
-        pinned=True,
     )
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX signals")
+def test_sigterm_enters_immediate_guard_cleanup_for_prospective_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot()
+    identity = tmp_path / "id_ed25519"
+    identity.write_bytes(b"synthetic key")
+    ready_read, ready_write = os.pipe()
+    cleanup_read, cleanup_write = os.pipe()
+    watchdog = SimpleNamespace(
+        cost_window=None,
+        instance=SimpleNamespace(instance_id="b" * 32),
+    )
+    monkeypatch.setattr(
+        remote.prospective_handoff,
+        "snapshot_handoff",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(remote, "_validate_prospective_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        remote,
+        "_prospective_source_archive_pin",
+        lambda *_args: SOURCE_DIGEST,
+    )
+
+    def create_source(
+        path: Path,
+        _commit: str,
+        **_kwargs: object,
+    ) -> tuple[str, int]:
+        path.write_bytes(SOURCE_BYTES)
+        return SOURCE_DIGEST, len(SOURCE_BYTES)
+
+    def block_capture(*_args: object, **_kwargs: object) -> tuple[Path, int]:
+        os.write(ready_write, b"r")
+        while True:
+            signal.pause()
+
+    def terminate(_watchdog: object) -> SimpleNamespace:
+        os.write(cleanup_write, b"c")
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote, "_create_source_archive", create_source)
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+    monkeypatch.setattr(remote, "_capture_prospective_over_ssh", block_capture)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        terminate,
+    )
+    args = _prospective_args(
+        tmp_path,
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name="gpu_1x_a10",
+        max_cost_usd=Decimal("0.75"),
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        try:
+            remote._capture(args, COMMIT, identity)
+        except KeyboardInterrupt:
+            os._exit(130)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+
+    os.close(ready_write)
+    os.close(cleanup_write)
+    reaped = False
+    try:
+        ready, _, _ = select.select([ready_read], [], [], 3)
+        assert ready and os.read(ready_read, 1) == b"r"
+        os.kill(pid, signal.SIGTERM)
+        status = _waitpid_bounded(pid)
+        reaped = True
+        cleanup, _, _ = select.select([cleanup_read], [], [], 1)
+        assert cleanup and os.read(cleanup_read, 1) == b"c"
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 130
+    finally:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        if not reaped:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
 
 
 def test_prospective_final_publication_never_replaces_raced_destination(
@@ -466,7 +583,8 @@ def test_remote_digest_gates_precede_wrapper_and_local_mismatch_stops_ssh(
         archive.archive_path.write_bytes(b"changed")  # type: ignore[union-attr]
     args = _prospective_args(tmp_path)
     (tmp_path / "id_ed25519").write_bytes(b"key")
-    monkeypatch.setattr(remote.shutil, "which", lambda _name: "/bin/tool")
+    local_identity = remote.resolve_executable_identity(sys.executable)
+    monkeypatch.setattr(remote, "_local_executable", lambda _name: local_identity)
     monkeypatch.setattr(
         remote,
         "_run",

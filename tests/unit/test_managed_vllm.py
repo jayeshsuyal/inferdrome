@@ -34,39 +34,66 @@ WHEEL_SHA256 = (
 )
 
 
-def test_managed_environment_exposes_sibling_tools_and_scrubs_controls() -> None:
+def test_managed_environment_is_allowlisted_with_fixed_cuda_loader_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(managed_vllm.platform, "machine", lambda: "x86_64")
     environment = managed_vllm.managed_process_environment(
         executable_path="/opt/inferdrome-gpu/bin/vllm",
+        home_directory=Path("/private/inferdrome-home"),
+        include_cuda_runtime=True,
         source={
-            "PATH": "/usr/bin",
+            "PATH": "/ambient/bin",
             "VLLM_CONFIG_ROOT": "/untrusted/config",
             "VLLM_NO_USAGE_STATS": "0",
             "HF_HUB_OFFLINE": "0",
-            "INFERDROME_FIXTURE": "retained",
-        }
+            "INFERDROME_FIXTURE": "must-not-cross",
+            "LAMBDA_CLOUD_API_KEY": "synthetic-placeholder",
+            "AWS_ACCESS_KEY_ID": "synthetic-placeholder",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/synthetic/placeholder.json",
+            "CC": "/synthetic/compiler",
+            "CXX": "/synthetic/compiler++",
+            "CUDA_HOME": "/synthetic/cuda",
+            "LD_LIBRARY_PATH": "/synthetic/loader",
+            "TRITON_LIBCUDA_PATH": "/synthetic/triton-loader",
+        },
     )
 
-    assert environment["PATH"] == "/opt/inferdrome-gpu/bin:/usr/bin"
-    assert environment["INFERDROME_FIXTURE"] == "retained"
+    assert environment["PATH"].split(os.pathsep)[0] == "/opt/inferdrome-gpu/bin"
+    assert "/ambient/bin" not in environment["PATH"]
+    assert environment["HOME"] == "/private/inferdrome-home"
+    assert environment["TMPDIR"] == "/private/inferdrome-home"
+    assert environment["CUDA_HOME"] == "/usr/local/cuda"
+    assert environment["TRITON_LIBCUDA_PATH"] == "/usr/lib/x86_64-linux-gnu"
+    assert "/synthetic/loader" not in environment["LD_LIBRARY_PATH"]
     assert environment["VLLM_NO_USAGE_STATS"] == "1"
     assert environment["HF_HUB_OFFLINE"] == "1"
     assert environment["TRANSFORMERS_OFFLINE"] == "1"
     assert environment["DO_NOT_TRACK"] == "1"
     assert "VLLM_CONFIG_ROOT" not in environment
+    assert "INFERDROME_FIXTURE" not in environment
+    assert "LAMBDA_CLOUD_API_KEY" not in environment
+    assert "AWS_ACCESS_KEY_ID" not in environment
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in environment
+    assert "CC" not in environment
+    assert "CXX" not in environment
 
 
-def test_managed_process_environment_deduplicates_executable_directory() -> None:
+def test_managed_process_environment_ignores_ambient_path() -> None:
     environment = managed_vllm.managed_process_environment(
         executable_path="/opt/inferdrome-gpu/bin/vllm",
         source={
             "PATH": (
                 "/usr/bin:/opt/inferdrome-gpu/bin:"
                 "/bin:/opt/inferdrome-gpu/bin"
-            )
+            ),
+            "LD_LIBRARY_PATH": "/synthetic/loader",
         },
     )
 
-    assert environment["PATH"] == "/opt/inferdrome-gpu/bin:/usr/bin:/bin"
+    assert environment["PATH"].split(os.pathsep)[0] == "/opt/inferdrome-gpu/bin"
+    assert environment["PATH"].count("/opt/inferdrome-gpu/bin") == 1
+    assert "LD_LIBRARY_PATH" not in environment
 
 
 def test_distribution_source_wheel_requires_exact_direct_url_pin(
@@ -170,8 +197,14 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
     snapshot.mkdir()
     (snapshot / "config.json").write_text("{}\n")
     nvidia_smi = tmp_path / "nvidia-smi"
-    nvidia_smi_bytes = b"fixture nvidia-smi\n"
+    nvidia_smi_bytes = b"#!/bin/sh\nexit 0\n"
     nvidia_smi.write_bytes(nvidia_smi_bytes)
+    nvidia_smi.chmod(0o700)
+    nvidia_smi_identity = managed_vllm.resolve_executable_identity(str(nvidia_smi))
+    vllm = tmp_path / "vllm"
+    vllm_bytes = b"#!/bin/sh\nexit 0\n"
+    vllm.write_bytes(vllm_bytes)
+    vllm.chmod(0o700)
     distribution = VllmDistributionIdentity(
         name="vllm",
         version="0.26.0",
@@ -179,8 +212,8 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
         file_count=100,
         total_bytes=1_000_000,
         hash_policy="installed-wheel-files-v1",
-        executable_path="/opt/inferdrome-gpu/bin/vllm",
-        executable_sha256=f"sha256:{'8' * 64}",
+        executable_path=str(vllm),
+        executable_sha256=f"sha256:{hashlib.sha256(vllm_bytes).hexdigest()}",
         source_wheel_filename=(
             "vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl"
         ),
@@ -204,7 +237,7 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
         managed_vllm,
         "_resolve_nvidia_smi",
         lambda: (
-            str(nvidia_smi),
+            nvidia_smi_identity,
             f"sha256:{hashlib.sha256(nvidia_smi_bytes).hexdigest()}",
         ),
     )
@@ -222,6 +255,7 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
 
     def process_runner(argv: tuple[str, ...], **kwargs: Any) -> ProcessCapture:
         if "--query-gpu=index,name,uuid,driver_version" in argv:
+            assert kwargs["executable_identity"] is nvidia_smi_identity
             return ProcessCapture(
                 argv=argv,
                 started_at=started_at,
@@ -233,6 +267,7 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
             )
         if "--query-compute-apps=pid,gpu_uuid" in argv:
             assert argv[-1] == "--id=0"
+            assert kwargs["executable_identity"] is nvidia_smi_identity
             output = f"7002, {GPU_UUID}\n"
             if foreign_process:
                 output += f"7999, {GPU_UUID}\n"
@@ -248,9 +283,8 @@ def test_managed_server_requires_exclusive_bound_gpu_processes(
         observer = kwargs["on_start"]
         cancellation = kwargs["cancellation"]
         environment = kwargs["environment"]
-        assert environment["PATH"].split(os.pathsep)[0] == (
-            "/opt/inferdrome-gpu/bin"
-        )
+        assert kwargs["executable_identity"].path == vllm
+        assert environment["PATH"].split(os.pathsep)[0] == str(tmp_path)
         assert environment["VLLM_NO_USAGE_STATS"] == "1"
         assert environment["HF_HUB_OFFLINE"] == "1"
         observer(7001, started_at)

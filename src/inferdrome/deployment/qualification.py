@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,8 +41,13 @@ from inferdrome.deployment.spec import (
 )
 from inferdrome.domain.digests import DigestDomain, canonical_json_bytes, digest_bytes
 from inferdrome.domain.ids import Sha256Digest, sha256_digest
-from inferdrome.errors import CancellationRequested, SourceInputError
+from inferdrome.errors import AdapterError, CancellationRequested, SourceInputError
 from inferdrome.execution.cancellation import CancellationToken
+from inferdrome.execution.subprocess_runner import (
+    ExecutableIdentity,
+    redact_subprocess_diagnostics,
+    resolve_executable_identity,
+)
 from inferdrome.immutable import publish_immutable_directory
 from inferdrome.resolution.yaml_loader import load_strict_yaml
 from inferdrome.vllm_compose import (
@@ -64,6 +70,19 @@ QUALIFICATION_MAX_DIAGNOSTIC_BYTES: Final = 64 * 1024
 QUALIFICATION_MAX_FAILURE_DIAGNOSTIC_BYTES: Final = 8 * 1024
 QUALIFICATION_MAX_RESIDUAL_RESOURCES: Final = 100
 QUALIFICATION_TIMEOUT_SECONDS: Final = 1_800.0
+_QUALIFICATION_DRAIN_GRACE_SECONDS: Final = 0.1
+_QUALIFICATION_TERMINATION_RESERVE_SECONDS: Final = 1.0
+_QUALIFICATION_SHUTDOWN_POLL_SECONDS: Final = 0.01
+_QUALIFICATION_TOOL_SEARCH_PATH: Final = os.pathsep.join(
+    (
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    )
+)
 QUALIFICATION_PROJECT_PATTERN: Final = re.compile(
     r"^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$"
 )
@@ -145,7 +164,9 @@ class QualificationError(Exception):
 def _sanitize_diagnostic_bytes(*, label: str, raw: bytes) -> str:
     """Keep failure context useful while excluding control bytes and secrets."""
 
-    bounded = raw[:QUALIFICATION_MAX_DIAGNOSTIC_BYTES]
+    bounded = redact_subprocess_diagnostics(
+        raw[:QUALIFICATION_MAX_DIAGNOSTIC_BYTES]
+    )
     text = bounded.decode("utf-8", errors="replace")
     text = _ANSI_ESCAPE_PATTERN.sub("", text)
     safe_lines: list[str] = []
@@ -405,6 +426,30 @@ class ProcessRunner(Protocol):
 class BoundedSubprocessRunner:
     """Run argv without a shell while retaining bounded diagnostics."""
 
+    def __init__(self) -> None:
+        self._executable_identities: dict[str, ExecutableIdentity] = {}
+
+    def _executable(self, name: str) -> ExecutableIdentity:
+        selected = self._executable_identities.get(name)
+        try:
+            if selected is None:
+                selected = resolve_executable_identity(
+                    name,
+                    search_path=_QUALIFICATION_TOOL_SEARCH_PATH,
+                )
+                self._executable_identities[name] = selected
+                return selected
+            observed = resolve_executable_identity(str(selected.path))
+        except AdapterError:
+            raise QualificationError(
+                "qualification subprocess executable is unavailable"
+            ) from None
+        if observed != selected:
+            raise QualificationError(
+                "qualification subprocess executable identity changed"
+            )
+        return selected
+
     def run(
         self,
         argv: Sequence[str],
@@ -436,13 +481,22 @@ class BoundedSubprocessRunner:
         ):
             raise QualificationError("qualification subprocess environment is invalid")
 
+        executable = self._executable(argv[0])
+        selected_environment = dict(env)
+        selected_environment["PATH"] = os.pathsep.join(
+            dict.fromkeys(
+                (str(executable.path.parent), *os.defpath.split(os.pathsep))
+            )
+        )
+        hard_deadline = time.monotonic() + timeout_seconds
         try:
             process = subprocess.Popen(
                 list(argv),
+                executable=str(executable.path),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=dict(env),
+                env=selected_environment,
                 shell=False,
                 start_new_session=True,
             )
@@ -467,6 +521,15 @@ class BoundedSubprocessRunner:
                         destination.extend(chunk[:remaining])
             except (AttributeError, OSError, TypeError, ValueError):
                 return
+            finally:
+                # The reader owns its stream; the controller never closes under it.
+                with contextlib.suppress(
+                    AttributeError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                ):
+                    stream.close()
 
         stdout_thread = threading.Thread(
             target=drain,
@@ -478,24 +541,56 @@ class BoundedSubprocessRunner:
             args=(process.stderr, stderr_bytes),
             daemon=True,
         )
-        stdout_thread.start()
-        stderr_thread.start()
+        threads = (stdout_thread, stderr_thread)
+        started_threads: list[threading.Thread] = []
         timed_out = False
+        shutdown_deadline: float | None = None
+        termination_attempted = False
+        # Keep escalation and final joins inside the caller's one total budget.
+        termination_reserve = min(
+            _QUALIFICATION_TERMINATION_RESERVE_SECONDS,
+            timeout_seconds / 2,
+        )
+        execution_deadline = hard_deadline - termination_reserve
         try:
-            process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            self._terminate(process)
+            for thread in threads:
+                thread.start()
+                started_threads.append(thread)
+            try:
+                process.wait(timeout=self._remaining(execution_deadline))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            else:
+                drain_deadline = min(
+                    execution_deadline,
+                    time.monotonic() + _QUALIFICATION_DRAIN_GRACE_SECONDS,
+                )
+                self._join_threads(started_threads, deadline=drain_deadline)
+                timed_out = self._has_live_execution(process, started_threads)
+            if timed_out:
+                termination_attempted = True
+                shutdown_deadline, shutdown_confirmed = self._terminate(
+                    process,
+                    started_threads,
+                    deadline=hard_deadline,
+                )
+                if not shutdown_confirmed:
+                    raise QualificationError(
+                        "qualification subprocess group could not be terminated"
+                    )
         except BaseException:
-            self._terminate(process)
+            if not termination_attempted:
+                shutdown_deadline, _shutdown_confirmed = self._terminate(
+                    process,
+                    started_threads,
+                    deadline=hard_deadline,
+                )
             raise
         finally:
-            stdout_thread.join(timeout=2)
-            stderr_thread.join(timeout=2)
-            for stream in (process.stdout, process.stderr):
-                if stream is not None:
-                    with contextlib.suppress(OSError):
-                        stream.close()
+            self._join_threads(
+                started_threads,
+                deadline=(shutdown_deadline or hard_deadline),
+            )
         return ProcessResult(
             124 if timed_out else process.returncode,
             bytes(stdout_bytes),
@@ -503,22 +598,100 @@ class BoundedSubprocessRunner:
         )
 
     @staticmethod
-    def _terminate(process: subprocess.Popen[bytes]) -> None:
+    def _remaining(deadline: float) -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    @classmethod
+    def _join_threads(
+        cls,
+        threads: Sequence[threading.Thread],
+        *,
+        deadline: float,
+    ) -> None:
+        for thread in threads:
+            thread.join(timeout=cls._remaining(deadline))
+
+    @staticmethod
+    def _process_group_is_alive(process: subprocess.Popen[bytes]) -> bool:
+        if os.name != "posix":
+            return process.poll() is None
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @classmethod
+    def _has_live_execution(
+        cls,
+        process: subprocess.Popen[bytes],
+        threads: Sequence[threading.Thread],
+    ) -> bool:
+        process.poll()
+        return cls._process_group_is_alive(process) or any(
+            thread.is_alive() for thread in threads
+        )
+
+    @classmethod
+    def _await_shutdown(
+        cls,
+        process: subprocess.Popen[bytes],
+        threads: Sequence[threading.Thread],
+        *,
+        deadline: float,
+    ) -> bool:
+        while cls._has_live_execution(process, threads):
+            remaining = cls._remaining(deadline)
+            if remaining <= 0:
+                return False
+            live_thread = next(
+                (thread for thread in threads if thread.is_alive()),
+                None,
+            )
+            if live_thread is not None:
+                live_thread.join(
+                    timeout=min(_QUALIFICATION_SHUTDOWN_POLL_SECONDS, remaining)
+                )
+            else:
+                time.sleep(min(_QUALIFICATION_SHUTDOWN_POLL_SECONDS, remaining))
+        return True
+
+    @classmethod
+    def _terminate(
+        cls,
+        process: subprocess.Popen[bytes],
+        threads: Sequence[threading.Thread],
+        *,
+        deadline: float,
+    ) -> tuple[float, bool]:
+        now = time.monotonic()
+        shutdown_deadline = min(
+            deadline,
+            now + _QUALIFICATION_TERMINATION_RESERVE_SECONDS,
+        )
         with contextlib.suppress(OSError):
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGTERM)
-            else:
+            elif process.poll() is None:
                 process.terminate()
-        try:
-            process.wait(timeout=2)
-        except (OSError, subprocess.TimeoutExpired):
-            with contextlib.suppress(OSError):
-                if os.name == "posix":
-                    os.killpg(process.pid, signal.SIGKILL)
-                else:
-                    process.kill()
-            with contextlib.suppress(OSError):
-                process.wait(timeout=2)
+        now = time.monotonic()
+        remaining = max(0.0, shutdown_deadline - now)
+        term_deadline = min(shutdown_deadline, now + (remaining / 2))
+        if cls._await_shutdown(process, threads, deadline=term_deadline):
+            return shutdown_deadline, True
+        with contextlib.suppress(OSError):
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.poll() is None:
+                process.kill()
+        stopped = cls._await_shutdown(
+            process,
+            threads,
+            deadline=shutdown_deadline,
+        )
+        return shutdown_deadline, stopped
 
 
 @dataclass(frozen=True)
@@ -591,7 +764,7 @@ def _reject_sensitive_fields(value: object) -> None:
 def _preflight_json(payload: str | bytes | bytearray) -> bytes:
     if isinstance(payload, str):
         raw = payload.encode("utf-8")
-    elif isinstance(payload, (bytes, bytearray)):
+    elif isinstance(payload, bytes | bytearray):
         raw = bytes(payload)
     else:
         raise ValueError("qualification JSON input is invalid")
@@ -881,13 +1054,27 @@ def _compose_argv(
     return argv
 
 
-def _safe_environment(*, uid: int, gid: int, evidence_dir: Path) -> dict[str, str]:
+def _safe_environment(
+    *,
+    uid: int,
+    gid: int,
+    evidence_dir: Path,
+    private_home: Path,
+    docker_config: Path,
+    temporary_directory: Path,
+) -> dict[str, str]:
     if not 1 <= uid <= 65_534 or not 1 <= gid <= 65_534:
         raise QualificationError(
             "qualification container identity is invalid", code="IDENTITY_INVALID"
         )
+    for path, label in (
+        (private_home, "private HOME"),
+        (docker_config, "Docker configuration"),
+        (temporary_directory, "temporary directory"),
+    ):
+        _existing_directory(path, f"qualification {label}")
     result: dict[str, str] = {}
-    for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"):
+    for key in ("LANG", "LC_ALL"):
         value = os.environ.get(key)
         if value is not None and len(value) <= 4_096 and "\x00" not in value:
             result[key] = value
@@ -895,9 +1082,17 @@ def _safe_environment(*, uid: int, gid: int, evidence_dir: Path) -> dict[str, st
         {
             # Compose must not implicitly read a developer-controlled .env file.
             "COMPOSE_DISABLE_ENV_FILE": "1",
+            "DOCKER_CONFIG": str(docker_config),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": str(private_home),
             "INFERDROME_COMPOSE_UID": str(uid),
             "INFERDROME_COMPOSE_GID": str(gid),
             "INFERDROME_COMPOSE_EVIDENCE_DIR": str(evidence_dir),
+            "PATH": os.defpath,
+            "TMPDIR": str(temporary_directory),
+            "XDG_CONFIG_HOME": str(private_home / ".config"),
         }
     )
     return result
@@ -1849,8 +2044,19 @@ def qualify_compose_mock(
     try:
         evidence = work / "evidence"
         evidence.mkdir(mode=0o700)
+        private_home = work / "home"
+        private_home.mkdir(mode=0o700)
+        docker_config = work / "docker-config"
+        docker_config.mkdir(mode=0o700)
+        temporary_directory = work / "tmp"
+        temporary_directory.mkdir(mode=0o700)
         env = _safe_environment(
-            uid=selected_uid, gid=selected_gid, evidence_dir=evidence
+            uid=selected_uid,
+            gid=selected_gid,
+            evidence_dir=evidence,
+            private_home=private_home,
+            docker_config=docker_config,
+            temporary_directory=temporary_directory,
         )
         override_file, compose_override_digest, image_references = (
             _write_compose_override(work, project)

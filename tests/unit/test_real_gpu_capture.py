@@ -7,10 +7,14 @@ import io
 import json
 import os
 import re
+import select
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
+import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +28,18 @@ import scripts.real_gpu_capture as capture
 
 COMMIT = "a" * 40
 SOURCE_ARCHIVE_SHA256 = "sha256:" + "f" * 64
+HOST_KEY_BYTES = b"[gpu.example.test]:22 ssh-ed25519 AAAATEST\n"
+HOST_KEY_DIGEST = hashlib.sha256(HOST_KEY_BYTES).hexdigest()
+
+
+def _waitpid_bounded(pid: int, *, timeout_seconds: float = 3.0) -> int:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            return status
+        time.sleep(0.01)
+    raise AssertionError("signal-test child did not exit within the bound")
 
 
 def _assert_embedded_python_compiles(script: str) -> None:
@@ -124,12 +140,167 @@ def test_ssh_transport_ignores_user_config_and_disables_forwarding(
 
     assert options[:2] == ["-F", "/dev/null"]
     assert "ForwardAgent=no" in rendered
+    assert "IdentityAgent=none" in rendered
+    assert "StrictHostKeyChecking=yes" in rendered
     assert "ForwardX11=no" in rendered
     assert "ClearAllForwardings=yes" in rendered
     assert "SendEnv=-*" in rendered
     assert "ProxyCommand=none" in rendered
     assert "ProxyJump=none" in rendered
     assert "IdentitiesOnly=yes" in rendered
+    scp_rendered = " ".join(
+        remote._scp_options(
+            identity=None,
+            known_hosts=tmp_path / "known-hosts",
+            port=22,
+        )
+    )
+    assert "IdentityAgent=none" in scp_rendered
+    assert "StrictHostKeyChecking=yes" in scp_rendered
+
+
+def test_mismatched_host_pin_fails_before_ssh_or_scp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_key_file = tmp_path / "known-hosts.pin"
+    host_key_file.write_bytes(HOST_KEY_BYTES)
+    source_archive = tmp_path / "repo.tar"
+    source_archive.write_bytes(b"synthetic source archive")
+    calls: list[object] = []
+    local_identity = remote.resolve_executable_identity(sys.executable)
+    monkeypatch.setattr(remote, "_local_executable", lambda _name: local_identity)
+    monkeypatch.setattr(
+        remote,
+        "_run",
+        lambda *args, **kwargs: calls.append((args, kwargs))
+        or pytest.fail("mismatched pin must precede SSH/SCP"),
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@gpu.example.test",
+        gpu_index=0,
+        host_key_file=str(host_key_file),
+        host_key_sha256="0" * 64,
+        managed_capability_profile=None,
+        output_root=str(tmp_path / "retrieved"),
+        port=22,
+        qwen3_gpu_tier=None,
+        remote_timeout_seconds=1_800,
+        startup_timeout_seconds=300,
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="do not match their pin"):
+        remote._capture_over_ssh(
+            args,
+            COMMIT,
+            None,
+            source_archive,
+            SOURCE_ARCHIVE_SHA256,
+        )
+
+    assert calls == []
+
+
+def test_every_capture_mode_requires_an_explicit_host_key_pin() -> None:
+    with pytest.raises(remote.RemoteCaptureError, match="host-key-sha256"):
+        remote._validate_capture_mode(
+            SimpleNamespace(
+                host_key_sha256=None,
+                prospective=False,
+            )
+        )
+
+
+def test_local_helpers_drop_provider_and_agent_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAMBDA_CLOUD_API_KEY", "synthetic-placeholder")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "synthetic-placeholder")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/synthetic/agent.sock")
+    remote._EXECUTABLE_IDENTITIES.clear()
+    child = (
+        "import os,sys; forbidden=("
+        "'LAMBDA_CLOUD_API_KEY','AWS_ACCESS_KEY_ID','SSH_AUTH_SOCK'); "
+        "sys.stdout.write('clean' if all(k not in os.environ for k in forbidden) "
+        "else 'inherited')"
+    )
+
+    result = remote._run(
+        [sys.executable, "-c", child],
+        label="synthetic local helper",
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert result.stdout == b"clean"
+
+
+def test_local_helper_redacts_credential_shaped_failure_output() -> None:
+    remote._EXECUTABLE_IDENTITIES.clear()
+    child = (
+        "import sys; "
+        "sys.stderr.write('LAMBDA_CLOUD_API_KEY=synthetic-placeholder\\n'); "
+        "raise SystemExit(7)"
+    )
+
+    with pytest.raises(remote.RemoteCaptureError) as caught:
+        remote._run(
+            [sys.executable, "-c", child],
+            label="synthetic local helper",
+            capture_output=True,
+            timeout=5,
+        )
+
+    assert "synthetic-placeholder" not in str(caught.value)
+    assert "[REDACTED]" in str(caught.value)
+
+
+def test_uncaptured_local_helper_output_is_suppressed(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    remote._EXECUTABLE_IDENTITIES.clear()
+    child = (
+        "import sys; "
+        "print('Bearer synthetic-placeholder'); "
+        "print('API_KEY synthetic-placeholder', file=sys.stderr)"
+    )
+
+    result = remote._run(
+        [sys.executable, "-c", child],
+        label="synthetic local helper",
+        capture_output=False,
+        timeout=5,
+    )
+
+    captured = capfd.readouterr()
+    assert result.returncode == 0
+    assert "synthetic-placeholder" not in captured.out
+    assert "synthetic-placeholder" not in captured.err
+
+
+def test_bounded_download_child_uses_minimal_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAMBDA_CLOUD_API_KEY", "synthetic-placeholder")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/synthetic/agent.sock")
+    remote._EXECUTABLE_IDENTITIES.clear()
+    destination = tmp_path / "bounded.bin"
+    child = (
+        "import os,sys; forbidden=('LAMBDA_CLOUD_API_KEY','SSH_AUTH_SOCK'); "
+        "sys.stdout.buffer.write(b'ok' if all(k not in os.environ for k in forbidden) "
+        "else b'bad')"
+    )
+
+    remote._download_bounded_remote_file(
+        [sys.executable, "-c", child],
+        destination,
+        minimum_size=2,
+        maximum_size=3,
+        timeout=5,
+    )
+
+    assert destination.read_bytes() == b"ok"
 
 
 def test_exact_tree_export_excludes_removed_secret_and_git_history(
@@ -813,6 +984,7 @@ def test_qwen3_remote_command_requires_explicit_profile() -> None:
 
 def test_qwen3_capture_mode_enforces_lambda_rate_instance_and_cap() -> None:
     base = {
+        "host_key_sha256": HOST_KEY_DIGEST,
         "lambda_billing_started_at": datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
         "lambda_hourly_rate_usd": Decimal("1.29"),
         "lambda_instance_id": "b" * 32,
@@ -852,6 +1024,7 @@ def test_qwen3_capture_mode_enforces_lambda_rate_instance_and_cap() -> None:
 
 def test_qwen3_a100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
     base = {
+        "host_key_sha256": HOST_KEY_DIGEST,
         "identity_file": "/tmp/inferdrome-key",
         "lambda_billing_started_at": datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
         "lambda_hourly_rate_usd": Decimal("1.99"),
@@ -877,6 +1050,7 @@ def test_qwen3_a100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
 
 def test_qwen3_a100_sxm4_capture_mode_freezes_exact_rate_and_cap() -> None:
     base = {
+        "host_key_sha256": HOST_KEY_DIGEST,
         "identity_file": "/tmp/inferdrome-key",
         "lambda_billing_started_at": datetime(2026, 8, 23, 17, 0, tzinfo=UTC),
         "lambda_hourly_rate_usd": Decimal("1.99"),
@@ -902,6 +1076,7 @@ def test_qwen3_a100_sxm4_capture_mode_freezes_exact_rate_and_cap() -> None:
 
 def test_qwen3_h100_capture_mode_freezes_exact_tier_rate_and_cap() -> None:
     base = {
+        "host_key_sha256": HOST_KEY_DIGEST,
         "identity_file": "/tmp/inferdrome-key",
         "lambda_billing_started_at": datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
         "lambda_hourly_rate_usd": Decimal("3.29"),
@@ -1167,13 +1342,8 @@ def test_qwen3_fake_ssh_retrieval_stops_at_checksum_before_semantics(
         argv = list(arguments)  # type: ignore[arg-type]
         calls.append(label)
         if label == "remote GPU preflight":
-            known_hosts_option = next(
-                item for item in argv if item.startswith("UserKnownHostsFile=")
-            )
-            Path(known_hosts_option.split("=", maxsplit=1)[1]).write_text(
-                "gpu.example.test ssh-ed25519 AAAATEST\n",
-                encoding="utf-8",
-            )
+            assert "StrictHostKeyChecking=yes" in argv
+            assert "IdentityAgent=none" in argv
             assert "NVIDIA A10" in argv[-1]
         elif label == "remote proof pack":
             assert remote._QWEN3_PROFILE_ID in argv[-1]
@@ -1210,11 +1380,15 @@ def test_qwen3_fake_ssh_retrieval_stops_at_checksum_before_semantics(
     monkeypatch.setattr(remote, "_run", fake_run)
     monkeypatch.setattr(remote, "_download_bounded_remote_file", download_metadata)
     monkeypatch.setattr(remote, "_download_exact_remote_file", download_archive)
-    monkeypatch.setattr(remote.shutil, "which", lambda executable: executable)
+    local_identity = remote.resolve_executable_identity(sys.executable)
+    monkeypatch.setattr(remote, "_local_executable", lambda _name: local_identity)
+    host_key_file = tmp_path / "known-hosts.pin"
+    host_key_file.write_bytes(HOST_KEY_BYTES)
     args = SimpleNamespace(
         destination="ubuntu@gpu.example.test",
         gpu_index=0,
-        host_key_sha256=None,
+        host_key_file=str(host_key_file),
+        host_key_sha256=HOST_KEY_DIGEST,
         lambda_instance_type_name="gpu_1x_a10",
         managed_capability_profile=remote._QWEN3_PROFILE_ID,
         output_root=str(tmp_path / "retrieved"),
@@ -1853,7 +2027,10 @@ def test_qwen3_guard_terminates_target_when_another_instance_is_active(
     monkeypatch.setattr(
         remote.lambda_gpu_guard,
         "terminate_guarded_instance",
-        lambda selected, *, trigger: terminated.append((selected, trigger)),
+        lambda selected, *, trigger: (
+            terminated.append((selected, trigger))
+            or SimpleNamespace(final_status="terminated")
+        ),
     )
     args = SimpleNamespace(
         destination="ubuntu@capture.example.test",
@@ -1898,7 +2075,10 @@ def test_qwen3_guard_terminates_same_price_wrong_instance_type(
     monkeypatch.setattr(
         remote.lambda_gpu_guard,
         "terminate_guarded_instance",
-        lambda selected, *, trigger: terminated.append((selected, trigger)),
+        lambda selected, *, trigger: (
+            terminated.append((selected, trigger))
+            or SimpleNamespace(final_status="terminated")
+        ),
     )
     args = SimpleNamespace(
         destination="ubuntu@capture.example.test",
@@ -1916,6 +2096,72 @@ def test_qwen3_guard_terminates_same_price_wrong_instance_type(
         remote._arm_lambda_watchdog(args)
 
     assert terminated == [(handle, "campaign-single-instance-check-failed")]
+
+
+def test_campaign_validation_failure_retains_unresolved_guard_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = SimpleNamespace(
+        instance_id="b" * 32,
+        instance_type_name="gpu_1x_a10",
+        status="active",
+    )
+    other = SimpleNamespace(
+        instance_id="c" * 32,
+        instance_type_name="gpu_1x_a10",
+        status="active",
+    )
+
+    class AliveWatchdog:
+        def poll(self) -> None:
+            return None
+
+    state_directory = tmp_path / "guard"
+    state_directory.mkdir()
+    handle = SimpleNamespace(
+        client=SimpleNamespace(list_instances=lambda: (target, other)),
+        cost_window=SimpleNamespace(deadline=datetime(2026, 8, 20, 20, 20, tzinfo=UTC)),
+        instance=target,
+        process=AliveWatchdog(),
+        state_directory=state_directory,
+    )
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "arm_watchdog",
+        lambda *_args, **_kwargs: handle,
+    )
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            remote.lambda_gpu_guard.LambdaGuardError("synthetic provider failure")
+        ),
+    )
+    args = SimpleNamespace(
+        destination="ubuntu@capture.example.test",
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_guard_state_root=str(tmp_path),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id=target.instance_id,
+        lambda_instance_type_name="gpu_1x_a10",
+        managed_capability_profile=remote._QWEN3_PROFILE_ID,
+        max_cost_usd=Decimal("0.75"),
+        qwen3_gpu_tier="a10-24gb-pcie",
+    )
+
+    with pytest.raises(
+        remote.RemoteCaptureError,
+        match="unresolved state was retained",
+    ):
+        remote._arm_lambda_watchdog(args)
+
+    marker = json.loads(
+        (state_directory / "termination-unresolved.json").read_text(encoding="utf-8")
+    )
+    assert marker["status"] == "UNRESOLVED"
+    assert marker["trigger"] == "campaign-single-instance-check-failed"
+    assert marker["watchdog_armed"] is True
 
 
 def test_qwen3_a100_guard_accepts_only_the_runtime_bound_instance_type(
@@ -1985,11 +2231,587 @@ def test_capture_terminates_guarded_instance_even_after_capture_failure(
     assert observed == [watchdog]
 
 
-def test_guard_failure_does_not_mask_the_capture_failure(
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX signals")
+@pytest.mark.parametrize(
+    "managed_profile",
+    [None, remote._QWEN3_PROFILE_ID],
+    ids=["retrospective-guarded", "qwen-guarded"],
+)
+def test_sigterm_enters_immediate_guard_cleanup_for_nonprospective_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    managed_profile: str | None,
+) -> None:
+    ready_read, ready_write = os.pipe()
+    cleanup_read, cleanup_write = os.pipe()
+    watchdog = SimpleNamespace(
+        cost_window=None,
+        instance=SimpleNamespace(instance_id="b" * 32),
+    )
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+
+    def create_source(path: Path, _commit: str) -> tuple[str, int]:
+        path.write_bytes(b"synthetic source")
+        return SOURCE_ARCHIVE_SHA256, len(b"synthetic source")
+
+    def block_capture(*_args: object, **_kwargs: object) -> Path:
+        os.write(ready_write, b"r")
+        while True:
+            signal.pause()
+
+    def terminate(_watchdog: object) -> SimpleNamespace:
+        os.write(cleanup_write, b"c")
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote, "_create_source_archive", create_source)
+    monkeypatch.setattr(remote, "_capture_over_ssh", block_capture)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        terminate,
+    )
+    args = SimpleNamespace(
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name=(
+            "gpu_1x_a10" if managed_profile is not None else None
+        ),
+        managed_capability_profile=managed_profile,
+        max_cost_usd=Decimal("0.75"),
+        prospective=False,
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        try:
+            remote._capture(args, COMMIT, None)
+        except KeyboardInterrupt:
+            os._exit(130)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+
+    os.close(ready_write)
+    os.close(cleanup_write)
+    reaped = False
+    try:
+        ready, _, _ = select.select([ready_read], [], [], 3)
+        assert ready and os.read(ready_read, 1) == b"r"
+        os.kill(pid, signal.SIGTERM)
+        status = _waitpid_bounded(pid)
+        reaped = True
+        cleanup, _, _ = select.select([cleanup_read], [], [], 1)
+        assert cleanup and os.read(cleanup_read, 1) == b"c"
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 130
+    finally:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        if not reaped:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX signals")
+def test_sigterm_during_guard_arming_is_deferred_until_cleanup_owns_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    ready_read, ready_write = os.pipe()
+    cleanup_read, cleanup_write = os.pipe()
+    watchdog = SimpleNamespace(instance=SimpleNamespace(instance_id="b" * 32))
+
+    def arm(_args: object) -> SimpleNamespace:
+        os.write(ready_write, b"r")
+        time.sleep(0.15)
+        return watchdog
+
+    def terminate(_watchdog: object) -> SimpleNamespace:
+        os.write(cleanup_write, b"c")
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", arm)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        terminate,
+    )
+    args = SimpleNamespace(
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name=None,
+        managed_capability_profile=None,
+        max_cost_usd=Decimal("0.75"),
+        prospective=False,
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        try:
+            remote._capture(args, COMMIT, None)
+        except KeyboardInterrupt:
+            os._exit(130)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+
+    os.close(ready_write)
+    os.close(cleanup_write)
+    reaped = False
+    try:
+        ready, _, _ = select.select([ready_read], [], [], 3)
+        assert ready and os.read(ready_read, 1) == b"r"
+        os.kill(pid, signal.SIGTERM)
+        status = _waitpid_bounded(pid)
+        reaped = True
+        cleanup, _, _ = select.select([cleanup_read], [], [], 1)
+        assert cleanup and os.read(cleanup_read, 1) == b"c"
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 130
+    finally:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        if not reaped:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX signals")
+def test_repeated_sigterm_cannot_interrupt_guard_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready_read, ready_write = os.pipe()
+    cleanup_read, cleanup_write = os.pipe()
+    watchdog = SimpleNamespace(instance=SimpleNamespace(instance_id="b" * 32))
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+
+    def create_source(path: Path, _commit: str) -> tuple[str, int]:
+        path.write_bytes(b"synthetic source")
+        return SOURCE_ARCHIVE_SHA256, len(b"synthetic source")
+
+    def block_capture(*_args: object, **_kwargs: object) -> Path:
+        os.write(ready_write, b"r")
+        while True:
+            signal.pause()
+
+    def terminate(_watchdog: object) -> SimpleNamespace:
+        os.write(cleanup_write, b"s")
+        signal.pause()
+        os.write(cleanup_write, b"d")
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote, "_create_source_archive", create_source)
+    monkeypatch.setattr(remote, "_capture_over_ssh", block_capture)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        terminate,
+    )
+    args = SimpleNamespace(
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name=None,
+        managed_capability_profile=None,
+        max_cost_usd=Decimal("0.75"),
+        prospective=False,
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        try:
+            remote._capture(args, COMMIT, None)
+        except KeyboardInterrupt:
+            os._exit(130)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+
+    os.close(ready_write)
+    os.close(cleanup_write)
+    reaped = False
+    try:
+        ready, _, _ = select.select([ready_read], [], [], 3)
+        assert ready and os.read(ready_read, 1) == b"r"
+        os.kill(pid, signal.SIGTERM)
+        started, _, _ = select.select([cleanup_read], [], [], 2)
+        assert started and os.read(cleanup_read, 1) == b"s"
+        os.kill(pid, signal.SIGTERM)
+        finished, _, _ = select.select([cleanup_read], [], [], 2)
+        assert finished and os.read(cleanup_read, 1) == b"d"
+        status = _waitpid_bounded(pid)
+        reaped = True
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 130
+    finally:
+        os.close(ready_read)
+        os.close(cleanup_read)
+        if not reaped:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX signals")
+def test_sigterm_at_cleanup_entry_cannot_bypass_guard_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_read, cleanup_write = os.pipe()
+    watchdog = SimpleNamespace(
+        cost_window=None,
+        instance=SimpleNamespace(instance_id="b" * 32),
+    )
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+
+    def create_source(path: Path, _commit: str) -> tuple[str, int]:
+        path.write_bytes(b"synthetic source")
+        return SOURCE_ARCHIVE_SHA256, len(b"synthetic source")
+
+    def terminate(_watchdog: object) -> SimpleNamespace:
+        os.write(cleanup_write, b"c")
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote, "_create_source_archive", create_source)
+    monkeypatch.setattr(
+        remote,
+        "_capture_over_ssh",
+        lambda *_args, **_kwargs: Path("/unused/capture"),
+    )
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        terminate,
+    )
+    args = SimpleNamespace(
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name=None,
+        managed_capability_profile=None,
+        max_cost_usd=Decimal("0.75"),
+        prospective=False,
+    )
+    source_lines = Path(remote.__file__).read_text(encoding="utf-8").splitlines()
+    first_line = remote._capture_with_source.__code__.co_firstlineno
+    cleanup_entry_line = next(
+        line_number
+        for line_number in range(first_line, len(source_lines) + 1)
+        if "capture_failed = sys.exc_info()" in source_lines[line_number - 1]
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(cleanup_read)
+
+        def inject_at_cleanup_entry(
+            frame: object,
+            event: str,
+            _argument: object,
+        ) -> object:
+            if (
+                event == "line"
+                and getattr(frame, "f_code", None)
+                is remote._capture_with_source.__code__
+                and getattr(frame, "f_lineno", None) == cleanup_entry_line
+            ):
+                sys.settrace(None)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return inject_at_cleanup_entry
+
+        sys.settrace(inject_at_cleanup_entry)
+        try:
+            remote._capture(args, COMMIT, None)
+        except KeyboardInterrupt:
+            os._exit(130)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+
+    os.close(cleanup_write)
+    reaped = False
+    try:
+        status = _waitpid_bounded(pid)
+        reaped = True
+        cleanup, _, _ = select.select([cleanup_read], [], [], 1)
+        assert cleanup and os.read(cleanup_read, 1) == b"c"
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 130
+    finally:
+        os.close(cleanup_read)
+        if not reaped:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX signals")
+def test_repeated_sigterm_during_handler_restore_cannot_interrupt_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_read, cleanup_write = os.pipe()
+    watchdog = SimpleNamespace(
+        cost_window=None,
+        instance=SimpleNamespace(instance_id="b" * 32),
+    )
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+
+    def create_source(path: Path, _commit: str) -> tuple[str, int]:
+        path.write_bytes(b"synthetic source")
+        return SOURCE_ARCHIVE_SHA256, len(b"synthetic source")
+
+    def interrupt_capture(*_args: object, **_kwargs: object) -> Path:
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM did not interrupt capture")
+
+    def terminate(_watchdog: object) -> SimpleNamespace:
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.write(cleanup_write, b"c")
+        return SimpleNamespace(final_status="absent")
+
+    monkeypatch.setattr(remote, "_create_source_archive", create_source)
+    monkeypatch.setattr(remote, "_capture_over_ssh", interrupt_capture)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        terminate,
+    )
+    args = SimpleNamespace(
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name=None,
+        managed_capability_profile=None,
+        max_cost_usd=Decimal("0.75"),
+        prospective=False,
+    )
+    source_lines = Path(remote.__file__).read_text(encoding="utf-8").splitlines()
+    guarded_code = remote._guarded_interruptible.__wrapped__.__code__
+    restore_line = next(
+        line_number
+        for line_number in range(guarded_code.co_firstlineno, len(source_lines) + 1)
+        if "signal.signal(selected_signal, handler)" in source_lines[line_number - 1]
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(cleanup_read)
+
+        def inject_during_restore(
+            frame: object,
+            event: str,
+            _argument: object,
+        ) -> object:
+            if (
+                event == "line"
+                and getattr(frame, "f_code", None) is guarded_code
+                and getattr(frame, "f_lineno", None) == restore_line
+            ):
+                sys.settrace(None)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return inject_during_restore
+
+        sys.settrace(inject_during_restore)
+        try:
+            remote._capture(args, COMMIT, None)
+        except KeyboardInterrupt:
+            os._exit(130)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+
+    os.close(cleanup_write)
+    reaped = False
+    try:
+        status = _waitpid_bounded(pid)
+        reaped = True
+        cleanup, _, _ = select.select([cleanup_read], [], [], 1)
+        assert cleanup and os.read(cleanup_read, 1) == b"c"
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 130
+    finally:
+        os.close(cleanup_read)
+        if not reaped:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX signals")
+def test_sigterm_with_unconfirmed_termination_retains_unresolved_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready_read, ready_write = os.pipe()
+    state_directory = tmp_path / "guard"
+    state_directory.mkdir()
+
+    class AliveWatchdog:
+        def poll(self) -> None:
+            return None
+
     watchdog = SimpleNamespace(
         instance=SimpleNamespace(instance_id="b" * 32),
+        process=AliveWatchdog(),
+        state_directory=state_directory,
+    )
+    monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
+
+    def create_source(path: Path, _commit: str) -> tuple[str, int]:
+        path.write_bytes(b"synthetic source")
+        return SOURCE_ARCHIVE_SHA256, len(b"synthetic source")
+
+    monkeypatch.setattr(remote, "_create_source_archive", create_source)
+
+    def block_capture(*_args: object, **_kwargs: object) -> Path:
+        os.write(ready_write, b"r")
+        while True:
+            signal.pause()
+
+    monkeypatch.setattr(remote, "_capture_over_ssh", block_capture)
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        lambda _watchdog: (_ for _ in ()).throw(
+            remote.lambda_gpu_guard.LambdaGuardError("synthetic provider failure")
+        ),
+    )
+    args = SimpleNamespace(
+        lambda_billing_started_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+        lambda_hourly_rate_usd=Decimal("1.29"),
+        lambda_instance_id="b" * 32,
+        lambda_instance_type_name=None,
+        managed_capability_profile=None,
+        max_cost_usd=Decimal("0.75"),
+        prospective=False,
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(ready_read)
+        try:
+            remote._capture(args, COMMIT, None)
+        except KeyboardInterrupt:
+            os._exit(130)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+
+    os.close(ready_write)
+    reaped = False
+    try:
+        ready, _, _ = select.select([ready_read], [], [], 3)
+        assert ready and os.read(ready_read, 1) == b"r"
+        os.kill(pid, signal.SIGTERM)
+        status = _waitpid_bounded(pid)
+        reaped = True
+        assert os.WIFEXITED(status)
+        assert os.WEXITSTATUS(status) == 130
+    finally:
+        os.close(ready_read)
+        if not reaped:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+    marker = json.loads(
+        (state_directory / "termination-unresolved.json").read_text(encoding="utf-8")
+    )
+    assert marker["status"] == "UNRESOLVED"
+    assert marker["watchdog_armed"] is True
+
+
+def test_unconfirmed_termination_retains_explicit_armed_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / "guard"
+    state_directory.mkdir()
+
+    class AliveWatchdog:
+        def poll(self) -> None:
+            return None
+
+    watchdog = SimpleNamespace(
+        instance=SimpleNamespace(instance_id="b" * 32),
+        process=AliveWatchdog(),
+        state_directory=state_directory,
+    )
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        lambda _watchdog: (_ for _ in ()).throw(
+            remote.lambda_gpu_guard.LambdaGuardError("synthetic provider failure")
+        ),
+    )
+
+    with pytest.raises(remote.RemoteCaptureError, match="was not confirmed"):
+        remote._terminate_guarded_capture(
+            watchdog,
+            capture_failed=False,
+            capture_label="capture",
+        )
+
+    marker = json.loads(
+        (state_directory / "termination-unresolved.json").read_text(encoding="utf-8")
+    )
+    assert marker["status"] == "UNRESOLVED"
+    assert marker["watchdog_armed"] is True
+    assert marker["instance_id"] == "b" * 32
+
+
+def test_unresolved_state_publication_failure_is_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watchdog = SimpleNamespace(instance=SimpleNamespace(instance_id="b" * 32))
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "terminate_guarded_instance",
+        lambda _watchdog: (_ for _ in ()).throw(
+            remote.lambda_gpu_guard.LambdaGuardError("synthetic provider failure")
+        ),
+    )
+    monkeypatch.setattr(
+        remote.lambda_gpu_guard,
+        "retain_unresolved_termination",
+        lambda _watchdog: (_ for _ in ()).throw(
+            remote.lambda_gpu_guard.LambdaGuardError("synthetic state failure")
+        ),
+    )
+
+    with pytest.raises(
+        remote.RemoteCaptureError,
+        match="explicit unresolved state could not be retained",
+    ):
+        remote._terminate_guarded_capture(
+            watchdog,
+            capture_failed=True,
+            capture_label="capture",
+        )
+
+
+def test_guard_failure_does_not_mask_the_capture_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / "guard"
+    state_directory.mkdir()
+
+    class AliveWatchdog:
+        def poll(self) -> None:
+            return None
+
+    watchdog = SimpleNamespace(
+        instance=SimpleNamespace(instance_id="b" * 32),
+        process=AliveWatchdog(),
+        state_directory=state_directory,
     )
     monkeypatch.setattr(remote, "_arm_lambda_watchdog", lambda _args: watchdog)
 
@@ -2014,6 +2836,7 @@ def test_guard_failure_does_not_mask_the_capture_failure(
             Path("/unused/repo.tar"),
             SOURCE_ARCHIVE_SHA256,
         )
+    assert (state_directory / "termination-unresolved.json").is_file()
 
 
 def test_completed_capture_manifest_anchors_receipts_and_support(

@@ -30,9 +30,18 @@ def assert_rejected(model: type[Any], value: dict[str, Any]) -> None:
         model.model_validate_json(json.dumps(value))
 
 
-def test_secret_bearing_endpoint_is_rejected() -> None:
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://127.0.0.1:8000?api_key=synthetic",
+        "http://127.0.0.1:8000/synthetic-marker",
+        "http://127.0.0.1:8000/.",
+        "http://127.0.0.1:8000/%2e",
+    ],
+)
+def test_non_root_or_secret_bearing_endpoint_is_rejected(endpoint: str) -> None:
     value = payload("experiment.json")
-    value["target"]["endpoint"] = "http://127.0.0.1:8000?api_key=secret"
+    value["target"]["endpoint"] = endpoint
     assert_rejected(ExperimentSpec, value)
 
 

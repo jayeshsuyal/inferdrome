@@ -156,6 +156,8 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   --dry-run \
   --expected-commit 0123456789abcdef0123456789abcdef01234567 \
   --identity-file /absolute/path/to/capture-only-id_ed25519 \
+  --host-key-file /absolute/path/to/pinned-known-hosts \
+  --host-key-sha256 <sha256-of-pinned-known-hosts-bytes> \
   --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
   --qwen3-gpu-tier a100-40gb-pcie \
   --lambda-instance-type-name '<exact Lambda API instance_type_name>' \
@@ -256,6 +258,8 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   --dry-run \
   --expected-commit 0123456789abcdef0123456789abcdef01234567 \
   --identity-file /absolute/path/to/capture-only-id_ed25519 \
+  --host-key-file /absolute/path/to/pinned-known-hosts \
+  --host-key-sha256 <sha256-of-pinned-known-hosts-bytes> \
   --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
   --qwen3-gpu-tier a100-40gb-sxm4 \
   --lambda-instance-type-name gpu_1x_a100_sxm4 \
@@ -319,6 +323,8 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   --dry-run \
   --expected-commit 0123456789abcdef0123456789abcdef01234567 \
   --identity-file /absolute/path/to/capture-only-id_ed25519 \
+  --host-key-file /absolute/path/to/pinned-known-hosts \
+  --host-key-sha256 <sha256-of-pinned-known-hosts-bytes> \
   --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
   --qwen3-gpu-tier h100-80gb-pcie \
   --lambda-instance-type-name '<exact Lambda API instance_type_name>' \
@@ -405,7 +411,10 @@ Lambda termination guard. This code does not launch an instance. The operator
 must still launch exactly one matching Lambda Stack 24.04 GPU instance,
 explicitly confirm that launch in Lambda, record the provider billing-start
 timestamp, and supply the exact instance ID, API instance-type name, SSH
-destination, GPU tier, and capture-only private-key path.
+destination, GPU tier, capture-only private-key path, independently retained
+host-key bytes, and the SHA-256 digest of those exact bytes. The controller
+uses strict checking against the staged pin from the first SSH/SCP handshake,
+sets `IdentityAgent=none`, and never consults an ambient SSH agent.
 
 The reviewed A10 path can still be previewed at zero cost. It requires a clean
 committed checkout, builds and validates the exact source archive, but does not
@@ -417,6 +426,8 @@ PYTHONPATH=src .venv/bin/python scripts/capture_real_gpu_over_ssh.py \
   --dry-run \
   --expected-commit 0123456789abcdef0123456789abcdef01234567 \
   --identity-file /absolute/path/to/capture-only-id_ed25519 \
+  --host-key-file /absolute/path/to/pinned-known-hosts \
+  --host-key-sha256 <sha256-of-pinned-known-hosts-bytes> \
   --managed-capability-profile managed-vllm-0.26-qwen3-8b-bf16-v1 \
   --qwen3-gpu-tier a10-24gb-pcie \
   --lambda-instance-type-name gpu_1x_a10 \
@@ -477,8 +488,9 @@ source rebuild is subtracted from that live window.
 This is a client-side fail-safe, not a provider-enforced spending limit or a
 guarantee about the final invoice. Provider timing, billing granularity, API
 availability, and termination latency remain outside Inferdrome's control. The
-controller always attempts termination in `finally`, while the independent
-watchdog remains the second termination path.
+controller attempts termination in `finally` after normal completion, handled
+failures, SIGINT, and SIGTERM. Abrupt controller death instead relies on the
+independent watchdog.
 
 The lifecycle order is deliberate:
 

@@ -104,7 +104,11 @@ canonical parsing, exact contract comparisons, and source-cleanliness checks.
 It rejects remote Docker contexts, public/host networking, privileged or
 GPU-shaped Compose escape hatches, and runner/engine topology drift. Its
 subprocess interface is an argv vector with a small allowlisted environment,
-bounded output/diagnostics, no shell, and bounded timeout termination.
+bounded output/diagnostics, no shell, a private `HOME` and empty Docker
+configuration, and one hard deadline covering execution, pipe draining,
+process-group termination, and final joins. Docker is selected from fixed
+system and Homebrew tool directories and its absolute file identity is
+rechecked before each start.
 
 Every started workflow has one generated project identity. Cleanup uses that
 identity, fixed Compose file, and a private project-derived image override;
@@ -174,10 +178,12 @@ can return internally consistent false observations.
 
 ### Secret leakage through configured inputs
 
-The resolver rejects user-info and query secrets in endpoint URLs. Invocation
-capture uses a structured argument vector and redacts configured secret-bearing
-arguments. Environment capture is allowlist-based rather than a dump of the
-process environment.
+The resolver accepts only root HTTP(S) endpoint base URLs and rejects every
+other path, user information, query, and fragment before reserving a workspace.
+The adapter rechecks the root-only contract before request, argument-vector,
+and evidence construction. Invocation capture uses a structured argument vector
+and redacts configured secret-bearing arguments. Environment capture is
+allowlist-based rather than a dump of the process environment.
 
 ### Unsafe bundle import
 
@@ -264,6 +270,12 @@ unless the run's sensitivity policy explicitly permits it.
 
 Redaction failures make the bundle ineligible rather than silently deleting a
 sealed native artifact.
+
+Producer stdout and stderr remain byte-exact only when they contain no
+credential-shaped material. A credential-shaped assignment, bearer value,
+signed-query value, URL user information, or private-key header fails producer
+capture before those bytes can be sealed. Operational qualification/helper
+errors are redacted or suppressed instead of being copied into evidence.
 
 ### Exact A10 archive publication review
 

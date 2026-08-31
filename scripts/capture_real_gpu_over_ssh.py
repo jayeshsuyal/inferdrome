@@ -15,7 +15,6 @@ import os
 import re
 import selectors
 import shlex
-import shutil
 import signal
 import stat
 import subprocess
@@ -30,6 +29,12 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from inferdrome.errors import AdapterError
+from inferdrome.execution.subprocess_runner import (
+    ExecutableIdentity,
+    redact_subprocess_diagnostics,
+    resolve_executable_identity,
+)
 from inferdrome.qwen3_gpu_tiers import (
     QWEN3_A10_GPU_TIER_ID,
     QWEN3_ARCHIVE_TRANSFER_SECONDS,
@@ -122,6 +127,17 @@ _DENIED_SOURCE_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 _RENAME_EXCL = 0x00000004
+_EXECUTABLE_IDENTITIES: dict[str, ExecutableIdentity] = {}
+_LOCAL_TOOL_SEARCH_PATH = os.pathsep.join(
+    (
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    )
+)
 
 
 class RemoteCaptureError(RuntimeError):
@@ -220,17 +236,51 @@ def _run(
     timeout: float | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[bytes]:
+    if (
+        not arguments
+        or any(
+            not isinstance(argument, str)
+            or not argument
+            or "\x00" in argument
+            or len(argument.encode("utf-8")) > 65_536
+            for argument in arguments
+        )
+    ):
+        raise RemoteCaptureError(f"{label} has an invalid argument vector")
+    try:
+        executable = _local_executable(arguments[0])
+    except AdapterError:
+        raise RemoteCaptureError(f"{label} executable is unavailable") from None
     try:
         completed = subprocess.run(
             list(arguments),
+            executable=str(executable.path),
+            env=_local_child_environment(executable),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE if capture_output else None,
-            stderr=subprocess.PIPE if capture_output else None,
+            stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
+            stderr=subprocess.PIPE if capture_output else subprocess.DEVNULL,
+            close_fds=True,
             check=False,
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise RemoteCaptureError(f"{label} could not complete") from None
+    stdout = (
+        redact_subprocess_diagnostics(completed.stdout)
+        if completed.stdout is not None
+        else None
+    )
+    stderr = (
+        redact_subprocess_diagnostics(completed.stderr)
+        if completed.stderr is not None
+        else None
+    )
+    completed = subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        stdout,
+        stderr,
+    )
     if check and completed.returncode != 0:
         detail = ""
         if capture_output and completed.stderr:
@@ -240,6 +290,49 @@ def _run(
         suffix = f": {detail}" if detail else ""
         raise RemoteCaptureError(f"{label} failed{suffix}")
     return completed
+
+
+def _local_executable(name: str) -> ExecutableIdentity:
+    """Resolve a local tool once, then reject any identity drift."""
+
+    cached = _EXECUTABLE_IDENTITIES.get(name)
+    if cached is None:
+        cached = resolve_executable_identity(
+            name,
+            search_path=_LOCAL_TOOL_SEARCH_PATH,
+        )
+        _EXECUTABLE_IDENTITIES[name] = cached
+        return cached
+    observed = resolve_executable_identity(str(cached.path))
+    if observed != cached:
+        raise AdapterError("local executable identity changed")
+    return cached
+
+
+def _local_child_environment(executable: ExecutableIdentity) -> dict[str, str]:
+    """Build a tool-only environment with no cloud or SSH-agent credentials."""
+
+    environment = {
+        name: value
+        for name in ("LANG", "LC_ALL")
+        if (value := os.environ.get(name)) is not None
+        and len(value) <= 4_096
+        and "\x00" not in value
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": "/nonexistent",
+            "PATH": os.pathsep.join(
+                dict.fromkeys(
+                    (str(executable.path.parent), *os.defpath.split(os.pathsep))
+                )
+            ),
+        }
+    )
+    return environment
 
 
 def _git(*arguments: str) -> str:
@@ -545,6 +638,7 @@ def _stream_git_source_archive(
     selector: selectors.BaseSelector | None = None
     successful = False
     try:
+        executable = _local_executable("git")
         descriptor = os.open(
             destination,
             os.O_RDWR
@@ -564,6 +658,8 @@ def _stream_git_source_archive(
                 "--format=tar",
                 commit,
             ],
+            executable=str(executable.path),
+            env=_local_child_environment(executable),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -611,7 +707,9 @@ def _stream_git_source_archive(
             raise subprocess.TimeoutExpired("git archive", 120)
         returncode = process.wait(timeout=remaining)
         if returncode != 0:
-            detail = stderr.decode("utf-8", errors="replace").strip()[:500]
+            detail = redact_subprocess_diagnostics(bytes(stderr)).decode(
+                "utf-8", errors="replace"
+            ).strip()[:500]
             suffix = f": {detail}" if detail else ""
             raise RemoteCaptureError(f"exact source archive creation failed{suffix}")
         if not 1 <= received <= _MAX_SOURCE_ARCHIVE_BYTES:
@@ -1002,20 +1100,22 @@ def _lambda_instance_type_name(value: str) -> str:
 
 
 def _require_checkout(expected_commit: str | None) -> str:
-    if shutil.which("git") is None:
+    try:
+        _local_executable("git")
+    except AdapterError:
         if _git_checkout_present():
-            raise RemoteCaptureError("git is required")
+            raise RemoteCaptureError("git is required") from None
         marker = _source_export_marker()
         commit = marker["repository_commit"]
         if expected_commit is not None:
             if _COMMIT_PATTERN.fullmatch(expected_commit) is None:
                 raise RemoteCaptureError(
                     "--expected-commit must be 40 lowercase hex digits"
-                )
+                ) from None
             if expected_commit != commit:
                 raise RemoteCaptureError(
                     "source export commit is not --expected-commit"
-                )
+                ) from None
         return commit
     if not _git_checkout_present():
         marker = _source_export_marker()
@@ -1071,7 +1171,6 @@ def _ssh_options(
     identity: Path | None,
     known_hosts: Path,
     port: int,
-    pinned: bool = False,
 ) -> list[str]:
     options = [
         "-F",
@@ -1085,13 +1184,15 @@ def _ssh_options(
         "-o",
         "ServerAliveCountMax=4",
         "-o",
-        "StrictHostKeyChecking=yes" if pinned else "StrictHostKeyChecking=accept-new",
+        "StrictHostKeyChecking=yes",
         "-o",
         f"UserKnownHostsFile={known_hosts}",
         "-o",
         "LogLevel=ERROR",
         "-o",
         "ForwardAgent=no",
+        "-o",
+        "IdentityAgent=none",
         "-o",
         "ForwardX11=no",
         "-o",
@@ -1119,13 +1220,11 @@ def _scp_options(
     identity: Path | None,
     known_hosts: Path,
     port: int,
-    pinned: bool = False,
 ) -> list[str]:
     options = _ssh_options(
         identity=identity,
         known_hosts=known_hosts,
         port=port,
-        pinned=pinned,
     )
     port_index = options.index("-p")
     options[port_index] = "-P"
@@ -2157,6 +2256,12 @@ def _download_remote_file(
     process: subprocess.Popen[bytes] | None = None
     selector: selectors.BaseSelector | None = None
     try:
+        try:
+            executable = _local_executable(arguments[0])
+        except (AdapterError, IndexError):
+            raise RemoteCaptureError(
+                "bounded archive retrieval executable is unavailable"
+            ) from None
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.download-",
             dir=destination.parent,
@@ -2165,6 +2270,8 @@ def _download_remote_file(
         created_inode = prospective_handoff._inode_identity(os.fstat(descriptor))
         process = subprocess.Popen(
             list(arguments),
+            executable=str(executable.path),
+            env=_local_child_environment(executable),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2212,7 +2319,9 @@ def _download_remote_file(
             raise subprocess.TimeoutExpired(arguments, timeout)
         returncode = process.wait(timeout=remaining)
         if returncode != 0:
-            detail = stderr.decode("utf-8", errors="replace").strip()[:500]
+            detail = redact_subprocess_diagnostics(bytes(stderr)).decode(
+                "utf-8", errors="replace"
+            ).strip()[:500]
             suffix = f": {detail}" if detail else ""
             raise RemoteCaptureError(f"bounded archive retrieval failed{suffix}")
         if not minimum_size <= received <= maximum_size:
@@ -2412,7 +2521,10 @@ def _qwen3_tier_policy(args: argparse.Namespace) -> Qwen3GpuTierPolicy:
 
 
 def _validate_capture_mode(args: argparse.Namespace) -> None:
-    """Keep the legacy workflow stable and make the campaign path fail closed."""
+    """Validate one capture mode before any provider or SSH action."""
+
+    if getattr(args, "host_key_sha256", None) is None:
+        raise RemoteCaptureError("capture requires explicit --host-key-sha256")
 
     if _prospective_requested(args):
         if (
@@ -2484,7 +2596,6 @@ def _validate_capture_mode(args: argparse.Namespace) -> None:
             "expected_workload_sha256",
             "expected_source_archive_sha256",
             "remote_state_root",
-            "host_key_file",
         )
     ):
         raise RemoteCaptureError("prospective transport options require --prospective")
@@ -2670,31 +2781,24 @@ def _arm_lambda_watchdog(
                     f"{expected_instance_type} target"
                 )
                 raise lambda_gpu_guard.LambdaGuardError(message)
-        except lambda_gpu_guard.LambdaGuardError as error:
-            try:
-                lambda_gpu_guard.terminate_guarded_instance(
-                    handle,
-                    trigger="campaign-single-instance-check-failed",
-                )
-            except lambda_gpu_guard.LambdaGuardError as termination_error:
-                prefix = (
-                    "Qwen3 single-instance check failed and immediate "
-                    if policy is not None
-                    else "prospective single-instance check failed and immediate "
-                )
+        except lambda_gpu_guard.LambdaGuardError:
+            label = (
+                "Qwen3 single-instance check"
+                if policy is not None
+                else "prospective single-instance check"
+            )
+            termination = _terminate_guarded_capture(
+                handle,
+                capture_failed=True,
+                capture_label=label,
+                termination_trigger="campaign-single-instance-check-failed",
+            )
+            if termination is None:
                 raise RemoteCaptureError(
-                    prefix
-                    + "termination was not confirmed; the watchdog remains armed: "
-                    + str(termination_error)
+                    f"{label} failed; immediate termination was not confirmed and "
+                    "explicit unresolved state was retained"
                 ) from None
-            raise RemoteCaptureError(
-                (
-                    "Qwen3 single-instance check failed; target terminated: "
-                    if policy is not None
-                    else "prospective single-instance check failed; target terminated: "
-                )
-                + str(error)
-            ) from None
+            raise RemoteCaptureError(f"{label} failed; target terminated") from None
     print(
         "Lambda termination watchdog armed for "
         f"{lambda_gpu_guard._timestamp(handle.cost_window.deadline)}."
@@ -2949,8 +3053,10 @@ def _capture_prospective_over_ssh(
         raise RemoteCaptureError("prospective transport archive identity changed")
 
     for executable in ("ssh", "scp"):
-        if shutil.which(executable) is None:
-            raise RemoteCaptureError(f"{executable} is required")
+        try:
+            _local_executable(executable)
+        except AdapterError:
+            raise RemoteCaptureError(f"{executable} is required") from None
     output_root = Path(args.output_root).expanduser().absolute()
     try:
         output_root.mkdir(parents=True, exist_ok=True)
@@ -2990,13 +3096,11 @@ def _capture_prospective_over_ssh(
             identity=identity,
             known_hosts=known_hosts,
             port=args.port,
-            pinned=True,
         )
         scp_options = _scp_options(
             identity=identity,
             known_hosts=known_hosts,
             port=args.port,
-            pinned=True,
         )
         print(f"Inferdrome commit: {commit}")
         print(f"Prospective remote workspace: {remote_root}")
@@ -3067,8 +3171,9 @@ def _capture_prospective_over_ssh(
         )
         if remote_result.returncode != 0:
             raise RemoteCaptureError(
-                "prospective remote capture failed; retained diagnostics at "
-                f"{staging_path} (remote workspace {remote_root})"
+                "prospective remote capture failed; child output was suppressed "
+                f"and local staging remains at {staging_path} "
+                f"(remote workspace {remote_root})"
             )
         transfer_deadline = _prospective_transfer_deadline(termination_deadline)
         _download_bounded_remote_file(
@@ -3346,8 +3451,10 @@ def _capture_over_ssh(
     termination_deadline: datetime | None = None,
 ) -> Path:
     for executable in ("ssh", "scp"):
-        if shutil.which(executable) is None:
-            raise RemoteCaptureError(f"{executable} is required")
+        try:
+            _local_executable(executable)
+        except AdapterError:
+            raise RemoteCaptureError(f"{executable} is required") from None
     output_root = Path(args.output_root).expanduser().absolute()
     try:
         output_root.mkdir(parents=True, exist_ok=True)
@@ -3369,10 +3476,22 @@ def _capture_over_ssh(
     checksum = staging_path / "capture.tar.gz.sha256"
     transfer_metadata = staging_path / "capture.tar.gz.metadata.json"
     remote_root = f"/tmp/inferdrome-gpu-{commit[:12]}-{token}"
-    pinned_host_key = (
-        bytes.fromhex(args.host_key_sha256)
-        if args.host_key_sha256 is not None
-        else None
+    expected_host_key_digest = getattr(args, "host_key_sha256", None)
+    if (
+        not isinstance(expected_host_key_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_host_key_digest) is None
+    ):
+        raise RemoteCaptureError("capture requires a pinned SSH host-key digest")
+    observed_host_identity_sha256 = _prepare_pinned_known_hosts(
+        destination=args.destination,
+        known_hosts=known_hosts,
+        host_key_file=(
+            Path(args.host_key_file).expanduser().absolute()
+            if getattr(args, "host_key_file", None) is not None
+            else None
+        ),
+        expected_digest=expected_host_key_digest,
+        port=args.port,
     )
     ssh_options = _ssh_options(
         identity=identity,
@@ -3413,12 +3532,6 @@ def _capture_over_ssh(
         label="remote GPU preflight",
         timeout=90,
     )
-    observed_host_identity_sha256 = _host_identity_digest(known_hosts)
-    if (
-        pinned_host_key is not None
-        and hashlib.sha256(known_hosts.read_bytes()).digest() != pinned_host_key
-    ):
-        raise RemoteCaptureError("SSH host identity does not match its expected digest")
     try:
         _run(
             [
@@ -3657,7 +3770,10 @@ def _capture_over_ssh(
     )
     if len(comparison_roots) == 1:
         comparison_root = comparison_roots[0]
-        dashboard_executable = shutil.which("inferdrome") or "inferdrome"
+        try:
+            dashboard_executable = str(_local_executable("inferdrome").path)
+        except AdapterError:
+            dashboard_executable = "inferdrome"
         dashboard_arguments = [
             dashboard_executable,
             "dashboard",
@@ -4194,7 +4310,10 @@ def _finalize_qwen3_capture_with_evidence(
 
     print("\nQWEN3 CAPTURE VERIFIED AFTER PROVIDER TERMINATION.")
     print(f"Local capture record: {capture_path}")
-    dashboard_executable = shutil.which("inferdrome") or "inferdrome"
+    try:
+        dashboard_executable = str(_local_executable("inferdrome").path)
+    except AdapterError:
+        dashboard_executable = "inferdrome"
     dashboard_arguments = [
         dashboard_executable,
         "dashboard",
@@ -4239,87 +4358,141 @@ def _resume_qwen3_finalization(
     )
 
 
+def _terminate_guarded_capture(
+    watchdog: lambda_gpu_guard.WatchdogHandle,
+    *,
+    capture_failed: bool,
+    capture_label: str,
+    termination_trigger: str | None = None,
+) -> lambda_gpu_guard.TerminationResult | None:
+    """Confirm provider termination or retain explicit unresolved guard state."""
+
+    try:
+        if termination_trigger is None:
+            termination = lambda_gpu_guard.terminate_guarded_instance(watchdog)
+        else:
+            termination = lambda_gpu_guard.terminate_guarded_instance(
+                watchdog,
+                trigger=termination_trigger,
+            )
+    except lambda_gpu_guard.LambdaGuardFinalizationError as error:
+        termination = error.result
+        print(
+            "WARNING: provider termination was confirmed, but local guard "
+            "finalization was incomplete.",
+            file=sys.stderr,
+        )
+        if not capture_failed:
+            raise RemoteCaptureError(
+                f"{capture_label} completed and Lambda terminated, but local guard "
+                "finalization failed"
+            ) from None
+        return termination
+    except lambda_gpu_guard.LambdaGuardError:
+        marker: Path | None = None
+        try:
+            if termination_trigger is None:
+                marker = lambda_gpu_guard.retain_unresolved_termination(watchdog)
+            else:
+                marker = lambda_gpu_guard.retain_unresolved_termination(
+                    watchdog,
+                    trigger=termination_trigger,
+                )
+        except (AttributeError, OSError, lambda_gpu_guard.LambdaGuardError):
+            raise RemoteCaptureError(
+                f"{capture_label} failed, provider termination was not confirmed, "
+                "and explicit unresolved state could not be retained"
+            ) from None
+        print(
+            "CRITICAL: immediate Lambda termination was not confirmed; the "
+            f"deadline watchdog state is retained at {marker}.",
+            file=sys.stderr,
+        )
+        if not capture_failed:
+            raise RemoteCaptureError(
+                f"{capture_label} completed, but Lambda termination was not confirmed"
+            ) from None
+        return None
+    print(
+        "Lambda termination confirmed: "
+        f"{watchdog.instance.instance_id} ({termination.final_status})."
+    )
+    return termination
+
+
 def _capture_with_source(
     args: argparse.Namespace,
     commit: str,
     identity: Path | None,
     source_archive: Path | None = None,
     source_archive_sha256: str | None = None,
+    *,
+    guard_signals: bool = False,
 ) -> Path:
     if (source_archive is None) != (source_archive_sha256 is None):
         raise RemoteCaptureError("source archive and digest must be supplied together")
-    watchdog = _arm_lambda_watchdog(args)
+    watchdog: lambda_gpu_guard.WatchdogHandle | None = None
     captured: Path | None = None
     termination: lambda_gpu_guard.TerminationResult | None = None
-    termination_deadline = getattr(
-        getattr(watchdog, "cost_window", None),
-        "deadline",
-        None,
-    )
-    try:
-        with tempfile.TemporaryDirectory(prefix="inferdrome-source-tree-") as temporary:
-            selected_archive = source_archive
-            selected_digest = source_archive_sha256
-            if selected_archive is None:
-                selected_archive = Path(temporary) / "repo.tar"
-                selected_digest, source_archive_bytes = _create_source_archive(
-                    selected_archive,
-                    commit,
-                )
-                print(
-                    "Exact source tree prepared without Git history: "
-                    f"{selected_digest} ({source_archive_bytes} bytes)"
-                )
-            if selected_digest is None:
-                raise AssertionError
-            if termination_deadline is None:
-                captured = _capture_over_ssh(
-                    args,
-                    commit,
-                    identity,
-                    selected_archive,
-                    selected_digest,
-                )
-            else:
-                captured = _capture_over_ssh(
-                    args,
-                    commit,
-                    identity,
-                    selected_archive,
-                    selected_digest,
-                    termination_deadline=termination_deadline,
-                )
-    finally:
-        if watchdog is not None:
-            capture_failed = sys.exc_info()[0] is not None
-            try:
-                termination = lambda_gpu_guard.terminate_guarded_instance(watchdog)
-            except lambda_gpu_guard.LambdaGuardFinalizationError as error:
-                print(
-                    "WARNING: local Lambda guard finalization failed after confirmed "
-                    f"termination: {error}",
-                    file=sys.stderr,
-                )
-                if not capture_failed:
-                    raise RemoteCaptureError(
-                        "capture completed and Lambda terminated, but local guard "
-                        "finalization failed"
-                    ) from None
-            except lambda_gpu_guard.LambdaGuardError as error:
-                print(
-                    "CRITICAL: immediate Lambda termination was not confirmed; "
-                    f"the deadline watchdog remains armed: {error}",
-                    file=sys.stderr,
-                )
-                if not capture_failed:
-                    raise RemoteCaptureError(
-                        "capture completed, but Lambda termination was not confirmed"
-                    ) from None
-            else:
-                print(
-                    "Lambda termination confirmed: "
-                    f"{watchdog.instance.instance_id} ({termination.final_status})."
-                )
+    with _guarded_cleanup_boundary(guard_signals) as deferred_interrupts:
+        try:
+            with _defer_guarded_interrupts():
+                watchdog = _arm_lambda_watchdog(args)
+            termination_deadline = getattr(
+                getattr(watchdog, "cost_window", None),
+                "deadline",
+                None,
+            )
+            with (
+                _capture_interrupt_boundary(deferred_interrupts),
+                tempfile.TemporaryDirectory(
+                    prefix="inferdrome-source-tree-"
+                ) as temporary,
+            ):
+                    selected_archive = source_archive
+                    selected_digest = source_archive_sha256
+                    if selected_archive is None:
+                        selected_archive = Path(temporary) / "repo.tar"
+                        selected_digest, source_archive_bytes = _create_source_archive(
+                            selected_archive,
+                            commit,
+                        )
+                        print(
+                            "Exact source tree prepared without Git history: "
+                            f"{selected_digest} ({source_archive_bytes} bytes)"
+                        )
+                    if selected_digest is None:
+                        raise AssertionError
+                    capture_arguments = (
+                        args,
+                        commit,
+                        identity,
+                        selected_archive,
+                        selected_digest,
+                    )
+                    if termination_deadline is None:
+                        captured = _capture_over_ssh(*capture_arguments)
+                    else:
+                        captured = _capture_over_ssh(
+                            *capture_arguments,
+                            termination_deadline=termination_deadline,
+                        )
+        finally:
+            if watchdog is not None:
+                capture_failed = sys.exc_info()[0] is not None
+                if deferred_interrupts is None:
+                    with _defer_guarded_interrupts():
+                        termination = _terminate_guarded_capture(
+                            watchdog,
+                            capture_failed=capture_failed,
+                            capture_label="capture",
+                        )
+                else:
+                    termination = _terminate_guarded_capture(
+                        watchdog,
+                        capture_failed=capture_failed,
+                        capture_label="capture",
+                    )
     if captured is None:
         raise AssertionError
     if _qwen3_profile_requested(args):
@@ -4337,12 +4510,21 @@ def _capture_with_source(
 
 
 @contextmanager
-def _prospective_interruptible() -> Any:
+def _guarded_interruptible(
+    deferred_interrupts: _DeferredInterruptState | None = None,
+) -> Any:
     """Make controller SIGINT/SIGTERM enter the guarded cleanup path."""
 
     previous: dict[signal.Signals, Any] = {}
+    interrupt_raised = False
 
     def interrupt(_signum: int, _frame: Any) -> None:
+        nonlocal interrupt_raised
+        if interrupt_raised:
+            if deferred_interrupts is not None:
+                deferred_interrupts.pending = True
+            return
+        interrupt_raised = True
         raise KeyboardInterrupt
 
     try:
@@ -4355,21 +4537,85 @@ def _prospective_interruptible() -> Any:
             signal.signal(selected_signal, handler)
 
 
+@dataclass
+class _DeferredInterruptState:
+    pending: bool = False
+
+    def defer(self, _signum: int, _frame: Any) -> None:
+        self.pending = True
+
+    def raise_if_pending(self) -> None:
+        if self.pending:
+            self.pending = False
+            raise KeyboardInterrupt
+
+
+@contextmanager
+def _defer_guarded_interrupts() -> Any:
+    """Finish watchdog ownership transitions before delivering an interrupt."""
+
+    state = _DeferredInterruptState()
+    previous: dict[signal.Signals, Any] = {}
+
+    try:
+        for selected_signal in (signal.SIGINT, signal.SIGTERM):
+            previous[selected_signal] = signal.getsignal(selected_signal)
+            signal.signal(selected_signal, state.defer)
+        yield state
+    finally:
+        for selected_signal, handler in previous.items():
+            signal.signal(selected_signal, handler)
+    state.raise_if_pending()
+
+
+@contextmanager
+def _guarded_cleanup_boundary(enabled: bool) -> Any:
+    """Keep cleanup shielded while allowing immediate capture interruption."""
+
+    if enabled:
+        with _defer_guarded_interrupts() as deferred_interrupts:
+            yield deferred_interrupts
+    else:
+        yield None
+
+
+@contextmanager
+def _capture_interrupt_boundary(
+    deferred_interrupts: _DeferredInterruptState | None,
+) -> Any:
+    """Deliver an already-pending or new signal before more capture work."""
+
+    if deferred_interrupts is None:
+        yield
+        return
+    with _guarded_interruptible(deferred_interrupts):
+        deferred_interrupts.raise_if_pending()
+        yield
+
+
 def _capture_prospective_with_handoff(
     args: argparse.Namespace,
     commit: str,
     identity: Path | None,
+    *,
+    guard_signals: bool = False,
 ) -> Path:
     """Snapshot P1 and only then enter the guarded remote workflow."""
 
-    with _prospective_interruptible():
-        return _capture_prospective_with_handoff_impl(args, commit, identity)
+    return _capture_prospective_with_handoff_impl(
+        args,
+        commit,
+        identity,
+        guard_signals=guard_signals,
+    )
 
 
 def _capture_prospective_with_handoff_impl(
     args: argparse.Namespace,
     commit: str,
     identity: Path | None,
+    *,
+    guard_signals: bool = False,
 ) -> Path:
 
     expected_source_archive_sha256 = _prospective_source_archive_pin(args, commit)
@@ -4405,56 +4651,44 @@ def _capture_prospective_with_handoff_impl(
             f"Exact source archive prepared: {source_archive_sha256} "
             f"({source_archive_bytes} bytes)"
         )
-        watchdog = _arm_lambda_watchdog(args)
+        watchdog: lambda_gpu_guard.WatchdogHandle | None = None
         captured: tuple[Path, int] | None = None
         termination: lambda_gpu_guard.TerminationResult | None = None
-        termination_deadline = getattr(
-            getattr(watchdog, "cost_window", None),
-            "deadline",
-            None,
-        )
-        try:
-            captured = _capture_prospective_over_ssh(
-                args,
-                commit,
-                identity,
-                source_archive,
-                source_archive_sha256,
-                handoff,
-                termination_deadline=termination_deadline,
-            )
-        finally:
-            if watchdog is not None:
-                capture_failed = sys.exc_info()[0] is not None
-                try:
-                    termination = lambda_gpu_guard.terminate_guarded_instance(watchdog)
-                except lambda_gpu_guard.LambdaGuardFinalizationError as error:
-                    print(
-                        "WARNING: local Lambda guard finalization failed after "
-                        f"confirmed termination: {error}",
-                        file=sys.stderr,
+        with _guarded_cleanup_boundary(guard_signals) as deferred_interrupts:
+            try:
+                with _defer_guarded_interrupts():
+                    watchdog = _arm_lambda_watchdog(args)
+                termination_deadline = getattr(
+                    getattr(watchdog, "cost_window", None),
+                    "deadline",
+                    None,
+                )
+                with _capture_interrupt_boundary(deferred_interrupts):
+                    captured = _capture_prospective_over_ssh(
+                        args,
+                        commit,
+                        identity,
+                        source_archive,
+                        source_archive_sha256,
+                        handoff,
+                        termination_deadline=termination_deadline,
                     )
-                    if not capture_failed:
-                        raise RemoteCaptureError(
-                            "prospective capture completed and Lambda terminated, "
-                            "but local guard finalization failed"
-                        ) from None
-                except lambda_gpu_guard.LambdaGuardError as error:
-                    print(
-                        "CRITICAL: immediate Lambda termination was not confirmed; "
-                        f"the deadline watchdog remains armed: {error}",
-                        file=sys.stderr,
-                    )
-                    if not capture_failed:
-                        raise RemoteCaptureError(
-                            "prospective capture completed, but Lambda termination "
-                            "was not confirmed"
-                        ) from None
-                else:
-                    print(
-                        "Lambda termination confirmed: "
-                        f"{watchdog.instance.instance_id} ({termination.final_status})."
-                    )
+            finally:
+                if watchdog is not None:
+                    capture_failed = sys.exc_info()[0] is not None
+                    if deferred_interrupts is None:
+                        with _defer_guarded_interrupts():
+                            termination = _terminate_guarded_capture(
+                                watchdog,
+                                capture_failed=capture_failed,
+                                capture_label="prospective capture",
+                            )
+                    else:
+                        termination = _terminate_guarded_capture(
+                            watchdog,
+                            capture_failed=capture_failed,
+                            capture_label="prospective capture",
+                        )
         if captured is None:
             raise AssertionError
         capture_path, source_archive_size_bytes = captured
@@ -4480,8 +4714,22 @@ def _capture_prospective_with_handoff_impl(
 def _capture(args: argparse.Namespace, commit: str, identity: Path | None) -> Path:
     """Protect the active instance before rebuilding the checked source payload."""
 
-    if _prospective_requested(args):
-        return _capture_prospective_with_handoff(args, commit, identity)
+    interruptible = _prospective_requested(args) or _lambda_guard_requested(args)
+    if interruptible:
+        with _guarded_interruptible():
+            if _prospective_requested(args):
+                return _capture_prospective_with_handoff(
+                    args,
+                    commit,
+                    identity,
+                    guard_signals=True,
+                )
+            return _capture_with_source(
+                args,
+                commit,
+                identity,
+                guard_signals=True,
+            )
     return _capture_with_source(args, commit, identity)
 
 
@@ -4536,11 +4784,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--host-key-sha256",
         type=_host_key_digest,
-        help="required prospective SHA-256 hex digest of the pinned known_hosts bytes",
+        help="required SHA-256 hex digest of the pinned known_hosts bytes",
     )
     parser.add_argument(
         "--host-key-file",
-        help="optional operator-supplied known_hosts bytes for prospective mode",
+        help="optional operator-supplied pinned known_hosts bytes",
     )
     parser.add_argument("--port", type=_port, default=22)
     parser.add_argument("--gpu-index", type=_gpu_index, default=0)
@@ -4624,6 +4872,7 @@ def main() -> int:
                 or args.managed_capability_profile is not None
                 or args.qwen3_gpu_tier is not None
                 or args.identity_file is not None
+                or args.host_key_file is not None
                 or args.host_key_sha256 is not None
                 or args.expected_source_archive_sha256 is not None
                 or _lambda_guard_requested(args)
@@ -4662,6 +4911,7 @@ def main() -> int:
                 or args.expected_workload_sha256 is not None
                 or args.expected_source_archive_sha256 is not None
                 or args.host_key_file is not None
+                or args.host_key_sha256 is not None
                 or args.managed_capability_profile is not None
                 or args.qwen3_gpu_tier is not None
                 or args.lambda_instance_type_name is not None
