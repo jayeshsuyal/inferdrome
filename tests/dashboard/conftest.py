@@ -103,6 +103,7 @@ def run_fake_bundle(tmp_path: Path) -> Iterator[Callable[..., RunResult]]:
         experiment_id: str | None = None,
         model: str | None = None,
         max_runtime_seconds: int | None = None,
+        exitspec_contract_digest: str | None = None,
     ) -> RunResult:
         source_path = FAKE_SOURCE
         if (
@@ -110,6 +111,7 @@ def run_fake_bundle(tmp_path: Path) -> Iterator[Callable[..., RunResult]]:
             or experiment_id is not None
             or model is not None
             or max_runtime_seconds is not None
+            or exitspec_contract_digest is not None
         ):
             source_root = tmp_path / "dashboard-sources" / run_id
             workload_directory = source_root / "workloads"
@@ -137,6 +139,11 @@ def run_fake_bundle(tmp_path: Path) -> Iterator[Callable[..., RunResult]]:
                 source_text = source_text.replace(
                     original_runtime,
                     f"max_runtime_seconds: {max_runtime_seconds}",
+                )
+            if exitspec_contract_digest is not None:
+                source_text += (
+                    "\nlinks:\n  exitspec_contract_digest: "
+                    f"{exitspec_contract_digest}\n"
                 )
             source_path = source_root / "fake-smoke.yaml"
             source_path.write_text(source_text, encoding="utf-8")

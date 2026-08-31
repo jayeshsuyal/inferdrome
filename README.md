@@ -137,10 +137,12 @@ plan and result contracts, bringing the public schema count to eleven. The
 initial design is intentionally narrow: two arms, one typed
 `traffic.concurrency` treatment, 2–100 permuted run pairs, one frozen primary
 outcome, complete-case paired arithmetic, and no uncertainty estimate. A result
-is `COMPARABLE` only when every planned bundle, schedule, fingerprint,
-allowlisted environment field, and outcome semantic verifies; otherwise all
-outcome arithmetic is suppressed. Predeclaration is `OPERATOR_ATTESTED`, not
-trusted proof of chronology, and comparability is not causality or acceptance.
+is `COMPARABLE` only when all run IDs are distinct, every member is
+`CUSTOMER_ELIGIBLE`, both arms and all bundles share one non-null ExitSpec
+contract identity, and every planned bundle, schedule, fingerprint, allowlisted
+environment field, and outcome semantic verifies; otherwise all outcome
+arithmetic is suppressed. Predeclaration is `OPERATOR_ATTESTED`, not trusted
+proof of chronology, and comparability is not causality or acceptance.
 
 The third v0.2 vertical slice adds a fail-closed executor for that frozen
 design without adding another public schema. One command verifies the retained

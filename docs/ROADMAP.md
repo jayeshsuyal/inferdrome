@@ -353,10 +353,15 @@ breaker rather than an exact provider-billing guarantee.
 Capture completion on 2026-08-20: one Lambda Stack 24.04 A10 archive contains a
 verified single-run proof and a verified four-run controlled comparison. Every
 comparison bundle is customer-eligible with complete observed environment
-evidence, all controls are satisfied, and the result is `COMPARABLE`. Archive
-verification is anchored to commit `c08b46d9fbd87477f45d130aa3c63615937c4dc3`
-and runs in an isolated temporary directory so source-workspace permission
-rewrites cannot weaken or spuriously invalidate the sealed bundles.
+evidence, and the preserved historical result records `COMPARABLE` under the
+former neutral measurement-compatibility policy. Its producer ExitSpec digest
+is null, so that label is non-authoritative and the current authority gate would
+produce `INCOMPARABLE` with no outcomes; see
+[REAL_GPU_PROOF.md](REAL_GPU_PROOF.md#publication-review-and-exitspec-handoff).
+Archive verification is anchored to commit
+`c08b46d9fbd87477f45d130aa3c63615937c4dc3` and runs in an isolated temporary
+directory so source-workspace permission rewrites cannot weaken or spuriously
+invalidate the sealed bundles.
 
 Producer publication closure on 2026-08-20 adds a standalone closed
 `inferdrome.local-gpu-proof.v1` schema, composite managed-vLLM profile,
@@ -452,7 +457,8 @@ Deliver:
 - bounded bundle discovery without a database;
 - authoritative Python verification and recalculation before projection;
 - Runs, Run detail, Compare, and Evidence views;
-- bounded and redacted browser-facing projections;
+- bounded, allowlisted browser-facing projections with documented exclusion,
+  transformation, and verbatim-disclosure policy;
 - pairwise comparison with explicit, deterministic comparability reasons;
 - neutral arithmetic deltas without better-or-worse claims; and
 - one ordinary display path for synthetic, attached-endpoint, and real-GPU

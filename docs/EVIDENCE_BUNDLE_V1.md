@@ -13,12 +13,16 @@ passes the same offline verifier exposed to consumers.
 The run workspace contains mutable control state and lock files. It is never
 presented as the evidence bundle. The writer creates `bundle.staging` beneath
 the reserved run directory, writes only declared public artifacts, verifies the
-staging tree, makes every file and directory owner-read-only, atomically renames
-it to `bundle`, verifies it again in immutable mode, and only then records the
+staging tree, makes every file and directory owner-read-only, and publishes it
+to `bundle` with the repository's platform-aware atomic no-replace primitive.
+The writer verifies that the final directory retains the staging device/inode
+identity before and after immutable verification, and only then records the
 `COMPLETE` state transition with `IntegrityStatus.VALID`.
 
-An existing staging or final path is never overwritten. A failed staging or
-verification attempt remains visibly incomplete for diagnosis.
+An existing staging or final path is never overwritten. A destination collision
+preserves both the pre-existing destination and the complete read-only staging
+tree; any failed staging, publication, or verification attempt remains visibly
+incomplete for diagnosis.
 
 ## Closed v1 layout
 

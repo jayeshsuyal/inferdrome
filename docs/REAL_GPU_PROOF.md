@@ -392,8 +392,20 @@ nor uploaded. The proposed future release-asset URL and exact required checksum
 are recorded in the handoff manifest; vendoring the same reviewed bytes in
 ExitSpec remains an alternative owner decision.
 
-Re-run the complete review and independently recalculate the 100/100 native
-TTFT population and nearest-rank p95 of `14,797,213 ns` with:
+The engineering gate always validates both tracked records, their duplicate-free
+closed JSON shapes, fixed canonical-document hashes, cross-document identities,
+profile/schema pins, `EXTERNAL_ONLY` owner-required state, retrospective
+chronology, and null Inferdrome/ExitSpec authority without requiring the raw
+archive:
+
+```bash
+PYTHONPATH=src .venv/bin/python \
+  scripts/review_gpu_evidence_publication.py --check-records
+```
+
+When the exact external archive is available locally, re-run the complete
+archive review and independently recalculate the 100/100 native TTFT population
+and nearest-rank p95 of `14,797,213 ns` with:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/review_gpu_evidence_publication.py --check
@@ -406,6 +418,11 @@ the sealed review.
 The handoff explicitly records a null producer-side ExitSpec contract digest
 and `RETROSPECTIVE` chronology. A future contract can be frozen before
 evaluation, but this capture does not prove that contract preceded measurement.
+Its preserved `comparison_context.status: COMPARABLE` is a historical, neutral
+measurement-compatibility label, not an evidence-authoritative comparison or
+an ExitSpec outcome. Under the current authority gate, the same null contract
+identity would produce `INCOMPARABLE` and withhold all controlled outcomes; the
+immutable handoff record remains unchanged.
 The capture producer commit, later profile/publication commits, and eventual
 merge commit are separate identities; the eventual owner merge must preserve
 `c08b46d9fbd87477f45d130aa3c63615937c4dc3` as an ancestor rather than
@@ -598,10 +615,12 @@ status and bounded outcome, and successful resume reverification. A fresh proof
 is expected to execute all four planned runs; the second invocation must report
 all four as reused and none as executed.
 
-`COMPARABLE` is emitted only if every frozen and observed v1 control is
-satisfied. A fully verified `INCOMPARABLE` result is still a successful proof
-of the evidence pipeline and contains no outcome estimate. Neither status is a
-winner label, causal claim, significance claim, or ExitSpec acceptance result.
+`COMPARABLE` is emitted only if all run IDs are distinct, every member is
+`CUSTOMER_ELIGIBLE`, both planned arms and all bundles share one non-null
+ExitSpec contract digest, and every frozen and observed v1 control is satisfied.
+A fully verified `INCOMPARABLE` result is still a successful proof of the
+evidence pipeline and contains no outcome estimate. Neither status is a winner
+label, causal claim, significance claim, or ExitSpec acceptance result.
 
 Inspect the finished proof through the locked read-only dashboard by replacing
 `<proof-directory>` with the directory containing the printed receipt:

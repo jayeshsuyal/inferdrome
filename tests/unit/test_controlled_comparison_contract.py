@@ -34,6 +34,23 @@ def test_plan_rejects_a_run_assigned_to_both_arms() -> None:
         ControlledComparisonPlan.model_validate_json(json.dumps(payload))
 
 
+def test_plan_rejects_nonmatching_exitspec_contract_identities() -> None:
+    payload = _fixture("controlled-comparison-plan.json")
+    baseline_arm = payload["baseline_arm"]
+    candidate_arm = payload["candidate_arm"]
+    assert isinstance(baseline_arm, dict)
+    assert isinstance(candidate_arm, dict)
+    baseline_spec = baseline_arm["resolved_experiment"]
+    candidate_spec = candidate_arm["resolved_experiment"]
+    assert isinstance(baseline_spec, dict)
+    assert isinstance(candidate_spec, dict)
+    baseline_spec["links"] = {"exitspec_contract_digest": f"sha256:{'a' * 64}"}
+    candidate_spec["links"] = {"exitspec_contract_digest": f"sha256:{'b' * 64}"}
+
+    with pytest.raises(ValidationError, match="differ only at the treatment path"):
+        ControlledComparisonPlan.model_validate_json(json.dumps(payload))
+
+
 def test_plan_rejects_an_extra_cross_arm_control_change() -> None:
     payload = _fixture("controlled-comparison-plan.json")
     candidate_arm = copy.deepcopy(payload["candidate_arm"])

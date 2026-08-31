@@ -1,6 +1,7 @@
 """Staged, verified, read-only evidence-bundle publication."""
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from inferdrome.domain.states import (
     RunState,
 )
 from inferdrome.errors import BundleError, VerificationError, WorkspaceError
+from inferdrome.immutable import _rename_no_replace
 from inferdrome.workspace import RunWorkspace
 
 _ARTIFACT_PATHS: dict[ArtifactRole, str] = {
@@ -182,6 +184,13 @@ def _make_read_only(root: Path) -> None:
     root.chmod(0o500)
 
 
+def _directory_identity(path: Path) -> tuple[int, int]:
+    metadata = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("bundle publication path is not a real directory")
+    return metadata.st_dev, metadata.st_ino
+
+
 def seal_bundle(
     workspace: RunWorkspace,
     metadata: BundleMetadata,
@@ -272,12 +281,19 @@ def seal_bundle(
             require_immutable=False,
         )
         _make_read_only(staging_path)
-        staging_path.rename(final_path)
+        staged_directory_identity = _directory_identity(staging_path)
+        _rename_no_replace(staging_path, final_path)
+        if _directory_identity(final_path) != staged_directory_identity:
+            raise VerificationError("published bundle identity disagrees with staging")
         verification = verify_bundle(
             final_path,
             expected_bundle_digest=bundle_digest,
             require_immutable=True,
         )
+        if _directory_identity(final_path) != staged_directory_identity:
+            raise VerificationError(
+                "published bundle identity changed during verification"
+            )
         workspace.transition(
             RunState.COMPLETE,
             integrity_status=IntegrityStatus.VALID,

@@ -358,6 +358,12 @@ def _command_trial_set_create(namespace: argparse.Namespace) -> int:
     )
     _json_output(
         {
+            "controlled_comparison_authority_issues": list(
+                verified.comparison_authority.issues
+            ),
+            "controlled_comparison_scope": (
+                verified.comparison_authority.scope
+            ),
             "member_count": len(verified.descriptor.members),
             "path": str(verified.path),
             "trial_set_digest": verified.trial_set_digest,
@@ -378,6 +384,12 @@ def _command_trial_set_verify(namespace: argparse.Namespace) -> int:
     )
     _json_output(
         {
+            "controlled_comparison_authority_issues": list(
+                verified.comparison_authority.issues
+            ),
+            "controlled_comparison_scope": (
+                verified.comparison_authority.scope
+            ),
             "execution_fingerprint": (verified.descriptor.execution_fingerprint),
             "member_count": len(verified.members),
             "trial_set_digest": verified.trial_set_digest,
@@ -399,6 +411,12 @@ def _command_trial_set_summarize(namespace: argparse.Namespace) -> int:
     variations = trial_metric_variations(verified)
     _json_output(
         {
+            "controlled_comparison_authority_issues": list(
+                verified.comparison_authority.issues
+            ),
+            "controlled_comparison_scope": (
+                verified.comparison_authority.scope
+            ),
             "inference": "DESCRIPTIVE_ONLY",
             "member_count": len(verified.members),
             "request_population_policy": "separate_per_run_v1",

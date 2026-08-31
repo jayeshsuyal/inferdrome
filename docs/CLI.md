@@ -204,9 +204,15 @@ inferdrome trial-set summarize \
 The summary exposes every run-level value and sample count, weights each
 available run equally, and reports Decimal minimum, median, maximum, mean, span,
 and sample standard deviation. Missing values remain unavailable rather than
-becoming zero. Output is `DESCRIPTIVE_ONLY`; these commands do not create a
-predeclared controlled comparison, infer confidence or causality, configure
-prefix caching, or issue ExitSpec outcomes.
+becoming zero. All three commands also emit the additive
+`controlled_comparison_scope` and
+`controlled_comparison_authority_issues` projection. A Trial Set is
+`CONTROLLED_OUTCOME_ELIGIBLE` only when every member is customer-eligible and
+all members share one non-null ExitSpec contract identity; every other set is
+explicitly `DESCRIPTIVE_ONLY_NON_AUTHORITATIVE`. Summary output remains
+`DESCRIPTIVE_ONLY`; these commands do not create a predeclared controlled
+comparison, infer confidence or causality, configure prefix caching, or issue
+ExitSpec outcomes.
 
 The full contract is in [TRIAL_SETS.md](TRIAL_SETS.md).
 

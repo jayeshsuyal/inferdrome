@@ -297,6 +297,16 @@ publication approval. The recorded decision is unchanged, and the raw archive
 remains ignored and local. This technical result is not legal advice and does
 not replace the final human security and privacy review.
 
+An archive-independent engineering-gate check strictly loads the two tracked
+A10 records without duplicate keys, rejects unknown nested fields, pins both
+canonical-document hashes, and validates their archive, review, profile,
+schema, run, history, and handoff cross-identities. It also fixes
+`EXTERNAL_ONLY`, requires owner approval to remain outstanding, requires
+retrospective chronology, and requires both Inferdrome acceptance and the
+producer-side ExitSpec contract authority fields to remain null. This metadata
+gate runs even when the ignored raw archive is absent; it does not publish,
+rewrite, authorize, or substitute for review of that archive.
+
 ## Availability controls
 
 Every run configures:

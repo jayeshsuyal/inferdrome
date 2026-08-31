@@ -271,11 +271,13 @@ closed and requires a fresh load.
 - Collection limits range from 1 through 200 entries; cursors are opaque,
   snapshot-bound, and at most 128 characters.
 - IDs and direct-child lookup replace arbitrary path parameters.
-- Roots, Trial Set directories, descriptors, run workspaces, and bundles must
-  satisfy the existing no-follow regular-file and real-directory rules.
-- Symlinks, duplicate IDs, unsafe entries, noncanonical JSON, writable
-  descriptors, oversized data, changed descriptors, and stale snapshots fail
-  closed.
+- A Trial Set directory has an exact one-file inventory. Its descriptor is
+  opened directory-relative with no-follow semantics and must be a bounded,
+  owner-read-only regular file with exactly one hard link.
+- Initial path, opened handle, and final path identities for both the directory
+  and descriptor must agree. Symlinks, hardlinks, extra siblings, duplicate
+  IDs, unsafe entries, noncanonical JSON, writable nodes, oversized data,
+  replacement races, and stale snapshots fail closed.
 - Verification reads each bundle through the existing bounded evidence path;
   Trial Set APIs do not serve raw bundle files or response-bearing content.
 - Cached projections are disposable and keyed by immutable digest. Refresh
@@ -293,3 +295,10 @@ descriptive when used alone. It does not become evidence of pre-run chronology,
 assignment, control, uncertainty, or causality. Prefix caching remains
 unsupported because it lacks a reviewed typed execution control and
 fingerprint-capable contract.
+
+Verification also derives a non-schema comparison-authority projection. A set
+is `CONTROLLED_OUTCOME_ELIGIBLE` only when every member is customer-eligible and
+all members share one non-null ExitSpec contract identity. Otherwise it is
+explicitly `DESCRIPTIVE_ONLY_NON_AUTHORITATIVE`, with closed reason codes, and
+cannot contribute outcome arithmetic to a controlled comparison. This
+projection leaves the frozen Trial Set v1 bytes unchanged.

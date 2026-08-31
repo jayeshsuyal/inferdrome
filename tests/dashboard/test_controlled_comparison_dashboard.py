@@ -40,6 +40,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FAKE_SOURCE = REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"
 FAKE_WORKLOAD = REPOSITORY_ROOT / "examples" / "workloads" / "fake-smoke.jsonl"
 PLAN_ID = "comparison-plan-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+CONTRACT_DIGEST = f"sha256:{'c' * 64}"
 
 
 def _capture_complete_synthetic_environment(
@@ -87,7 +88,9 @@ def _make_tree_writable(root: Path) -> None:
 
 
 def _create_pending_plan(root: Path) -> VerifiedComparisonPlan:
-    source_text = FAKE_SOURCE.read_text(encoding="utf-8")
+    source_text = FAKE_SOURCE.read_text(encoding="utf-8") + (
+        f"\nlinks:\n  exitspec_contract_digest: {CONTRACT_DIGEST}\n"
+    )
     sources: list[Path] = []
     for name, concurrency in (("baseline", 2), ("candidate", 4)):
         source_root = root / name
@@ -321,6 +324,7 @@ def test_incomparable_detail_suppresses_all_run_level_outcome_projections(
 def test_comparable_detail_exposes_only_verified_paired_outcomes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    emulated_customer_eligible_recalculation: None,
 ) -> None:
     try:
         monkeypatch.setattr(

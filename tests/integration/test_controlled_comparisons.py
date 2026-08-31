@@ -37,6 +37,7 @@ from inferdrome.trials import create_trial_set
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 FAKE_SOURCE = REPOSITORY_ROOT / "examples" / "fake-smoke.yaml"
 FAKE_WORKLOAD = REPOSITORY_ROOT / "examples" / "workloads" / "fake-smoke.jsonl"
+CONTRACT_DIGEST = f"sha256:{'c' * 64}"
 
 
 @pytest.fixture
@@ -87,7 +88,11 @@ def _make_tree_writable(root: Path) -> None:
         current.chmod(0o700)
 
 
-def _source_pair(root: Path) -> tuple[Path, Path]:
+def _source_pair(
+    root: Path,
+    *,
+    contract_digest: str | None = CONTRACT_DIGEST,
+) -> tuple[Path, Path]:
     baseline_root = root / "baseline-source"
     candidate_root = root / "candidate-source"
     for source_root in (baseline_root, candidate_root):
@@ -96,6 +101,10 @@ def _source_pair(root: Path) -> tuple[Path, Path]:
         shutil.copy2(FAKE_WORKLOAD, workload_root / FAKE_WORKLOAD.name)
 
     source_text = FAKE_SOURCE.read_text(encoding="utf-8")
+    if contract_digest is not None:
+        source_text += (
+            f"\nlinks:\n  exitspec_contract_digest: {contract_digest}\n"
+        )
     baseline_source = baseline_root / "experiment.yaml"
     candidate_source = candidate_root / "experiment.yaml"
     baseline_source.write_text(source_text, encoding="utf-8")
@@ -118,8 +127,12 @@ def _create_plan(
     root: Path,
     *,
     schedule_seed: str = "00" * 32,
+    contract_digest: str | None = CONTRACT_DIGEST,
 ) -> tuple[VerifiedComparisonPlan, Path, Path]:
-    baseline_source, candidate_source = _source_pair(root)
+    baseline_source, candidate_source = _source_pair(
+        root,
+        contract_digest=contract_digest,
+    )
     baseline = resolve_experiment(
         baseline_source,
         run_id="run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -203,6 +216,7 @@ def _execute_and_group(
 def test_controlled_comparison_recalculates_one_paired_point_estimate(
     tmp_path: Path,
     _complete_synthetic_environment: None,
+    emulated_customer_eligible_recalculation: None,
 ) -> None:
     try:
         plan, baseline_source, candidate_source = _create_plan(tmp_path)
@@ -251,6 +265,102 @@ def test_controlled_comparison_recalculates_one_paired_point_estimate(
             expected_comparison_result_digest=result.comparison_result_digest,
         )
         assert independently_verified.descriptor == result.descriptor
+    finally:
+        _make_tree_writable(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "eligibility_fixture",
+    [None, "emulated_ineligible_recalculation"],
+    ids=["synthetic-only", "ineligible"],
+)
+def test_ineligible_evidence_suppresses_controlled_outcomes(
+    tmp_path: Path,
+    _complete_synthetic_environment: None,
+    request: pytest.FixtureRequest,
+    eligibility_fixture: str | None,
+) -> None:
+    if eligibility_fixture is not None:
+        request.getfixturevalue(eligibility_fixture)
+    try:
+        plan, baseline_source, candidate_source = _create_plan(tmp_path)
+        baseline, candidate = _execute_and_group(
+            tmp_path,
+            plan,
+            baseline_source,
+            candidate_source,
+        )
+        result = create_comparison_result(
+            runs_root=tmp_path / "runs",
+            trial_sets_root=tmp_path / "trial-sets",
+            comparison_plans_root=tmp_path / "comparison-plans",
+            comparison_results_root=tmp_path / "comparison-results",
+            comparison_plan_id=plan.descriptor.comparison_plan_id,
+            expected_comparison_plan_digest=plan.comparison_plan_digest,
+            baseline_trial_set_id=baseline.descriptor.trial_set_id,
+            expected_baseline_trial_set_digest=baseline.trial_set_digest,
+            candidate_trial_set_id=candidate.descriptor.trial_set_id,
+            expected_candidate_trial_set_digest=candidate.trial_set_digest,
+        )
+
+        assert baseline.comparison_authority.scope == (
+            "DESCRIPTIVE_ONLY_NON_AUTHORITATIVE"
+        )
+        assert candidate.comparison_authority.scope == (
+            "DESCRIPTIVE_ONLY_NON_AUTHORITATIVE"
+        )
+        assert result.descriptor.status == "INCOMPARABLE"
+        assert result.descriptor.outcomes == ()
+        assert ControlCheckId.OUTCOME_COVERAGE_AND_SEMANTICS in (
+            result.descriptor.unsatisfied_controls
+        )
+        assert ControlCheckId.EXACT_ARM_MEMBERSHIP not in (
+            result.descriptor.unsatisfied_controls
+        )
+    finally:
+        _make_tree_writable(tmp_path)
+
+
+def test_missing_exitspec_identity_suppresses_controlled_outcomes(
+    tmp_path: Path,
+    _complete_synthetic_environment: None,
+    emulated_customer_eligible_recalculation: None,
+) -> None:
+    try:
+        plan, baseline_source, candidate_source = _create_plan(
+            tmp_path,
+            contract_digest=None,
+        )
+        baseline, candidate = _execute_and_group(
+            tmp_path,
+            plan,
+            baseline_source,
+            candidate_source,
+        )
+        result = create_comparison_result(
+            runs_root=tmp_path / "runs",
+            trial_sets_root=tmp_path / "trial-sets",
+            comparison_plans_root=tmp_path / "comparison-plans",
+            comparison_results_root=tmp_path / "comparison-results",
+            comparison_plan_id=plan.descriptor.comparison_plan_id,
+            expected_comparison_plan_digest=plan.comparison_plan_digest,
+            baseline_trial_set_id=baseline.descriptor.trial_set_id,
+            expected_baseline_trial_set_digest=baseline.trial_set_digest,
+            candidate_trial_set_id=candidate.descriptor.trial_set_id,
+            expected_candidate_trial_set_digest=candidate.trial_set_digest,
+        )
+
+        assert baseline.comparison_authority.issues == (
+            "EXITSPEC_CONTRACT_IDENTITY_MISSING",
+        )
+        assert candidate.comparison_authority.issues == (
+            "EXITSPEC_CONTRACT_IDENTITY_MISSING",
+        )
+        assert result.descriptor.status == "INCOMPARABLE"
+        assert result.descriptor.outcomes == ()
+        assert ControlCheckId.OUTCOME_COVERAGE_AND_SEMANTICS in (
+            result.descriptor.unsatisfied_controls
+        )
     finally:
         _make_tree_writable(tmp_path)
 
@@ -371,6 +481,7 @@ def test_comparison_plan_rejects_extra_entries_and_hard_links(
 def test_result_recalculation_rejects_invented_arithmetic(
     tmp_path: Path,
     _complete_synthetic_environment: None,
+    emulated_customer_eligible_recalculation: None,
 ) -> None:
     try:
         plan, baseline_source, candidate_source = _create_plan(tmp_path)

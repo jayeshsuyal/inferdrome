@@ -13,6 +13,8 @@ from pathlib import Path
 
 STAGING_DIRECTORY = ".inferdrome-staging"
 STAGING_PREFIX = ".inferdrome-stage-"
+_DARWIN_RENAME_EXCL = 0x00000004
+_LINUX_RENAME_NOREPLACE = 1
 
 
 def is_internal_staging_entry(name: str) -> bool:
@@ -124,20 +126,34 @@ def _rename_no_replace(source: Path, destination: Path) -> None:
             ctypes.c_uint,
         )
         rename.restype = ctypes.c_int
-        if rename(-100, source_bytes, -100, destination_bytes, 1) != 0:
+        if (
+            rename(
+                -100,
+                source_bytes,
+                -100,
+                destination_bytes,
+                _LINUX_RENAME_NOREPLACE,
+            )
+            != 0
+        ):
             _raise_rename_error()
         return
     if sys.platform == "darwin":
         try:
-            os.lstat(destination)
-        except OSError as error:
-            if error.errno != errno.ENOENT:
-                raise
-        else:
-            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST))
-        # Darwin's RENAME_EXCL rejects a non-empty read-only source directory.
-        # The caller holds the root publication lock around this rename.
-        os.rename(source, destination)
+            rename = library.renamex_np
+        except AttributeError:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace rename is unavailable",
+            ) from None
+        rename.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        if rename(source_bytes, destination_bytes, _DARWIN_RENAME_EXCL) != 0:
+            _raise_rename_error()
         return
     raise OSError(
         errno.ENOTSUP,
