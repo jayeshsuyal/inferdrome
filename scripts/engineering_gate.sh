@@ -11,6 +11,7 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/generate_deployment_receipt.py --check
 "$inferdrome_python" scripts/generate_gcp_dry_run_plan.py --check
 "$inferdrome_python" scripts/generate_gcp_execution_contracts.py --check
+"$inferdrome_python" scripts/generate_gcp_supervisor_contracts.py --check
 "$inferdrome_python" scripts/generate_kubernetes_contract.py --check
 "$inferdrome_python" scripts/runner_smoke.py --check
 "$inferdrome_python" scripts/build_runner_image.py --check
@@ -64,6 +65,7 @@ bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/gcp_dry_run_plan.py
 "$inferdrome_python" -m py_compile scripts/generate_gcp_dry_run_plan.py
 "$inferdrome_python" -m py_compile scripts/generate_gcp_execution_contracts.py
+"$inferdrome_python" -m py_compile scripts/generate_gcp_supervisor_contracts.py
 "$inferdrome_python" -m py_compile scripts/gcp_guarded_lifecycle.py
 "$inferdrome_python" -m py_compile scripts/runner_smoke.py
 "$inferdrome_python" -m py_compile scripts/build_runner_image.py

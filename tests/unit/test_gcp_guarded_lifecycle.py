@@ -8,7 +8,7 @@ import os
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,8 @@ from inferdrome.deployment import (
     gcp_execution_contract_schemas,
     gcp_execution_environment_digest,
     gcp_execution_request_digest,
+    gcp_execution_supervisor_contract_schemas,
+    gcp_supervisor_binding,
     issue_gcp_execution_arm,
     parse_deployment_spec_json,
     parse_gcp_execution_arm_json,
@@ -54,6 +56,17 @@ from inferdrome.deployment.gcp_compute_transport import (
     _canonical_resource_ref,
     _observation,
     create_google_compute_transport,
+)
+from inferdrome.deployment.gcp_supervisor import (
+    GCP_SUPERVISOR_CONFIRMATION,
+    FakeGcpWatchdog,
+    GcpLifecycleSupervisor,
+    GcpSupervisorError,
+    GcpSupervisorJournal,
+    InMemoryGcpKillSwitch,
+    canonical_gcp_execution_approval_bytes,
+    issue_gcp_execution_approval,
+    parse_gcp_execution_approval_json,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -186,12 +199,19 @@ def _quote_and_capacity(
     return quote, capacity
 
 
-def _controller(tmp_path: Path, transport: Any, arm_store: Any | None = None) -> Any:
+def _controller(
+    tmp_path: Path,
+    transport: Any,
+    arm_store: Any | None = None,
+    *,
+    safety_supervisor: Any | None = None,
+) -> Any:
     return GcpGuardedLifecycleController(
         transport=transport,
         arm_store=arm_store or InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(tmp_path),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=safety_supervisor,
     )
 
 
@@ -201,6 +221,7 @@ def _run(
     *,
     work: Any = None,
     return_controller: bool = False,
+    safety_supervisor: Any | None = None,
 ) -> Any:
     spec, inventory, context, plan = _inputs()
     arm = _arm()
@@ -209,7 +230,9 @@ def _run(
         "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
     ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
     quote, capacity = _quote_and_capacity(plan, arm, request)
-    controller = _controller(tmp_path, transport)
+    controller = _controller(
+        tmp_path, transport, safety_supervisor=safety_supervisor
+    )
     outcome = controller.execute(
         plan=plan,
         expected_spec=spec,
@@ -224,12 +247,92 @@ def _run(
     return (outcome, controller) if return_controller else outcome
 
 
+def _v2_inputs(controller_id: str = "ctl-12345678") -> tuple[Any, ...]:
+    spec, inventory, context, plan = _inputs()
+    arm = _arm(controller_id)
+    environment = _environment(plan)
+    request = __import__(
+        "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
+    ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
+    quote, capacity = _quote_and_capacity(plan, arm, request)
+    preflight = validate_gcp_execution_preflight(
+        plan=plan,
+        expected_spec=spec,
+        expected_inventory=inventory,
+        expected_context=context,
+        arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+        environment=environment,
+        quote=quote,
+        capacity=capacity,
+        now=NOW,
+    )
+    return spec, inventory, context, plan, arm, environment, quote, capacity, preflight
+
+
+def _execute_v2(controller: Any, inputs: tuple[Any, ...], *, work: Any = None) -> Any:
+    (
+        spec,
+        inventory,
+        context,
+        plan,
+        arm,
+        environment,
+        quote,
+        capacity,
+        _preflight,
+    ) = inputs
+    return controller.execute(
+        plan=plan,
+        expected_spec=spec,
+        expected_inventory=inventory,
+        expected_context=context,
+        arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+        environment=environment,
+        quote=quote,
+        capacity=capacity,
+        work=work,
+    )
+
+
+def _v2_supervisor(
+    root: Path,
+    preflight: Any,
+    *,
+    watchdog: FakeGcpWatchdog | None = None,
+    kill_switch: InMemoryGcpKillSwitch | None = None,
+) -> tuple[GcpLifecycleSupervisor, Any]:
+    root.mkdir()
+    approval = issue_gcp_execution_approval(
+        preflight=preflight,
+        operator_identity="operator-alice",
+        issued_at=NOW,
+        expires_at=NOW + timedelta(minutes=5),
+        confirmation=GCP_SUPERVISOR_CONFIRMATION,
+    )
+    return (
+        GcpLifecycleSupervisor(
+            approval=approval,
+            journal=GcpSupervisorJournal(root),
+            watchdog=watchdog or FakeGcpWatchdog(),
+            kill_switch=kill_switch or InMemoryGcpKillSwitch(),
+        ),
+        approval,
+    )
+
+
 def test_generated_schema_is_closed_and_fixture_is_exact() -> None:
     schemas = gcp_execution_contract_schemas()
     assert len(schemas) == 11
     for schema in schemas.values():
         Draft202012Validator.check_schema(schema)
         assert schema["$id"].startswith("urn:inferdrome:gcp-execution-")
+
+    supervisor_schemas = gcp_execution_supervisor_contract_schemas()
+    assert len(supervisor_schemas) == 4
+    for schema in supervisor_schemas.values():
+        Draft202012Validator.check_schema(schema)
+        assert schema["$id"].startswith("urn:inferdrome:gcp-")
+        assert schema["$id"].endswith(":v2")
 
     spec, inventory, context, plan = _inputs()
     expected = issue_gcp_execution_arm(
@@ -375,6 +478,390 @@ def test_quote_fixed_point_boundary_and_incomplete_capacity_fail_closed() -> Non
             capacity=capacity.model_copy(update={"capacity_status": "unknown"}),
             now=NOW,
         )
+
+
+def test_v2_supervisor_orders_approval_watchdog_and_intent_before_factory(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    safety_root = tmp_path / "safety"
+    watchdog = FakeGcpWatchdog()
+    supervisor, approval = _v2_supervisor(
+        safety_root, inputs[-1], watchdog=watchdog
+    )
+
+    class IntentCheckedTransport(FakeGcpComputeTransport):
+        def insert(
+            self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
+        ) -> Any:
+            assert supervisor.journal.load("ctl-12345678").state == "CREATE_INTENT"
+            return super().insert(
+                request, timeout_seconds=timeout_seconds, request_id=request_id
+            )
+
+    transport = IntentCheckedTransport()
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        assert supervisor.journal.load("ctl-12345678").state == "WATCHDOG_READY"
+        return transport
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "SUCCEEDED"
+    assert approval.operator_confirmation == GCP_SUPERVISOR_CONFIRMATION
+    assert factory_calls == ["factory"]
+    assert watchdog.arm_calls == 1
+    assert transport.insert_calls == 1
+    assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
+
+
+def test_v2_approval_substitution_blocks_before_future_factory(tmp_path: Path) -> None:
+    inputs = _v2_inputs()
+    other_inputs = _v2_inputs("ctl-87654321")
+    safety_root = tmp_path / "safety"
+    supervisor, _approval = _v2_supervisor(safety_root, other_inputs[-1])
+    factory_calls: list[str] = []
+    transport = FakeGcpComputeTransport()
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        return transport
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "APPROVAL_BINDING_MISMATCH"
+    assert outcome.arm_consumed is False
+    assert outcome.cleanup_confirmed is True
+    assert factory_calls == []
+    assert transport.insert_calls == 0
+
+
+def test_v2_watchdog_failure_consumes_arm_but_blocks_future_factory(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    watchdog = FakeGcpWatchdog(arm_error="WATCHDOG_ARM_FAILED")
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        raise AssertionError("future factory must not activate without watchdog")
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "WATCHDOG_ARM_FAILED"
+    assert outcome.arm_consumed is True
+    assert outcome.provider_mutation_attempted is False
+    assert outcome.cleanup_confirmed is True
+    assert factory_calls == []
+    assert watchdog.arm_calls == 1
+    assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
+
+
+@pytest.mark.parametrize(
+    ("fail_on_update", "primary_error", "expected_factory_calls"),
+    [
+        (1, "ARM_JOURNAL_UPDATE_FAILED", 0),
+        (2, "CREATE_INTENT_JOURNAL_FAILED", 1),
+    ],
+)
+def test_v2_core_journal_boundary_failure_blocks_without_insert(
+    tmp_path: Path,
+    fail_on_update: int,
+    primary_error: str,
+    expected_factory_calls: int,
+) -> None:
+    class BrokenJournal(GcpLeaseJournal):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.update_calls = 0
+
+        def update(self, record: Any) -> None:
+            self.update_calls += 1
+            if self.update_calls >= fail_on_update:
+                raise GcpJournalError("simulated journal failure")
+            super().update(record)
+
+    inputs = _v2_inputs()
+    supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    transport = FakeGcpComputeTransport()
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        return transport
+
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=BrokenJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == primary_error
+    assert outcome.error_code == "JOURNAL_UPDATE_FAILED"
+    assert outcome.cleanup_confirmed is False
+    assert transport.insert_calls == 0
+    assert len(factory_calls) == expected_factory_calls
+    assert supervisor.journal.load("ctl-12345678").state == "BLOCKED"
+
+
+def test_v2_kill_switch_blocks_after_arm_before_future_factory(tmp_path: Path) -> None:
+    inputs = _v2_inputs()
+    kill_switch = InMemoryGcpKillSwitch(killed=True)
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], kill_switch=kill_switch
+    )
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        raise AssertionError("future factory must not activate when killed")
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "KILL_SWITCH_ACTIVE"
+    assert outcome.arm_consumed is True
+    assert outcome.provider_mutation_attempted is False
+    assert outcome.cleanup_confirmed is True
+    assert factory_calls == []
+    assert kill_switch.checks == 1
+    assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
+
+
+def test_v2_kill_switch_is_rechecked_before_work_and_cleans_exact_lease(
+    tmp_path: Path,
+) -> None:
+    class FlipKillSwitch:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def is_killed(self, binding: Any) -> bool:
+            del binding
+            self.checks += 1
+            return self.checks >= 4
+
+    inputs = _v2_inputs()
+    kill_switch = FlipKillSwitch()
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], kill_switch=kill_switch
+    )
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    transport = FakeGcpComputeTransport()
+    controller = GcpGuardedLifecycleController(
+        transport=transport,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+    work_called = False
+
+    def work(_: Any) -> None:
+        nonlocal work_called
+        work_called = True
+
+    outcome = _execute_v2(controller, inputs, work=work)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "KILL_SWITCH_ACTIVE"
+    assert outcome.cleanup_confirmed is True
+    assert work_called is False
+    assert kill_switch.checks == 4
+    assert transport.insert_calls == 1
+    assert transport.delete_calls == 1
+    assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
+
+
+def test_v2_approval_parser_and_sidecar_journal_repair_fail_closed(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    safety_root = tmp_path / "safety"
+    supervisor, approval = _v2_supervisor(safety_root, inputs[-1])
+    approval_raw = canonical_gcp_execution_approval_bytes(approval)
+    assert parse_gcp_execution_approval_json(approval_raw) == approval
+    duplicate = approval_raw.replace(
+        b'"provider":"gcp-compute-engine"',
+        b'"provider":"gcp-compute-engine","provider":"gcp-compute-engine"',
+        1,
+    )
+    with pytest.raises(GcpSupervisorError, match="APPROVAL_INVALID"):
+        parse_gcp_execution_approval_json(duplicate)
+    unknown = json.loads(approval_raw)
+    unknown["unexpected"] = True
+    with pytest.raises(GcpSupervisorError, match="APPROVAL_INVALID"):
+        parse_gcp_execution_approval_json(json.dumps(unknown))
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    outcome, controller = _run(
+        core_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    binding = gcp_supervisor_binding(
+        approval, controller.journal.load("ctl-12345678")
+    )
+    supervisor.journal.reserve(binding, now=NOW)
+    path = safety_root / "ctl-12345678.safety-v2.events.jsonl"
+    path.write_bytes(path.read_bytes() + b'{"partial"')
+    assert supervisor.journal.load("ctl-12345678").state == "PREPARED"
+    with pytest.raises(GcpSupervisorError, match="SUPERVISOR_UNRESOLVED_LEASE"):
+        supervisor.journal.reserve(binding, now=NOW)
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "expected_state"),
+    [
+        ("reserve_after_event_fsync", "PREPARED"),
+        ("advance_after_event_fsync", "ARM_CONSUMED"),
+    ],
+)
+def test_v2_sidecar_crash_prefix_is_durable_and_restartable(
+    tmp_path: Path, crash_point: str, expected_state: str
+) -> None:
+    inputs = _v2_inputs()
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    outcome, controller = _run(
+        core_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    binding = gcp_supervisor_binding(
+        approval, controller.journal.load("ctl-12345678")
+    )
+    if crash_point.startswith("advance"):
+        supervisor.journal.reserve(binding, now=NOW)
+
+    pid = os.fork()
+    if pid == 0:
+        journal = GcpSupervisorJournal(
+            tmp_path / "safety",
+            crash_hook=lambda point: os._exit(77)
+            if point == crash_point
+            else None,
+        )
+        if crash_point.startswith("reserve"):
+            journal.reserve(binding, now=NOW)
+        else:
+            journal.advance(binding, state="ARM_CONSUMED", now=NOW)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 77
+    assert (
+        GcpSupervisorJournal(tmp_path / "safety").load("ctl-12345678").state
+        == expected_state
+    )
+
+
+def test_v2_recovery_enters_cleanup_sidecar_before_future_factory(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    safety_root = tmp_path / "safety"
+    supervisor, approval = _v2_supervisor(safety_root, inputs[-1])
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    transport = FakeGcpComputeTransport(delete_error="DELETE_DENIED")
+    initial = GcpGuardedLifecycleController(
+        transport=transport,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+    initial_outcome = _execute_v2(initial, inputs)
+    assert initial_outcome.orphaned is True
+    assert supervisor.journal.load("ctl-12345678").state == "ORPHANED"
+
+    factory_calls: list[str] = []
+    resumed_supervisor = GcpLifecycleSupervisor(
+        approval=approval,
+        journal=GcpSupervisorJournal(safety_root),
+        watchdog=FakeGcpWatchdog(),
+        kill_switch=InMemoryGcpKillSwitch(),
+    )
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        assert (
+            resumed_supervisor.journal.load("ctl-12345678").state
+            == "CLEANUP_PENDING"
+        )
+        return transport
+
+    recovery = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=resumed_supervisor,
+    )
+
+    recovered = recovery.recover_cleanup(
+        controller_id="ctl-12345678", confirmation=GCP_RECOVERY_CONFIRMATION
+    )
+
+    assert recovered.orphaned is True
+    assert recovered.cleanup_confirmed is False
+    assert factory_calls == ["factory"]
+    assert resumed_supervisor.journal.load("ctl-12345678").state == "ORPHANED"
 
 
 def test_successful_fake_lifecycle_has_one_delete_and_no_evidence_claim(

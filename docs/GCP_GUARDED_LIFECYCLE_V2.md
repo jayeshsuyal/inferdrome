@@ -16,7 +16,9 @@ Any later activation path must validate its separate approval artifact before
 it can construct an SDK/ADC client. It must retain the existing ordering:
 canonical preflight, durable lease reservation, one-shot arm consumption and
 `ARM_CONSUMED` journal event, then transport activation. This repository does
-not provide that later activation path.
+not provide that later activation path. The additive local approval, watchdog,
+and recovery state contract is documented in
+[`GCP_EXECUTION_SUPERVISOR_V2.md`](GCP_EXECUTION_SUPERVISOR_V2.md).
 
 ## Exact ownership and reconciliation
 

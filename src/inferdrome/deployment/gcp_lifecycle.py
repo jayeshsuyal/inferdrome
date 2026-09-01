@@ -1328,6 +1328,51 @@ class GcpExecutionPreflight:
     arm_sha256: Sha256Digest
 
 
+class GcpLifecycleSafetySupervisor(Protocol):
+    """Optional v0.2 sidecar hook; v1 lease semantics remain unchanged."""
+
+    def reserve(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
+    ) -> None: ...
+
+    def arm_watchdog(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
+    ) -> None: ...
+
+    def assert_create_permitted(
+        self, record: GcpLeaseRecord, *, now: datetime
+    ) -> None: ...
+
+    def create_intent(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
+
+    def before_work(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
+
+    def cleanup_pending(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
+
+    def cleanup_terminal(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        confirmed: bool,
+        error_code: str | None,
+        now: datetime,
+    ) -> None: ...
+
+    def block(
+        self, record: GcpLeaseRecord, *, error_code: str, now: datetime
+    ) -> None: ...
+
+    def resume_cleanup(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
+
+
 def _json_value(model: GcpExecutionModel) -> dict[str, Any]:
     value = model.model_dump(mode="json", by_alias=True, exclude_none=False)
     if not isinstance(value, dict):
@@ -2634,10 +2679,7 @@ class GcpLeaseJournal:
             raise GcpJournalError("GCP journal intent digest is invalid")
         with self._exclusive():
             for existing in self._scan():
-                if (
-                    existing.state != "CLEANUP_CONFIRMED"
-                    and existing.plan_id == record.plan_id
-                ):
+                if existing.state != "CLEANUP_CONFIRMED":
                     raise GcpJournalError("an unresolved GCP lease already exists")
             raw = canonical_json_bytes(_json_value(record))
             event_raw = (
@@ -3248,6 +3290,7 @@ class GcpGuardedLifecycleController:
         arm_store: ExecutionArmStore,
         journal: GcpLeaseJournal,
         clock: GcpClock | None = None,
+        safety_supervisor: GcpLifecycleSafetySupervisor | None = None,
     ) -> None:
         if (transport is None) == (transport_factory is None):
             raise GcpExecutionError(
@@ -3258,6 +3301,7 @@ class GcpGuardedLifecycleController:
         self.arm_store = arm_store
         self.journal = journal
         self.clock = clock or system_gcp_clock()
+        self.safety_supervisor = safety_supervisor
 
     @property
     def transport(self) -> GcpComputeTransport:
@@ -3277,6 +3321,47 @@ class GcpGuardedLifecycleController:
             except BaseException:
                 raise GcpExecutionError("GCP transport activation failed") from None
         return self._transport
+
+    @staticmethod
+    def _supervisor_error_code(error: BaseException) -> str:
+        if isinstance(error, GcpExecutionError) and re.fullmatch(
+            r"[A-Z][A-Z0-9_]{2,47}", str(error)
+        ):
+            return str(error)
+        return "SUPERVISOR_GUARD_FAILED"
+
+    def _supervisor_cleanup_terminal(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        confirmed: bool,
+        error_code: str | None,
+    ) -> str | None:
+        supervisor = self.safety_supervisor
+        if supervisor is None:
+            return None
+        try:
+            supervisor.cleanup_terminal(
+                record,
+                confirmed=confirmed,
+                error_code=error_code,
+                now=self.clock.now(),
+            )
+        except BaseException as error:
+            return self._supervisor_error_code(error)
+        return None
+
+    def _supervisor_block(
+        self, record: GcpLeaseRecord, *, error_code: str
+    ) -> str | None:
+        supervisor = self.safety_supervisor
+        if supervisor is None:
+            return None
+        try:
+            supervisor.block(record, error_code=error_code, now=self.clock.now())
+        except BaseException as error:
+            return self._supervisor_error_code(error)
+        return None
 
     def _owned_inventory(
         self, request: GcpInsertRequest, *, timeout_seconds: int
@@ -3589,6 +3674,13 @@ class GcpGuardedLifecycleController:
         cleanup_error: str | None = None
         if journal_error is not None:
             cleanup_error = journal_error
+        if self.safety_supervisor is not None:
+            try:
+                self.safety_supervisor.cleanup_pending(
+                    current, now=self.clock.now()
+                )
+            except BaseException as error:
+                cleanup_error = self._supervisor_error_code(error)
         ambiguous_mutation = ambiguous_mutation or current.provider_mutation_ambiguous
         cleanup_deadline = self.clock.monotonic() + timeout_seconds
 
@@ -3693,6 +3785,13 @@ class GcpGuardedLifecycleController:
                         orphaned=False,
                         last_error_code=None,
                     )
+                    supervisor_error = self._supervisor_cleanup_terminal(
+                        confirmed_record,
+                        confirmed=True,
+                        error_code=write_error,
+                    )
+                    if supervisor_error is not None:
+                        return confirmed_record, supervisor_error
                     if write_error is not None:
                         return confirmed_record, write_error
                     return confirmed_record, None
@@ -3794,7 +3893,18 @@ class GcpGuardedLifecycleController:
             orphaned=True,
             last_error_code=cleanup_error or "CLEANUP_UNCONFIRMED",
         )
-        return orphan_record, write_error or cleanup_error or "CLEANUP_UNCONFIRMED"
+        terminal_error = self._supervisor_cleanup_terminal(
+            orphan_record,
+            confirmed=False,
+            error_code=write_error or cleanup_error or "CLEANUP_UNCONFIRMED",
+        )
+        return (
+            orphan_record,
+            write_error
+            or terminal_error
+            or cleanup_error
+            or "CLEANUP_UNCONFIRMED",
+        )
 
     def execute(
         self,
@@ -3826,7 +3936,8 @@ class GcpGuardedLifecycleController:
         self._trace(trace, "VALIDATION", "SUCCEEDED")
         request = preflight.request
         arm = preflight.arm
-        now = _timestamp(self.clock.now())
+        clock_now = self.clock.now()
+        now = _timestamp(clock_now)
         record = GcpLeaseRecord(
             schema_version=GCP_EXECUTION_JOURNAL_SCHEMA_VERSION,
             state="PREPARED",
@@ -3878,42 +3989,118 @@ class GcpGuardedLifecycleController:
         )
         self.journal.reserve(record)
         self._trace(trace, "JOURNAL_PREPARE", "SUCCEEDED")
-        if not self.arm_store.consume(arm.arm_id, preflight.arm_sha256):
-            record = self._record(
-                record,
-                state="CLEANUP_CONFIRMED",
-                now=now,
-                cleanup_confirmed=True,
-                last_error_code="ARM_ALREADY_CONSUMED",
-            )
-            self._trace(trace, "ARM_CONSUME", "FAILED", "ARM_ALREADY_CONSUMED")
-            return _outcome(
-                record,
-                trace,
-                status="FAILED",
-                error_code="ARM_ALREADY_CONSUMED",
-                primary_error_code="ARM_ALREADY_CONSUMED",
-            )
-        record = self._record(record, state="ARM_CONSUMED", now=now, arm_consumed=True)
-        self._trace(trace, "ARM_CONSUME", "SUCCEEDED")
-        try:
-            self._activate_transport()
-        except BaseException:
-            activation_error = "TRANSPORT_ACTIVATION_FAILED"
-            self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", activation_error)
-            record = self._record(
+        if self.safety_supervisor is not None:
+            try:
+                self.safety_supervisor.reserve(
+                    record, preflight=preflight, now=clock_now
+                )
+            except BaseException as error:
+                supervisor_error = self._supervisor_error_code(error)
+                prior_record = record
+                record, journal_error = self._record_resilient(
+                    record,
+                    state="CLEANUP_CONFIRMED",
+                    now=now,
+                    cleanup_confirmed=True,
+                    orphaned=False,
+                    last_error_code=supervisor_error,
+                )
+                if journal_error is not None:
+                    record = prior_record
+                    supervisor_error = journal_error
+                self._trace(trace, "JOURNAL_PREPARE", "FAILED", supervisor_error)
+                return _outcome(
+                    record,
+                    trace,
+                    status="FAILED",
+                    error_code=supervisor_error,
+                    primary_error_code=supervisor_error,
+                )
+
+        def abort_before_provider(error_code: str) -> str:
+            nonlocal record
+            prior_record = record
+            record, journal_error = self._record_resilient(
                 record,
                 state="CLEANUP_CONFIRMED",
                 now=now,
                 cleanup_confirmed=True,
                 orphaned=False,
-                last_error_code=activation_error,
+                last_error_code=error_code,
             )
+            if journal_error is not None:
+                # A memory-only cleanup state is never authoritative. Keep the
+                # last durable core record visible to the caller and make the
+                # v0.2 sidecar explicitly block all subsequent runs.
+                record = prior_record
+                return (
+                    self._supervisor_block(
+                        record, error_code="JOURNAL_UPDATE_FAILED"
+                    )
+                    or journal_error
+                )
+            return (
+                self._supervisor_cleanup_terminal(
+                    record, confirmed=True, error_code=error_code
+                )
+                or error_code
+            )
+
+        if not self.arm_store.consume(arm.arm_id, preflight.arm_sha256):
+            terminal_error = abort_before_provider("ARM_ALREADY_CONSUMED")
+            self._trace(trace, "ARM_CONSUME", "FAILED", "ARM_ALREADY_CONSUMED")
             return _outcome(
                 record,
                 trace,
                 status="FAILED",
-                error_code=activation_error,
+                error_code=terminal_error,
+                primary_error_code="ARM_ALREADY_CONSUMED",
+            )
+        try:
+            record = self._record(
+                record, state="ARM_CONSUMED", now=now, arm_consumed=True
+            )
+        except BaseException:
+            if self.safety_supervisor is None:
+                raise
+            terminal_error = abort_before_provider("ARM_JOURNAL_UPDATE_FAILED")
+            self._trace(trace, "ARM_CONSUME", "FAILED", terminal_error)
+            return _outcome(
+                record,
+                trace,
+                status="FAILED",
+                error_code=terminal_error,
+                primary_error_code="ARM_JOURNAL_UPDATE_FAILED",
+            )
+        self._trace(trace, "ARM_CONSUME", "SUCCEEDED")
+        if self.safety_supervisor is not None:
+            try:
+                self.safety_supervisor.arm_watchdog(
+                    record, preflight=preflight, now=clock_now
+                )
+                self.safety_supervisor.assert_create_permitted(record, now=clock_now)
+            except BaseException as error:
+                supervisor_error = self._supervisor_error_code(error)
+                terminal_error = abort_before_provider(supervisor_error)
+                self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", supervisor_error)
+                return _outcome(
+                    record,
+                    trace,
+                    status="FAILED",
+                    error_code=terminal_error,
+                    primary_error_code=supervisor_error,
+                )
+        try:
+            self._activate_transport()
+        except BaseException:
+            activation_error = "TRANSPORT_ACTIVATION_FAILED"
+            self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", activation_error)
+            terminal_error = abort_before_provider(activation_error)
+            return _outcome(
+                record,
+                trace,
+                status="FAILED",
+                error_code=terminal_error,
                 primary_error_code=activation_error,
             )
         provider_attempted = False
@@ -3940,19 +4127,12 @@ class GcpGuardedLifecycleController:
                 self._trace(
                     trace, "OWNERSHIP_VERIFY", "FAILED", "ACTIVE_RESOURCE_EXISTS"
                 )
-                record, _ = self._record_resilient(
-                    record,
-                    state="CLEANUP_CONFIRMED",
-                    now=now,
-                    cleanup_confirmed=True,
-                    orphaned=False,
-                    last_error_code="ACTIVE_RESOURCE_EXISTS",
-                )
+                terminal_error = abort_before_provider("ACTIVE_RESOURCE_EXISTS")
                 return _outcome(
                     record,
                     trace,
                     status="FAILED",
-                    error_code="ACTIVE_RESOURCE_EXISTS",
+                    error_code=terminal_error,
                     primary_error_code="ACTIVE_RESOURCE_EXISTS",
                 )
             image_observation = GcpImageObservation.model_validate_json(
@@ -3974,38 +4154,24 @@ class GcpGuardedLifecycleController:
                 raise GcpTransportError("BOOT_IMAGE_OBSERVATION_MISMATCH")
         except GcpTransportError as error:
             self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", error.code)
-            record, _ = self._record_resilient(
-                record,
-                state="CLEANUP_CONFIRMED",
-                now=now,
-                cleanup_confirmed=True,
-                orphaned=False,
-                last_error_code=error.code,
-            )
+            terminal_error = abort_before_provider(error.code)
             return _outcome(
                 record,
                 trace,
                 status="FAILED",
-                error_code=error.code,
+                error_code=terminal_error,
                 primary_error_code=error.code,
             )
         except BaseException:
             self._trace(
                 trace, "OWNERSHIP_VERIFY", "FAILED", "PREFLIGHT_OBSERVATION_FAILED"
             )
-            record, _ = self._record_resilient(
-                record,
-                state="CLEANUP_CONFIRMED",
-                now=now,
-                cleanup_confirmed=True,
-                orphaned=False,
-                last_error_code="PREFLIGHT_OBSERVATION_FAILED",
-            )
+            terminal_error = abort_before_provider("PREFLIGHT_OBSERVATION_FAILED")
             return _outcome(
                 record,
                 trace,
                 status="FAILED",
-                error_code="PREFLIGHT_OBSERVATION_FAILED",
+                error_code=terminal_error,
                 primary_error_code="PREFLIGHT_OBSERVATION_FAILED",
             )
 
@@ -4033,17 +4199,38 @@ class GcpGuardedLifecycleController:
             # process death after the provider accepts insert but before its
             # operation handle is returned is therefore recovered as UNKNOWN,
             # never as a false absence.
-            record = self._record(
-                record,
-                state="CREATE_SUBMITTED",
-                now=now,
-                provider_mutation_attempted=True,
-                provider_mutation_ambiguous=True,
-                provider_operation_status="UNKNOWN",
-                provider_operation_terminal=False,
-                last_error_code="CREATE_MUTATION_PENDING",
-            )
+            try:
+                record = self._record(
+                    record,
+                    state="CREATE_SUBMITTED",
+                    now=now,
+                    provider_mutation_attempted=True,
+                    provider_mutation_ambiguous=True,
+                    provider_operation_status="UNKNOWN",
+                    provider_operation_terminal=False,
+                    last_error_code="CREATE_MUTATION_PENDING",
+                )
+            except BaseException:
+                if self.safety_supervisor is None:
+                    raise
+                terminal_error = abort_before_provider("CREATE_INTENT_JOURNAL_FAILED")
+                self._trace(trace, "CREATE", "FAILED", terminal_error)
+                return _outcome(
+                    record,
+                    trace,
+                    status="FAILED",
+                    error_code=terminal_error,
+                    primary_error_code="CREATE_INTENT_JOURNAL_FAILED",
+                )
             provider_attempted = True
+            if self.safety_supervisor is not None:
+                # The v0.2 sidecar makes a second durable intent record after
+                # the core journal and before the transport boundary.  This
+                # is deliberately still before an injected future provider
+                # insert can be reached.
+                self.safety_supervisor.create_intent(
+                    record, now=self.clock.now()
+                )
             operation = self._validate_operation_handle(
                 self.transport.insert(
                     request,
@@ -4113,6 +4300,8 @@ class GcpGuardedLifecycleController:
                 raise GcpExecutionError(primary_error)
             record = self._record(record, state="OWNED", now=now)
             self._trace(trace, "OWNERSHIP_VERIFY", "SUCCEEDED")
+            if self.safety_supervisor is not None:
+                self.safety_supervisor.before_work(record, now=self.clock.now())
             if work is not None:
                 work(observation)
             if self.clock.monotonic() >= controller_deadline:
@@ -4187,7 +4376,7 @@ class GcpGuardedLifecycleController:
             ambiguous_mutation=ambiguous_mutation,
         )
         cleanup_state_error = cleanup_error
-        terminal_error = cleanup_state_error or primary_error
+        outcome_error = cleanup_state_error or primary_error
         if cleanup_state_error is not None:
             status: Literal[
                 "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED"
@@ -4204,7 +4393,7 @@ class GcpGuardedLifecycleController:
             record,
             trace,
             status=status,
-            error_code=terminal_error,
+            error_code=outcome_error,
             primary_error_code=primary_error,
             cleanup_error_code=cleanup_state_error,
         )
@@ -4223,6 +4412,11 @@ class GcpGuardedLifecycleController:
             or gcp_execution_request_digest(request) != record.request_digest
         ):
             raise GcpJournalError("GCP lease request binding is invalid")
+        if self.safety_supervisor is not None:
+            try:
+                self.safety_supervisor.resume_cleanup(record, now=self.clock.now())
+            except BaseException as error:
+                raise GcpExecutionError(self._supervisor_error_code(error)) from None
         try:
             self._activate_transport()
         except BaseException:

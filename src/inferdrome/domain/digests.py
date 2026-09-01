@@ -28,6 +28,9 @@ class DigestDomain(StrEnum):
     GCP_EXECUTION_QUOTE = "gcp-execution-quote-v1"
     GCP_EXECUTION_RESULT = "gcp-execution-result-v1"
     GCP_EXECUTION_JOURNAL = "gcp-execution-journal-v1"
+    GCP_EXECUTION_APPROVAL = "gcp-execution-approval-v2"
+    GCP_EXECUTION_SUPERVISOR = "gcp-execution-supervisor-v2"
+    GCP_EXECUTION_WATCHDOG = "gcp-execution-watchdog-v2"
     DEPLOYMENT_QUALIFICATION = "deployment-qualification-v1"
 
 

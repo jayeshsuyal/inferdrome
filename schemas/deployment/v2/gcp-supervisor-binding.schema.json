@@ -1,0 +1,140 @@
+{
+  "$defs": {
+    "GcpExecutionLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_execution_v1",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "plan_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "provider-envelope",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "controller_id",
+        "plan_id",
+        "arm_id",
+        "managed_by",
+        "role"
+      ],
+      "title": "GcpExecutionLabels",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-supervisor-binding:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable exact resource/approval binding repeated in every event.",
+  "properties": {
+    "approval_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Approval Digest",
+      "type": "string"
+    },
+    "approval_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Approval Id",
+      "type": "string"
+    },
+    "arm_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Arm Id",
+      "type": "string"
+    },
+    "controller_deadline_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Controller Deadline At",
+      "type": "string"
+    },
+    "controller_id": {
+      "pattern": "^ctl-[a-z0-9]{8,24}$",
+      "title": "Controller Id",
+      "type": "string"
+    },
+    "instance_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "labels": {
+      "$ref": "#/$defs/GcpExecutionLabels"
+    },
+    "plan_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "region": {
+      "maxLength": 32,
+      "minLength": 5,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+      "title": "Region",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-supervisor-binding.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "approval_id",
+    "approval_digest",
+    "controller_id",
+    "arm_id",
+    "plan_id",
+    "request_digest",
+    "project_id",
+    "region",
+    "zone",
+    "instance_name",
+    "labels",
+    "controller_deadline_at"
+  ],
+  "title": "GcpSupervisorBinding",
+  "type": "object"
+}

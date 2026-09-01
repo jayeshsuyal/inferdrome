@@ -1,0 +1,82 @@
+{
+  "$id": "urn:inferdrome:gcp-watchdog-receipt:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A future external watchdog's exact, independently-ready receipt.",
+  "properties": {
+    "approval_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Approval Digest",
+      "type": "string"
+    },
+    "armed_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Armed At",
+      "type": "string"
+    },
+    "controller_death_coverage": {
+      "const": true,
+      "title": "Controller Death Coverage",
+      "type": "boolean"
+    },
+    "controller_id": {
+      "pattern": "^ctl-[a-z0-9]{8,24}$",
+      "title": "Controller Id",
+      "type": "string"
+    },
+    "expires_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "hung_work_coverage": {
+      "const": true,
+      "title": "Hung Work Coverage",
+      "type": "boolean"
+    },
+    "independently_durable": {
+      "const": true,
+      "title": "Independently Durable",
+      "type": "boolean"
+    },
+    "ready": {
+      "const": true,
+      "title": "Ready",
+      "type": "boolean"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-watchdog-receipt.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "watchdog_id": {
+      "maxLength": 70,
+      "minLength": 12,
+      "pattern": "^watchdog-[a-z][a-z0-9-]{2,61}$",
+      "title": "Watchdog Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "watchdog_id",
+    "approval_digest",
+    "request_digest",
+    "controller_id",
+    "armed_at",
+    "expires_at",
+    "ready",
+    "independently_durable",
+    "controller_death_coverage",
+    "hung_work_coverage"
+  ],
+  "title": "GcpWatchdogReceipt",
+  "type": "object"
+}
