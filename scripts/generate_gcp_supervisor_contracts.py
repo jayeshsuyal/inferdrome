@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate/check the additive v0.2 GCP supervisor schemas."""
+"""Generate/check the additive v0.2 GCP safety-contract schemas."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ import argparse
 import json
 from pathlib import Path
 
+from inferdrome.deployment.gcp_cost_guard import gcp_cost_guard_contract_schemas
+from inferdrome.deployment.gcp_lifecycle import (
+    gcp_execution_v2_safety_contract_schemas,
+)
 from inferdrome.deployment.gcp_supervisor import (
     gcp_execution_supervisor_contract_schemas,
 )
@@ -23,9 +27,14 @@ def _pretty(value: dict[str, object]) -> bytes:
 
 
 def _render() -> dict[Path, bytes]:
+    schemas = {
+        **gcp_execution_v2_safety_contract_schemas(),
+        **gcp_execution_supervisor_contract_schemas(),
+        **gcp_cost_guard_contract_schemas(),
+    }
     return {
         SCHEMA_ROOT / filename: _pretty(schema)
-        for filename, schema in gcp_execution_supervisor_contract_schemas().items()
+        for filename, schema in schemas.items()
     }
 
 
@@ -41,14 +50,14 @@ def main() -> int:
     ]
     if args.check:
         if mismatches:
-            print("GCP supervisor schemas are stale")
+            print("GCP v0.2 safety schemas are stale")
             return 1
-        print(f"GCP supervisor schemas are current ({len(rendered)} files)")
+        print(f"GCP v0.2 safety schemas are current ({len(rendered)} files)")
         return 0
     for path, content in rendered.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-    print(f"generated GCP supervisor schemas ({len(rendered)} files)")
+    print(f"generated GCP v0.2 safety schemas ({len(rendered)} files)")
     return 0
 
 

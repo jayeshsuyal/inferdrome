@@ -42,6 +42,7 @@ from inferdrome.deployment import (
     gcp_execution_environment_digest,
     gcp_execution_request_digest,
     gcp_execution_supervisor_contract_schemas,
+    gcp_execution_v2_safety_contract_schemas,
     gcp_supervisor_binding,
     issue_gcp_execution_arm,
     parse_deployment_spec_json,
@@ -57,15 +58,29 @@ from inferdrome.deployment.gcp_compute_transport import (
     _observation,
     create_google_compute_transport,
 )
+from inferdrome.deployment.gcp_cost_guard import (
+    GcpCostGuardError,
+    canonical_gcp_cost_cleanup_guard_bytes,
+    canonical_gcp_read_only_quote_basis_bytes,
+    gcp_cost_guard_contract_schemas,
+    issue_gcp_cost_cleanup_guard,
+    issue_gcp_read_only_quote_basis,
+    parse_gcp_cost_cleanup_guard_json,
+    parse_gcp_read_only_quote_basis_json,
+)
 from inferdrome.deployment.gcp_supervisor import (
+    GCP_KILL_SWITCH_CONFIRMATION,
     GCP_SUPERVISOR_CONFIRMATION,
     FakeGcpWatchdog,
+    FileGcpKillSwitch,
     GcpLifecycleSupervisor,
     GcpSupervisorError,
     GcpSupervisorJournal,
     InMemoryGcpKillSwitch,
     canonical_gcp_execution_approval_bytes,
+    canonical_gcp_kill_switch_bytes,
     issue_gcp_execution_approval,
+    issue_gcp_kill_switch_record,
     parse_gcp_execution_approval_json,
 )
 
@@ -269,6 +284,38 @@ def _v2_inputs(controller_id: str = "ctl-12345678") -> tuple[Any, ...]:
     return spec, inventory, context, plan, arm, environment, quote, capacity, preflight
 
 
+def _v2_inputs_with_observations(
+    inputs: tuple[Any, ...], *, quote: Any | None = None, capacity: Any | None = None
+) -> tuple[Any, ...]:
+    """Rebuild canonical preflight after a local fake observation change."""
+
+    (
+        spec,
+        inventory,
+        context,
+        plan,
+        arm,
+        environment,
+        original_quote,
+        original_capacity,
+        _preflight,
+    ) = inputs
+    quote = original_quote if quote is None else quote
+    capacity = original_capacity if capacity is None else capacity
+    preflight = validate_gcp_execution_preflight(
+        plan=plan,
+        expected_spec=spec,
+        expected_inventory=inventory,
+        expected_context=context,
+        arm_bytes=canonical_gcp_execution_arm_bytes(arm),
+        environment=environment,
+        quote=quote,
+        capacity=capacity,
+        now=NOW,
+    )
+    return spec, inventory, context, plan, arm, environment, quote, capacity, preflight
+
+
 def _execute_v2(controller: Any, inputs: tuple[Any, ...], *, work: Any = None) -> Any:
     (
         spec,
@@ -299,11 +346,21 @@ def _v2_supervisor(
     preflight: Any,
     *,
     watchdog: FakeGcpWatchdog | None = None,
-    kill_switch: InMemoryGcpKillSwitch | None = None,
+    kill_switch: Any | None = None,
 ) -> tuple[GcpLifecycleSupervisor, Any]:
     root.mkdir()
+    quote_basis = issue_gcp_read_only_quote_basis(preflight=preflight)
+    cost_guard = issue_gcp_cost_cleanup_guard(
+        preflight=preflight,
+        quote_basis=quote_basis,
+        max_cleanup_attempts=3,
+        cleanup_timeout_seconds=120,
+        now=NOW,
+    )
     approval = issue_gcp_execution_approval(
         preflight=preflight,
+        quote_basis=quote_basis,
+        cost_guard=cost_guard,
         operator_identity="operator-alice",
         issued_at=NOW,
         expires_at=NOW + timedelta(minutes=5),
@@ -312,12 +369,54 @@ def _v2_supervisor(
     return (
         GcpLifecycleSupervisor(
             approval=approval,
+            quote_basis=quote_basis,
+            cost_guard=cost_guard,
             journal=GcpSupervisorJournal(root),
             watchdog=watchdog or FakeGcpWatchdog(),
             kill_switch=kill_switch or InMemoryGcpKillSwitch(),
         ),
         approval,
     )
+
+
+class _NoopFactorySafetySupervisor:
+    """Private test double for legacy fake-only factory-boundary tests."""
+
+    def reserve(self, record: Any, *, preflight: Any, now: datetime) -> None:
+        del record, preflight, now
+
+    def arm_watchdog(self, record: Any, *, preflight: Any, now: datetime) -> None:
+        del record, preflight, now
+
+    def assert_create_permitted(
+        self, record: Any, *, preflight: Any, now: datetime
+    ) -> None:
+        del record, preflight, now
+
+    def create_intent(self, record: Any, *, preflight: Any, now: datetime) -> None:
+        del record, preflight, now
+
+    def before_work(self, record: Any, *, preflight: Any, now: datetime) -> None:
+        del record, preflight, now
+
+    def cleanup_pending(self, record: Any, *, now: datetime) -> None:
+        del record, now
+
+    def cleanup_terminal(
+        self,
+        record: Any,
+        *,
+        confirmed: bool,
+        error_code: str | None,
+        now: datetime,
+    ) -> None:
+        del record, confirmed, error_code, now
+
+    def block(self, record: Any, *, error_code: str, now: datetime) -> None:
+        del record, error_code, now
+
+    def resume_cleanup(self, record: Any, *, now: datetime) -> None:
+        del record, now
 
 
 def test_generated_schema_is_closed_and_fixture_is_exact() -> None:
@@ -328,8 +427,22 @@ def test_generated_schema_is_closed_and_fixture_is_exact() -> None:
         assert schema["$id"].startswith("urn:inferdrome:gcp-execution-")
 
     supervisor_schemas = gcp_execution_supervisor_contract_schemas()
-    assert len(supervisor_schemas) == 4
+    assert len(supervisor_schemas) == 6
     for schema in supervisor_schemas.values():
+        Draft202012Validator.check_schema(schema)
+        assert schema["$id"].startswith("urn:inferdrome:gcp-")
+        assert schema["$id"].endswith(":v2")
+
+    cost_guard_schemas = gcp_cost_guard_contract_schemas()
+    assert len(cost_guard_schemas) == 2
+    for schema in cost_guard_schemas.values():
+        Draft202012Validator.check_schema(schema)
+        assert schema["$id"].startswith("urn:inferdrome:gcp-")
+        assert schema["$id"].endswith(":v2")
+
+    v2_safety_schemas = gcp_execution_v2_safety_contract_schemas()
+    assert len(v2_safety_schemas) == 3
+    for schema in v2_safety_schemas.values():
         Draft202012Validator.check_schema(schema)
         assert schema["$id"].startswith("urn:inferdrome:gcp-")
         assert schema["$id"].endswith(":v2")
@@ -559,6 +672,346 @@ def test_v2_approval_substitution_blocks_before_future_factory(tmp_path: Path) -
     assert transport.insert_calls == 0
 
 
+def test_v2_read_only_cost_guard_binds_rate_cap_and_blocks_substitution(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    quote_basis = supervisor.quote_basis
+    guard = supervisor.cost_guard
+
+    assert quote_basis.currency == "USD"
+    assert quote_basis.quote_authority == "operator_supplied_read_only_quote"
+    assert quote_basis.invoice_truth == "unavailable_external_provider_invoice"
+    assert (
+        sum(component.maximum_microusd for component in quote_basis.component_rates)
+        + quote_basis.safety_margin_microusd
+        == quote_basis.worst_case_microusd
+    )
+    assert guard.quote_authority == "read_only_quote_only"
+    assert guard.capacity_authority == "read_only_capacity_only"
+    assert guard.provider_billing_enforcement is False
+    assert guard.estimated_max_microusd <= guard.hard_ceiling_microusd
+
+    invalid_guard = json.loads(canonical_gcp_cost_cleanup_guard_bytes(guard))
+    invalid_guard["estimated_max_microusd"] = (
+        invalid_guard["hard_ceiling_microusd"] + 1
+    )
+    with pytest.raises(GcpCostGuardError, match="COST_GUARD_INVALID"):
+        parse_gcp_cost_cleanup_guard_json(json.dumps(invalid_guard))
+
+    tampered_guard = guard.model_copy(update={"max_cleanup_attempts": 2})
+    safety_root = tmp_path / "tampered-safety"
+    safety_root.mkdir()
+    tampered_supervisor = GcpLifecycleSupervisor(
+        approval=approval,
+        quote_basis=quote_basis,
+        cost_guard=tampered_guard,
+        journal=GcpSupervisorJournal(safety_root),
+        watchdog=FakeGcpWatchdog(),
+        kill_switch=InMemoryGcpKillSwitch(),
+    )
+    factory_calls: list[str] = []
+    transport = FakeGcpComputeTransport()
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        return transport
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=tampered_supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "APPROVAL_BINDING_MISMATCH"
+    assert outcome.arm_consumed is False
+    assert outcome.provider_mutation_attempted is False
+    assert factory_calls == []
+    assert transport.insert_calls == 0
+
+
+def test_v2_rate_basis_is_component_order_canonical_and_parser_closed() -> None:
+    inputs = _v2_inputs()
+    preflight = inputs[-1]
+    reordered_preflight = preflight.__class__(
+        arm=preflight.arm,
+        request=preflight.request,
+        quote=preflight.quote.model_copy(
+            update={"components": tuple(reversed(preflight.quote.components))}
+        ),
+        capacity=preflight.capacity,
+        arm_sha256=preflight.arm_sha256,
+    )
+    basis = issue_gcp_read_only_quote_basis(preflight=preflight)
+
+    assert issue_gcp_read_only_quote_basis(preflight=reordered_preflight) == basis
+    raw = canonical_gcp_read_only_quote_basis_bytes(basis)
+    assert parse_gcp_read_only_quote_basis_json(raw) == basis
+    duplicate = raw.replace(
+        b'"basis_kind":"read_only_rational_rate_basis"',
+        (
+            b'"basis_kind":"read_only_rational_rate_basis",'
+            b'"basis_kind":"read_only_rational_rate_basis"'
+        ),
+        1,
+    )
+    with pytest.raises(GcpCostGuardError, match="RATE_BASIS_INVALID"):
+        parse_gcp_read_only_quote_basis_json(duplicate)
+    unknown = json.loads(raw)
+    unknown["unexpected"] = True
+    with pytest.raises(GcpCostGuardError, match="RATE_BASIS_INVALID"):
+        parse_gcp_read_only_quote_basis_json(json.dumps(unknown))
+
+
+def test_v2_watchdog_receipt_must_cover_quoted_cleanup_tail(
+    tmp_path: Path,
+) -> None:
+    class RuntimeOnlyWatchdog(FakeGcpWatchdog):
+        def arm(self, binding: Any, *, approval: Any, now: datetime) -> Any:
+            receipt = super().arm(binding, approval=approval, now=now)
+            return receipt.model_copy(
+                update={"expires_at": approval.controller_deadline_at}
+            )
+
+    inputs = _v2_inputs()
+    watchdog = RuntimeOnlyWatchdog()
+    supervisor, approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    expected_watchdog_deadline = NOW + timedelta(
+        seconds=inputs[-1].quote.billable_duration_seconds
+    )
+    assert approval.watchdog_deadline_at == expected_watchdog_deadline.strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        raise AssertionError(
+            "future factory must not activate without cleanup coverage"
+        )
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "WATCHDOG_BINDING_MISMATCH"
+    assert outcome.arm_consumed is True
+    assert outcome.provider_mutation_attempted is False
+    assert factory_calls == []
+    assert watchdog.arm_calls == 1
+
+
+def test_v2_elapsed_setup_cannot_consume_runtime_or_cleanup_horizon(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    clock_values = iter((NOW, NOW, NOW + timedelta(seconds=1)))
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        raise AssertionError("future factory must not activate after elapsed setup")
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(
+            now_fn=lambda: next(clock_values, NOW + timedelta(seconds=1)),
+            monotonic_fn=lambda: 0.0,
+        ),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "CONTROLLER_RUNTIME_HORIZON_INSUFFICIENT"
+    assert outcome.arm_consumed is True
+    assert outcome.provider_mutation_attempted is False
+    assert factory_calls == []
+
+
+def test_v2_deadline_is_rechecked_before_work_and_triggers_cleanup(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    clock_values = iter(
+        (NOW, NOW, NOW, NOW, NOW, NOW + timedelta(minutes=10))
+    )
+    transport = FakeGcpComputeTransport()
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport=transport,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(
+            now_fn=lambda: next(clock_values, NOW + timedelta(minutes=10)),
+            monotonic_fn=lambda: 0.0,
+        ),
+        safety_supervisor=supervisor,
+    )
+    work_called = False
+
+    def work(_: Any) -> None:
+        nonlocal work_called
+        work_called = True
+
+    outcome = _execute_v2(controller, inputs, work=work)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "CONTROLLER_DEADLINE_EXPIRED"
+    assert outcome.cleanup_confirmed is True
+    assert work_called is False
+    assert transport.insert_calls == 1
+    assert transport.delete_calls == 1
+
+
+def test_v2_final_create_rechecks_stale_capacity_without_insert(
+    tmp_path: Path,
+) -> None:
+    base_inputs = _v2_inputs()
+    fresh_capacity = base_inputs[7].model_copy(
+        update={"observed_at": "2026-08-25T12:00:00Z", "freshness_seconds": 1}
+    )
+    inputs = _v2_inputs_with_observations(base_inputs, capacity=fresh_capacity)
+    supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    clock_values = iter(
+        (NOW, NOW, NOW, NOW + timedelta(seconds=2))
+    )
+    transport = FakeGcpComputeTransport()
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        return transport
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(
+            now_fn=lambda: next(clock_values, NOW + timedelta(seconds=2)),
+            monotonic_fn=lambda: 0.0,
+        ),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "PREFLIGHT_CAPACITY_STALE"
+    assert outcome.arm_consumed is True
+    assert transport.insert_calls == 0
+    assert factory_calls == ["factory"]
+
+
+@pytest.mark.parametrize(
+    ("clock_offset", "expected_error"),
+    [
+        (timedelta(seconds=2), "PREFLIGHT_QUOTE_WINDOW_INVALID"),
+        (timedelta(minutes=5), "APPROVAL_EXPIRED"),
+    ],
+)
+def test_v2_elapsed_read_only_or_approval_input_blocks_factory(
+    tmp_path: Path, clock_offset: timedelta, expected_error: str
+) -> None:
+    base_inputs = _v2_inputs()
+    quote = base_inputs[6]
+    if expected_error == "PREFLIGHT_QUOTE_WINDOW_INVALID":
+        quote = quote.model_copy(
+            update={
+                "issued_at": "2026-08-25T12:00:00Z",
+                "valid_until": "2026-08-25T12:00:01Z",
+                "freshness_seconds": 1,
+            }
+        )
+    inputs = _v2_inputs_with_observations(base_inputs, quote=quote)
+    supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    clock_values = iter((NOW, NOW, NOW + clock_offset))
+    factory_calls: list[str] = []
+
+    def factory() -> FakeGcpComputeTransport:
+        factory_calls.append("factory")
+        raise AssertionError("future factory must not activate after input expiry")
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    controller = GcpGuardedLifecycleController(
+        transport_factory=factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(
+            now_fn=lambda: next(clock_values, NOW + clock_offset),
+            monotonic_fn=lambda: 0.0,
+        ),
+        safety_supervisor=supervisor,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == expected_error
+    assert outcome.arm_consumed is True
+    assert outcome.provider_mutation_attempted is False
+    assert factory_calls == []
+
+
+def test_future_factory_and_nonfake_transport_require_safety_supervisor(
+    tmp_path: Path,
+) -> None:
+    factory_called = False
+
+    def factory() -> FakeGcpComputeTransport:
+        nonlocal factory_called
+        factory_called = True
+        return FakeGcpComputeTransport()
+
+    with pytest.raises(GcpExecutionError, match="GCP_LAZY_FACTORY_REQUIRES_SUPERVISOR"):
+        GcpGuardedLifecycleController(
+            transport_factory=factory,
+            arm_store=InMemoryExecutionArmStore(),
+            journal=GcpLeaseJournal(tmp_path),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        )
+    assert factory_called is False
+
+    non_fake_transport: Any = object()
+    with pytest.raises(GcpExecutionError, match="GCP_SUPERVISOR_REQUIRED"):
+        GcpGuardedLifecycleController(
+            transport=non_fake_transport,
+            arm_store=InMemoryExecutionArmStore(),
+            journal=GcpLeaseJournal(tmp_path),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        )
+
+
 def test_v2_watchdog_failure_consumes_arm_but_blocks_future_factory(
     tmp_path: Path,
 ) -> None:
@@ -728,6 +1181,45 @@ def test_v2_kill_switch_is_rechecked_before_work_and_cleans_exact_lease(
     assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
 
 
+def test_v2_file_kill_switch_is_exact_bound_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    _supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    outcome, controller = _run(
+        core_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    assert outcome.status == "SUCCEEDED"
+    binding = gcp_supervisor_binding(
+        approval, controller.journal.load("ctl-12345678")
+    )
+    kill_root = tmp_path / "kill"
+    kill_root.mkdir()
+    marker = issue_gcp_kill_switch_record(
+        binding,
+        operator_identity="operator-alice",
+        now=NOW,
+        confirmation=GCP_KILL_SWITCH_CONFIRMATION,
+    )
+    marker_path = kill_root / "ctl-12345678.kill-v2.json"
+    marker_path.write_bytes(canonical_gcp_kill_switch_bytes(marker))
+    switch = FileGcpKillSwitch(kill_root)
+
+    assert switch.is_killed(binding) is True
+    with pytest.raises(GcpSupervisorError, match="KILL_SWITCH_BINDING_MISMATCH"):
+        switch.is_killed(
+            binding.model_copy(update={"request_digest": "sha256:" + "f" * 64})
+        )
+
+    symlink_root = tmp_path / "symlink-kill"
+    symlink_root.mkdir()
+    os.symlink(marker_path, symlink_root / "ctl-12345678.kill-v2.json")
+    with pytest.raises(GcpSupervisorError, match="KILL_SWITCH"):
+        FileGcpKillSwitch(symlink_root).is_killed(binding)
+
+
 def test_v2_approval_parser_and_sidecar_journal_repair_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -828,11 +1320,19 @@ def test_v2_recovery_enters_cleanup_sidecar_before_future_factory(
     )
     initial_outcome = _execute_v2(initial, inputs)
     assert initial_outcome.orphaned is True
-    assert supervisor.journal.load("ctl-12345678").state == "ORPHANED"
+    orphaned_event = supervisor.journal.load("ctl-12345678")
+    assert orphaned_event.state == "ORPHANED"
+    assert orphaned_event.orphan_report is not None
+    assert orphaned_event.orphan_report.request_digest == initial_outcome.request_digest
+    assert orphaned_event.orphan_report.instance_name == "inferdrome-ctl-12345678"
+    assert orphaned_event.orphan_report.boot_disk_name == "inferdrome-ctl-12345678"
+    assert orphaned_event.orphan_report.reason_code == "DELETE_DENIED"
 
     factory_calls: list[str] = []
     resumed_supervisor = GcpLifecycleSupervisor(
         approval=approval,
+        quote_basis=supervisor.quote_basis,
+        cost_guard=supervisor.cost_guard,
         journal=GcpSupervisorJournal(safety_root),
         watchdog=FakeGcpWatchdog(),
         kill_switch=InMemoryGcpKillSwitch(),
@@ -2638,6 +3138,7 @@ def test_lazy_transport_factory_is_not_activated_before_arm_validation(
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(tmp_path),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=_NoopFactorySafetySupervisor(),
     )
     with pytest.raises((GcpPlanError, ValueError)):
         controller.execute(
@@ -2687,6 +3188,7 @@ def test_lazy_factory_is_not_activated_for_stale_execution_inputs(
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(tmp_path),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=_NoopFactorySafetySupervisor(),
     )
     with pytest.raises(GcpExecutionError):
         controller.execute(
@@ -2729,6 +3231,7 @@ def test_lazy_factory_is_not_activated_when_journal_reservation_fails(
         arm_store=InMemoryExecutionArmStore(),
         journal=BrokenJournal(tmp_path),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=_NoopFactorySafetySupervisor(),
     )
     with pytest.raises(GcpJournalError):
         controller.execute(
@@ -2771,6 +3274,7 @@ def test_lazy_factory_is_not_activated_when_arm_replay_is_rejected(
         arm_store=ReplayedArm(),
         journal=GcpLeaseJournal(tmp_path),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=_NoopFactorySafetySupervisor(),
     )
     outcome = controller.execute(
         plan=plan,

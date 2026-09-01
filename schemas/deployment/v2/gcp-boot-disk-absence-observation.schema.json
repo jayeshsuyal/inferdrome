@@ -1,0 +1,50 @@
+{
+  "$id": "urn:inferdrome:gcp-boot-disk-absence-observation:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact boot-disk absence is required alongside instance absence.",
+  "properties": {
+    "disk_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Disk Name",
+      "type": "string"
+    },
+    "instance_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-boot-disk-absence-observation.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state": {
+      "const": "NOT_FOUND",
+      "title": "State",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "project_id",
+    "zone",
+    "instance_name",
+    "disk_name",
+    "state"
+  ],
+  "title": "GcpBootDiskAbsenceObservation",
+  "type": "object"
+}

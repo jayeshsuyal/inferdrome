@@ -84,11 +84,20 @@ GCP_EXECUTION_ANCHOR_SCHEMA_VERSION: Final = "inferdrome.gcp-execution-intent-an
 GCP_OWNED_RESOURCE_INVENTORY_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-owned-resource-inventory.v2"
 )
+GCP_OWNED_RESOURCE_INVENTORY_SCHEMA_ID: Final = (
+    "urn:inferdrome:gcp-owned-resource-inventory:v2"
+)
 GCP_INSTANCE_SAFETY_OBSERVATION_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-instance-safety-observation.v2"
 )
+GCP_INSTANCE_SAFETY_OBSERVATION_SCHEMA_ID: Final = (
+    "urn:inferdrome:gcp-instance-safety-observation:v2"
+)
 GCP_BOOT_DISK_ABSENCE_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-boot-disk-absence-observation.v2"
+)
+GCP_BOOT_DISK_ABSENCE_SCHEMA_ID: Final = (
+    "urn:inferdrome:gcp-boot-disk-absence-observation:v2"
 )
 GCP_EXECUTION_ADAPTER_ID: Final = "inferdrome.provider.gcp.compute_guarded"
 GCP_EXECUTION_ADAPTER_VERSION: Final = "1.0.0"
@@ -1328,6 +1337,50 @@ class GcpExecutionPreflight:
     arm_sha256: Sha256Digest
 
 
+def validate_gcp_execution_preflight_freshness(
+    preflight: GcpExecutionPreflight, *, now: datetime
+) -> None:
+    """Recheck expiring read-only inputs immediately before a create boundary.
+
+    The initial canonical preflight establishes identity. This narrow second
+    check deliberately reuses those immutable bindings and only asks whether
+    the quote/capacity observation is still fresh and eligible at the instant
+    a future provider mutation could be reached.
+    """
+
+    try:
+        quote = GcpCostQuote.model_validate_json(
+            canonical_json_bytes(_json_value(preflight.quote))
+        )
+        capacity = GcpCapacityInput.model_validate_json(
+            canonical_json_bytes(_json_value(preflight.capacity))
+        )
+        now_value = _parse_timestamp(_timestamp(now))
+    except (ValidationError, ValueError, TypeError):
+        raise GcpExecutionError("PREFLIGHT_FRESHNESS_INVALID") from None
+    if not (
+        _parse_timestamp(quote.issued_at)
+        <= now_value
+        <= _parse_timestamp(quote.valid_until)
+    ):
+        raise GcpExecutionError("PREFLIGHT_QUOTE_WINDOW_INVALID")
+    if (now_value - _parse_timestamp(quote.issued_at)).total_seconds() > (
+        quote.freshness_seconds
+    ):
+        raise GcpExecutionError("PREFLIGHT_QUOTE_STALE")
+    observed_at = _parse_timestamp(capacity.observed_at)
+    if observed_at > now_value:
+        raise GcpExecutionError("PREFLIGHT_CAPACITY_FUTURE")
+    if (now_value - observed_at).total_seconds() > capacity.freshness_seconds:
+        raise GcpExecutionError("PREFLIGHT_CAPACITY_STALE")
+    if capacity.capacity_status != "operator_supplied_eligible":
+        raise GcpExecutionError("PREFLIGHT_CAPACITY_INELIGIBLE")
+    if capacity.matching_active_resources != 0:
+        raise GcpExecutionError("PREFLIGHT_CAPACITY_ACTIVE_RESOURCE")
+    if capacity.capacity_proven:
+        raise GcpExecutionError("PREFLIGHT_CAPACITY_PROOF_FORBIDDEN")
+
+
 class GcpLifecycleSafetySupervisor(Protocol):
     """Optional v0.2 sidecar hook; v1 lease semantics remain unchanged."""
 
@@ -1348,12 +1401,28 @@ class GcpLifecycleSafetySupervisor(Protocol):
     ) -> None: ...
 
     def assert_create_permitted(
-        self, record: GcpLeaseRecord, *, now: datetime
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
     ) -> None: ...
 
-    def create_intent(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
+    def create_intent(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
+    ) -> None: ...
 
-    def before_work(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
+    def before_work(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
+    ) -> None: ...
 
     def cleanup_pending(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
 
@@ -3296,6 +3365,14 @@ class GcpGuardedLifecycleController:
             raise GcpExecutionError(
                 "provide exactly one injected transport or lazy transport factory"
             )
+        if transport_factory is not None and safety_supervisor is None:
+            raise GcpExecutionError("GCP_LAZY_FACTORY_REQUIRES_SUPERVISOR")
+        if (
+            transport is not None
+            and safety_supervisor is None
+            and not isinstance(transport, FakeGcpComputeTransport)
+        ):
+            raise GcpExecutionError("GCP_SUPERVISOR_REQUIRED")
         self._transport = transport
         self._transport_factory = transport_factory
         self.arm_store = arm_store
@@ -4078,7 +4155,9 @@ class GcpGuardedLifecycleController:
                 self.safety_supervisor.arm_watchdog(
                     record, preflight=preflight, now=clock_now
                 )
-                self.safety_supervisor.assert_create_permitted(record, now=clock_now)
+                self.safety_supervisor.assert_create_permitted(
+                    record, preflight=preflight, now=self.clock.now()
+                )
             except BaseException as error:
                 supervisor_error = self._supervisor_error_code(error)
                 terminal_error = abort_before_provider(supervisor_error)
@@ -4229,7 +4308,7 @@ class GcpGuardedLifecycleController:
                 # is deliberately still before an injected future provider
                 # insert can be reached.
                 self.safety_supervisor.create_intent(
-                    record, now=self.clock.now()
+                    record, preflight=preflight, now=self.clock.now()
                 )
             operation = self._validate_operation_handle(
                 self.transport.insert(
@@ -4301,7 +4380,9 @@ class GcpGuardedLifecycleController:
             record = self._record(record, state="OWNED", now=now)
             self._trace(trace, "OWNERSHIP_VERIFY", "SUCCEEDED")
             if self.safety_supervisor is not None:
-                self.safety_supervisor.before_work(record, now=self.clock.now())
+                self.safety_supervisor.before_work(
+                    record, preflight=preflight, now=self.clock.now()
+                )
             if work is not None:
                 work(observation)
             if self.clock.monotonic() >= controller_deadline:
@@ -4536,6 +4617,40 @@ def gcp_execution_contract_schemas() -> dict[str, dict[str, Any]]:
             "gcp-execution-result.schema.json",
             GcpExecutionOutcome,
             GCP_EXECUTION_RESULT_SCHEMA_ID,
+        ),
+    )
+    output: dict[str, dict[str, Any]] = {}
+    for filename, model, schema_id in models:
+        schema = model.model_json_schema()
+        schema["$id"] = schema_id
+        schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+        output[filename] = schema
+    return output
+
+
+def gcp_execution_v2_safety_contract_schemas() -> dict[str, dict[str, Any]]:
+    """Return additive v0.2 provider-observation schemas.
+
+    These internal execution contracts remain outside the frozen public v1
+    registry, but their explicit v2 schema versions are generated and checked
+    atomically with the supervisor and cost-guard artifacts.
+    """
+
+    models: tuple[tuple[str, type[GcpExecutionModel], str], ...] = (
+        (
+            "gcp-owned-resource-inventory.schema.json",
+            GcpOwnedResourceInventory,
+            GCP_OWNED_RESOURCE_INVENTORY_SCHEMA_ID,
+        ),
+        (
+            "gcp-instance-safety-observation.schema.json",
+            GcpInstanceSafetyObservation,
+            GCP_INSTANCE_SAFETY_OBSERVATION_SCHEMA_ID,
+        ),
+        (
+            "gcp-boot-disk-absence-observation.schema.json",
+            GcpBootDiskAbsenceObservation,
+            GCP_BOOT_DISK_ABSENCE_SCHEMA_ID,
         ),
     )
     output: dict[str, dict[str, Any]] = {}

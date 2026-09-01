@@ -99,17 +99,39 @@
       "title": "Boot Image Provider Id",
       "type": "integer"
     },
+    "capacity_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Capacity Digest",
+      "type": "string"
+    },
     "controller_deadline_at": {
       "maxLength": 32,
       "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
       "title": "Controller Deadline At",
       "type": "string"
     },
+    "cost_guard_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Cost Guard Digest",
+      "type": "string"
+    },
+    "estimated_max_microusd": {
+      "maximum": 1000000000000,
+      "minimum": 0,
+      "title": "Estimated Max Microusd",
+      "type": "integer"
+    },
     "expires_at": {
       "maxLength": 32,
       "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
       "title": "Expires At",
       "type": "string"
+    },
+    "hard_ceiling_microusd": {
+      "maximum": 1000000000000,
+      "minimum": 0,
+      "title": "Hard Ceiling Microusd",
+      "type": "integer"
     },
     "hard_cost_ceiling": {
       "$ref": "#/$defs/CostCeiling"
@@ -165,9 +187,19 @@
       "title": "Provider",
       "type": "string"
     },
-    "quote_basis_digest": {
+    "quote_currency": {
+      "const": "USD",
+      "title": "Quote Currency",
+      "type": "string"
+    },
+    "quote_digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Quote Basis Digest",
+      "title": "Quote Digest",
+      "type": "string"
+    },
+    "rate_basis_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Rate Basis Digest",
       "type": "string"
     },
     "region": {
@@ -197,6 +229,12 @@
       "title": "Serving Runtime Image Digest",
       "type": "string"
     },
+    "watchdog_deadline_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Watchdog Deadline At",
+      "type": "string"
+    },
     "zone": {
       "maxLength": 64,
       "minLength": 7,
@@ -215,7 +253,11 @@
     "plan_sha256",
     "arm_id",
     "request_digest",
-    "quote_basis_digest",
+    "quote_digest",
+    "capacity_digest",
+    "rate_basis_digest",
+    "cost_guard_digest",
+    "quote_currency",
     "project_id",
     "region",
     "zone",
@@ -231,7 +273,10 @@
     "serving_runtime_image_digest",
     "max_runtime_seconds",
     "controller_deadline_at",
+    "watchdog_deadline_at",
     "hard_cost_ceiling",
+    "hard_ceiling_microusd",
+    "estimated_max_microusd",
     "issued_at",
     "expires_at",
     "approval_id"

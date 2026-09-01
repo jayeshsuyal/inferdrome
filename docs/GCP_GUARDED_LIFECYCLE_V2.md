@@ -19,6 +19,9 @@ canonical preflight, durable lease reservation, one-shot arm consumption and
 not provide that later activation path. The additive local approval, watchdog,
 and recovery state contract is documented in
 [`GCP_EXECUTION_SUPERVISOR_V2.md`](GCP_EXECUTION_SUPERVISOR_V2.md).
+Its separate read-only pricing, cleanup-cap, and exact local kill-marker
+contracts are documented in
+[`GCP_COST_CLEANUP_GUARDS_V2.md`](GCP_COST_CLEANUP_GUARDS_V2.md).
 
 ## Exact ownership and reconciliation
 

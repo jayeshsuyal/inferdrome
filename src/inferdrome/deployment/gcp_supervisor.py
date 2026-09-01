@@ -15,7 +15,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Protocol, Self
@@ -29,6 +29,15 @@ from inferdrome.deployment.gcp import (
     GcpTimestamp,
     GcpZone,
 )
+from inferdrome.deployment.gcp_cost_guard import (
+    GcpCostCleanupGuard,
+    GcpReadOnlyQuoteBasis,
+    gcp_cost_cleanup_guard_digest,
+    gcp_hard_usd_ceiling_microusd,
+    gcp_read_only_quote_basis_digest,
+    gcp_watchdog_deadline_at,
+    validate_gcp_cost_cleanup_guard,
+)
 from inferdrome.deployment.gcp_lifecycle import (
     _CONTROLLER_RE,
     GcpExecutionError,
@@ -40,9 +49,11 @@ from inferdrome.deployment.gcp_lifecycle import (
     _preflight_json,
     _timestamp,
     _write_all,
+    gcp_capacity_digest,
     gcp_cost_quote_digest,
     gcp_execution_request_digest,
     validate_gcp_a2_profile,
+    validate_gcp_execution_preflight_freshness,
 )
 from inferdrome.deployment.spec import CostCeiling
 from inferdrome.domain.digests import DigestDomain, canonical_json_bytes, digest_bytes
@@ -52,13 +63,21 @@ GCP_EXECUTION_APPROVAL_SCHEMA_VERSION: Final = "inferdrome.gcp-execution-approva
 GCP_SUPERVISOR_BINDING_SCHEMA_VERSION: Final = "inferdrome.gcp-supervisor-binding.v2"
 GCP_SUPERVISOR_EVENT_SCHEMA_VERSION: Final = "inferdrome.gcp-supervisor-event.v2"
 GCP_WATCHDOG_RECEIPT_SCHEMA_VERSION: Final = "inferdrome.gcp-watchdog-receipt.v2"
+GCP_KILL_SWITCH_SCHEMA_VERSION: Final = "inferdrome.gcp-kill-switch.v2"
+GCP_EXACT_ORPHAN_REPORT_SCHEMA_VERSION: Final = "inferdrome.gcp-exact-orphan-report.v2"
 GCP_EXECUTION_APPROVAL_SCHEMA_ID: Final = "urn:inferdrome:gcp-execution-approval:v2"
 GCP_SUPERVISOR_BINDING_SCHEMA_ID: Final = "urn:inferdrome:gcp-supervisor-binding:v2"
 GCP_SUPERVISOR_EVENT_SCHEMA_ID: Final = "urn:inferdrome:gcp-supervisor-event:v2"
 GCP_WATCHDOG_RECEIPT_SCHEMA_ID: Final = "urn:inferdrome:gcp-watchdog-receipt:v2"
+GCP_KILL_SWITCH_SCHEMA_ID: Final = "urn:inferdrome:gcp-kill-switch:v2"
+GCP_EXACT_ORPHAN_REPORT_SCHEMA_ID: Final = (
+    "urn:inferdrome:gcp-exact-orphan-report:v2"
+)
 GCP_SUPERVISOR_CONFIRMATION: Final = "APPROVE_GCP_V2_EXACT"
+GCP_KILL_SWITCH_CONFIRMATION: Final = "KILL_GCP_V2_EXACT"
 GCP_SUPERVISOR_MAX_EVENTS: Final = 64
 GCP_SUPERVISOR_MAX_EVENT_BYTES: Final = 262_144
+GCP_KILL_SWITCH_MAX_BYTES: Final = 8_192
 
 _OPERATOR_ID_RE = re.compile(r"^operator-[a-z0-9][a-z0-9_-]{2,61}$")
 _WATCHDOG_ID_RE = re.compile(r"^watchdog-[a-z][a-z0-9-]{2,61}$")
@@ -113,7 +132,11 @@ class GcpExecutionApprovalPayload(GcpExecutionModel):
     plan_sha256: Sha256Digest
     arm_id: Sha256Digest
     request_digest: Sha256Digest
-    quote_basis_digest: Sha256Digest
+    quote_digest: Sha256Digest
+    capacity_digest: Sha256Digest
+    rate_basis_digest: Sha256Digest
+    cost_guard_digest: Sha256Digest
+    quote_currency: Literal["USD"]
     project_id: GcpProjectId
     region: GcpRegion
     zone: GcpZone
@@ -137,7 +160,10 @@ class GcpExecutionApprovalPayload(GcpExecutionModel):
     serving_runtime_image_digest: Sha256Digest
     max_runtime_seconds: int = Field(strict=True, ge=1, le=86_400)
     controller_deadline_at: GcpTimestamp
+    watchdog_deadline_at: GcpTimestamp
     hard_cost_ceiling: CostCeiling
+    hard_ceiling_microusd: int = Field(strict=True, ge=0, le=10**12)
+    estimated_max_microusd: int = Field(strict=True, ge=0, le=10**12)
     issued_at: GcpTimestamp
     expires_at: GcpTimestamp
 
@@ -152,7 +178,12 @@ class GcpExecutionApprovalPayload(GcpExecutionModel):
         issued = _parse_timestamp(self.issued_at)
         expires = _parse_timestamp(self.expires_at)
         deadline = _parse_timestamp(self.controller_deadline_at)
-        if expires <= issued or deadline < expires:
+        watchdog_deadline = _parse_timestamp(self.watchdog_deadline_at)
+        if (
+            expires <= issued
+            or deadline < expires
+            or watchdog_deadline < deadline
+        ):
             raise ValueError("approval times are inconsistent")
         if (
             self.hard_cost_ceiling.currency != "USD"
@@ -160,6 +191,14 @@ class GcpExecutionApprovalPayload(GcpExecutionModel):
             or self.hard_cost_ceiling.estimate_basis != "controller_estimate"
         ):
             raise ValueError("approval hard cost ceiling is inconsistent")
+        try:
+            hard_ceiling = gcp_hard_usd_ceiling_microusd(self.hard_cost_ceiling)
+        except GcpExecutionError:
+            raise ValueError("approval hard cost ceiling is invalid") from None
+        if self.hard_ceiling_microusd != hard_ceiling:
+            raise ValueError("approval fixed-point cost ceiling is inconsistent")
+        if self.estimated_max_microusd > self.hard_ceiling_microusd:
+            raise ValueError("approval estimate exceeds its hard cost ceiling")
         return self
 
 
@@ -195,6 +234,62 @@ class GcpSupervisorBinding(GcpExecutionModel):
     ]
     labels: GcpExecutionLabels
     controller_deadline_at: GcpTimestamp
+    watchdog_deadline_at: GcpTimestamp
+
+
+class GcpExactOrphanReport(GcpExecutionModel):
+    """Durable proof that one exact owned resource set remains unconfirmed."""
+
+    schema_version: Literal["inferdrome.gcp-exact-orphan-report.v2"]
+    approval_digest: Sha256Digest
+    request_digest: Sha256Digest
+    controller_id: Annotated[
+        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
+    ]
+    project_id: GcpProjectId
+    region: GcpRegion
+    zone: GcpZone
+    instance_name: Annotated[
+        str, StringConstraints(pattern=r"^inferdrome-ctl-[a-z0-9]{8,24}$")
+    ]
+    boot_disk_name: Annotated[
+        str, StringConstraints(pattern=r"^inferdrome-ctl-[a-z0-9]{8,24}$")
+    ]
+    labels: GcpExecutionLabels
+    cleanup_state: Literal["unconfirmed_exact_owned_resource"]
+    reason_code: GcpSupervisorErrorCode
+    reported_at: GcpTimestamp
+    report_id: Sha256Digest
+
+    @model_validator(mode="after")
+    def validate_orphan_identity(self) -> Self:
+        if self.boot_disk_name != self.instance_name:
+            raise ValueError("orphan report boot-disk identity is inconsistent")
+        if self.report_id != gcp_exact_orphan_report_id(self):
+            raise ValueError("orphan report identity does not match its payload")
+        return self
+
+
+class GcpKillSwitchRecord(GcpExecutionModel):
+    """One exact local kill marker; it carries no provider credential."""
+
+    schema_version: Literal["inferdrome.gcp-kill-switch.v2"]
+    action: Literal["KILL"]
+    operator_identity: GcpOperatorIdentity
+    operator_confirmation: Literal["KILL_GCP_V2_EXACT"]
+    approval_digest: Sha256Digest
+    request_digest: Sha256Digest
+    controller_id: Annotated[
+        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
+    ]
+    issued_at: GcpTimestamp
+    kill_id: Sha256Digest
+
+    @model_validator(mode="after")
+    def validate_kill_identity(self) -> Self:
+        if self.kill_id != gcp_kill_switch_id(self):
+            raise ValueError("kill-switch identity does not match its payload")
+        return self
 
 
 class GcpWatchdogReceipt(GcpExecutionModel):
@@ -231,6 +326,7 @@ class GcpSupervisorJournalEvent(GcpExecutionModel):
     occurred_at: GcpTimestamp
     previous_event_digest: Sha256Digest | None
     watchdog_receipt_digest: Sha256Digest | None = None
+    orphan_report: GcpExactOrphanReport | None = None
     error_code: GcpSupervisorErrorCode | None = None
     event_digest: Sha256Digest
 
@@ -238,6 +334,10 @@ class GcpSupervisorJournalEvent(GcpExecutionModel):
     def validate_event_identity(self) -> Self:
         if self.state == "WATCHDOG_READY" and self.watchdog_receipt_digest is None:
             raise ValueError("watchdog-ready event requires a receipt digest")
+        if self.state == "ORPHANED" and self.orphan_report is None:
+            raise ValueError("orphaned event requires an exact orphan report")
+        if self.state != "ORPHANED" and self.orphan_report is not None:
+            raise ValueError("orphan report is only valid for orphaned state")
         value = _model_value(self)
         value.pop("event_digest", None)
         expected = digest_bytes(
@@ -318,6 +418,8 @@ def _strict_approval(approval: GcpExecutionApproval) -> GcpExecutionApproval:
 def issue_gcp_execution_approval(
     *,
     preflight: GcpExecutionPreflight,
+    quote_basis: GcpReadOnlyQuoteBasis,
+    cost_guard: GcpCostCleanupGuard,
     operator_identity: str,
     issued_at: datetime,
     expires_at: datetime,
@@ -337,6 +439,15 @@ def issue_gcp_execution_approval(
     request = preflight.request
     if request.accelerator_count != 1:
         raise GcpSupervisorError("APPROVAL_ACCELERATOR_PROFILE_INVALID")
+    try:
+        validate_gcp_cost_cleanup_guard(
+            cost_guard,
+            preflight=preflight,
+            quote_basis=quote_basis,
+            now=issued_at,
+        )
+    except GcpExecutionError as error:
+        raise GcpSupervisorError(str(error)) from None
     payload = GcpExecutionApprovalPayload(
         schema_version=GCP_EXECUTION_APPROVAL_SCHEMA_VERSION,
         approval_kind="exact_operator_execution_approval",
@@ -347,7 +458,11 @@ def issue_gcp_execution_approval(
         plan_sha256=preflight.arm.plan_sha256,
         arm_id=preflight.arm.arm_id,
         request_digest=gcp_execution_request_digest(request),
-        quote_basis_digest=gcp_cost_quote_digest(preflight.quote),
+        quote_digest=gcp_cost_quote_digest(preflight.quote),
+        capacity_digest=gcp_capacity_digest(preflight.capacity),
+        rate_basis_digest=gcp_read_only_quote_basis_digest(quote_basis),
+        cost_guard_digest=gcp_cost_cleanup_guard_digest(cost_guard),
+        quote_currency=preflight.quote.currency,
         project_id=request.project_id,
         region=request.region,
         zone=request.zone,
@@ -365,7 +480,12 @@ def issue_gcp_execution_approval(
         serving_runtime_image_digest=request.serving_runtime_image.digest,
         max_runtime_seconds=request.provider_max_runtime_seconds,
         controller_deadline_at=preflight.arm.expires_at,
+        watchdog_deadline_at=gcp_watchdog_deadline_at(preflight),
         hard_cost_ceiling=preflight.arm.cost_ceiling,
+        hard_ceiling_microusd=gcp_hard_usd_ceiling_microusd(
+            preflight.arm.cost_ceiling
+        ),
+        estimated_max_microusd=preflight.quote.worst_case_microusd,
         issued_at=issued_text,
         expires_at=expires_text,
     )
@@ -378,6 +498,8 @@ def validate_gcp_execution_approval(
     approval: GcpExecutionApproval,
     *,
     preflight: GcpExecutionPreflight,
+    quote_basis: GcpReadOnlyQuoteBasis,
+    cost_guard: GcpCostCleanupGuard,
     now: datetime,
 ) -> GcpExecutionApproval:
     """Fail closed unless one approval binds every current preflight fact."""
@@ -401,7 +523,11 @@ def validate_gcp_execution_approval(
         "plan_sha256": preflight.arm.plan_sha256,
         "arm_id": preflight.arm.arm_id,
         "request_digest": gcp_execution_request_digest(request),
-        "quote_basis_digest": gcp_cost_quote_digest(preflight.quote),
+        "quote_digest": gcp_cost_quote_digest(preflight.quote),
+        "capacity_digest": gcp_capacity_digest(preflight.capacity),
+        "rate_basis_digest": gcp_read_only_quote_basis_digest(quote_basis),
+        "cost_guard_digest": gcp_cost_cleanup_guard_digest(cost_guard),
+        "quote_currency": preflight.quote.currency,
         "project_id": request.project_id,
         "region": request.region,
         "zone": request.zone,
@@ -417,7 +543,12 @@ def validate_gcp_execution_approval(
         "serving_runtime_image_digest": request.serving_runtime_image.digest,
         "max_runtime_seconds": request.provider_max_runtime_seconds,
         "controller_deadline_at": preflight.arm.expires_at,
+        "watchdog_deadline_at": gcp_watchdog_deadline_at(preflight),
         "hard_cost_ceiling": preflight.arm.cost_ceiling,
+        "hard_ceiling_microusd": gcp_hard_usd_ceiling_microusd(
+            preflight.arm.cost_ceiling
+        ),
+        "estimated_max_microusd": preflight.quote.worst_case_microusd,
     }
     if any(getattr(approval, key) != value for key, value in expected.items()):
         raise GcpSupervisorError("APPROVAL_BINDING_MISMATCH")
@@ -425,6 +556,15 @@ def validate_gcp_execution_approval(
         preflight.arm.expires_at
     ):
         raise GcpSupervisorError("APPROVAL_EXPIRY_EXCEEDS_ARM")
+    try:
+        validate_gcp_cost_cleanup_guard(
+            cost_guard,
+            preflight=preflight,
+            quote_basis=quote_basis,
+            now=now,
+        )
+    except GcpExecutionError as error:
+        raise GcpSupervisorError(str(error)) from None
     return approval
 
 
@@ -458,7 +598,118 @@ def gcp_supervisor_binding(
         instance_name=record.instance_name,
         labels=record.labels,
         controller_deadline_at=approval.controller_deadline_at,
+        watchdog_deadline_at=approval.watchdog_deadline_at,
     )
+
+
+def canonical_gcp_exact_orphan_report_payload_bytes(
+    report: GcpExactOrphanReport,
+) -> bytes:
+    value = _model_value(report)
+    value.pop("report_id", None)
+    return canonical_json_bytes(value)
+
+
+def gcp_exact_orphan_report_id(report: GcpExactOrphanReport) -> Sha256Digest:
+    return digest_bytes(
+        DigestDomain.GCP_EXACT_ORPHAN_REPORT,
+        canonical_gcp_exact_orphan_report_payload_bytes(report),
+    )
+
+
+def issue_gcp_exact_orphan_report(
+    binding: GcpSupervisorBinding,
+    *,
+    reason_code: str,
+    now: datetime,
+) -> GcpExactOrphanReport:
+    """Record only the exact, immutable identity that needs recovery."""
+
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{2,47}", reason_code) is None:
+        reason_code = "CLEANUP_UNCONFIRMED"
+    payload: dict[str, Any] = {
+        "schema_version": GCP_EXACT_ORPHAN_REPORT_SCHEMA_VERSION,
+        "approval_digest": binding.approval_digest,
+        "request_digest": binding.request_digest,
+        "controller_id": binding.controller_id,
+        "project_id": binding.project_id,
+        "region": binding.region,
+        "zone": binding.zone,
+        "instance_name": binding.instance_name,
+        "boot_disk_name": binding.instance_name,
+        "labels": _model_value(binding.labels),
+        "cleanup_state": "unconfirmed_exact_owned_resource",
+        "reason_code": reason_code,
+        "reported_at": _timestamp(now),
+    }
+    payload["report_id"] = digest_bytes(
+        DigestDomain.GCP_EXACT_ORPHAN_REPORT, canonical_json_bytes(payload)
+    )
+    return GcpExactOrphanReport.model_validate_json(canonical_json_bytes(payload))
+
+
+def canonical_gcp_kill_switch_payload_bytes(
+    record: GcpKillSwitchRecord,
+) -> bytes:
+    """Return the exact local kill-marker payload excluding its identity."""
+
+    value = _model_value(record)
+    value.pop("kill_id", None)
+    return canonical_json_bytes(value)
+
+
+def gcp_kill_switch_id(record: GcpKillSwitchRecord) -> Sha256Digest:
+    return digest_bytes(
+        DigestDomain.GCP_EXECUTION_KILL_SWITCH,
+        canonical_gcp_kill_switch_payload_bytes(record),
+    )
+
+
+def canonical_gcp_kill_switch_bytes(record: GcpKillSwitchRecord) -> bytes:
+    return canonical_json_bytes(_model_value(record))
+
+
+def parse_gcp_kill_switch_json(payload: str | bytes) -> GcpKillSwitchRecord:
+    """Parse one strict exact-bound local kill marker."""
+
+    try:
+        _preflight_json(payload, kind="GCP kill switch")
+        return GcpKillSwitchRecord.model_validate_json(payload)
+    except (ValidationError, ValueError):
+        raise GcpSupervisorError("KILL_SWITCH_INVALID") from None
+
+
+def issue_gcp_kill_switch_record(
+    binding: GcpSupervisorBinding,
+    *,
+    operator_identity: str,
+    now: datetime,
+    confirmation: str,
+) -> GcpKillSwitchRecord:
+    """Issue an exact local marker without touching a provider boundary."""
+
+    if confirmation != GCP_KILL_SWITCH_CONFIRMATION:
+        raise GcpSupervisorError("KILL_CONFIRMATION_REQUIRED")
+    if _OPERATOR_ID_RE.fullmatch(operator_identity) is None:
+        raise GcpSupervisorError("KILL_OPERATOR_IDENTITY_INVALID")
+    try:
+        issued_at = _timestamp(now)
+    except ValueError:
+        raise GcpSupervisorError("KILL_TIME_INVALID") from None
+    payload: dict[str, Any] = {
+        "schema_version": GCP_KILL_SWITCH_SCHEMA_VERSION,
+        "action": "KILL",
+        "operator_identity": operator_identity,
+        "operator_confirmation": GCP_KILL_SWITCH_CONFIRMATION,
+        "approval_digest": binding.approval_digest,
+        "request_digest": binding.request_digest,
+        "controller_id": binding.controller_id,
+        "issued_at": issued_at,
+    }
+    payload["kill_id"] = digest_bytes(
+        DigestDomain.GCP_EXECUTION_KILL_SWITCH, canonical_json_bytes(payload)
+    )
+    return GcpKillSwitchRecord.model_validate_json(canonical_json_bytes(payload))
 
 
 def _event(
@@ -469,6 +720,7 @@ def _event(
     occurred_at: str,
     previous_event_digest: Sha256Digest | None,
     watchdog_receipt_digest: Sha256Digest | None,
+    orphan_report: GcpExactOrphanReport | None,
     error_code: str | None,
 ) -> GcpSupervisorJournalEvent:
     payload: dict[str, Any] = {
@@ -479,6 +731,9 @@ def _event(
         "occurred_at": occurred_at,
         "previous_event_digest": previous_event_digest,
         "watchdog_receipt_digest": watchdog_receipt_digest,
+        "orphan_report": (
+            _model_value(orphan_report) if orphan_report is not None else None
+        ),
         "error_code": error_code,
     }
     payload["event_digest"] = digest_bytes(
@@ -740,6 +995,7 @@ class GcpSupervisorJournal:
                 occurred_at=occurred_at,
                 previous_event_digest=None,
                 watchdog_receipt_digest=None,
+                orphan_report=None,
                 error_code=None,
             )
             raw = canonical_json_bytes(_model_value(event)) + b"\n"
@@ -779,6 +1035,7 @@ class GcpSupervisorJournal:
         state: GcpSupervisorState,
         now: datetime,
         watchdog_receipt_digest: Sha256Digest | None = None,
+        orphan_report: GcpExactOrphanReport | None = None,
         error_code: str | None = None,
     ) -> GcpSupervisorJournalEvent:
         """Append exactly one validated deterministic state transition."""
@@ -801,6 +1058,7 @@ class GcpSupervisorJournal:
                 occurred_at=occurred_at,
                 previous_event_digest=previous.event_digest,
                 watchdog_receipt_digest=receipt_digest,
+                orphan_report=orphan_report,
                 error_code=error_code,
             )
             candidate = [*events, event]
@@ -883,7 +1141,7 @@ class FakeGcpWatchdog:
             request_digest=binding.request_digest,
             controller_id=binding.controller_id,
             armed_at=_timestamp(now),
-            expires_at=approval.controller_deadline_at,
+            expires_at=approval.watchdog_deadline_at,
             ready=True,
             independently_durable=True,
             controller_death_coverage=True,
@@ -904,6 +1162,96 @@ class InMemoryGcpKillSwitch:
         return self.killed
 
 
+class FileGcpKillSwitch:
+    """Read one exact, no-follow local kill marker without directory discovery.
+
+    The file is deliberately controller-addressed rather than discovered by
+    hostname, glob, or account-wide state.  Any malformed, retargeted, or
+    concurrently changed marker is an unavailable safety control and must
+    therefore fail closed in ``GcpLifecycleSupervisor``.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def _checked_root(self) -> Path:
+        if not self.root.is_absolute():
+            raise GcpSupervisorError("KILL_SWITCH_PATH_INVALID")
+        try:
+            metadata = self.root.lstat()
+        except OSError:
+            raise GcpSupervisorError("KILL_SWITCH_UNAVAILABLE") from None
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_mode & 0o022
+        ):
+            raise GcpSupervisorError("KILL_SWITCH_PATH_UNSAFE")
+        return self.root
+
+    @staticmethod
+    def _path_for(root: Path, controller_id: str) -> Path:
+        if _CONTROLLER_RE.fullmatch(controller_id) is None:
+            raise GcpSupervisorError("KILL_SWITCH_CONTROLLER_INVALID")
+        return root / f"{controller_id}.kill-v2.json"
+
+    def _read_marker(self, path: Path) -> GcpKillSwitchRecord | None:
+        descriptor: int | None = None
+        try:
+            try:
+                descriptor = os.open(
+                    path,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                )
+            except FileNotFoundError:
+                return None
+            initial = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(initial.st_mode)
+                or initial.st_size <= 0
+                or initial.st_size > GCP_KILL_SWITCH_MAX_BYTES
+                or initial.st_mode & 0o022
+            ):
+                raise GcpSupervisorError("KILL_SWITCH_MARKER_UNSAFE")
+            raw = os.read(descriptor, GCP_KILL_SWITCH_MAX_BYTES + 1)
+            final = os.fstat(descriptor)
+            if (
+                len(raw) > GCP_KILL_SWITCH_MAX_BYTES
+                or final.st_ino != initial.st_ino
+                or final.st_size != initial.st_size
+                or final.st_size != len(raw)
+                or final.st_mtime_ns != initial.st_mtime_ns
+            ):
+                raise GcpSupervisorError("KILL_SWITCH_MARKER_CHANGED")
+            marker = parse_gcp_kill_switch_json(raw)
+            if canonical_gcp_kill_switch_bytes(marker) != raw:
+                raise GcpSupervisorError("KILL_SWITCH_MARKER_NONCANONICAL")
+            return marker
+        except GcpSupervisorError:
+            raise
+        except (OSError, ValueError):
+            raise GcpSupervisorError("KILL_SWITCH_UNAVAILABLE") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def is_killed(self, binding: GcpSupervisorBinding) -> bool:
+        marker = self._read_marker(
+            self._path_for(self._checked_root(), binding.controller_id)
+        )
+        if marker is None:
+            return False
+        if (
+            marker.approval_digest != binding.approval_digest
+            or marker.request_digest != binding.request_digest
+            or marker.controller_id != binding.controller_id
+        ):
+            raise GcpSupervisorError("KILL_SWITCH_BINDING_MISMATCH")
+        return True
+
+
 class GcpLifecycleSupervisor:
     """Bridge exact approval/watchdog state into the existing core controller."""
 
@@ -911,17 +1259,49 @@ class GcpLifecycleSupervisor:
         self,
         *,
         approval: GcpExecutionApproval,
+        quote_basis: GcpReadOnlyQuoteBasis,
+        cost_guard: GcpCostCleanupGuard,
         journal: GcpSupervisorJournal,
         watchdog: GcpWatchdog,
         kill_switch: GcpKillSwitch,
     ) -> None:
         self.approval = _strict_approval(approval)
+        self.quote_basis = quote_basis
+        self.cost_guard = cost_guard
         self.journal = journal
         self.watchdog = watchdog
         self.kill_switch = kill_switch
 
     def _binding(self, record: GcpLeaseRecord) -> GcpSupervisorBinding:
         return gcp_supervisor_binding(self.approval, record)
+
+    def _validate_current_create_inputs(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
+    ) -> None:
+        """Repeat all expiring and exact bindings at the create edge."""
+
+        try:
+            validate_gcp_execution_preflight_freshness(preflight, now=now)
+            validate_gcp_execution_approval(
+                self.approval,
+                preflight=preflight,
+                quote_basis=self.quote_basis,
+                cost_guard=self.cost_guard,
+                now=now,
+            )
+            validate_gcp_cost_cleanup_guard(
+                self.cost_guard,
+                preflight=preflight,
+                quote_basis=self.quote_basis,
+                now=now,
+                record=record,
+            )
+        except GcpExecutionError as error:
+            raise GcpSupervisorError(str(error)) from None
 
     def _assert_not_killed(
         self, binding: GcpSupervisorBinding, *, now: datetime
@@ -948,7 +1328,7 @@ class GcpLifecycleSupervisor:
         preflight: GcpExecutionPreflight,
         now: datetime,
     ) -> None:
-        validate_gcp_execution_approval(self.approval, preflight=preflight, now=now)
+        self._validate_current_create_inputs(record, preflight=preflight, now=now)
         self.journal.reserve(self._binding(record), now=now)
 
     def arm_watchdog(
@@ -958,7 +1338,7 @@ class GcpLifecycleSupervisor:
         preflight: GcpExecutionPreflight,
         now: datetime,
     ) -> None:
-        validate_gcp_execution_approval(self.approval, preflight=preflight, now=now)
+        self._validate_current_create_inputs(record, preflight=preflight, now=now)
         binding = self._binding(record)
         self.journal.advance(binding, state="ARM_CONSUMED", now=now)
         self._assert_not_killed(binding, now=now)
@@ -976,7 +1356,7 @@ class GcpLifecycleSupervisor:
             or receipt.request_digest != binding.request_digest
             or receipt.controller_id != binding.controller_id
             or receipt.armed_at != _timestamp(now)
-            or receipt.expires_at != binding.controller_deadline_at
+            or receipt.expires_at != binding.watchdog_deadline_at
             or _parse_timestamp(receipt.armed_at) > _parse_timestamp(
                 receipt.expires_at
             )
@@ -990,11 +1370,19 @@ class GcpLifecycleSupervisor:
         )
 
     def assert_create_permitted(
-        self, record: GcpLeaseRecord, *, now: datetime
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
     ) -> None:
+        self._validate_current_create_inputs(record, preflight=preflight, now=now)
         binding = self._binding(record)
         event = self.journal.load(binding.controller_id)
-        if event.binding != binding or event.state != "WATCHDOG_READY":
+        if event.binding != binding or event.state not in {
+            "WATCHDOG_READY",
+            "CREATE_INTENT",
+        }:
             raise GcpSupervisorError("WATCHDOG_NOT_READY")
         if event.watchdog_receipt_digest is None:
             raise GcpSupervisorError("WATCHDOG_RECEIPT_MISSING")
@@ -1002,14 +1390,47 @@ class GcpLifecycleSupervisor:
             _timestamp(now)
         ):
             raise GcpSupervisorError("CONTROLLER_DEADLINE_EXPIRED")
+        now_value = _parse_timestamp(_timestamp(now))
+        controller_remaining = _parse_timestamp(
+            binding.controller_deadline_at
+        ) - now_value
+        if controller_remaining < timedelta(
+            seconds=record.request.provider_max_runtime_seconds
+        ):
+            raise GcpSupervisorError("CONTROLLER_RUNTIME_HORIZON_INSUFFICIENT")
+        watchdog_remaining = _parse_timestamp(binding.watchdog_deadline_at) - now_value
+        if watchdog_remaining < timedelta(
+            seconds=preflight.quote.billable_duration_seconds
+        ):
+            raise GcpSupervisorError("WATCHDOG_CLEANUP_HORIZON_INSUFFICIENT")
         self._assert_not_killed(binding, now=now)
 
-    def create_intent(self, record: GcpLeaseRecord, *, now: datetime) -> None:
-        self.assert_create_permitted(record, now=now)
+    def create_intent(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
+    ) -> None:
+        self.assert_create_permitted(record, preflight=preflight, now=now)
         self.journal.advance(self._binding(record), state="CREATE_INTENT", now=now)
 
-    def before_work(self, record: GcpLeaseRecord, *, now: datetime) -> None:
+    def before_work(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        now: datetime,
+    ) -> None:
         binding = self._binding(record)
+        now_value = _parse_timestamp(_timestamp(now))
+        if now_value >= _parse_timestamp(binding.controller_deadline_at):
+            raise GcpSupervisorError("CONTROLLER_DEADLINE_EXPIRED")
+        if now_value >= _parse_timestamp(binding.watchdog_deadline_at):
+            raise GcpSupervisorError("WATCHDOG_DEADLINE_EXPIRED")
+        self._validate_current_create_inputs(
+            record, preflight=preflight, now=now
+        )
         event = self.journal.load(binding.controller_id)
         if event.binding != binding or event.state != "CREATE_INTENT":
             raise GcpSupervisorError("SUPERVISOR_WORK_STATE_INVALID")
@@ -1027,10 +1448,19 @@ class GcpLifecycleSupervisor:
         error_code: str | None,
         now: datetime,
     ) -> None:
+        binding = self._binding(record)
+        orphan_report = None
+        if not confirmed:
+            orphan_report = issue_gcp_exact_orphan_report(
+                binding,
+                reason_code=error_code or "CLEANUP_UNCONFIRMED",
+                now=now,
+            )
         self.journal.advance(
-            self._binding(record),
+            binding,
             state="CLEANUP_CONFIRMED" if confirmed else "ORPHANED",
             now=now,
+            orphan_report=orphan_report,
             error_code=error_code,
         )
 
@@ -1073,6 +1503,16 @@ def gcp_execution_supervisor_contract_schemas() -> dict[str, dict[str, Any]]:
             "gcp-watchdog-receipt.schema.json",
             GcpWatchdogReceipt,
             GCP_WATCHDOG_RECEIPT_SCHEMA_ID,
+        ),
+        (
+            "gcp-exact-orphan-report.schema.json",
+            GcpExactOrphanReport,
+            GCP_EXACT_ORPHAN_REPORT_SCHEMA_ID,
+        ),
+        (
+            "gcp-kill-switch.schema.json",
+            GcpKillSwitchRecord,
+            GCP_KILL_SWITCH_SCHEMA_ID,
         ),
     )
     output: dict[str, dict[str, Any]] = {}

@@ -31,6 +31,10 @@ class DigestDomain(StrEnum):
     GCP_EXECUTION_APPROVAL = "gcp-execution-approval-v2"
     GCP_EXECUTION_SUPERVISOR = "gcp-execution-supervisor-v2"
     GCP_EXECUTION_WATCHDOG = "gcp-execution-watchdog-v2"
+    GCP_READ_ONLY_QUOTE_BASIS = "gcp-read-only-quote-basis-v2"
+    GCP_COST_CLEANUP_GUARD = "gcp-cost-cleanup-guard-v2"
+    GCP_EXECUTION_KILL_SWITCH = "gcp-execution-kill-switch-v2"
+    GCP_EXACT_ORPHAN_REPORT = "gcp-exact-orphan-report-v2"
     DEPLOYMENT_QUALIFICATION = "deployment-qualification-v1"
 
 
