@@ -1,6 +1,6 @@
 # Inferdrome v0.1 release checklist
 
-Status: **Repository gates defined; human security review recorded; external acceptance and final release sign-off pending**
+Status: **Producer-side v0.1.0 release authorized; independent prospective ExitSpec evaluation and receipt remain deferred and NOT_RECORDED**
 
 This checklist maps the frozen
 [v0.1 definition of done](V0_1_DEFINITION_OF_DONE.md) to reviewable evidence.
@@ -39,12 +39,12 @@ Normal pull-request CI remains GPU-free.
 | 5. Canonical request records | Public schema, pinned normalizer, golden and semantic-invariant tests | Automated gate |
 | 6. Measurements | Metric definitions, deterministic reducer, quantile tests, conformance vectors | Automated gate |
 | 7. Evidence bundle | Bundle contract, offline verifier, immutable publication, mutation suites | Automated gate |
-| 8. ExitSpec integration | Independently owned importer, recalculation, decision table, and receipt | External release blocker |
-| 9. Flagship demonstration | Managed runbook, exact A10 handoff, corruption and synthetic rejection demos | Inferdrome producer evidence complete; ExitSpec outcomes pending |
+| 8. ExitSpec integration | Independently owned importer, recalculation, decision table, and receipt | External release blocker for acceptance; deferred post-v0.1 by owner authorization; no outcome or receipt recorded |
+| 9. Flagship demonstration | Managed runbook, exact A10 handoff, corruption and synthetic rejection demos | Inferdrome producer evidence complete; independent prospective ExitSpec evaluation deferred and not claimed |
 | 10. Security and privacy | Threat model, bounded readers, adversarial tests, exact-archive publication review | `EXTERNAL_ONLY`; owner refusal to publish recorded; human security review approved subject to recorded limitations |
 | 11. Engineering quality | All three CI jobs, packaging smoke, documentation, contribution guidance | Apache-2.0 selected and added; `v0.1.0` tag deferred to the release record |
 
-## Release-blocking evidence
+## Release evidence and deferred external work
 
 - [x] Record one newly generated, customer-eligible bundle from a clean,
   compatible Linux/NVIDIA host.
@@ -69,12 +69,17 @@ Normal pull-request CI remains GPU-free.
 - [x] Select and add the repository license. The owner selected Apache License
   2.0 for Inferdrome; `LICENSE`, package metadata, and third-party notices
   record that choice without licensing external materials or raw archives.
+- [x] Jayesh Suyal authorizes `v0.1.0` as a producer-side release while the
+  two ExitSpec items above remain `NOT_RECORDED`; see the
+  [owner release-policy exception record](reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md).
 
 The remaining unchecked items are ExitSpec outcomes and receipt. The
 archive-publication decision gate is closed only as a
 refusal: the raw archive remains `EXTERNAL_ONLY` and must not be published.
-Those remaining items must be genuinely recorded before the release owner
-authorizes the final tag.
+They remain required for independent customer acceptance, but the owner has
+authorized the `v0.1.0` producer-side tag while they remain deferred
+post-v0.1. The exception neither checks those boxes nor makes an outcome or
+receipt exist; the final release record must state their absence.
 
 ## Repository machine checks
 
@@ -122,7 +127,8 @@ Deployment qualification gate run URL(s):
 Dashboard gate run URL(s):
 GPU provider and declared instance type:
 GPU demonstration bundle digest:
-ExitSpec receipt digest:
+ExitSpec status: DEFERRED POST-v0.1; outcomes and receipt NOT_RECORDED
+ExitSpec deferral authorization: docs/reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md
 Security reviewer and date:
 Selected license: Apache License 2.0 (`Apache-2.0`)
 Release tag: v0.1.0
@@ -140,9 +146,10 @@ The final external record must also cite the exact release commit whose
 final-pre-tag pull-request and `main` workflows passed all three jobs, plus the
 post-tag workflow result. The annotated tag itself must not be amended or
 recreated to append post-tag facts.
-The GPU bundle digest and ExitSpec receipt digest remain out-of-band evidence
-anchors; neither may be reconstructed from a summary or edited into a sealed
-bundle.
+The GPU bundle digest remains an out-of-band evidence anchor. A future ExitSpec
+receipt digest must likewise remain out-of-band and may not be reconstructed
+from a summary or edited into a sealed bundle; no such digest is recorded for
+this release.
 
 ## Frozen GPU producer anchors
 
@@ -195,10 +202,10 @@ approval for external materials, or final release approval.
 ### Final pre-tag phase: readiness of the exact release commit
 
 After the remaining ExitSpec blockers are genuinely recorded by their named
-owners, the recorded human security review remains applicable, and the archive
-refusal remains recorded, the release owner creates a separate release commit.
-That commit (which is not this
-development-version PR) changes both package-version locations to `0.1.0`
+owners, or after the bounded owner exception is recorded for this producer-side
+`v0.1.0` release, and while the recorded human security review remains
+applicable and the archive refusal remains recorded, the release owner creates
+the final-version release commit. That commit changes both package-version locations to `0.1.0`
 while preserving the canonical Apache-2.0 license, matching metadata, and
 current dependency lock. No
 `v0.1.0` tag exists yet.
@@ -270,16 +277,17 @@ lock, frozen capture ancestry, and all repository gates. The Engineering
 checkout's complete tag visibility allows this
 `refs/tags/v0.1.0` resolution to be checked against the actual tag namespace.
 After all three jobs pass, put the exact release SHA, three CI run URLs, tag
-verification, and remaining external sign-off in the GitHub Release or another
-explicit external immutable release record. Post-tag verification facts belong
-in that external record and must never be added to the annotated tag message.
-This record is not a substitute for ExitSpec outcomes, human security review,
-the recorded owner archive-publication decision, or final release approval.
+verification, producer-side limitation, owner-exception source, and remaining
+external sign-off in the GitHub Release or another explicit external immutable
+release record. Post-tag verification facts belong in that external record and
+must never be added to the annotated tag message. This record is not a
+substitute for ExitSpec outcomes, human security review, the recorded owner
+archive-publication decision, or final release approval.
 Publishing and merging are not performed by this preflight.
 
 Automation cannot prove the ExitSpec importer or `PASS`/`FAIL`/`NOT_PROVEN`
 outcomes, pre-measurement contract chronology, human security approval, owner
 archive-publication decision, licensing or publication rights for external
 materials, GitHub check results, or final release approval. Those inputs must
-remain explicit checklist evidence; checking a box does not turn them into
-Inferdrome evidence.
+remain explicit checklist evidence; the bounded owner exception changes release
+timing only and does not turn missing inputs into Inferdrome evidence.

@@ -14,10 +14,12 @@ runtime-unproven; neither pack launched a cloud instance or produced a receipt.
 A separate GET-only exact-capacity watcher now validates each implemented
 provider description, rate, capacity region, and zero-active-instance boundary
 without granting launch authority. Both reviewed raw archives remain
-EXTERNAL_ONLY; owner archive-publication decisions, external-material license
-reviews, security sign-off, ExitSpec outcomes, and release work remain open.
-The owner-selected Apache-2.0 repository license does not close those separate
-archive boundaries.**
+EXTERNAL_ONLY and unpublished; the owner recorded that refusal and the named
+human security review. Independent prospective ExitSpec outcomes and receipt
+remain NOT_RECORDED and are deferred post-v0.1 by the
+[owner policy exception](reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md); they
+are not acceptance evidence. The owner-selected Apache-2.0 repository license
+does not close those separate archive boundaries.**
 
 Next campaign checkpoint: **After a fresh read-only preflight and separate
 explicit operator launch decision, execute the exact Qwen3-8B same-model
@@ -425,16 +427,18 @@ library boundaries used by tests. The release shield runs the engineering,
 deployment-qualification, and populated-dashboard gates in GitHub Actions and
 maps remaining evidence in
 `V0_1_RELEASE_CHECKLIST.md`. The genuine GPU producer evidence is complete;
-Apache-2.0 is selected for the repository, while ExitSpec demonstrations,
-human security sign-off, external-material licensing, the owner
-archive-publication decision, and the release tag remain open. Remaining
-polish is tracked by the offline release preflight and existing gates rather
-than by adding new product scope.
+Apache-2.0 is selected, human security approval is recorded, and the owner
+has refused public delivery of the raw archive. Independent prospective
+ExitSpec demonstrations and a receipt remain NOT_RECORDED; their bounded
+post-v0.1 deferral for the producer-side `v0.1.0` release is recorded in the
+[owner policy exception](reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md).
+The final version transition, review, CI, tag, and release work remain open.
 
 Gate:
 
 ```text
-Every item in the v0.1 definition of done has linked evidence.
+Every repository-owned v0.1 criterion has linked evidence; the separately
+owned ExitSpec acceptance work is explicitly deferred and not claimed.
 ```
 
 See [V0_1_DEFINITION_OF_DONE.md](V0_1_DEFINITION_OF_DONE.md).

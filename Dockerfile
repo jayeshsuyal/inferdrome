@@ -23,7 +23,7 @@ RUN tar -xzf /tmp/uv.tar.gz --strip-components=1 -C /usr/local/bin \
 FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c AS runner
 
 ARG SOURCE_REPOSITORY_COMMIT=development-unpinned
-ARG INFERDROME_VERSION=0.1.0.dev0
+ARG INFERDROME_VERSION=0.1.0
 ARG BUILD_FLAVOR=development
 
 # Proof/release images must carry an exact source identity. Development images

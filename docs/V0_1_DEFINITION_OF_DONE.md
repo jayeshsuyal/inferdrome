@@ -1,10 +1,25 @@
 # Inferdrome v0.1 definition of done
 
-Status: **Frozen release gate**
+Status: **Frozen producer-side release gate; independent ExitSpec evaluation deferred by a bounded owner exception**
 
+Except for the explicitly bounded producer-side scope exception below,
 Inferdrome v0.1 ships only when every mandatory criterion below is satisfied.
 An unmet criterion is release-blocking; it cannot be waived by relabeling a
 demonstration or manually editing an evidence bundle.
+
+## v0.1.0 owner-authorized scope exception
+
+On 2026-08-31, Jayesh Suyal authorized `v0.1.0` as a producer-side release
+without waiting for independently owned prospective ExitSpec `PASS`, `FAIL`,
+and `NOT_PROVEN` evaluations or an ingestion-receipt digest. The exact
+authorization, four `NOT_RECORDED` items, and preserved limitations are in the
+[owner release-policy exception record](reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md).
+
+This narrowly changes release timing for the listed ExitSpec work; it does not
+declare that work satisfied, infer an acceptance outcome, or permit relabeling
+or manual editing of evidence. The work remains release-blocking for independent
+customer acceptance and is deferred post-v0.1. Every other mandatory criterion
+and release integrity control remains in force.
 
 ## 1. Public contracts
 
@@ -135,7 +150,9 @@ rejection, and synthetic customer-flow rejection are implemented. A genuine
 compatible-host A10 bundle is retained as producer-side evidence, but it does
 not close archive publication, human sign-off, or acceptance. The separately
 owned ExitSpec `PASS`, `FAIL`, and `NOT_PROVEN` demonstrations remain
-release-blocking.
+release-blocking for independent customer acceptance. They are `NOT_RECORDED`
+and deferred post-v0.1 under the bounded owner exception above; the
+producer-side `v0.1.0` release must not claim otherwise.
 
 ## 10. Security and privacy
 
@@ -164,6 +181,9 @@ release-blocking.
 
 ## Release sign-off
 
-The release checklist must link to evidence for each section above. The sign-off
-records the exact commit, engineering-gate result, GPU demonstration bundle
-digest, and ExitSpec receipt digest.
+The release checklist must link to evidence for each section above. An
+acceptance-complete sign-off records the exact commit, engineering-gate result,
+GPU demonstration bundle digest, and ExitSpec receipt digest. Under the
+`v0.1.0` owner exception, the producer-side release instead records the exact
+exception source and the explicit absence of the deferred ExitSpec outcomes and
+receipt; it must not invent a receipt digest.
