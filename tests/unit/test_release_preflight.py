@@ -30,17 +30,36 @@ def _minimal_repository(root: Path) -> None:
         (root / relative_path).write_bytes(
             (REPOSITORY_ROOT / relative_path).read_bytes()
         )
+    for relative_path, _expected_digest in (
+        release_preflight.FROZEN_V0_1_CLOSURE_FILE_SHA256
+    ):
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((REPOSITORY_ROOT / relative_path).read_bytes())
     (root / "src/inferdrome/__init__.py").write_text(
         f'__version__ = "{release_preflight.DEVELOPMENT_VERSION}"\n',
         encoding="utf-8",
     )
+    document_markers = dict(release_preflight.DOCUMENT_MARKERS)
     for relative_path, markers in release_preflight.DOCUMENT_MARKERS:
         (root / relative_path).write_text("\n".join(markers), encoding="utf-8")
-    checklist = root / "docs/V0_1_RELEASE_CHECKLIST.md"
+    inputs = root / release_preflight.ACTIVE_RELEASE_SERIES.inputs_path
+    inputs.write_text(
+        "\n".join(
+            (
+                *document_markers[release_preflight.ACTIVE_RELEASE_SERIES.inputs_path],
+                *release_preflight.ACTIVE_RELEASE_SERIES.input_markers,
+            )
+        ),
+        encoding="utf-8",
+    )
+    checklist = root / release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
     checklist.write_text(
         "\n".join(
             [
-                *release_preflight.DOCUMENT_MARKERS[3][1],
+                *document_markers[
+                    release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
+                ],
                 *(
                     f"- [ ] {item.marker}"
                     for item in release_preflight.MANUAL_RELEASE_ITEMS
@@ -117,6 +136,83 @@ def test_engineering_ci_preflight_resolves_phase_and_fetches_tags() -> None:
     assert "fetch-depth: 0" in engineering_job
     assert "inputs.release_phase || 'auto'" in engineering_job
     assert '--phase "$RELEASE_PREFLIGHT_PHASE"' in engineering_job
+
+
+def test_active_preflight_series_uses_distinct_v0_2_release_inputs() -> None:
+    series = release_preflight.ACTIVE_RELEASE_SERIES
+    source = (REPOSITORY_ROOT / "scripts/release_preflight.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert series.name == "v0.2"
+    assert series.development_version == "0.2.0.dev0"
+    assert series.final_version == "0.2.0"
+    assert series.final_tag == "v0.2.0"
+    assert series.checklist_path == "docs/V0_2_RELEASE_CHECKLIST.md"
+    assert series.inputs_path == "docs/V0_2_RELEASE_INPUTS.md"
+    assert "docs/V0_1_RELEASE_CHECKLIST.md" not in release_preflight.REQUIRED_FILES
+    assert "active v0.2 release-series preflight" in source
+    assert "Inferdrome {ACTIVE_RELEASE_SERIES.name} release preflight" in source
+    assert (
+        "offline v0.2 release preflight"
+        in release_preflight.build_parser().format_help()
+    )
+
+
+def test_v0_2_release_inputs_fail_closed_when_a_required_input_is_missing(
+    tmp_path: Path,
+) -> None:
+    _minimal_repository(tmp_path)
+    inputs_path = tmp_path / release_preflight.ACTIVE_RELEASE_SERIES.inputs_path
+    missing_marker = release_preflight.ACTIVE_RELEASE_SERIES.input_markers[-1]
+    inputs_path.write_text(
+        inputs_path.read_text(encoding="utf-8").replace(missing_marker, ""),
+        encoding="utf-8",
+    )
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    input_check = _named_check(checks, "release-series-inputs")
+    assert input_check.status == "FAIL"
+    assert missing_marker in input_check.detail
+
+
+def test_frozen_v0_1_closure_records_match_the_v0_1_0_baseline() -> None:
+    check = release_preflight._check_frozen_v0_1_closure_records(REPOSITORY_ROOT)
+
+    assert (
+        release_preflight.V0_1_RELEASE_BASE_COMMIT
+        == "a9e325de4794f741453e37df515a595060d5a2ca"
+    )
+    assert check.status == "PASS"
+    assert "frozen SHA-256" in check.detail
+
+
+def test_v0_1_closure_record_hash_drift_fails_closed(tmp_path: Path) -> None:
+    _minimal_repository(tmp_path)
+    relative_path, _expected_digest = (
+        release_preflight.FROZEN_V0_1_CLOSURE_FILE_SHA256[0]
+    )
+    path = tmp_path / relative_path
+    path.write_bytes(path.read_bytes() + b"\nlocal mutation\n")
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    check = _named_check(checks, "frozen-v0-1-closure-records")
+    assert check.status == "FAIL"
+    assert relative_path in check.detail
 
 
 def test_python_ci_uses_the_hash_locked_frozen_environment() -> None:
@@ -698,12 +794,14 @@ def test_final_pre_tag_requires_final_version_and_license_artifact(
 ) -> None:
     _minimal_repository(tmp_path)
     (tmp_path / "LICENSE").unlink()
-    (tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md").write_text(
-        (tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md")
+    checklist_path = tmp_path / release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
+    authorization = release_preflight.MANUAL_RELEASE_ITEMS[-1]
+    checklist_path.write_text(
+        checklist_path
         .read_text(encoding="utf-8")
         .replace(
-            "- [ ] Select and add the repository license",
-            "- [x] Select and add the repository license",
+            f"- [ ] {authorization.marker}",
+            f"- [x] {authorization.marker}",
         ),
         encoding="utf-8",
     )
@@ -725,12 +823,12 @@ def test_final_pre_tag_requires_final_version_and_license_artifact(
 
     version_check = next(check for check in checks if check.name == "package-version")
     license_check = next(check for check in checks if check.name == "license-artifact")
-    manual_license = next(
-        check for check in checks if check.name == "manual-license-selection"
+    manual_authorization = next(
+        check for check in checks if check.name == f"manual-{authorization.name}"
     )
     assert version_check.status == "FAIL"
     assert license_check.status == "FAIL"
-    assert manual_license.status == "MANUAL"
+    assert manual_authorization.status == "MANUAL"
 
 
 def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
@@ -786,7 +884,7 @@ def test_pre_tag_ready_without_aggregate_ci_or_tag(
         project_version=release_preflight.FINAL_VERSION,
         package_version=release_preflight.FINAL_VERSION,
     )
-    checklist = tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md"
+    checklist = tmp_path / release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
     checklist_text = checklist.read_text(encoding="utf-8")
     for item in release_preflight.MANUAL_RELEASE_ITEMS:
         checklist_text = checklist_text.replace(
@@ -835,6 +933,71 @@ def test_pre_tag_ready_without_aggregate_ci_or_tag(
     assert "machine preflight only" in output
     assert "externally verified three-job aggregate CI" in output
     assert "explicit owner authorization" in output
+
+
+def test_completed_v0_1_records_cannot_yield_v0_2_pre_tag_ready(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _minimal_repository(tmp_path)
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
+    completed_legacy_record = tmp_path / "historical/V0_1_RELEASE_CHECKLIST.md"
+    completed_legacy_record.parent.mkdir(parents=True)
+    completed_legacy_record.write_text(
+        re.sub(
+            r"(?m)^- \[ \]",
+            "- [x]",
+            (REPOSITORY_ROOT / "docs/V0_1_RELEASE_CHECKLIST.md").read_text(
+                encoding="utf-8"
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["git", "status", "--porcelain=v1"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "show-ref", "--verify", "--quiet"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        assert Path(command[0]).name in {"engineering_gate.sh", "dashboard_gate.sh"}
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="final-pre-tag",
+        repository_only=False,
+        require_clean=True,
+        run_gates=True,
+    )
+
+    assert _named_check(checks, "release-series-inputs").status == "PASS"
+    assert _named_check(checks, "frozen-v0-1-closure-records").status == "PASS"
+    assert all(
+        _named_check(checks, f"manual-{item.name}").status == "PENDING"
+        for item in release_preflight.MANUAL_RELEASE_ITEMS
+    )
+    assert release_preflight._has_pending_manual_input(checks)
+
+    release_preflight._print_report(
+        checks,
+        phase="final-pre-tag",
+        repository_only=False,
+        run_gates=True,
+    )
+    output = capsys.readouterr().out
+    assert "result: BLOCKED" in output
+    assert "PRE_TAG_READY" not in output
 
 
 def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
@@ -1142,7 +1305,7 @@ def test_release_closure_reports_open_manual_inputs(capsys) -> None:
     assert result == 1
     assert "[SKIPPED] engineering-gate" in captured
     assert "phase: candidate" in captured
-    assert "[PENDING] manual-exitspec-outcomes" in captured
+    assert "[PENDING] manual-v0-2-scope-review" in captured
     assert "result: BLOCKED" in captured
 
 

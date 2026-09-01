@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the offline, fail-closed v0.1 release preflight.
+"""Run the offline, fail-closed active v0.2 release-series preflight.
 
 This command checks repository-owned release inputs and can delegate to the
 existing engineering and dashboard gates. It never contacts a provider,
@@ -26,10 +26,6 @@ from typing import Literal
 Phase = Literal["candidate", "final-pre-tag", "post-tag"]
 RequestedPhase = Literal["auto", "candidate", "final-pre-tag", "post-tag"]
 TagState = Literal["absent", "head", "elsewhere", "unannotated", "error"]
-DEVELOPMENT_VERSION = "0.2.0.dev0"
-FINAL_VERSION = "0.2.0"
-FINAL_TAG = "v0.2.0"
-CAPTURE_PRODUCER_COMMIT = "c08b46d9fbd87477f45d130aa3c63615937c4dc3"
 CheckStatus = Literal["PASS", "FAIL", "PENDING", "MANUAL", "SKIPPED"]
 
 APACHE_LICENSE_EXPRESSION = "Apache-2.0"
@@ -37,6 +33,45 @@ APACHE_LICENSE_SHA256 = (
     "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 )
 REPOSITORY_URL = "https://github.com/jayeshsuyal/inferdrome"
+V0_1_RELEASE_BASE_COMMIT = "a9e325de4794f741453e37df515a595060d5a2ca"
+# These closure and review records were frozen at the v0.1.0 release base
+# above.
+# They are retained for historical integrity only: none is an input to the
+# active v0.2 release decision.
+FROZEN_V0_1_CLOSURE_FILE_SHA256: tuple[tuple[str, str], ...] = (
+    (
+        "docs/V0_1_DEFINITION_OF_DONE.md",
+        "9842a0aad692b94aaf51647540779c08bb1772991931ecc22797623b87ef0f2c",
+    ),
+    (
+        "docs/V0_1_RELEASE_CHECKLIST.md",
+        "3cd8d4c5f87577dc8f5cfcdef705d3fb4cec0a4b06a9c217c21144e1f8f4984f",
+    ),
+    (
+        "docs/THREAT_MODEL.md",
+        "51670262dbea2d8cf271eaac998e7b7db70d8d9a36d84c85b02ada695d07d523",
+    ),
+    (
+        "docs/reviews/V0_1_A10_RAW_ARCHIVE_PRIVACY_LICENSING_REVIEW.md",
+        "ea94c67f6fb32dc1ae1f3dacab0178b094c2b9ce1b8ffcb27a7d3856bcbe3eaa",
+    ),
+    (
+        "docs/reviews/V0_1_HUMAN_SECURITY_REVIEW_APPROVAL.md",
+        "60f8985db58f0c5ae5e96bba66039859534feef7b2aa371ac0607e9c2071ecc4",
+    ),
+    (
+        "docs/reviews/V0_1_MODEL_ASSISTED_SECURITY_AUDIT.md",
+        "8d9cd6615516b99b3d806e2e89c39b77ab4bdbbaeb6d44b3adb3414a6009dd82",
+    ),
+    (
+        "docs/reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md",
+        "f27ac66d0ddbaf610f050cec109cc4aa05a70da59c5cc5d3d377dfebe82e254d",
+    ),
+    (
+        "docs/reviews/V0_1_PROVIDER_GPU_SSH_COST_CLOSURE.md",
+        "f01dc7a64772dcf1078371cfe714ab8d9aadc532d32ad8367239674dc6f509ba",
+    ),
+)
 UV_LOCK_VERSION = 1
 UV_LOCK_REVISION = 3
 PROJECT_REQUIRES_PYTHON = ">=3.12,<3.13"
@@ -95,6 +130,22 @@ class ManualItem:
     owner: str
 
 
+@dataclass(frozen=True)
+class ReleaseSeries:
+    """Immutable inputs for the one release series this checkout may prepare."""
+
+    name: str
+    development_version: str
+    final_version: str
+    final_tag: str
+    checklist_path: str
+    inputs_path: str
+    required_files: tuple[str, ...]
+    document_markers: tuple[tuple[str, tuple[str, ...]], ...]
+    input_markers: tuple[str, ...]
+    manual_items: tuple[ManualItem, ...]
+
+
 def _uv_sync_command_lines(text: str) -> tuple[str, ...]:
     """Return non-comment lines that directly invoke ``uv sync``."""
 
@@ -117,35 +168,7 @@ def _uv_lock_command_lines(text: str) -> tuple[str, ...]:
     )
 
 
-MANUAL_RELEASE_ITEMS: tuple[ManualItem, ...] = (
-    ManualItem(
-        "exitspec-outcomes",
-        "Independently demonstrate ExitSpec",
-        "ExitSpec owner",
-    ),
-    ManualItem(
-        "exitspec-receipt",
-        "Retain the ExitSpec ingestion receipt digest",
-        "ExitSpec owner",
-    ),
-    ManualItem(
-        "archive-publication",
-        "Owner decides whether to approve public delivery",
-        "repository owner",
-    ),
-    ManualItem(
-        "security-review",
-        "Complete a human review against",
-        "security reviewer",
-    ),
-    ManualItem(
-        "license-selection",
-        "Select and add the repository license",
-        "repository owner",
-    ),
-)
-
-REQUIRED_FILES: tuple[str, ...] = (
+_COMMON_REQUIRED_FILES: tuple[str, ...] = (
     "LICENSE",
     "README.md",
     "CONTRIBUTING.md",
@@ -154,8 +177,6 @@ REQUIRED_FILES: tuple[str, ...] = (
     "src/inferdrome/__init__.py",
     "docs/PRODUCT.md",
     "docs/ROADMAP.md",
-    "docs/V0_1_RELEASE_CHECKLIST.md",
-    "docs/V0_1_DEFINITION_OF_DONE.md",
     ".github/workflows/ci.yml",
     "scripts/engineering_gate.sh",
     "scripts/dashboard_gate.sh",
@@ -165,7 +186,7 @@ REQUIRED_FILES: tuple[str, ...] = (
     "scripts/release_preflight.py",
 )
 
-DOCUMENT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+_COMMON_DOCUMENT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "README.md",
         (
@@ -190,23 +211,77 @@ DOCUMENT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "release work remain open",
         ),
     ),
-    (
-        "docs/V0_1_RELEASE_CHECKLIST.md",
+)
+
+
+ACTIVE_RELEASE_SERIES = ReleaseSeries(
+    name="v0.2",
+    development_version="0.2.0.dev0",
+    final_version="0.2.0",
+    final_tag="v0.2.0",
+    checklist_path="docs/V0_2_RELEASE_CHECKLIST.md",
+    inputs_path="docs/V0_2_RELEASE_INPUTS.md",
+    required_files=(
+        "docs/V0_2_RELEASE_INPUTS.md",
+        "docs/V0_2_RELEASE_CHECKLIST.md",
+    ),
+    document_markers=(
         (
-            "Deployment qualification gate",
-            "External release blocker",
-            "EXTERNAL_ONLY",
+            "docs/V0_2_RELEASE_INPUTS.md",
+            (
+                "v0.2 release inputs",
+                "v0.1 closure records do not authorize a v0.2 release",
+                "Content-addressed local bindings are not signatures",
+            ),
+        ),
+        (
+            "docs/V0_2_RELEASE_CHECKLIST.md",
+            (
+                "No v0.2 release is currently authorized",
+                "v0.2 release inputs",
+                "All v0.2 release checkboxes below are deliberately unchecked",
+            ),
         ),
     ),
-    (
-        "docs/V0_1_DEFINITION_OF_DONE.md",
-        (
-            "separately owned",
-            "owner-selected Apache License 2.0 is added",
-            "release-blocking",
+    input_markers=(
+        "exact final source commit, package version, and annotated tag",
+        "fresh v0.2 security and lifecycle review records",
+        "all three required CI job URLs for the exact final source commit",
+    ),
+    manual_items=(
+        ManualItem(
+            "v0-2-scope-review",
+            "Review the exact v0.2 release scope and deferred boundaries",
+            "release reviewer",
+        ),
+        ManualItem(
+            "v0-2-gcp-safety-review",
+            "Complete an independent v0.2 GCP safety and cleanup review",
+            "security reviewer",
+        ),
+        ManualItem(
+            "v0-2-release-authorization",
+            "Record explicit v0.2 release authorization for the exact release "
+            "commit and annotated tag",
+            "release owner",
         ),
     ),
 )
+
+# These aliases retain the narrow public surface used by repository tests while
+# making every active check derive from the v0.2 series contract above.
+DEVELOPMENT_VERSION = ACTIVE_RELEASE_SERIES.development_version
+FINAL_VERSION = ACTIVE_RELEASE_SERIES.final_version
+FINAL_TAG = ACTIVE_RELEASE_SERIES.final_tag
+REQUIRED_FILES = _COMMON_REQUIRED_FILES + ACTIVE_RELEASE_SERIES.required_files
+DOCUMENT_MARKERS = (
+    _COMMON_DOCUMENT_MARKERS + ACTIVE_RELEASE_SERIES.document_markers
+)
+MANUAL_RELEASE_ITEMS = ACTIVE_RELEASE_SERIES.manual_items
+
+# This is historical v0.1 lineage integrity only. It is not a v0.2 release
+# input, and no v0.1 checklist or approval can satisfy a v0.2 manual check.
+V0_1_CAPTURE_PRODUCER_COMMIT = "c08b46d9fbd87477f45d130aa3c63615937c4dc3"
 
 
 def _check_required_files(repository_root: Path) -> Check:
@@ -224,7 +299,38 @@ def _check_required_files(repository_root: Path) -> Check:
     return Check(
         "required-files",
         "PASS",
-        f"{len(REQUIRED_FILES)} release inputs are present",
+        f"{len(REQUIRED_FILES)} {ACTIVE_RELEASE_SERIES.name} release inputs "
+        "are present",
+    )
+
+
+def _check_frozen_v0_1_closure_records(repository_root: Path) -> Check:
+    """Require exact v0.1 closure bytes without treating them as v0.2 inputs."""
+
+    invalid: list[str] = []
+    for relative_path, expected_digest in FROZEN_V0_1_CLOSURE_FILE_SHA256:
+        path = repository_root / relative_path
+        try:
+            if path.is_symlink() or not path.is_file():
+                invalid.append(f"{relative_path} (not a regular file)")
+                continue
+            actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            invalid.append(f"{relative_path} ({error})")
+            continue
+        if actual_digest != expected_digest:
+            invalid.append(f"{relative_path} (SHA-256 differs from v0.1.0)")
+    if invalid:
+        return Check(
+            "frozen-v0-1-closure-records",
+            "FAIL",
+            "; ".join(invalid),
+        )
+    return Check(
+        "frozen-v0-1-closure-records",
+        "PASS",
+        f"{len(FROZEN_V0_1_CLOSURE_FILE_SHA256)} v0.1.0 closure/review files "
+        "match their frozen SHA-256 values",
     )
 
 
@@ -418,8 +524,8 @@ def _check_license_artifact(repository_root: Path) -> Check:
             not in license_text
         ):
             raise ValueError("LICENSE is not the canonical Apache License 2.0 text")
-        with pyproject_path.open("rb") as source:
-            pyproject = tomllib.load(source)
+        with pyproject_path.open("rb") as pyproject_source:
+            pyproject = tomllib.load(pyproject_source)
         project = pyproject.get("project")
         if not isinstance(project, dict):
             raise ValueError("pyproject project metadata is unavailable")
@@ -524,10 +630,10 @@ def _check_python_dependency_lock(repository_root: Path) -> Check:
     try:
         if lock_path.is_symlink() or not lock_path.is_file():
             raise ValueError("uv.lock must be a committed regular file")
-        with pyproject_path.open("rb") as source:
-            pyproject = tomllib.load(source)
-        with lock_path.open("rb") as source:
-            lock = tomllib.load(source)
+        with pyproject_path.open("rb") as pyproject_source:
+            pyproject = tomllib.load(pyproject_source)
+        with lock_path.open("rb") as lock_source:
+            lock = tomllib.load(lock_source)
         if lock.get("version") != UV_LOCK_VERSION:
             raise ValueError("uv.lock version is unsupported")
         if lock.get("revision") != UV_LOCK_REVISION:
@@ -553,7 +659,7 @@ def _check_python_dependency_lock(repository_root: Path) -> Check:
             raise ValueError("pyproject dependency metadata is invalid")
         if not isinstance(build_requirements, list):
             raise ValueError("pyproject build requirements are invalid")
-        expected_requirements = [
+        expected_requirements: list[tuple[str, str | None]] = [
             (_canonical_project_requirement(requirement), None)
             for requirement in dependencies
         ]
@@ -716,14 +822,14 @@ def _check_tag(repository_root: Path, *, phase: Phase, tag: str) -> Check:
     return Check("release-tag", "FAIL", tag_detail)
 
 
-def _check_capture_ancestor(repository_root: Path) -> Check:
+def _check_historical_capture_ancestor(repository_root: Path) -> Check:
     try:
         result = subprocess.run(
             [
                 "git",
                 "merge-base",
                 "--is-ancestor",
-                CAPTURE_PRODUCER_COMMIT,
+                V0_1_CAPTURE_PRODUCER_COMMIT,
                 "HEAD",
             ],
             cwd=repository_root,
@@ -731,25 +837,27 @@ def _check_capture_ancestor(repository_root: Path) -> Check:
         )
     except OSError as error:
         return Check(
-            "capture-producer-ancestor",
+            "historical-v0-1-capture-ancestor",
             "FAIL",
             f"could not verify frozen capture producer ancestry: {error}",
         )
     if result.returncode == 0:
         return Check(
-            "capture-producer-ancestor",
+            "historical-v0-1-capture-ancestor",
             "PASS",
-            f"frozen capture producer {CAPTURE_PRODUCER_COMMIT} is an ancestor of HEAD",
+            "historical v0.1 capture producer "
+            f"{V0_1_CAPTURE_PRODUCER_COMMIT} is an ancestor of HEAD",
         )
     if result.returncode == 1:
         return Check(
-            "capture-producer-ancestor",
+            "historical-v0-1-capture-ancestor",
             "FAIL",
-            f"frozen capture producer {CAPTURE_PRODUCER_COMMIT} is not an "
+            "historical v0.1 capture producer "
+            f"{V0_1_CAPTURE_PRODUCER_COMMIT} is not an "
             "ancestor of HEAD",
         )
     return Check(
-        "capture-producer-ancestor",
+        "historical-v0-1-capture-ancestor",
         "FAIL",
         "git merge-base could not verify the frozen capture producer ancestry "
         f"(exit code {result.returncode})",
@@ -778,6 +886,54 @@ def _check_document_markers(repository_root: Path) -> Check:
         "PASS",
         "producer proof, local qualification, dry-run/simulation, external work, "
         "and future scope remain labeled",
+    )
+
+
+def _check_release_series_inputs(repository_root: Path) -> Check:
+    """Require the active series' distinct release-input and checklist contract."""
+
+    try:
+        inputs = (repository_root / ACTIVE_RELEASE_SERIES.inputs_path).read_text(
+            encoding="utf-8"
+        )
+        checklist_lines = (
+            repository_root / ACTIVE_RELEASE_SERIES.checklist_path
+        ).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        return Check(
+            "release-series-inputs",
+            "FAIL",
+            f"could not read {ACTIVE_RELEASE_SERIES.name} release inputs: {error}",
+        )
+
+    missing = [
+        marker
+        for marker in ACTIVE_RELEASE_SERIES.input_markers
+        if marker not in inputs
+    ]
+    malformed: list[str] = []
+    for item in ACTIVE_RELEASE_SERIES.manual_items:
+        candidates = [line for line in checklist_lines if item.marker in line]
+        if len(candidates) != 1:
+            malformed.append(f"{item.name} ({len(candidates)} matching items)")
+            continue
+        if re.match(r"^\s*- \[([ xX])\]", candidates[0]) is None:
+            malformed.append(f"{item.name} (not an explicit checkbox)")
+    if missing or malformed:
+        detail = []
+        if missing:
+            detail.append(
+                "missing inputs: " + ", ".join(repr(item) for item in missing)
+            )
+        if malformed:
+            detail.append("invalid checklist requirements: " + ", ".join(malformed))
+        return Check("release-series-inputs", "FAIL", "; ".join(detail))
+    return Check(
+        "release-series-inputs",
+        "PASS",
+        f"{ACTIVE_RELEASE_SERIES.name} has {len(ACTIVE_RELEASE_SERIES.input_markers)} "
+        "explicit release inputs and "
+        f"{len(ACTIVE_RELEASE_SERIES.manual_items)} checklist requirements",
     )
 
 
@@ -1069,14 +1225,14 @@ def _check_working_tree(repository_root: Path, *, require_clean: bool) -> Check:
 
 
 def _manual_check(repository_root: Path, item: ManualItem) -> Check:
-    checklist_path = repository_root / "docs/V0_1_RELEASE_CHECKLIST.md"
+    checklist_path = repository_root / ACTIVE_RELEASE_SERIES.checklist_path
     try:
         lines = checklist_path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as error:
         return Check(
             f"manual-{item.name}",
             "FAIL",
-            f"could not read release checklist: {error}",
+            f"could not read {ACTIVE_RELEASE_SERIES.name} release checklist: {error}",
         )
 
     candidates = [line for line in lines if item.marker in line]
@@ -1152,6 +1308,8 @@ def _run_preflight_for_phase(
 
     checks = [
         _check_required_files(repository_root),
+        _check_release_series_inputs(repository_root),
+        _check_frozen_v0_1_closure_records(repository_root),
     ]
     if phase_selection is not None:
         checks.append(phase_selection)
@@ -1170,7 +1328,7 @@ def _run_preflight_for_phase(
         )
     )
     if resolved_phase != "candidate":
-        checks.append(_check_capture_ancestor(repository_root))
+        checks.append(_check_historical_capture_ancestor(repository_root))
         checks.append(_check_tag(repository_root, phase=resolved_phase, tag=FINAL_TAG))
         checks.append(
             Check(
@@ -1247,7 +1405,7 @@ def _print_report(
     run_gates: bool,
 ) -> None:
     mode = "repository-only" if repository_only else "release-closure"
-    print("Inferdrome v0.1 release preflight")
+    print(f"Inferdrome {ACTIVE_RELEASE_SERIES.name} release preflight")
     print(f"phase: {phase}")
     print(f"mode: {mode}")
     print(f"existing gates delegated: {'yes' if run_gates else 'no'}")
@@ -1299,7 +1457,7 @@ def _print_report(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the offline v0.1 release preflight. The default release-closure "
+            "Run the offline v0.2 release preflight. The default release-closure "
             "mode fails closed on open manual inputs."
         )
     )
