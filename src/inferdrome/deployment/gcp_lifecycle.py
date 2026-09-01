@@ -81,6 +81,15 @@ GCP_EXECUTION_JOURNAL_SCHEMA_VERSION: Final = "inferdrome.gcp-execution-lease.v1
 GCP_EXECUTION_REQUEST_SCHEMA_VERSION: Final = "inferdrome.gcp-execution-request.v1"
 GCP_EXECUTION_QUOTE_SCHEMA_VERSION: Final = "inferdrome.gcp-execution-quote.v1"
 GCP_EXECUTION_ANCHOR_SCHEMA_VERSION: Final = "inferdrome.gcp-execution-intent-anchor.v1"
+GCP_OWNED_RESOURCE_INVENTORY_SCHEMA_VERSION: Final = (
+    "inferdrome.gcp-owned-resource-inventory.v2"
+)
+GCP_INSTANCE_SAFETY_OBSERVATION_SCHEMA_VERSION: Final = (
+    "inferdrome.gcp-instance-safety-observation.v2"
+)
+GCP_BOOT_DISK_ABSENCE_SCHEMA_VERSION: Final = (
+    "inferdrome.gcp-boot-disk-absence-observation.v2"
+)
 GCP_EXECUTION_ADAPTER_ID: Final = "inferdrome.provider.gcp.compute_guarded"
 GCP_EXECUTION_ADAPTER_VERSION: Final = "1.0.0"
 GCP_EXECUTION_TRANSPORT_ID: Final = "inferdrome.transport.gcp.compute"
@@ -795,6 +804,70 @@ class GcpInstanceObservation(GcpExecutionModel):
         return self
 
 
+class GcpOwnedResourceInventory(GcpExecutionModel):
+    """A bounded, exhaustive read-only owned-instance inventory.
+
+    This is a v0.2 supervisory input, not a replacement for the frozen v1
+    execution request or lease.  A controller must never treat an empty
+    partial page as evidence that an owned resource is absent.
+    """
+
+    schema_version: Literal["inferdrome.gcp-owned-resource-inventory.v2"]
+    request_digest: Sha256Digest
+    project_id: GcpProjectId
+    region: GcpRegion
+    zone: GcpZone
+    labels: GcpExecutionLabels
+    instances: tuple[GcpInstanceObservation, ...] = Field(max_length=256)
+    pagination_complete: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_inventory(self) -> Self:
+        for instance in self.instances:
+            if (
+                instance.state == "NOT_FOUND"
+                or instance.project_id != self.project_id
+                or instance.zone != self.zone
+                or instance.labels != self.labels
+            ):
+                raise ValueError("owned-resource inventory entry is inconsistent")
+        return self
+
+
+class GcpInstanceSafetyObservation(GcpExecutionModel):
+    """Provider-observed termination and boot-disk safeguards after create."""
+
+    schema_version: Literal["inferdrome.gcp-instance-safety-observation.v2"]
+    request_digest: Sha256Digest
+    project_id: GcpProjectId
+    zone: GcpZone
+    instance_name: GcpInstanceName
+    labels: GcpExecutionLabels
+    boot_disk_auto_delete: Literal[True]
+    deletion_protection: Literal[False]
+    automatic_restart: Literal[False]
+    maintenance_policy: Literal["TERMINATE"]
+    max_run_duration_seconds: int = Field(strict=True, ge=1, le=86_400)
+    instance_termination_action: Literal["DELETE"]
+
+
+class GcpBootDiskAbsenceObservation(GcpExecutionModel):
+    """Exact boot-disk absence is required alongside instance absence."""
+
+    schema_version: Literal["inferdrome.gcp-boot-disk-absence-observation.v2"]
+    project_id: GcpProjectId
+    zone: GcpZone
+    instance_name: GcpInstanceName
+    disk_name: GcpInstanceName
+    state: Literal["NOT_FOUND"]
+
+    @model_validator(mode="after")
+    def validate_absence_identity(self) -> Self:
+        if self.disk_name != self.instance_name:
+            raise ValueError("boot-disk absence identity is inconsistent")
+        return self
+
+
 class GcpComputeTransport(Protocol):
     """Narrow transport surface used only after all pure gates pass."""
 
@@ -814,6 +887,10 @@ class GcpComputeTransport(Protocol):
         self, request: GcpInsertRequest, *, timeout_seconds: int
     ) -> tuple[GcpInstanceObservation, ...]: ...
 
+    def list_owned_complete(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpOwnedResourceInventory: ...
+
     def get_image(
         self, request: GcpInsertRequest, *, timeout_seconds: int
     ) -> GcpImageObservation: ...
@@ -821,6 +898,14 @@ class GcpComputeTransport(Protocol):
     def get_boot_disk(
         self, request: GcpInsertRequest, *, timeout_seconds: int
     ) -> GcpBootDiskObservation: ...
+
+    def get_instance_safety(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpInstanceSafetyObservation: ...
+
+    def confirm_boot_disk_absent(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpBootDiskAbsenceObservation: ...
 
     def delete(
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
@@ -2849,6 +2934,9 @@ class FakeGcpComputeTransport:
             "TIMEOUT", "DONE", "ERROR"
         ] = "TIMEOUT",
         insert_timeout_late_instance: bool = False,
+        owned_inventory_incomplete: bool = False,
+        instance_safety_error: str | None = None,
+        residual_boot_disk: bool = False,
     ) -> None:
         self.insert_error = insert_error
         self.insert_error_ambiguous = insert_error_ambiguous
@@ -2859,6 +2947,9 @@ class FakeGcpComputeTransport:
         self.false_not_found = false_not_found
         self.insert_timeout_reconcile_status = insert_timeout_reconcile_status
         self.insert_timeout_late_instance = insert_timeout_late_instance
+        self.owned_inventory_incomplete = owned_inventory_incomplete
+        self.instance_safety_error = instance_safety_error
+        self.residual_boot_disk = residual_boot_disk
         self.insert_calls = 0
         self.delete_calls = 0
         self.get_calls = 0
@@ -2867,6 +2958,7 @@ class FakeGcpComputeTransport:
         self.requests: list[GcpInsertRequest] = []
         self.request_ids: list[str] = []
         self._owned: GcpInstanceObservation | None = None
+        self._boot_disk_present = False
         self._operations: dict[str, GcpOperationResult] = {}
         self._sequence = 0
 
@@ -2963,6 +3055,7 @@ class FakeGcpComputeTransport:
         )
         if self.insert_status == "DONE":
             self._owned = self._running(request)
+            self._boot_disk_present = True
         return operation
 
     def wait_operation(
@@ -2991,6 +3084,7 @@ class FakeGcpComputeTransport:
             if result.status == "DONE" and self.insert_timeout_late_instance:
                 request = self.requests[0]
                 self._owned = self._running(request)
+                self._boot_disk_present = True
         return result
 
     def get_instance(
@@ -3010,6 +3104,22 @@ class FakeGcpComputeTransport:
         if self._owned is None or self._owned.labels != request.labels:
             return ()
         return (self._owned,)
+
+    def list_owned_complete(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpOwnedResourceInventory:
+        if self.owned_inventory_incomplete:
+            raise GcpTransportError("LIST_OWNED_INCOMPLETE")
+        return GcpOwnedResourceInventory(
+            schema_version=GCP_OWNED_RESOURCE_INVENTORY_SCHEMA_VERSION,
+            request_digest=gcp_execution_request_digest(request),
+            project_id=request.project_id,
+            region=request.region,
+            zone=request.zone,
+            labels=request.labels,
+            instances=self.list_owned(request, timeout_seconds=timeout_seconds),
+            pagination_complete=True,
+        )
 
     def get_image(
         self, request: GcpInsertRequest, *, timeout_seconds: int
@@ -3036,6 +3146,44 @@ class FakeGcpComputeTransport:
             source_image_id=request.boot_image.provider_image_id,
         )
 
+    def get_instance_safety(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpInstanceSafetyObservation:
+        del timeout_seconds
+        if self.instance_safety_error is not None:
+            raise GcpTransportError(self.instance_safety_error)
+        if self._owned is None:
+            raise GcpTransportError("INSTANCE_SAFETY_NOT_FOUND")
+        return GcpInstanceSafetyObservation(
+            schema_version=GCP_INSTANCE_SAFETY_OBSERVATION_SCHEMA_VERSION,
+            request_digest=gcp_execution_request_digest(request),
+            project_id=request.project_id,
+            zone=request.zone,
+            instance_name=request.instance_name,
+            labels=request.labels,
+            boot_disk_auto_delete=True,
+            deletion_protection=False,
+            automatic_restart=False,
+            maintenance_policy="TERMINATE",
+            max_run_duration_seconds=request.provider_max_runtime_seconds,
+            instance_termination_action="DELETE",
+        )
+
+    def confirm_boot_disk_absent(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpBootDiskAbsenceObservation:
+        del timeout_seconds
+        if self._boot_disk_present:
+            raise GcpTransportError("BOOT_DISK_RESIDUAL")
+        return GcpBootDiskAbsenceObservation(
+            schema_version=GCP_BOOT_DISK_ABSENCE_SCHEMA_VERSION,
+            project_id=request.project_id,
+            zone=request.zone,
+            instance_name=request.instance_name,
+            disk_name=request.instance_name,
+            state="NOT_FOUND",
+        )
+
     def delete(
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
     ) -> GcpOperationHandle:
@@ -3057,6 +3205,7 @@ class FakeGcpComputeTransport:
         )
         if self.delete_status == "DONE" and not self.false_not_found:
             self._owned = None
+            self._boot_disk_present = self.residual_boot_disk
         return operation
 
 
@@ -3128,6 +3277,88 @@ class GcpGuardedLifecycleController:
             except BaseException:
                 raise GcpExecutionError("GCP transport activation failed") from None
         return self._transport
+
+    def _owned_inventory(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpOwnedResourceInventory:
+        """Read a complete, exact-label inventory or fail before acting on it."""
+
+        try:
+            raw = self.transport.list_owned_complete(
+                request, timeout_seconds=timeout_seconds
+            )
+            inventory = GcpOwnedResourceInventory.model_validate_json(
+                canonical_json_bytes(_json_value(raw))
+            )
+        except GcpTransportError:
+            raise
+        except (ValidationError, ValueError, TypeError):
+            raise GcpTransportError("OWNED_INVENTORY_INVALID") from None
+        if (
+            inventory.request_digest != gcp_execution_request_digest(request)
+            or inventory.project_id != request.project_id
+            or inventory.region != request.region
+            or inventory.zone != request.zone
+            or inventory.labels != request.labels
+            or inventory.pagination_complete is not True
+        ):
+            raise GcpTransportError("OWNED_INVENTORY_MISMATCH")
+        return inventory
+
+    def _verify_instance_safety(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> None:
+        """Require provider-observed TTL and deletion protections before work."""
+
+        try:
+            raw = self.transport.get_instance_safety(
+                request, timeout_seconds=timeout_seconds
+            )
+            observed = GcpInstanceSafetyObservation.model_validate_json(
+                canonical_json_bytes(_json_value(raw))
+            )
+        except GcpTransportError:
+            raise
+        except (ValidationError, ValueError, TypeError):
+            raise GcpTransportError("INSTANCE_SAFETY_INVALID") from None
+        if (
+            observed.request_digest != gcp_execution_request_digest(request)
+            or observed.project_id != request.project_id
+            or observed.zone != request.zone
+            or observed.instance_name != request.instance_name
+            or observed.labels != request.labels
+            or observed.max_run_duration_seconds
+            != request.provider_max_runtime_seconds
+            or observed.boot_disk_auto_delete is not True
+            or observed.deletion_protection is not False
+            or observed.automatic_restart is not False
+            or observed.maintenance_policy != request.maintenance_policy
+            or observed.instance_termination_action != "DELETE"
+        ):
+            raise GcpTransportError("INSTANCE_SAFETY_MISMATCH")
+
+    def _confirm_boot_disk_absence(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> None:
+        try:
+            raw = self.transport.confirm_boot_disk_absent(
+                request, timeout_seconds=timeout_seconds
+            )
+            observed = GcpBootDiskAbsenceObservation.model_validate_json(
+                canonical_json_bytes(_json_value(raw))
+            )
+        except GcpTransportError:
+            raise
+        except (ValidationError, ValueError, TypeError):
+            raise GcpTransportError("BOOT_DISK_ABSENCE_INVALID") from None
+        if (
+            observed.project_id != request.project_id
+            or observed.zone != request.zone
+            or observed.instance_name != request.instance_name
+            or observed.disk_name != request.instance_name
+            or observed.state != "NOT_FOUND"
+        ):
+            raise GcpTransportError("BOOT_DISK_ABSENCE_MISMATCH")
 
     def _trace(
         self,
@@ -3328,14 +3559,15 @@ class GcpGuardedLifecycleController:
             observed = self.transport.get_instance(
                 request, timeout_seconds=timeout_seconds
             )
-            owned = self.transport.list_owned(request, timeout_seconds=timeout_seconds)
+            owned = self._owned_inventory(request, timeout_seconds=timeout_seconds)
+            self._confirm_boot_disk_absence(request, timeout_seconds=timeout_seconds)
         except GcpTransportError as error:
             return False, error.code
         except KeyboardInterrupt:
             return False, "CLEANUP_INTERRUPTED"
         except BaseException:
             return False, "CLEANUP_EXCEPTION"
-        if observed.state != "NOT_FOUND" or owned:
+        if observed.state != "NOT_FOUND" or owned.instances:
             return False, "CLEANUP_UNCONFIRMED"
         return True, None
 
@@ -3418,7 +3650,7 @@ class GcpGuardedLifecycleController:
                 observation = self.transport.get_instance(
                     request, timeout_seconds=call_timeout
                 )
-                owned = self.transport.list_owned(request, timeout_seconds=call_timeout)
+                owned = self._owned_inventory(request, timeout_seconds=call_timeout)
             except GcpTransportError as error:
                 cleanup_error = error.code
                 continue
@@ -3428,7 +3660,11 @@ class GcpGuardedLifecycleController:
             except BaseException:
                 cleanup_error = "CLEANUP_EXCEPTION"
                 continue
-            if ambiguous_mutation and observation.state == "NOT_FOUND" and not owned:
+            if (
+                ambiguous_mutation
+                and observation.state == "NOT_FOUND"
+                and not owned.instances
+            ):
                 cleanup_error = "AMBIGUOUS_MUTATION_UNRESOLVED"
                 self._trace(
                     trace,
@@ -3437,7 +3673,7 @@ class GcpGuardedLifecycleController:
                     cleanup_error,
                 )
                 continue
-            if observation.state == "NOT_FOUND" and not owned:
+            if observation.state == "NOT_FOUND" and not owned.instances:
                 self._trace(trace, "DELETE", "SKIPPED")
                 try:
                     confirmed, confirmation_error = self._final_confirm(
@@ -3466,7 +3702,9 @@ class GcpGuardedLifecycleController:
             if observation.state != "NOT_FOUND" and not _owned(observation, request):
                 cleanup_error = "OWNERSHIP_MISMATCH"
                 continue
-            if owned and any(not _owned(item, request) for item in owned):
+            if owned.instances and any(
+                not _owned(item, request) for item in owned.instances
+            ):
                 cleanup_error = "OWNERSHIP_MISMATCH"
                 continue
             if current.delete_attempts >= max_attempts:
@@ -3695,10 +3933,10 @@ class GcpGuardedLifecycleController:
         # runs only after the pure plan/arm/quote/journal gates and before the
         # first insert.  An existing owned target blocks the run.
         try:
-            existing = self.transport.list_owned(
+            existing = self._owned_inventory(
                 request, timeout_seconds=controller_timeout()
             )
-            if existing:
+            if existing.instances:
                 self._trace(
                     trace, "OWNERSHIP_VERIFY", "FAILED", "ACTIVE_RESOURCE_EXISTS"
                 )
@@ -3852,6 +4090,9 @@ class GcpGuardedLifecycleController:
                 primary_error = "OWNERSHIP_MISMATCH"
                 self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", primary_error)
                 raise GcpExecutionError(primary_error)
+            self._verify_instance_safety(
+                request, timeout_seconds=controller_timeout()
+            )
             disk_observation = GcpBootDiskObservation.model_validate_json(
                 canonical_json_bytes(
                     _json_value(
@@ -3898,9 +4139,16 @@ class GcpGuardedLifecycleController:
             elif not isinstance(error, GcpTransportError) or error.ambiguous:
                 if pending_operation is None:
                     mark_ambiguous_mutation()
-            elif isinstance(error, GcpTransportError) and pending_operation is None:
+            elif (
+                isinstance(error, GcpTransportError)
+                and pending_operation is None
+                and record.provider_operation_id is None
+            ):
                 # A provider rejection before accepting the mutation is known
                 # non-ambiguous; clear only the conservative pre-call marker.
+                # Post-create observation failures retain their terminal exact
+                # operation identity for cleanup/recovery instead of erasing
+                # it into an invalid journal record.
                 try:
                     record = self._record(
                         record,

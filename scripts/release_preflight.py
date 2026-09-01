@@ -26,9 +26,9 @@ from typing import Literal
 Phase = Literal["candidate", "final-pre-tag", "post-tag"]
 RequestedPhase = Literal["auto", "candidate", "final-pre-tag", "post-tag"]
 TagState = Literal["absent", "head", "elsewhere", "unannotated", "error"]
-DEVELOPMENT_VERSION = "0.1.0.dev0"
-FINAL_VERSION = "0.1.0"
-FINAL_TAG = "v0.1.0"
+DEVELOPMENT_VERSION = "0.2.0.dev0"
+FINAL_VERSION = "0.2.0"
+FINAL_TAG = "v0.2.0"
 CAPTURE_PRODUCER_COMMIT = "c08b46d9fbd87477f45d130aa3c63615937c4dc3"
 CheckStatus = Literal["PASS", "FAIL", "PENDING", "MANUAL", "SKIPPED"]
 

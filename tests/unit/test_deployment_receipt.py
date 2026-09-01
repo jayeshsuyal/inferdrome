@@ -100,7 +100,7 @@ def _expected(spec, outcome) -> dict[str, Any]:
         "expected_spec": spec,
         "expected_outcome": outcome,
         "expected_source_repository_commit": SOURCE_COMMIT,
-        "expected_inferdrome_version": "0.1.0",
+        "expected_inferdrome_version": "0.2.0.dev0",
         "expected_provider_adapter": PROVIDER_IDENTITY,
         "expected_runtime_adapter": RUNTIME_IDENTITY,
     }
@@ -143,7 +143,7 @@ def test_deterministic_synthetic_vector_and_identity_rules() -> None:
     assert parse_deployment_receipt_json(fixture_bytes) == receipt
     assert receipt.receipt_id == deployment_receipt_id(receipt)
     assert sha256_digest(fixture_bytes) == (
-        "sha256:f38482a3966797447610904af75f2b8b9a9c52531f48784727c063f55aa570e0"
+        "sha256:6864fce81ca9331442c2597d6898474a0311048a007232e25f8a8b21dbc4e7ff"
     )
     assert deployment_receipt_sha256(receipt) == sha256_digest(fixture_bytes)
     assert verify_deployment_receipt(receipt, **_expected(spec, outcome)) == receipt

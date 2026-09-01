@@ -51,7 +51,6 @@ from inferdrome.deployment import (
     validate_gcp_execution_preflight,
 )
 from inferdrome.deployment.gcp_compute_transport import (
-    GcpOptionalDependencyUnavailable,
     _canonical_resource_ref,
     _observation,
     create_google_compute_transport,
@@ -393,6 +392,46 @@ def test_successful_fake_lifecycle_has_one_delete_and_no_evidence_claim(
     assert canonical_gcp_execution_outcome_bytes(
         outcome
     ) == canonical_gcp_execution_outcome_bytes(outcome)
+
+
+def test_incomplete_owned_inventory_blocks_before_create(tmp_path: Path) -> None:
+    transport = FakeGcpComputeTransport(owned_inventory_incomplete=True)
+
+    outcome = _run(tmp_path, transport)
+
+    assert outcome.status == "FAILED"
+    assert outcome.error_code == "LIST_OWNED_INCOMPLETE"
+    assert outcome.cleanup_confirmed is True
+    assert transport.insert_calls == 0
+    assert transport.delete_calls == 0
+
+
+def test_post_create_safety_mismatch_cleans_up_before_work(tmp_path: Path) -> None:
+    transport = FakeGcpComputeTransport(
+        instance_safety_error="INSTANCE_TTL_MISMATCH"
+    )
+
+    outcome = _run(tmp_path, transport)
+
+    assert outcome.status == "FAILED"
+    assert outcome.primary_error_code == "INSTANCE_TTL_MISMATCH"
+    assert outcome.cleanup_confirmed is True
+    assert outcome.orphaned is False
+    assert transport.insert_calls == 1
+    assert transport.delete_calls == 1
+
+
+def test_residual_exact_boot_disk_never_confirms_cleanup(tmp_path: Path) -> None:
+    transport = FakeGcpComputeTransport(residual_boot_disk=True)
+
+    outcome = _run(tmp_path, transport)
+
+    assert outcome.status == "FAILED"
+    assert outcome.cleanup_confirmed is False
+    assert outcome.orphaned is True
+    assert outcome.cleanup_error_code == "BOOT_DISK_RESIDUAL"
+    assert transport.insert_calls == 1
+    assert transport.delete_calls == 1
 
 
 @pytest.mark.parametrize("failure", ["benchmark", "keyboard"])
@@ -758,9 +797,7 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
             operation_type="insert",
             target_link=target_link,
         )
-        handle = transport.insert(
-            request, timeout_seconds=5, request_id=request.insert_request_id
-        )
+        handle = transport._remember(client.operation, "insert", request)
         assert transport.wait_operation(handle, timeout_seconds=5).status == "TIMEOUT"
     client.operation = sdk.Operation(
         name="operation-1",
@@ -768,9 +805,7 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
         operation_type="insert",
         target_link=target_link,
     )
-    handle = transport.insert(
-        request, timeout_seconds=5, request_id=request.insert_request_id
-    )
+    handle = transport._remember(client.operation, "insert", request)
     done_result = transport.wait_operation(handle, timeout_seconds=5)
     assert done_result.status == "DONE"
     assert done_result.instance_name == request.instance_name
@@ -781,9 +816,7 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
         target_link=target_link,
         error=sdk.Error(errors=[{"code": "FAILED", "message": "provider"}]),
     )
-    handle = transport.insert(
-        request, timeout_seconds=5, request_id=request.insert_request_id
-    )
+    handle = transport._remember(client.operation, "insert", request)
     assert transport.wait_operation(handle, timeout_seconds=5).status == "ERROR"
 
     class PollFailure:
@@ -802,9 +835,7 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
             raise RuntimeError("transient provider polling failure")
 
     client.operation = PollFailure()
-    handle = transport.insert(
-        request, timeout_seconds=5, request_id=request.insert_request_id
-    )
+    handle = transport._remember(client.operation, "insert", request)
     assert transport.wait_operation(handle, timeout_seconds=5).status == "TIMEOUT"
 
     class Operations:
@@ -822,9 +853,7 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
         operation_type="insert",
         target_link=target_link,
     )
-    handle = transport.insert(
-        request, timeout_seconds=5, request_id=request.insert_request_id
-    )
+    handle = transport._remember(client.operation, "insert", request)
     class FreshOperations:
         def get(self, **_: Any) -> Any:
             return sdk.Operation(
@@ -908,9 +937,7 @@ def test_real_sdk_operation_binds_kind_and_full_target() -> None:
             operation_type=vector["operation_type"],
             target_link=vector["target_link"],
         )
-        handle = transport.insert(
-            request, timeout_seconds=5, request_id=request.insert_request_id
-        )
+        handle = transport._remember(client.operation, "insert", request)
         with pytest.raises(
             GcpTransportError, match=r"OPERATION_RESPONSE_(?:MISMATCH|INVALID)"
         ):
@@ -1004,32 +1031,41 @@ def test_optional_transport_is_lazy_and_projects_only_private_request() -> None:
         images_client=object(),
         disks_client=object(),
     )
-    operation = transport.insert(
-        request, timeout_seconds=7, request_id=request.insert_request_id
+    projected = transport.project_create_request(
+        request, request_id=request.insert_request_id
     )
-    result = transport.wait_operation(operation, timeout_seconds=7)
-    assert result.status == "DONE"
-    assert client.operation.timeout == 7
-    assert client.inserted.network_interfaces[0].network == request.network.network
-    assert not hasattr(client.inserted.network_interfaces[0], "access_configs")
-    assert client.inserted.deletion_protection is False
-    assert client.inserted.scheduling.automatic_restart is False
+    with pytest.raises(GcpTransportError, match="LIVE_MUTATION_DISABLED"):
+        transport.insert(
+            request, timeout_seconds=7, request_id=request.insert_request_id
+        )
+    assert client.inserted is None
+    assert (
+        projected.instance_resource.network_interfaces[0].network
+        == request.network.network
+    )
+    assert not hasattr(
+        projected.instance_resource.network_interfaces[0], "access_configs"
+    )
+    assert projected.instance_resource.deletion_protection is False
+    assert projected.instance_resource.scheduling.automatic_restart is False
 
 
-def test_missing_optional_dependency_is_bounded(
+def test_live_transport_factory_is_disabled_before_sdk_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    called = False
+
     def missing(_: str) -> Any:
+        nonlocal called
+        called = True
         raise ModuleNotFoundError("google-cloud-compute")
 
     monkeypatch.setattr(
         "inferdrome.deployment.gcp_compute_transport.importlib.import_module", missing
     )
-    with pytest.raises(
-        GcpOptionalDependencyUnavailable,
-        match="optional dependency unavailable",
-    ):
+    with pytest.raises(GcpTransportError, match="LIVE_TRANSPORT_DISABLED"):
         create_google_compute_transport()
+    assert called is False
 
 
 def test_default_clock_is_canonical_second_precision() -> None:
@@ -2317,33 +2353,43 @@ def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> 
         images_client=object(),
         disks_client=object(),
     )
-    handle = transport.insert(
-        request, timeout_seconds=7, request_id=request.insert_request_id
+    create_request = transport.project_create_request(
+        request, request_id=request.insert_request_id
     )
-    assert isinstance(client.request, sdk.InsertInstanceRequest)
-    assert client.request.request_id == request.insert_request_id
+    assert isinstance(create_request, sdk.InsertInstanceRequest)
+    assert create_request.request_id == request.insert_request_id
     assert isinstance(
-        client.request.instance_resource.disks[0].initialize_params,
+        create_request.instance_resource.disks[0].initialize_params,
         sdk.AttachedDiskInitializeParams,
     )
     assert (
-        client.request.instance_resource.disks[0].initialize_params.source_image
+        create_request.instance_resource.disks[0].initialize_params.source_image
         == request.boot_image.image_name
     )
-    assert client.request.instance_resource.guest_accelerators == []
+    assert create_request.instance_resource.guest_accelerators == []
     assert (
-        client.request.instance_resource.network_interfaces[0].stack_type == "IPV4_ONLY"
+        create_request.instance_resource.network_interfaces[0].stack_type == "IPV4_ONLY"
     )
-    assert client.request.instance_resource.scheduling.max_run_duration.seconds == 600
+    assert create_request.instance_resource.scheduling.max_run_duration.seconds == 600
     assert (
-        client.request.instance_resource.scheduling.instance_termination_action
+        create_request.instance_resource.scheduling.instance_termination_action
         == "DELETE"
     )
-    result = transport.wait_operation(handle, timeout_seconds=7)
-    assert result.status == "DONE"
+    with pytest.raises(GcpTransportError, match="LIVE_MUTATION_DISABLED"):
+        transport.insert(
+            request, timeout_seconds=7, request_id=request.insert_request_id
+        )
+    assert not hasattr(client, "request")
     transport.list_owned(request, timeout_seconds=7)
     assert isinstance(client.list_request, sdk.ListInstancesRequest)
     assert client.list_request.max_results == 256
-    transport.delete(request, timeout_seconds=7, request_id=request.delete_request_id)
-    assert isinstance(client.delete_request, sdk.DeleteInstanceRequest)
-    assert client.delete_request.request_id == request.delete_request_id
+    delete_request = transport.project_terminate_request(
+        request, request_id=request.delete_request_id
+    )
+    assert isinstance(delete_request, sdk.DeleteInstanceRequest)
+    assert delete_request.request_id == request.delete_request_id
+    with pytest.raises(GcpTransportError, match="LIVE_MUTATION_DISABLED"):
+        transport.delete(
+            request, timeout_seconds=7, request_id=request.delete_request_id
+        )
+    assert not hasattr(client, "delete_request")

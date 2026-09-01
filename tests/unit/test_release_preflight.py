@@ -31,7 +31,7 @@ def _minimal_repository(root: Path) -> None:
             (REPOSITORY_ROOT / relative_path).read_bytes()
         )
     (root / "src/inferdrome/__init__.py").write_text(
-        '__version__ = "0.1.0.dev0"\n',
+        f'__version__ = "{release_preflight.DEVELOPMENT_VERSION}"\n',
         encoding="utf-8",
     )
     for relative_path, markers in release_preflight.DOCUMENT_MARKERS:
@@ -194,8 +194,11 @@ def test_uv_lock_metadata_drift_fails_lock_check(tmp_path: Path) -> None:
     lock_path = tmp_path / "uv.lock"
     lock_path.write_text(
         lock_path.read_text(encoding="utf-8").replace(
-            'name = "inferdrome"\nversion = "0.1.0.dev0"',
-            'name = "inferdrome"\nversion = "0.1.0"',
+            (
+                'name = "inferdrome"\nversion = '
+                f'"{release_preflight.DEVELOPMENT_VERSION}"'
+            ),
+            f'name = "inferdrome"\nversion = "{release_preflight.FINAL_VERSION}"',
             1,
         ),
         encoding="utf-8",
@@ -539,8 +542,8 @@ def test_development_version_mismatch_fails_closed(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
     _set_package_versions(
         tmp_path,
-        project_version="0.1.0",
-        package_version="0.1.0.dev0",
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.DEVELOPMENT_VERSION,
     )
 
     checks = release_preflight.run_preflight(
@@ -553,7 +556,7 @@ def test_development_version_mismatch_fails_closed(tmp_path: Path) -> None:
 
     version_check = next(check for check in checks if check.name == "package-version")
     assert version_check.status == "FAIL"
-    assert "0.1.0.dev0" in version_check.detail
+    assert release_preflight.DEVELOPMENT_VERSION in version_check.detail
 
 
 def test_auto_phase_selects_candidate_for_exact_development_versions(
@@ -583,7 +586,11 @@ def test_auto_phase_selects_final_pre_tag_for_exact_final_versions(
     monkeypatch,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
 
     def fake_run(
         command: list[str],
@@ -621,7 +628,10 @@ def test_auto_phase_selects_final_pre_tag_for_exact_final_versions(
 
 @pytest.mark.parametrize(
     ("project_version", "package_version"),
-    (("0.2.0", "0.2.0"), ("0.1.0", "0.1.0.dev0")),
+    (
+        ("0.1.0", "0.1.0"),
+        (release_preflight.FINAL_VERSION, release_preflight.DEVELOPMENT_VERSION),
+    ),
 )
 def test_auto_phase_rejects_unknown_or_mismatched_versions(
     tmp_path: Path,
@@ -728,7 +738,11 @@ def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
     monkeypatch,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
 
     def fake_run(
         command: list[str],
@@ -767,7 +781,11 @@ def test_pre_tag_ready_without_aggregate_ci_or_tag(
     capsys,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     checklist = tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md"
     checklist_text = checklist.read_text(encoding="utf-8")
     for item in release_preflight.MANUAL_RELEASE_ITEMS:
@@ -821,7 +839,11 @@ def test_pre_tag_ready_without_aggregate_ci_or_tag(
 
 def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     _git(
@@ -843,9 +865,9 @@ def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
 
     checks = release_preflight.run_preflight(
@@ -867,7 +889,11 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
     tmp_path: Path,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     commit_arguments = (
@@ -882,7 +908,7 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
     )
     _git(tmp_path, *commit_arguments)
 
-    _git(tmp_path, "tag", "v0.1.0")
+    _git(tmp_path, "tag", release_preflight.FINAL_TAG)
     lightweight_checks = release_preflight.run_preflight(
         tmp_path,
         phase="post-tag",
@@ -896,7 +922,7 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
     assert lightweight_tag_check.status == "FAIL"
     assert "not an annotated tag" in lightweight_tag_check.detail
 
-    _git(tmp_path, "tag", "--delete", "v0.1.0")
+    _git(tmp_path, "tag", "--delete", release_preflight.FINAL_TAG)
     _git(
         tmp_path,
         "-c",
@@ -905,9 +931,9 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
     annotated_checks = release_preflight.run_preflight(
         tmp_path,
@@ -924,7 +950,11 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
 
 def test_post_tag_auto_rejects_tag_elsewhere(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     commit_arguments = (
@@ -945,9 +975,9 @@ def test_post_tag_auto_rejects_tag_elsewhere(tmp_path: Path) -> None:
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
     (tmp_path / "README.md").write_text("post-tag commit\n", encoding="utf-8")
     _git(tmp_path, "add", "README.md")
@@ -993,7 +1023,11 @@ def test_release_docs_do_not_require_a_post_tag_repository_commit() -> None:
 
 def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
 
     def fake_run(
         command: list[str],
@@ -1003,7 +1037,7 @@ def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> 
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[:3] == ["git", "cat-file", "-t"]:
             return subprocess.CompletedProcess(command, 0, stdout="tag\n", stderr="")
-        if "refs/tags/v0.1.0^{commit}" in command:
+        if f"refs/tags/{release_preflight.FINAL_TAG}^{{commit}}" in command:
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -1034,7 +1068,11 @@ def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> 
 
 def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     _git(
@@ -1069,9 +1107,9 @@ def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> N
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
     pre_tag_after_tag = release_preflight.run_preflight(
         tmp_path,
@@ -1094,7 +1132,7 @@ def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> N
     )
     tag_check = next(check for check in post_tag_checks if check.name == "release-tag")
     assert tag_check.status == "PASS"
-    assert "v0.1.0 points to HEAD" in tag_check.detail
+    assert f"{release_preflight.FINAL_TAG} points to HEAD" in tag_check.detail
 
 
 def test_release_closure_reports_open_manual_inputs(capsys) -> None:

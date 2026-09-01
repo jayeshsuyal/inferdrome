@@ -16,10 +16,14 @@ import re
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 from inferdrome.deployment.gcp_lifecycle import (
+    GCP_BOOT_DISK_ABSENCE_SCHEMA_VERSION,
+    GCP_INSTANCE_SAFETY_OBSERVATION_SCHEMA_VERSION,
+    GCP_OWNED_RESOURCE_INVENTORY_SCHEMA_VERSION,
+    GcpBootDiskAbsenceObservation,
     GcpBootDiskObservation,
     GcpComputeTransport,
     GcpExecutionError,
@@ -27,9 +31,12 @@ from inferdrome.deployment.gcp_lifecycle import (
     GcpImageObservation,
     GcpInsertRequest,
     GcpInstanceObservation,
+    GcpInstanceSafetyObservation,
     GcpOperationHandle,
     GcpOperationResult,
+    GcpOwnedResourceInventory,
     GcpTransportError,
+    gcp_execution_request_digest,
     validate_gcp_a2_profile,
 )
 
@@ -40,6 +47,7 @@ _GOOGLE_SCOPE_URLS = {
 }
 _SUPPORTED_COMPUTE_HOSTS = frozenset({"www.googleapis.com", "compute.googleapis.com"})
 _RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
+GCP_LIVE_MUTATIONS_ENABLED: Final[Literal[False]] = False
 
 
 class GcpOptionalDependencyUnavailable(GcpExecutionError):
@@ -462,6 +470,91 @@ def _not_found(request: GcpInsertRequest) -> GcpInstanceObservation:
     )
 
 
+def _duration_seconds(value: object) -> int:
+    """Read an exact protobuf Duration with no fractional or implicit value."""
+
+    if value is None:
+        raise GcpTransportError("INSTANCE_TTL_MISSING")
+    seconds = getattr(value, "seconds", None)
+    nanos = getattr(value, "nanos", 0)
+    if (
+        seconds is None
+        or nanos is None
+        or isinstance(seconds, bool)
+        or isinstance(nanos, bool)
+    ):
+        raise GcpTransportError("INSTANCE_TTL_INVALID")
+    try:
+        parsed_seconds = int(seconds)
+        parsed_nanos = int(nanos)
+    except (TypeError, ValueError):
+        raise GcpTransportError("INSTANCE_TTL_INVALID") from None
+    if (
+        parsed_seconds < 1
+        or parsed_seconds > 86_400
+        or parsed_nanos != 0
+        or str(seconds) != str(parsed_seconds)
+        or str(nanos) != str(parsed_nanos)
+    ):
+        raise GcpTransportError("INSTANCE_TTL_INVALID")
+    return parsed_seconds
+
+
+def _instance_safety_observation(
+    value: Any, request: GcpInsertRequest
+) -> GcpInstanceSafetyObservation:
+    """Project only exact provider-observed teardown protections."""
+
+    try:
+        if str(getattr(value, "name", "")) != request.instance_name:
+            raise GcpTransportError("INSTANCE_SAFETY_IDENTITY_MISMATCH")
+        labels = _safe_labels(getattr(value, "labels", None))
+        if labels != request.labels:
+            raise GcpTransportError("INSTANCE_SAFETY_OWNERSHIP_MISMATCH")
+        disks = list(getattr(value, "disks", None) or ())
+        boot_disks = [disk for disk in disks if getattr(disk, "boot", None) is True]
+        if (
+            len(boot_disks) != 1
+            or getattr(boot_disks[0], "auto_delete", None) is not True
+        ):
+            raise GcpTransportError("INSTANCE_BOOT_DISK_AUTODELETE_MISMATCH")
+        if getattr(value, "deletion_protection", None) is not False:
+            raise GcpTransportError("INSTANCE_DELETION_PROTECTION_MISMATCH")
+        scheduling = getattr(value, "scheduling", None)
+        if scheduling is None:
+            raise GcpTransportError("INSTANCE_SCHEDULING_MISSING")
+        if getattr(scheduling, "automatic_restart", None) is not False:
+            raise GcpTransportError("INSTANCE_RESTART_POLICY_MISMATCH")
+        if str(getattr(scheduling, "on_host_maintenance", "")) != "TERMINATE":
+            raise GcpTransportError("INSTANCE_MAINTENANCE_POLICY_MISMATCH")
+        if (
+            str(getattr(scheduling, "instance_termination_action", ""))
+            != "DELETE"
+        ):
+            raise GcpTransportError("INSTANCE_TERMINATION_ACTION_MISMATCH")
+        duration = _duration_seconds(getattr(scheduling, "max_run_duration", None))
+        if duration != request.provider_max_runtime_seconds:
+            raise GcpTransportError("INSTANCE_TTL_MISMATCH")
+        return GcpInstanceSafetyObservation(
+            schema_version=GCP_INSTANCE_SAFETY_OBSERVATION_SCHEMA_VERSION,
+            request_digest=gcp_execution_request_digest(request),
+            project_id=request.project_id,
+            zone=request.zone,
+            instance_name=request.instance_name,
+            labels=request.labels,
+            boot_disk_auto_delete=True,
+            deletion_protection=False,
+            automatic_restart=False,
+            maintenance_policy="TERMINATE",
+            max_run_duration_seconds=duration,
+            instance_termination_action="DELETE",
+        )
+    except GcpTransportError:
+        raise
+    except (AttributeError, TypeError, ValueError):
+        raise GcpTransportError("INSTANCE_SAFETY_RESPONSE_INVALID") from None
+
+
 def _is_not_found(error: BaseException) -> bool:
     status = getattr(error, "code", None)
     if callable(status):
@@ -552,6 +645,22 @@ class GoogleComputeTransport(GcpComputeTransport):
     def insert(
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
     ) -> GcpOperationHandle:
+        """Refuse provider mutation while v0.2 execution remains disabled.
+
+        ``project_create_request`` deliberately remains available to local
+        plan/check callers.  Keeping the SDK call behind this unconditional
+        denial prevents an imported transport from becoming an accidental
+        launch authority before a separately reviewed activation path exists.
+        """
+
+        self.project_create_request(request, request_id=request_id)
+        raise GcpTransportError("LIVE_MUTATION_DISABLED")
+
+    def project_create_request(
+        self, request: GcpInsertRequest, *, request_id: str
+    ) -> object:
+        """Build the exact create request without invoking a provider client."""
+
         try:
             if validate_gcp_a2_profile(
                 request.machine_type,
@@ -576,16 +685,7 @@ class GoogleComputeTransport(GcpComputeTransport):
             raise
         except Exception:
             raise GcpTransportError("INSERT_REQUEST_INVALID") from None
-        try:
-            operation = self._client.insert(
-                request=insert_request,
-                timeout=timeout_seconds,
-            )
-            return self._remember(operation, "insert", request)
-        except GcpTransportError:
-            raise
-        except Exception:
-            raise GcpTransportError("INSERT_AMBIGUOUS", ambiguous=True) from None
+        return insert_request
 
     def wait_operation(
         self, operation: GcpOperationHandle, *, timeout_seconds: int
@@ -765,6 +865,17 @@ class GoogleComputeTransport(GcpComputeTransport):
     def list_owned(
         self, request: GcpInsertRequest, *, timeout_seconds: int
     ) -> tuple[GcpInstanceObservation, ...]:
+        """Compatibility view of the exhaustive, label-scoped inventory."""
+
+        return self.list_owned_complete(
+            request, timeout_seconds=timeout_seconds
+        ).instances
+
+    def list_owned_complete(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpOwnedResourceInventory:
+        """Return a bounded inventory only when pagination proves completion."""
+
         try:
             list_request = self._sdk.ListInstancesRequest(
                 project=request.project_id,
@@ -783,13 +894,25 @@ class GoogleComputeTransport(GcpComputeTransport):
             output: list[GcpInstanceObservation] = []
             for index, value in enumerate(values):
                 if index >= 256:
-                    raise GcpTransportError("LIST_OWNED_LIMIT")
+                    raise GcpTransportError("LIST_OWNED_INCOMPLETE")
                 output.append(_observation(value, request))
-            return tuple(output)
+            next_page_token = getattr(values, "next_page_token", None)
+            if next_page_token not in (None, ""):
+                raise GcpTransportError("LIST_OWNED_INCOMPLETE")
+            return GcpOwnedResourceInventory(
+                schema_version=GCP_OWNED_RESOURCE_INVENTORY_SCHEMA_VERSION,
+                request_digest=gcp_execution_request_digest(request),
+                project_id=request.project_id,
+                region=request.region,
+                zone=request.zone,
+                labels=request.labels,
+                instances=tuple(output),
+                pagination_complete=True,
+            )
         except GcpTransportError:
             raise
         except Exception:
-            raise GcpTransportError("LIST_OWNED_FAILED") from None
+            raise GcpTransportError("LIST_OWNED_INCOMPLETE") from None
 
     def get_image(
         self, request: GcpInsertRequest, *, timeout_seconds: int
@@ -861,9 +984,70 @@ class GoogleComputeTransport(GcpComputeTransport):
                 raise GcpTransportError("BOOT_DISK_NOT_FOUND") from None
             raise _sanitize_exception(error, "BOOT_DISK_OBSERVATION_FAILED") from None
 
+    def get_instance_safety(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpInstanceSafetyObservation:
+        """Read back exact teardown protections after a future create path."""
+
+        try:
+            value = self._client.get(
+                project=request.project_id,
+                zone=request.zone,
+                instance=request.instance_name,
+                timeout=timeout_seconds,
+            )
+            return _instance_safety_observation(value, request)
+        except GcpTransportError:
+            raise
+        except Exception as error:
+            if _is_not_found(error):
+                raise GcpTransportError("INSTANCE_SAFETY_NOT_FOUND") from None
+            raise _sanitize_exception(
+                error, "INSTANCE_SAFETY_OBSERVATION_FAILED"
+            ) from None
+
+    def confirm_boot_disk_absent(
+        self, request: GcpInsertRequest, *, timeout_seconds: int
+    ) -> GcpBootDiskAbsenceObservation:
+        """Confirm the exact named boot disk is absent, never infer it."""
+
+        if self._disks_client is None:
+            raise GcpTransportError("BOOT_DISK_ABSENCE_OBSERVATION_UNAVAILABLE")
+        try:
+            self._disks_client.get(
+                project=request.project_id,
+                zone=request.zone,
+                disk=request.instance_name,
+                timeout=timeout_seconds,
+            )
+        except Exception as error:
+            if _is_not_found(error):
+                return GcpBootDiskAbsenceObservation(
+                    schema_version=GCP_BOOT_DISK_ABSENCE_SCHEMA_VERSION,
+                    project_id=request.project_id,
+                    zone=request.zone,
+                    instance_name=request.instance_name,
+                    disk_name=request.instance_name,
+                    state="NOT_FOUND",
+                )
+            raise _sanitize_exception(
+                error, "BOOT_DISK_ABSENCE_OBSERVATION_FAILED"
+            ) from None
+        raise GcpTransportError("BOOT_DISK_RESIDUAL")
+
     def delete(
         self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
     ) -> GcpOperationHandle:
+        """Refuse provider mutation while v0.2 execution remains disabled."""
+
+        self.project_terminate_request(request, request_id=request_id)
+        raise GcpTransportError("LIVE_MUTATION_DISABLED")
+
+    def project_terminate_request(
+        self, request: GcpInsertRequest, *, request_id: str
+    ) -> object:
+        """Build the exact termination request without invoking a provider client."""
+
         try:
             if (
                 request_id != request.delete_request_id
@@ -880,16 +1064,7 @@ class GoogleComputeTransport(GcpComputeTransport):
             raise
         except Exception:
             raise GcpTransportError("DELETE_REQUEST_INVALID") from None
-        try:
-            operation = self._client.delete(
-                request=delete_request,
-                timeout=timeout_seconds,
-            )
-            return self._remember(operation, "delete", request)
-        except GcpTransportError:
-            raise
-        except Exception:
-            raise GcpTransportError("DELETE_AMBIGUOUS", ambiguous=True) from None
+        return delete_request
 
     def _project_instance(self, request: GcpInsertRequest) -> object:
         return self._sdk.Instance(
@@ -956,8 +1131,33 @@ def create_google_compute_transport(
     images_client: _ImagesClient | None = None,
     disks_client: _DisksClient | None = None,
 ) -> GoogleComputeTransport:
-    """Explicitly select the live transport; import SDK/ADC only here."""
+    """Remain fail-closed until a future reviewed activation path exists.
 
+    The parameters are intentionally retained for API compatibility.  Fully
+    injected test doubles may still be wrapped for local-only contract tests,
+    but this v0.2 development cycle does not permit SDK import or ADC client
+    construction through this factory.
+    """
+
+    if (
+        sdk_module is not None
+        and client is not None
+        and operations_client is not None
+        and images_client is not None
+        and disks_client is not None
+    ):
+        return GoogleComputeTransport(
+            sdk=sdk_module,
+            client=client,
+            operations_client=operations_client,
+            images_client=images_client,
+            disks_client=disks_client,
+        )
+    if not GCP_LIVE_MUTATIONS_ENABLED:
+        raise GcpTransportError("LIVE_TRANSPORT_DISABLED")
+
+    # This branch is deliberately unreachable until a separately reviewed
+    # activation implementation changes the immutable default above.
     if sdk_module is None:
         try:
             sdk_module = importlib.import_module("google.cloud.compute_v1")
