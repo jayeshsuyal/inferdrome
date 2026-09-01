@@ -29,6 +29,7 @@ class DigestDomain(StrEnum):
     GCP_EXECUTION_RESULT = "gcp-execution-result-v1"
     GCP_EXECUTION_JOURNAL = "gcp-execution-journal-v1"
     GCP_EXECUTION_APPROVAL = "gcp-execution-approval-v2"
+    GCP_EXECUTION_PAYLOAD = "gcp-execution-payload-v2"
     GCP_EXECUTION_SUPERVISOR = "gcp-execution-supervisor-v2"
     GCP_EXECUTION_WATCHDOG = "gcp-execution-watchdog-v2"
     GCP_READ_ONLY_QUOTE_BASIS = "gcp-read-only-quote-basis-v2"

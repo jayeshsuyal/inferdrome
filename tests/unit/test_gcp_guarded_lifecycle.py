@@ -54,35 +54,74 @@ from inferdrome.deployment import (
     validate_gcp_execution_preflight,
 )
 from inferdrome.deployment.gcp_compute_transport import (
+    GcpV2LocalTransportFactory,
     _canonical_resource_ref,
     _observation,
+    bind_gcp_v2_watchdog_cleanup_transport,
     create_google_compute_transport,
+    create_google_compute_transport_for_v2_capability,
 )
 from inferdrome.deployment.gcp_cost_guard import (
     GcpCostGuardError,
     canonical_gcp_cost_cleanup_guard_bytes,
     canonical_gcp_read_only_quote_basis_bytes,
+    gcp_cost_cleanup_guard_digest,
     gcp_cost_guard_contract_schemas,
+    gcp_read_only_quote_basis_digest,
     issue_gcp_cost_cleanup_guard,
     issue_gcp_read_only_quote_basis,
     parse_gcp_cost_cleanup_guard_json,
     parse_gcp_read_only_quote_basis_json,
 )
 from inferdrome.deployment.gcp_supervisor import (
+    _MUTATION_ACTIVATION_PROOF_SEAL,
     GCP_KILL_SWITCH_CONFIRMATION,
     GCP_SUPERVISOR_CONFIRMATION,
     FakeGcpWatchdog,
     FileGcpKillSwitch,
+    FileGcpWatchdog,
     GcpLifecycleSupervisor,
     GcpSupervisorError,
     GcpSupervisorJournal,
+    GcpV2ActivatedMutationProof,
+    GcpV2LocalWatchdogExecutorFactory,
+    GcpWatchdogActivationReceipt,
     InMemoryGcpKillSwitch,
+    _MutationProofUse,
     canonical_gcp_execution_approval_bytes,
     canonical_gcp_kill_switch_bytes,
+    gcp_execution_approval_digest,
+    gcp_watchdog_activation_receipt_id,
     issue_gcp_execution_approval,
     issue_gcp_kill_switch_record,
     parse_gcp_execution_approval_json,
+    validate_gcp_v2_activated_mutation_proof,
 )
+from inferdrome.deployment.gcp_v2_contracts import (
+    GCP_CLEANUP_RECOVERY_CONFIRMATION,
+    GcpV2ContractError,
+    GcpV2MutationCapability,
+    canonical_gcp_v2_startup_projection_bytes,
+    gcp_v2_execution_payload_digest,
+    gcp_v2_mutation_capability_id,
+    issue_gcp_cleanup_recovery_authorization,
+    issue_gcp_v2_activation_deadline,
+    issue_gcp_v2_mutation_capability,
+    issue_gcp_v2_startup_projection,
+    parse_gcp_v2_startup_projection_json,
+    validate_gcp_cleanup_recovery_authorization,
+)
+from inferdrome.deployment.gcp_v2_disk_cleanup import (
+    GCP_V2_OWNED_BOOT_DISK_SCHEMA_VERSION,
+    FileBackedFakeDiskProvider,
+    GcpV2DiskCleanupError,
+    GcpV2ExactOwnedBootDisk,
+    GcpV2ExactOwnedInstance,
+    GcpV2LocalDiskCleanupFactory,
+    issue_gcp_v2_disk_cleanup_binding,
+    issue_gcp_v2_owned_boot_disk_inventory,
+)
+from inferdrome.domain.digests import DigestDomain, canonical_json_bytes, digest_bytes
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = ROOT / "deployments/v1/examples/gcp-dry-run-reference.json"
@@ -316,6 +355,15 @@ def _v2_inputs_with_observations(
     return spec, inventory, context, plan, arm, environment, quote, capacity, preflight
 
 
+def _v2_startup_projection(preflight: Any) -> Any:
+    """Bind only fixed opaque test bytes; no execution semantics are implied."""
+
+    return issue_gcp_v2_startup_projection(
+        request=preflight.request,
+        execution_payload=b"inferdrome-v2-opaque-test-payload",
+    )
+
+
 def _execute_v2(controller: Any, inputs: tuple[Any, ...], *, work: Any = None) -> Any:
     (
         spec,
@@ -345,10 +393,11 @@ def _v2_supervisor(
     root: Path,
     preflight: Any,
     *,
-    watchdog: FakeGcpWatchdog | None = None,
+    watchdog: Any | None = None,
     kill_switch: Any | None = None,
 ) -> tuple[GcpLifecycleSupervisor, Any]:
     root.mkdir()
+    startup_projection = _v2_startup_projection(preflight)
     quote_basis = issue_gcp_read_only_quote_basis(preflight=preflight)
     cost_guard = issue_gcp_cost_cleanup_guard(
         preflight=preflight,
@@ -357,10 +406,21 @@ def _v2_supervisor(
         cleanup_timeout_seconds=120,
         now=NOW,
     )
+    activation_deadline = issue_gcp_v2_activation_deadline(
+        preflight=preflight,
+        startup_projection=startup_projection,
+        rate_basis_digest=gcp_read_only_quote_basis_digest(quote_basis),
+        cost_guard_digest=gcp_cost_cleanup_guard_digest(cost_guard),
+        issued_at=NOW,
+        authorization_expires_at=NOW + timedelta(minutes=5),
+        setup_margin_seconds=60,
+    )
     approval = issue_gcp_execution_approval(
         preflight=preflight,
         quote_basis=quote_basis,
         cost_guard=cost_guard,
+        activation_deadline=activation_deadline,
+        startup_projection=startup_projection,
         operator_identity="operator-alice",
         issued_at=NOW,
         expires_at=NOW + timedelta(minutes=5),
@@ -371,12 +431,95 @@ def _v2_supervisor(
             approval=approval,
             quote_basis=quote_basis,
             cost_guard=cost_guard,
+            activation_deadline=activation_deadline,
+            startup_projection=startup_projection,
             journal=GcpSupervisorJournal(root),
             watchdog=watchdog or FakeGcpWatchdog(),
             kill_switch=kill_switch or InMemoryGcpKillSwitch(),
         ),
         approval,
     )
+
+
+def _v2_disk_binding_for_record(record: Any) -> Any:
+    """Return a test-only externally observed disk binding.
+
+    The disk/attachment values model one complete provider observation.  The
+    name happens to equal this fake's observed boot disk; it is supplied as a
+    fact and is separately checked against the post-create transport readback.
+    Production callers must obtain the equivalent binding from the dedicated
+    exact inventory boundary.
+    """
+
+    request = record.request
+    disk = GcpV2ExactOwnedBootDisk(
+        schema_version=GCP_V2_OWNED_BOOT_DISK_SCHEMA_VERSION,
+        request_digest=record.request_digest,
+        project_id=record.project_id,
+        zone=record.zone,
+        instance_name=record.instance_name,
+        disk_name=record.instance_name,
+        provider_disk_id=987654321,
+        self_link=(
+            f"projects/{record.project_id}/zones/{record.zone}/disks/"
+            f"{record.instance_name}"
+        ),
+        attached_instance_provider_id=123456790,
+        attached_instance_self_link=(
+            f"projects/{record.project_id}/zones/{record.zone}/instances/"
+            f"{record.instance_name}"
+        ),
+        boot_device_name="boot",
+        boot_source_disk_self_link=(
+            f"projects/{record.project_id}/zones/{record.zone}/disks/"
+            f"{record.instance_name}"
+        ),
+        boot_attachment=True,
+        labels=record.labels,
+        source_image_name=request.boot_image.image_name,
+        source_image_provider_id=request.boot_image.provider_image_id,
+        source_image_digest=request.boot_image.digest,
+        disk_type=request.boot_disk_type,
+        size_gib=request.boot_disk_size_gib,
+        state="PRESENT",
+    )
+    inventory = issue_gcp_v2_owned_boot_disk_inventory(disk=disk, observed_at=NOW)
+    instance = GcpV2ExactOwnedInstance(
+        schema_version="inferdrome.gcp-owned-instance.v2",
+        request_digest=record.request_digest,
+        project_id=record.project_id,
+        region=record.region,
+        zone=record.zone,
+        instance_name=record.instance_name,
+        provider_instance_id=123456790,
+        self_link=(
+            f"projects/{record.project_id}/zones/{record.zone}/instances/"
+            f"{record.instance_name}"
+        ),
+        labels=record.labels,
+        state="RUNNING",
+    )
+    return issue_gcp_v2_disk_cleanup_binding(
+        inventory,
+        controller_id=record.controller_id,
+        attached_instance=instance,
+    )
+
+
+class _UnexpectedFileWatchdogExecutor:
+    """Sentinel executor for activation-only tests.
+
+    A successful core cleanup must settle the durable watchdog locally; this
+    executor therefore makes an accidental sidecar cleanup visible.
+    """
+
+    def cleanup_exact(self, event: Any, *, timeout_seconds: int) -> Any:
+        del event, timeout_seconds
+        raise AssertionError("file watchdog executor must not run in this test")
+
+    def cleanup_prebind(self, event: Any, *, timeout_seconds: int) -> Any:
+        del event, timeout_seconds
+        raise AssertionError("prebind watchdog executor must not run in this test")
 
 
 class _NoopFactorySafetySupervisor:
@@ -427,7 +570,7 @@ def test_generated_schema_is_closed_and_fixture_is_exact() -> None:
         assert schema["$id"].startswith("urn:inferdrome:gcp-execution-")
 
     supervisor_schemas = gcp_execution_supervisor_contract_schemas()
-    assert len(supervisor_schemas) == 6
+    assert len(supervisor_schemas) == 9
     for schema in supervisor_schemas.values():
         Draft202012Validator.check_schema(schema)
         assert schema["$id"].startswith("urn:inferdrome:gcp-")
@@ -593,7 +736,7 @@ def test_quote_fixed_point_boundary_and_incomplete_capacity_fail_closed() -> Non
         )
 
 
-def test_v2_supervisor_orders_approval_watchdog_and_intent_before_factory(
+def test_v2_supervisor_orders_approval_watchdog_and_intent_before_fake_create(
     tmp_path: Path,
 ) -> None:
     inputs = _v2_inputs()
@@ -603,27 +746,15 @@ def test_v2_supervisor_orders_approval_watchdog_and_intent_before_factory(
         safety_root, inputs[-1], watchdog=watchdog
     )
 
-    class IntentCheckedTransport(FakeGcpComputeTransport):
-        def insert(
-            self, request: GcpInsertRequest, *, timeout_seconds: int, request_id: str
-        ) -> Any:
-            assert supervisor.journal.load("ctl-12345678").state == "CREATE_INTENT"
-            return super().insert(
-                request, timeout_seconds=timeout_seconds, request_id=request_id
-            )
-
-    transport = IntentCheckedTransport()
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        assert supervisor.journal.load("ctl-12345678").state == "WATCHDOG_READY"
-        return transport
+    # A direct exact fake remains an explicitly offline-only test route.  A
+    # real v2 supervisor rejects generic lazy factories; those must instead
+    # receive an opaque one-shot capability proof and return a sealed adapter.
+    transport = FakeGcpComputeTransport()
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
@@ -632,12 +763,150 @@ def test_v2_supervisor_orders_approval_watchdog_and_intent_before_factory(
 
     outcome = _execute_v2(controller, inputs)
 
-    assert outcome.status == "SUCCEEDED"
+    assert outcome.status == "SUCCEEDED", outcome.model_dump_json()
     assert approval.operator_confirmation == GCP_SUPERVISOR_CONFIRMATION
-    assert factory_calls == ["factory"]
     assert watchdog.arm_calls == 1
     assert transport.insert_calls == 1
     assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
+
+
+def test_v2_concrete_watchdog_factory_is_one_shot_and_request_bound(
+    tmp_path: Path,
+) -> None:
+    """Exercise the only activation-capable route with local injected fakes.
+
+    The seed lease supplies an externally observed test disk binding.  It is
+    not used to infer a target in production code; all three persistent
+    journals remain separate and the transport factory receives only the
+    opaque post-watchdog proof.
+    """
+
+    inputs = _v2_inputs()
+    startup_projection = _v2_startup_projection(inputs[-1])
+    seed_root = tmp_path / "seed-core"
+    seed_root.mkdir()
+    _seed_outcome, seeded = _run(
+        seed_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    seed_record = seeded.journal.load("ctl-12345678")
+    disk_binding = _v2_disk_binding_for_record(seed_record)
+
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    disk_provider = FileBackedFakeDiskProvider.initialize(
+        tmp_path / "disk-provider", observation=disk_binding.disk
+    )
+    disk_cleanup_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=lambda: disk_provider,
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    raw_transport = FakeGcpComputeTransport(
+        exact_boot_disk_observation=disk_binding.disk,
+        exact_boot_disk_inventory=disk_binding.owned_inventory,
+        exact_owned_instance_observation=disk_binding.attached_instance,
+    )
+    activation_factory = GcpV2LocalTransportFactory(
+        transport_supplier=lambda: raw_transport,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=GcpV2LocalWatchdogExecutorFactory(
+            transport_factory=activation_factory,
+            disk_cleanup_factory=disk_cleanup_factory,
+            core_journal=GcpLeaseJournal(core_root),
+            now_fn=lambda: NOW,
+        ),
+        runner_enabled=True,
+        runner_poll_seconds=0.01,
+        runner_now_fn=lambda: NOW,
+    )
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+
+    controller = GcpGuardedLifecycleController(
+        activation_transport_factory=activation_factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+        exact_disk_cleanup_factory=disk_cleanup_factory,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert outcome.status == "SUCCEEDED"
+    assert raw_transport.insert_calls == 1
+    assert (
+        watchdog.run_due(
+            controller_id="ctl-12345678", now=NOW + timedelta(minutes=10)
+        ).state
+        == "CLEANUP_NOT_REQUIRED"
+    )
+
+    assert raw_transport.insert_calls == 1
+
+
+def test_v2_rejects_marker_generic_factory_fake_watchdog_and_fake_subclass(
+    tmp_path: Path,
+) -> None:
+    inputs = _v2_inputs()
+    supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+
+    def factory() -> FakeGcpComputeTransport:
+        raise AssertionError("generic factory must never be invoked")
+
+    with pytest.raises(GcpExecutionError, match="GCP_V2_GENERIC_FACTORY_FORBIDDEN"):
+        GcpGuardedLifecycleController(
+            transport_factory=factory,
+            arm_store=InMemoryExecutionArmStore(),
+            journal=GcpLeaseJournal(tmp_path / "generic-core"),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+            safety_supervisor=supervisor,
+        )
+
+    with pytest.raises(GcpExecutionError, match="GCP_V2_DURABLE_WATCHDOG_REQUIRED"):
+        GcpGuardedLifecycleController(
+            activation_transport_factory=lambda proof: proof,
+            arm_store=InMemoryExecutionArmStore(),
+            journal=GcpLeaseJournal(tmp_path / "fake-watchdog-core"),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+            safety_supervisor=supervisor,
+        )
+
+    class FakeSubclass(FakeGcpComputeTransport):
+        pass
+
+    with pytest.raises(GcpExecutionError, match="GCP_V2_CAPABILITY_FACTORY_REQUIRED"):
+        GcpGuardedLifecycleController(
+            transport=FakeSubclass(),
+            arm_store=InMemoryExecutionArmStore(),
+            journal=GcpLeaseJournal(tmp_path / "subclass-core"),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+            safety_supervisor=supervisor,
+        )
+
+    class ForgedMarker:
+        requires_v2_capability_factories = True
+
+    with pytest.raises(
+        GcpExecutionError, match="GCP_V2_FACTORIES_REQUIRE_REAL_SUPERVISOR"
+    ):
+        GcpGuardedLifecycleController(
+            activation_transport_factory=lambda proof: proof,
+            arm_store=InMemoryExecutionArmStore(),
+            journal=GcpLeaseJournal(tmp_path / "marker-core"),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+            safety_supervisor=ForgedMarker(),
+        )
 
 
 def test_v2_approval_substitution_blocks_before_future_factory(tmp_path: Path) -> None:
@@ -645,17 +914,12 @@ def test_v2_approval_substitution_blocks_before_future_factory(tmp_path: Path) -
     other_inputs = _v2_inputs("ctl-87654321")
     safety_root = tmp_path / "safety"
     supervisor, _approval = _v2_supervisor(safety_root, other_inputs[-1])
-    factory_calls: list[str] = []
     transport = FakeGcpComputeTransport()
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        return transport
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
@@ -665,12 +929,263 @@ def test_v2_approval_substitution_blocks_before_future_factory(tmp_path: Path) -
     outcome = _execute_v2(controller, inputs)
 
     assert outcome.status == "FAILED"
-    assert outcome.primary_error_code == "APPROVAL_BINDING_MISMATCH"
+    # The opaque startup projection binds the exact request before the later
+    # approval/deadline checks, so a substituted controller identity fails at
+    # the earliest exact binding boundary.
+    assert outcome.primary_error_code == "STARTUP_PROJECTION_BINDING_MISMATCH"
     assert outcome.arm_consumed is False
     assert outcome.cleanup_confirmed is True
-    assert factory_calls == []
     assert transport.insert_calls == 0
 
+
+def test_v2_opaque_payload_projection_is_domain_separated_and_closed() -> None:
+    """The v2 overlay binds opaque bytes without retaining their semantics."""
+
+    preflight = _v2_inputs()[-1]
+    payload = b"opaque-local-payload-bytes"
+    projection = issue_gcp_v2_startup_projection(
+        request=preflight.request, execution_payload=payload
+    )
+
+    assert gcp_v2_execution_payload_digest(payload) == digest_bytes(
+        DigestDomain.GCP_EXECUTION_PAYLOAD, payload
+    )
+    assert gcp_v2_execution_payload_digest(payload) != digest_bytes(
+        DigestDomain.GCP_EXECUTION_APPROVAL, payload
+    )
+    assert projection.startup_script_digest == preflight.request.startup_script_digest
+    projection_bytes = canonical_gcp_v2_startup_projection_bytes(projection)
+    assert payload not in projection_bytes
+    assert b"execution_payload_digest" in projection_bytes
+
+    missing_field = json.loads(projection_bytes)
+    missing_field.pop("execution_payload_digest")
+    with pytest.raises(GcpV2ContractError, match="STARTUP_PROJECTION_INVALID"):
+        parse_gcp_v2_startup_projection_json(canonical_json_bytes(missing_field))
+
+
+def test_v2_activation_deadline_keeps_runtime_distinct_from_setup_margin(
+    tmp_path: Path,
+) -> None:
+    """Activation needs setup/auth headroom, not a pre-expired full runtime."""
+
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    contract = supervisor.activation_deadline
+    activation_at = NOW + timedelta(seconds=contract.setup_margin_seconds - 1)
+
+    capability = issue_gcp_v2_mutation_capability(
+        contract=contract,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=activation_at,
+    )
+
+    provider_deadline = datetime.fromisoformat(
+        str(capability.provider_runtime_deadline_at).replace("Z", "+00:00")
+    )
+    setup_deadline = datetime.fromisoformat(
+        str(contract.setup_deadline_at).replace("Z", "+00:00")
+    )
+    assert provider_deadline == activation_at + timedelta(
+        seconds=contract.provider_runtime_seconds
+    )
+    assert provider_deadline > setup_deadline
+    with pytest.raises(GcpV2ContractError, match="ACTIVATION_SETUP_HORIZON_EXPIRED"):
+        issue_gcp_v2_mutation_capability(
+            contract=contract,
+            approval_digest=gcp_execution_approval_digest(approval),
+            now=setup_deadline,
+        )
+
+
+def test_v2_payload_substitution_blocks_supplier_before_factory(tmp_path: Path) -> None:
+    """A changed opaque digest cannot even initialize a future supplier."""
+
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    substituted_projection = issue_gcp_v2_startup_projection(
+        request=inputs[-1].request,
+        execution_payload=b"different-opaque-local-payload",
+    )
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    supplier_calls = 0
+
+    def supplier() -> FakeGcpComputeTransport:
+        nonlocal supplier_calls
+        supplier_calls += 1
+        return FakeGcpComputeTransport()
+
+    with pytest.raises(
+        GcpTransportError, match="WATCHDOG_CLEANUP_PAYLOAD_MISMATCH"
+    ):
+        bind_gcp_v2_watchdog_cleanup_transport(
+            transport_supplier=supplier,
+            capability=capability,
+            startup_projection=substituted_projection,
+            now=NOW,
+            now_fn=lambda: NOW,
+        )
+
+    assert supplier_calls == 0
+
+
+def test_v2_public_capability_factory_checks_payload_before_sdk_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exported future seam cannot reach SDK/client construction on mismatch."""
+
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir()
+    _outcome, seeded = _run(
+        seed_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    record = seeded.journal.load("ctl-12345678")
+    binding = gcp_supervisor_binding(approval, record)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    proof = GcpV2ActivatedMutationProof(
+        capability=capability,
+        receipt=FakeGcpWatchdog().activate(
+            binding, approval=approval, capability=capability, now=NOW
+        ),
+        _seal=_MUTATION_ACTIVATION_PROOF_SEAL,
+        _use=_MutationProofUse(),
+    )
+    substituted_projection = issue_gcp_v2_startup_projection(
+        request=inputs[-1].request,
+        execution_payload=b"substituted-public-factory-payload",
+    )
+    boundary_calls = 0
+
+    def unexpected_sdk_boundary(**_: Any) -> Any:
+        nonlocal boundary_calls
+        boundary_calls += 1
+        raise AssertionError("payload mismatch reached SDK/client boundary")
+
+    import inferdrome.deployment.gcp_compute_transport as transport_module
+
+    monkeypatch.setattr(
+        transport_module, "create_google_compute_transport", unexpected_sdk_boundary
+    )
+    with pytest.raises(GcpTransportError, match="MUTATION_CAPABILITY_PAYLOAD_MISMATCH"):
+        create_google_compute_transport_for_v2_capability(
+            capability=proof,
+            startup_projection=substituted_projection,
+            now=NOW,
+        )
+
+    assert boundary_calls == 0
+
+
+def test_v2_disk_adapter_rechecks_payload_before_lazy_provider_supplier(
+    tmp_path: Path,
+) -> None:
+    """A post-bind payload substitution cannot wake a deferred disk provider."""
+
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    _outcome, seeded = _run(
+        core_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    record = seeded.journal.load("ctl-12345678")
+    binding = _v2_disk_binding_for_record(record)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    supplier_calls = 0
+
+    def supplier() -> FileBackedFakeDiskProvider:
+        nonlocal supplier_calls
+        supplier_calls += 1
+        return FileBackedFakeDiskProvider.initialize(
+            tmp_path / "provider", observation=binding.disk
+        )
+
+    disk_root = tmp_path / "disk-journal"
+    disk_root.mkdir()
+    coordinator = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=supplier,
+        journal_root=disk_root,
+        now_fn=lambda: NOW,
+        startup_projection=supervisor.startup_projection,
+    ).bind(record=record, binding=binding, authority=capability, now=NOW)
+    tampered = capability.model_dump(mode="json")
+    tampered["execution_payload_digest"] = gcp_v2_execution_payload_digest(
+        b"tampered-deferred-disk-payload"
+    )
+    tampered["capability_id"] = "sha256:" + "0" * 64
+    provisional = GcpV2MutationCapability.model_construct(**tampered)
+    tampered["capability_id"] = gcp_v2_mutation_capability_id(provisional)
+    coordinator.provider._authority = GcpV2MutationCapability.model_validate_json(
+        canonical_json_bytes(tampered)
+    )
+
+    with pytest.raises(GcpV2DiskCleanupError, match="DISK_CAPABILITY_PAYLOAD_MISMATCH"):
+        coordinator.provider.read_exact_owned_boot_disk(binding, timeout_seconds=1)
+
+    assert supplier_calls == 0
+
+
+def test_v2_tampered_watchdog_receipt_payload_is_rejected(tmp_path: Path) -> None:
+    """The sealed proof checks the receipt's opaque payload binding too."""
+
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir()
+    _outcome, seeded = _run(
+        seed_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    record = seeded.journal.load("ctl-12345678")
+    binding = gcp_supervisor_binding(approval, record)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    receipt = FakeGcpWatchdog().activate(
+        binding, approval=approval, capability=capability, now=NOW
+    )
+    proof = GcpV2ActivatedMutationProof(
+        capability=capability,
+        receipt=receipt,
+        _seal=_MUTATION_ACTIVATION_PROOF_SEAL,
+        _use=_MutationProofUse(),
+    )
+    assert validate_gcp_v2_activated_mutation_proof(proof, now=NOW) == proof
+
+    tampered = receipt.model_dump(mode="json")
+    tampered["execution_payload_digest"] = gcp_v2_execution_payload_digest(
+        b"substituted-receipt-payload"
+    )
+    tampered["receipt_id"] = "sha256:" + "0" * 64
+    provisional = GcpWatchdogActivationReceipt.model_construct(**tampered)
+    tampered["receipt_id"] = gcp_watchdog_activation_receipt_id(provisional)
+    tampered_receipt = GcpWatchdogActivationReceipt.model_validate_json(
+        canonical_json_bytes(tampered)
+    )
+    tampered_proof = GcpV2ActivatedMutationProof(
+        capability=capability,
+        receipt=tampered_receipt,
+        _seal=_MUTATION_ACTIVATION_PROOF_SEAL,
+        _use=_MutationProofUse(),
+    )
+
+    with pytest.raises(GcpSupervisorError, match="MUTATION_PROOF_BINDING_MISMATCH"):
+        validate_gcp_v2_activated_mutation_proof(tampered_proof, now=NOW)
 
 def test_v2_read_only_cost_guard_binds_rate_cap_and_blocks_substitution(
     tmp_path: Path,
@@ -707,21 +1222,18 @@ def test_v2_read_only_cost_guard_binds_rate_cap_and_blocks_substitution(
         approval=approval,
         quote_basis=quote_basis,
         cost_guard=tampered_guard,
+        activation_deadline=supervisor.activation_deadline,
+        startup_projection=supervisor.startup_projection,
         journal=GcpSupervisorJournal(safety_root),
         watchdog=FakeGcpWatchdog(),
         kill_switch=InMemoryGcpKillSwitch(),
     )
-    factory_calls: list[str] = []
     transport = FakeGcpComputeTransport()
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        return transport
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
@@ -731,10 +1243,9 @@ def test_v2_read_only_cost_guard_binds_rate_cap_and_blocks_substitution(
     outcome = _execute_v2(controller, inputs)
 
     assert outcome.status == "FAILED"
-    assert outcome.primary_error_code == "APPROVAL_BINDING_MISMATCH"
+    assert outcome.primary_error_code == "ACTIVATION_CONTRACT_BINDING_MISMATCH"
     assert outcome.arm_consumed is False
     assert outcome.provider_mutation_attempted is False
-    assert factory_calls == []
     assert transport.insert_calls == 0
 
 
@@ -787,23 +1298,17 @@ def test_v2_watchdog_receipt_must_cover_quoted_cleanup_tail(
         tmp_path / "safety", inputs[-1], watchdog=watchdog
     )
     expected_watchdog_deadline = NOW + timedelta(
-        seconds=inputs[-1].quote.billable_duration_seconds
+        seconds=inputs[-1].quote.billable_duration_seconds + 60
     )
     assert approval.watchdog_deadline_at == expected_watchdog_deadline.strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        raise AssertionError(
-            "future factory must not activate without cleanup coverage"
-        )
+    transport = FakeGcpComputeTransport()
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
@@ -816,30 +1321,26 @@ def test_v2_watchdog_receipt_must_cover_quoted_cleanup_tail(
     assert outcome.primary_error_code == "WATCHDOG_BINDING_MISMATCH"
     assert outcome.arm_consumed is True
     assert outcome.provider_mutation_attempted is False
-    assert factory_calls == []
+    assert transport.insert_calls == 0
     assert watchdog.arm_calls == 1
 
 
-def test_v2_elapsed_setup_cannot_consume_runtime_or_cleanup_horizon(
+def test_v2_elapsed_setup_beyond_explicit_margin_blocks_factory(
     tmp_path: Path,
 ) -> None:
     inputs = _v2_inputs()
     supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
-    clock_values = iter((NOW, NOW, NOW + timedelta(seconds=1)))
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        raise AssertionError("future factory must not activate after elapsed setup")
+    clock_values = iter((NOW, NOW, NOW + timedelta(seconds=61)))
+    transport = FakeGcpComputeTransport()
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(
-            now_fn=lambda: next(clock_values, NOW + timedelta(seconds=1)),
+            now_fn=lambda: next(clock_values, NOW + timedelta(seconds=61)),
             monotonic_fn=lambda: 0.0,
         ),
         safety_supervisor=supervisor,
@@ -848,10 +1349,10 @@ def test_v2_elapsed_setup_cannot_consume_runtime_or_cleanup_horizon(
     outcome = _execute_v2(controller, inputs)
 
     assert outcome.status == "FAILED"
-    assert outcome.primary_error_code == "CONTROLLER_RUNTIME_HORIZON_INSUFFICIENT"
+    assert outcome.primary_error_code == "ACTIVATION_SETUP_HORIZON_EXPIRED"
     assert outcome.arm_consumed is True
     assert outcome.provider_mutation_attempted is False
-    assert factory_calls == []
+    assert transport.insert_calls == 0
 
 
 def test_v2_deadline_is_rechecked_before_work_and_triggers_cleanup(
@@ -859,10 +1360,17 @@ def test_v2_deadline_is_rechecked_before_work_and_triggers_cleanup(
 ) -> None:
     inputs = _v2_inputs()
     supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
-    clock_values = iter(
-        (NOW, NOW, NOW, NOW, NOW, NOW + timedelta(minutes=10))
-    )
+    current_time = [NOW]
     transport = FakeGcpComputeTransport()
+    original_boot_disk = transport.get_boot_disk
+
+    def advance_past_runtime(_: Any, *, timeout_seconds: int) -> Any:
+        current_time[0] = NOW + timedelta(minutes=11)
+        return original_boot_disk(_, timeout_seconds=timeout_seconds)
+
+    # Keep the exact fake type (rather than a subclass) while advancing the
+    # local clock immediately before the supervisor's post-create work gate.
+    transport.get_boot_disk = advance_past_runtime  # type: ignore[method-assign]
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
@@ -870,7 +1378,7 @@ def test_v2_deadline_is_rechecked_before_work_and_triggers_cleanup(
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(
-            now_fn=lambda: next(clock_values, NOW + timedelta(minutes=10)),
+            now_fn=lambda: current_time[0],
             monotonic_fn=lambda: 0.0,
         ),
         safety_supervisor=supervisor,
@@ -884,7 +1392,7 @@ def test_v2_deadline_is_rechecked_before_work_and_triggers_cleanup(
     outcome = _execute_v2(controller, inputs, work=work)
 
     assert outcome.status == "FAILED"
-    assert outcome.primary_error_code == "CONTROLLER_DEADLINE_EXPIRED"
+    assert outcome.primary_error_code == "PROVIDER_RUNTIME_DEADLINE_EXPIRED"
     assert outcome.cleanup_confirmed is True
     assert work_called is False
     assert transport.insert_calls == 1
@@ -904,16 +1412,11 @@ def test_v2_final_create_rechecks_stale_capacity_without_insert(
         (NOW, NOW, NOW, NOW + timedelta(seconds=2))
     )
     transport = FakeGcpComputeTransport()
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        return transport
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(
@@ -929,7 +1432,6 @@ def test_v2_final_create_rechecks_stale_capacity_without_insert(
     assert outcome.primary_error_code == "PREFLIGHT_CAPACITY_STALE"
     assert outcome.arm_consumed is True
     assert transport.insert_calls == 0
-    assert factory_calls == ["factory"]
 
 
 @pytest.mark.parametrize(
@@ -955,16 +1457,12 @@ def test_v2_elapsed_read_only_or_approval_input_blocks_factory(
     inputs = _v2_inputs_with_observations(base_inputs, quote=quote)
     supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
     clock_values = iter((NOW, NOW, NOW + clock_offset))
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        raise AssertionError("future factory must not activate after input expiry")
+    transport = FakeGcpComputeTransport()
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(
@@ -980,7 +1478,7 @@ def test_v2_elapsed_read_only_or_approval_input_blocks_factory(
     assert outcome.primary_error_code == expected_error
     assert outcome.arm_consumed is True
     assert outcome.provider_mutation_attempted is False
-    assert factory_calls == []
+    assert transport.insert_calls == 0
 
 
 def test_future_factory_and_nonfake_transport_require_safety_supervisor(
@@ -1020,16 +1518,12 @@ def test_v2_watchdog_failure_consumes_arm_but_blocks_future_factory(
     supervisor, _approval = _v2_supervisor(
         tmp_path / "safety", inputs[-1], watchdog=watchdog
     )
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        raise AssertionError("future factory must not activate without watchdog")
+    transport = FakeGcpComputeTransport()
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
@@ -1043,23 +1537,22 @@ def test_v2_watchdog_failure_consumes_arm_but_blocks_future_factory(
     assert outcome.arm_consumed is True
     assert outcome.provider_mutation_attempted is False
     assert outcome.cleanup_confirmed is True
-    assert factory_calls == []
+    assert transport.insert_calls == 0
     assert watchdog.arm_calls == 1
     assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
 
 
 @pytest.mark.parametrize(
-    ("fail_on_update", "primary_error", "expected_factory_calls"),
+    ("fail_on_update", "primary_error"),
     [
-        (1, "ARM_JOURNAL_UPDATE_FAILED", 0),
-        (2, "CREATE_INTENT_JOURNAL_FAILED", 1),
+        (1, "ARM_JOURNAL_UPDATE_FAILED"),
+        (2, "CREATE_INTENT_JOURNAL_FAILED"),
     ],
 )
 def test_v2_core_journal_boundary_failure_blocks_without_insert(
     tmp_path: Path,
     fail_on_update: int,
     primary_error: str,
-    expected_factory_calls: int,
 ) -> None:
     class BrokenJournal(GcpLeaseJournal):
         def __init__(self, root: Path) -> None:
@@ -1077,14 +1570,8 @@ def test_v2_core_journal_boundary_failure_blocks_without_insert(
     core_root = tmp_path / "core"
     core_root.mkdir()
     transport = FakeGcpComputeTransport()
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        return transport
-
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=BrokenJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
@@ -1098,7 +1585,6 @@ def test_v2_core_journal_boundary_failure_blocks_without_insert(
     assert outcome.error_code == "JOURNAL_UPDATE_FAILED"
     assert outcome.cleanup_confirmed is False
     assert transport.insert_calls == 0
-    assert len(factory_calls) == expected_factory_calls
     assert supervisor.journal.load("ctl-12345678").state == "BLOCKED"
 
 
@@ -1108,16 +1594,12 @@ def test_v2_kill_switch_blocks_after_arm_before_future_factory(tmp_path: Path) -
     supervisor, _approval = _v2_supervisor(
         tmp_path / "safety", inputs[-1], kill_switch=kill_switch
     )
-    factory_calls: list[str] = []
-
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        raise AssertionError("future factory must not activate when killed")
+    transport = FakeGcpComputeTransport()
 
     core_root = tmp_path / "core"
     core_root.mkdir()
     controller = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        transport=transport,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
@@ -1131,7 +1613,7 @@ def test_v2_kill_switch_blocks_after_arm_before_future_factory(tmp_path: Path) -
     assert outcome.arm_consumed is True
     assert outcome.provider_mutation_attempted is False
     assert outcome.cleanup_confirmed is True
-    assert factory_calls == []
+    assert transport.insert_calls == 0
     assert kill_switch.checks == 1
     assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
 
@@ -1146,7 +1628,10 @@ def test_v2_kill_switch_is_rechecked_before_work_and_cleans_exact_lease(
         def is_killed(self, binding: Any) -> bool:
             del binding
             self.checks += 1
-            return self.checks >= 4
+            # Arming, capability issuance, and pre-work each independently
+            # consult the local switch; the third check is the post-create
+            # gate in the direct fake-only path.
+            return self.checks >= 3
 
     inputs = _v2_inputs()
     kill_switch = FlipKillSwitch()
@@ -1175,7 +1660,7 @@ def test_v2_kill_switch_is_rechecked_before_work_and_cleans_exact_lease(
     assert outcome.primary_error_code == "KILL_SWITCH_ACTIVE"
     assert outcome.cleanup_confirmed is True
     assert work_called is False
-    assert kill_switch.checks == 4
+    assert kill_switch.checks == 3
     assert transport.insert_calls == 1
     assert transport.delete_calls == 1
     assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
@@ -1261,7 +1746,9 @@ def test_v2_approval_parser_and_sidecar_journal_repair_fail_closed(
     ("crash_point", "expected_state"),
     [
         ("reserve_after_event_fsync", "PREPARED"),
+        ("reserve_after_directory_fsync", "PREPARED"),
         ("advance_after_event_fsync", "ARM_CONSUMED"),
+        ("advance_after_directory_fsync", "ARM_CONSUMED"),
     ],
 )
 def test_v2_sidecar_crash_prefix_is_durable_and_restartable(
@@ -1302,8 +1789,488 @@ def test_v2_sidecar_crash_prefix_is_durable_and_restartable(
     )
 
 
-def test_v2_recovery_enters_cleanup_sidecar_before_future_factory(
+@pytest.mark.parametrize("state", ["PREPARED", "ARM_CONSUMED"])
+def test_v2_no_provider_recovery_converges_each_pre_mutation_core_state(
+    tmp_path: Path, state: str
+) -> None:
+    """A restart settles both journals before any factory/provider boundary."""
+
+    inputs = _v2_inputs()
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir()
+    _seed_outcome, seed_controller = _run(
+        seed_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    seeded = seed_controller.journal.load("ctl-12345678")
+    values = seeded.model_dump(mode="python")
+    values.update(
+        {
+            "state": "PREPARED",
+            "arm_consumed": False,
+            "provider_mutation_attempted": False,
+            "provider_mutation_ambiguous": False,
+            "provider_operation_id": None,
+            "provider_operation_name": None,
+            "provider_operation_kind": None,
+            "provider_operation_status": None,
+            "provider_operation_terminal": False,
+            "cleanup_confirmed": False,
+            "orphaned": False,
+            "delete_attempts": 0,
+            "last_error_code": None,
+        }
+    )
+    prepared = type(seeded).model_validate(values)
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    core_journal = GcpLeaseJournal(core_root)
+    core_journal.reserve(prepared)
+    if state == "ARM_CONSUMED":
+        armed_values = prepared.model_dump(mode="python")
+        armed_values.update({"state": "ARM_CONSUMED", "arm_consumed": True})
+        core_journal.update(type(prepared).model_validate(armed_values))
+
+    watchdog = FakeGcpWatchdog()
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    transport = FakeGcpComputeTransport()
+    controller = GcpGuardedLifecycleController(
+        transport=transport,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=core_journal,
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+    )
+
+    recovered = controller.recover_cleanup(controller_id="ctl-12345678")
+
+    assert recovered.status == "CANCELLED"
+    assert recovered.primary_error_code == "NO_PROVIDER_MUTATION_RECOVERED"
+    assert recovered.provider_mutation_attempted is False
+    assert recovered.cleanup_confirmed is True
+    assert transport.insert_calls == 0
+    assert transport.delete_calls == 0
+    assert watchdog.activation_calls == 0
+    assert core_journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
+    assert supervisor.journal.load("ctl-12345678").state == "CLEANUP_CONFIRMED"
+
+    repeated = controller.recover_cleanup(controller_id="ctl-12345678")
+    assert repeated.primary_error_code == "CLEANUP_ALREADY_CONFIRMED"
+    assert transport.insert_calls == 0
+    assert transport.delete_calls == 0
+
+
+def test_v2_file_watchdog_core_fence_survives_crash_and_settles_without_provider(
     tmp_path: Path,
+) -> None:
+    """A crashed intent cannot outlive authoritative core cleanup indefinitely."""
+
+    inputs = _v2_inputs()
+    startup_projection = _v2_startup_projection(inputs[-1])
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir()
+    _seed_outcome, seed_controller = _run(
+        seed_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    record = seed_controller.journal.load("ctl-12345678")
+
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    provider_calls = 0
+
+    def transport_supplier() -> FakeGcpComputeTransport:
+        nonlocal provider_calls
+        provider_calls += 1
+        return FakeGcpComputeTransport()
+
+    def disk_provider_supplier() -> Any:
+        raise AssertionError("disk supplier must not run behind a terminal fence")
+
+    transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=transport_supplier,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    disk_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=disk_provider_supplier,
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    executor = GcpV2LocalWatchdogExecutorFactory(
+        transport_factory=transport_factory,
+        disk_cleanup_factory=disk_factory,
+        core_journal=GcpLeaseJournal(seed_root),
+        now_fn=lambda: NOW,
+    )
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=executor,
+        runner_enabled=True,
+        runner_poll_seconds=0.01,
+        runner_now_fn=lambda: NOW,
+    )
+    supervisor, approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    binding = gcp_supervisor_binding(approval, record)
+    watchdog.configure_lease(record)
+    watchdog.arm(binding, approval=approval, now=NOW)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    watchdog.activate(binding, approval=approval, capability=capability, now=NOW)
+    due = datetime.fromisoformat(
+        str(capability.provider_runtime_deadline_at).replace("Z", "+00:00")
+    )
+    runner_pid: int | None = None
+    try:
+        with watchdog._exclusive() as root:
+            runner_pid = watchdog._read_locked(root, binding.controller_id)[
+                -1
+            ].runner_process_id
+        crash_pid = os.fork()
+        if crash_pid == 0:
+            crashed = FileGcpWatchdog(
+                watchdog_root,
+                executor=executor,
+                crash_hook=lambda point: os._exit(77)
+                if point == "file_watchdog_after_cleanup_intent"
+                else None,
+                runner_enabled=True,
+                runner_poll_seconds=0.01,
+                runner_now_fn=lambda: NOW,
+            )
+            crashed.run_due(controller_id=binding.controller_id, now=due)
+            os._exit(1)
+        _, status = os.waitpid(crash_pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 77
+
+        with pytest.raises(
+            GcpSupervisorError, match="FILE_WATCHDOG_CORE_TERMINAL_PENDING"
+        ):
+            supervisor.reconcile_core_terminal_sidecar(record, now=due)
+        assert provider_calls == 0
+
+        restarted = FileGcpWatchdog(
+            watchdog_root,
+            executor=executor,
+            runner_enabled=True,
+            runner_poll_seconds=0.01,
+            runner_now_fn=lambda: NOW,
+        )
+        fenced = restarted.run_due(
+            controller_id=binding.controller_id, now=due + timedelta(seconds=1)
+        )
+        assert fenced.state == "PREBIND_CLEANUP_INTENT"
+        assert fenced.core_terminal_fenced_at is not None
+        assert provider_calls == 0
+
+        settled_at = due + timedelta(seconds=record.cleanup_timeout_seconds + 1)
+        settled = restarted.run_due(
+            controller_id=binding.controller_id, now=settled_at
+        )
+        assert settled.state == "CLEANUP_NOT_REQUIRED"
+        assert provider_calls == 0
+
+        resumed_supervisor = GcpLifecycleSupervisor(
+            approval=approval,
+            quote_basis=supervisor.quote_basis,
+            cost_guard=supervisor.cost_guard,
+            activation_deadline=supervisor.activation_deadline,
+            startup_projection=supervisor.startup_projection,
+            journal=GcpSupervisorJournal(tmp_path / "safety"),
+            watchdog=restarted,
+            kill_switch=InMemoryGcpKillSwitch(),
+        )
+        resumed_supervisor.reconcile_core_terminal_sidecar(record, now=settled_at)
+        assert provider_calls == 0
+        assert (
+            resumed_supervisor.journal.load(binding.controller_id).state
+            == "CLEANUP_CONFIRMED"
+        )
+    finally:
+        if runner_pid is not None:
+            watchdog._kill_runner(runner_pid)
+
+
+def test_v2_file_watchdog_hung_cleanup_is_bounded_and_restart_fences_locally(
+    tmp_path: Path,
+) -> None:
+    """A hung local cleanup child is killed and cannot permanently block restart."""
+
+    inputs = _v2_inputs()
+    record = _prepared_record(tmp_path / "prepared").model_copy(
+        update={"cleanup_timeout_seconds": 1}
+    )
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    core_journal = GcpLeaseJournal(core_root)
+    core_journal.reserve(record)
+    startup_projection = _v2_startup_projection(inputs[-1])
+
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    supplier_marker = tmp_path / "unexpected-transport-supplier"
+    disk_supplier_marker = tmp_path / "unexpected-disk-supplier"
+
+    def transport_supplier() -> FakeGcpComputeTransport:
+        supplier_marker.write_text("called", encoding="ascii")
+        return FakeGcpComputeTransport()
+
+    def disk_provider_supplier() -> Any:
+        disk_supplier_marker.write_text("called", encoding="ascii")
+        raise AssertionError("a hung prebind worker must not reach disk cleanup")
+
+    transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=transport_supplier,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    disk_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=disk_provider_supplier,
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    executor_factory = GcpV2LocalWatchdogExecutorFactory(
+        transport_factory=transport_factory,
+        disk_cleanup_factory=disk_factory,
+        core_journal=core_journal,
+        now_fn=lambda: NOW,
+    )
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=executor_factory,
+        runner_enabled=True,
+        runner_poll_seconds=0.01,
+        runner_now_fn=lambda: NOW,
+    )
+    supervisor, approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    binding = gcp_supervisor_binding(approval, record)
+    watchdog.configure_lease(record)
+    watchdog.arm(binding, approval=approval, now=NOW)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    watchdog.activate(binding, approval=approval, capability=capability, now=NOW)
+    due = datetime.fromisoformat(
+        str(capability.provider_runtime_deadline_at).replace("Z", "+00:00")
+    )
+    runner_pid: int | None = None
+    try:
+        with watchdog._exclusive() as root:
+            runner_pid = watchdog._read_locked(root, binding.controller_id)[
+                -1
+            ].runner_process_id
+
+        original_bind_for_event = executor_factory.bind_for_event
+
+        def bind_hanging_prebind(event: Any) -> Any:
+            executor = original_bind_for_event(event)
+
+            def hang(*_: Any, **__: Any) -> Any:
+                time.sleep(10)
+                raise AssertionError("hung worker should have been killed")
+
+            executor.cleanup_prebind = hang  # type: ignore[method-assign]
+            return executor
+
+        executor_factory.bind_for_event = bind_hanging_prebind  # type: ignore[method-assign]
+        started = time.monotonic()
+        retry = watchdog.run_due(controller_id=binding.controller_id, now=due)
+        elapsed = time.monotonic() - started
+
+        assert retry.state == "PREBIND_RETRY_PENDING"
+        assert retry.error_code == "WATCHDOG_PREBIND_CLEANUP_UNCONFIRMED"
+        assert elapsed < 4.0
+        assert not supplier_marker.exists()
+        assert not disk_supplier_marker.exists()
+
+        terminal = record.model_copy(
+            update={
+                "state": "CLEANUP_CONFIRMED",
+                "cleanup_confirmed": True,
+                "orphaned": False,
+                "last_error_code": "NO_PROVIDER_MUTATION",
+            }
+        )
+        core_journal.update(terminal)
+        restarted = FileGcpWatchdog(
+            watchdog_root,
+            executor=GcpV2LocalWatchdogExecutorFactory(
+                transport_factory=transport_factory,
+                disk_cleanup_factory=disk_factory,
+                core_journal=GcpLeaseJournal(core_root),
+                now_fn=lambda: NOW,
+            ),
+            runner_enabled=True,
+            runner_poll_seconds=0.01,
+            runner_now_fn=lambda: NOW,
+        )
+        settled = restarted.reconcile_core_terminal(
+            binding,
+            now=due + timedelta(seconds=1),
+            reason_code="CORE_CLEANUP_CONFIRMED",
+        )
+        assert settled is not None
+        assert settled.state == "CLEANUP_NOT_REQUIRED"
+        assert (
+            restarted.run_due(
+                controller_id=binding.controller_id,
+                now=due + timedelta(seconds=2),
+            ).state
+            == "CLEANUP_NOT_REQUIRED"
+        )
+        assert not supplier_marker.exists()
+        assert not disk_supplier_marker.exists()
+    finally:
+        if runner_pid is not None:
+            watchdog._kill_runner(runner_pid)
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "phase", "expected_state"),
+    [
+        ("file_watchdog_after_event_fsync", "arm", "READY"),
+        ("file_watchdog_after_directory_fsync", "arm", "READY"),
+        ("file_watchdog_after_runner_ready", "activate", "RUNNER_READY"),
+        (
+            "file_watchdog_child_after_post_gate_validation",
+            "activate",
+            "RUNNER_READY",
+        ),
+    ],
+)
+def test_v2_file_watchdog_crash_prefixes_restart_without_transport_activation(
+    tmp_path: Path, crash_point: str, phase: str, expected_state: str
+) -> None:
+    """Every watchdog-journal publication edge has a locally restartable prefix."""
+
+    inputs = _v2_inputs()
+    record = _prepared_record(tmp_path / "prepared")
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    core_journal = GcpLeaseJournal(core_root)
+    core_journal.reserve(record)
+    startup_projection = _v2_startup_projection(inputs[-1])
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    transport_supplier_marker = tmp_path / "unexpected-transport-supplier"
+    disk_supplier_marker = tmp_path / "unexpected-disk-supplier"
+
+    def transport_supplier() -> FakeGcpComputeTransport:
+        transport_supplier_marker.write_text("called", encoding="ascii")
+        return FakeGcpComputeTransport()
+
+    def disk_provider_supplier() -> Any:
+        disk_supplier_marker.write_text("called", encoding="ascii")
+        raise AssertionError("watchdog recovery must stay before provider activation")
+
+    transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=transport_supplier,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    disk_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=disk_provider_supplier,
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+
+    def make_watchdog(crash_hook: Any = None) -> FileGcpWatchdog:
+        return FileGcpWatchdog(
+            watchdog_root,
+            executor=GcpV2LocalWatchdogExecutorFactory(
+                transport_factory=transport_factory,
+                disk_cleanup_factory=disk_factory,
+                core_journal=GcpLeaseJournal(core_root),
+                now_fn=lambda: NOW,
+            ),
+            crash_hook=crash_hook,
+            runner_enabled=True,
+            runner_poll_seconds=0.01,
+            runner_now_fn=lambda: NOW,
+        )
+
+    watchdog = make_watchdog()
+    supervisor, approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    binding = gcp_supervisor_binding(approval, record)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    if phase == "activate":
+        watchdog.configure_lease(record)
+        watchdog.arm(binding, approval=approval, now=NOW)
+
+    crash_marker = tmp_path / "crash-marker"
+
+    def crash_hook(point: str) -> None:
+        if point == crash_point:
+            crash_marker.write_text(point, encoding="ascii")
+            os._exit(77)
+
+    pid = os.fork()
+    if pid == 0:
+        crashed = make_watchdog(crash_hook=crash_hook)
+        crashed.configure_lease(record)
+        try:
+            if phase == "arm":
+                crashed.arm(binding, approval=approval, now=NOW)
+            else:
+                crashed.activate(
+                    binding, approval=approval, capability=capability, now=NOW
+                )
+        except GcpSupervisorError:
+            # The post-gate runner crash is observed by its parent as an
+            # unavailable runner; the durable RUNNER_READY event remains.
+            pass
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) in {0, 77}
+    assert crash_marker.read_text(encoding="ascii") == crash_point
+
+    restarted = make_watchdog()
+    restarted.configure_lease(record)
+    runner_pid: int | None = None
+    try:
+        if phase == "arm":
+            restarted.arm(binding, approval=approval, now=NOW)
+        else:
+            restarted.activate(
+                binding, approval=approval, capability=capability, now=NOW
+            )
+        with restarted._exclusive() as root:
+            latest = restarted._read_locked(root, binding.controller_id)[-1]
+            assert latest.state == expected_state
+            runner_pid = latest.runner_process_id
+        assert not transport_supplier_marker.exists()
+        assert not disk_supplier_marker.exists()
+    finally:
+        if runner_pid is not None:
+            restarted._kill_runner(runner_pid)
+
+
+def test_v2_recovery_requires_exact_cleanup_authorization_and_sidecar(
+    tmp_path: Path, request: Any
 ) -> None:
     inputs = _v2_inputs()
     safety_root = tmp_path / "safety"
@@ -1325,42 +2292,156 @@ def test_v2_recovery_enters_cleanup_sidecar_before_future_factory(
     assert orphaned_event.orphan_report is not None
     assert orphaned_event.orphan_report.request_digest == initial_outcome.request_digest
     assert orphaned_event.orphan_report.instance_name == "inferdrome-ctl-12345678"
-    assert orphaned_event.orphan_report.boot_disk_name == "inferdrome-ctl-12345678"
     assert orphaned_event.orphan_report.reason_code == "DELETE_DENIED"
 
-    factory_calls: list[str] = []
+    recovery_record = initial.journal.load("ctl-12345678")
+    disk_binding = _v2_disk_binding_for_record(recovery_record)
+    disk_root = tmp_path / "disk-journal"
+    disk_root.mkdir()
+    disk_provider = FileBackedFakeDiskProvider.initialize(
+        tmp_path / "disk-provider", observation=disk_binding.disk
+    )
+    disk_cleanup_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=lambda: disk_provider,
+        journal_root=disk_root,
+        now_fn=lambda: NOW,
+        startup_projection=supervisor.startup_projection,
+    )
+    cleanup_transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=lambda: transport,
+        now_fn=lambda: NOW,
+        startup_projection=supervisor.startup_projection,
+    )
+    watchdog_root = tmp_path / "recovery-watchdog"
+    watchdog_root.mkdir()
+    watchdogs_to_stop: list[FileGcpWatchdog] = []
+
+    def stop_watchdog_runners() -> None:
+        """Prevent a local fake sidecar from surviving this test process."""
+
+        runner_pids: set[int] = set()
+        for candidate in watchdogs_to_stop:
+            try:
+                with candidate._exclusive() as locked_root:
+                    runner_pids.update(
+                        event.runner_process_id
+                        for event in candidate._read_locked(
+                            locked_root, "ctl-12345678"
+                        )
+                        if event.runner_process_id is not None
+                    )
+            except (GcpSupervisorError, OSError):
+                continue
+        if not watchdogs_to_stop:
+            return
+        for runner_pid in runner_pids:
+            try:
+                watchdogs_to_stop[0]._kill_runner(runner_pid)
+            except OSError:
+                continue
+
+    request.addfinalizer(stop_watchdog_runners)
+
+    def watchdog_for_restart() -> FileGcpWatchdog:
+        return FileGcpWatchdog(
+            watchdog_root,
+            executor=GcpV2LocalWatchdogExecutorFactory(
+                transport_factory=cleanup_transport_factory,
+                disk_cleanup_factory=disk_cleanup_factory,
+                core_journal=GcpLeaseJournal(core_root),
+                now_fn=lambda: NOW,
+            ),
+            runner_enabled=True,
+            runner_poll_seconds=0.01,
+            runner_now_fn=lambda: NOW,
+        )
+
+    # Seed a separately durable sidecar exactly as a future activation would,
+    # then reopen it through a fresh watchdog object.  This keeps the original
+    # failed fake lifecycle offline while exercising recovery's concrete,
+    # restartable factory boundary.
+    armed_watchdog = watchdog_for_restart()
+    watchdogs_to_stop.append(armed_watchdog)
+    durable_binding = gcp_supervisor_binding(approval, recovery_record)
+    armed_watchdog.configure_lease(recovery_record)
+    armed_watchdog.arm(durable_binding, approval=approval, now=NOW)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    armed_watchdog.activate(
+        durable_binding,
+        approval=approval,
+        capability=capability,
+        now=NOW,
+    )
+    armed_watchdog.bind_disk_cleanup(
+        durable_binding, disk_cleanup_binding=disk_binding, now=NOW
+    )
+    resumed_watchdog = watchdog_for_restart()
+    watchdogs_to_stop.append(resumed_watchdog)
     resumed_supervisor = GcpLifecycleSupervisor(
         approval=approval,
         quote_basis=supervisor.quote_basis,
         cost_guard=supervisor.cost_guard,
+        activation_deadline=supervisor.activation_deadline,
+        startup_projection=supervisor.startup_projection,
         journal=GcpSupervisorJournal(safety_root),
-        watchdog=FakeGcpWatchdog(),
+        watchdog=resumed_watchdog,
         kill_switch=InMemoryGcpKillSwitch(),
     )
 
-    def factory() -> FakeGcpComputeTransport:
-        factory_calls.append("factory")
-        assert (
-            resumed_supervisor.journal.load("ctl-12345678").state
-            == "CLEANUP_PENDING"
-        )
-        return transport
-
     recovery = GcpGuardedLifecycleController(
-        transport_factory=factory,
+        # Recovery receives only cleanup-scoped factories; it never receives a
+        # create-capability route.
+        cleanup_transport_factory=cleanup_transport_factory,
         arm_store=InMemoryExecutionArmStore(),
         journal=GcpLeaseJournal(core_root),
         clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
         safety_supervisor=resumed_supervisor,
+        exact_disk_cleanup_factory=disk_cleanup_factory,
     )
 
+    cleanup_authorization = issue_gcp_cleanup_recovery_authorization(
+        record=recovery_record,
+        approval_digest=gcp_execution_approval_digest(approval),
+        startup_projection_digest=approval.startup_projection_digest,
+        execution_payload_digest=approval.execution_payload_digest,
+        disk_cleanup_binding=disk_binding,
+        operator_identity="operator-alice",
+        issued_at=NOW,
+        expires_at=NOW + timedelta(minutes=10),
+        watchdog_cleanup_deadline_at=datetime.fromisoformat(
+            str(approval.watchdog_deadline_at).replace("Z", "+00:00")
+        ),
+        confirmation=GCP_CLEANUP_RECOVERY_CONFIRMATION,
+    )
+    # Create authorization expires at five minutes, while this distinct,
+    # exact cleanup-only authorization remains valid only through the durable
+    # watchdog horizon.  The later validation must not reopen create authority
+    # or derive a target from the original hostname.
+    cleanup_after_create_expiry = NOW + timedelta(minutes=6)
+    assert cleanup_after_create_expiry > datetime.fromisoformat(
+        str(approval.expires_at).replace("Z", "+00:00")
+    )
+    assert validate_gcp_cleanup_recovery_authorization(
+        cleanup_authorization,
+        record=recovery_record,
+        approval_digest=gcp_execution_approval_digest(approval),
+        startup_projection_digest=approval.startup_projection_digest,
+        execution_payload_digest=approval.execution_payload_digest,
+        now=cleanup_after_create_expiry,
+        watchdog_cleanup_deadline_at=datetime.fromisoformat(
+            str(approval.watchdog_deadline_at).replace("Z", "+00:00")
+        ),
+    ) == cleanup_authorization
     recovered = recovery.recover_cleanup(
-        controller_id="ctl-12345678", confirmation=GCP_RECOVERY_CONFIRMATION
+        controller_id="ctl-12345678", cleanup_authorization=cleanup_authorization
     )
 
     assert recovered.orphaned is True
     assert recovered.cleanup_confirmed is False
-    assert factory_calls == ["factory"]
     assert resumed_supervisor.journal.load("ctl-12345678").state == "ORPHANED"
 
 

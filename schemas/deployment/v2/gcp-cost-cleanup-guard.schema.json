@@ -44,7 +44,7 @@
   "$id": "urn:inferdrome:gcp-cost-cleanup-guard:v2",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "A self-authenticating local-only cost and cleanup guard.",
+  "description": "A content-addressed local-only cost/cleanup guard, not an authorization proof.",
   "properties": {
     "capacity_authority": {
       "const": "read_only_capacity_only",

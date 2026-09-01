@@ -46,24 +46,14 @@
       "type": "object"
     }
   },
-  "$id": "urn:inferdrome:gcp-exact-orphan-report:v2",
+  "$id": "urn:inferdrome:gcp-disk-absence-observation:v2",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Durable proof that one exact owned resource set remains unconfirmed.",
+  "description": "Authoritative absence confirmation for the one bound disk identity.",
   "properties": {
-    "approval_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Approval Digest",
-      "type": "string"
-    },
-    "cleanup_state": {
-      "const": "unconfirmed_exact_owned_resource",
-      "title": "Cleanup State",
-      "type": "string"
-    },
-    "controller_id": {
-      "pattern": "^ctl-[a-z0-9]{8,24}$",
-      "title": "Controller Id",
+    "disk_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Disk Name",
       "type": "string"
     },
     "instance_name": {
@@ -79,37 +69,19 @@
       "title": "Project Id",
       "type": "string"
     },
-    "reason_code": {
-      "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
-      "title": "Reason Code",
-      "type": "string"
-    },
-    "region": {
-      "maxLength": 32,
-      "minLength": 5,
-      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
-      "title": "Region",
-      "type": "string"
-    },
-    "report_id": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Report Id",
-      "type": "string"
-    },
-    "reported_at": {
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Reported At",
-      "type": "string"
-    },
     "request_digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Request Digest",
       "type": "string"
     },
     "schema_version": {
-      "const": "inferdrome.gcp-exact-orphan-report.v2",
+      "const": "inferdrome.gcp-disk-absence-observation.v2",
       "title": "Schema Version",
+      "type": "string"
+    },
+    "state": {
+      "const": "NOT_FOUND",
+      "title": "State",
       "type": "string"
     },
     "zone": {
@@ -122,19 +94,14 @@
   },
   "required": [
     "schema_version",
-    "approval_digest",
     "request_digest",
-    "controller_id",
     "project_id",
-    "region",
     "zone",
     "instance_name",
+    "disk_name",
     "labels",
-    "cleanup_state",
-    "reason_code",
-    "reported_at",
-    "report_id"
+    "state"
   ],
-  "title": "GcpExactOrphanReport",
+  "title": "GcpV2DiskAbsenceObservation",
   "type": "object"
 }

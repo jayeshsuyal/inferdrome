@@ -201,7 +201,7 @@ class GcpCostCleanupGuardPayload(GcpExecutionModel):
 
 
 class GcpCostCleanupGuard(GcpCostCleanupGuardPayload):
-    """A self-authenticating local-only cost and cleanup guard."""
+    """A content-addressed local-only cost/cleanup guard, not an authorization proof."""
 
     guard_id: Sha256Digest
 
@@ -362,6 +362,7 @@ def validate_gcp_read_only_quote_basis(
     *,
     preflight: GcpExecutionPreflight,
     now: datetime,
+    enforce_freshness: bool = True,
 ) -> GcpReadOnlyQuoteBasis:
     """Fail closed if a rate basis is not exact to the current quote input."""
 
@@ -385,23 +386,24 @@ def validate_gcp_read_only_quote_basis(
     }
     if any(getattr(basis, key) != value for key, value in expected.items()):
         raise GcpCostGuardError("RATE_BASIS_BINDING_MISMATCH")
-    now_value = _parse_timestamp(_timestamp(now))
-    if not (
-        _parse_timestamp(basis.issued_at)
-        <= now_value
-        <= _parse_timestamp(basis.valid_until)
-    ):
-        raise GcpCostGuardError("RATE_BASIS_EXPIRED")
+    if enforce_freshness:
+        now_value = _parse_timestamp(_timestamp(now))
+        if not (
+            _parse_timestamp(basis.issued_at)
+            <= now_value
+            <= _parse_timestamp(basis.valid_until)
+        ):
+            raise GcpCostGuardError("RATE_BASIS_EXPIRED")
     return basis
 
 
 def gcp_watchdog_deadline_at(preflight: GcpExecutionPreflight) -> GcpTimestamp:
     """Derive the durable watchdog horizon from the immutable quote window.
 
-    The frozen v1 arm deadline bounds controller/provider runtime.  Its quote
-    must additionally cover cleanup and exact-absence confirmation.  A future
-    watchdog therefore remains armed through that quoted tail instead of
-    expiring with the controller itself.
+    This is a frozen-v1 preflight observation used to bind the read-only quote
+    and cleanup tail.  It does not extend, replace, or dynamically govern the
+    v2 provider runtime after activation: the versioned activation contract
+    derives that bounded runtime and its watchdog-cleanup horizon separately.
     """
 
     try:
@@ -476,12 +478,17 @@ def validate_gcp_cost_cleanup_guard(
     quote_basis: GcpReadOnlyQuoteBasis,
     now: datetime,
     record: GcpLeaseRecord | None = None,
+    enforce_freshness: bool = True,
+    enforce_controller_deadline: bool = True,
 ) -> GcpCostCleanupGuard:
     """Validate that pure pricing/capacity input cannot authorize a launch."""
 
     guard = _strict_guard(guard)
     quote_basis = validate_gcp_read_only_quote_basis(
-        quote_basis, preflight=preflight, now=now
+        quote_basis,
+        preflight=preflight,
+        now=now,
+        enforce_freshness=enforce_freshness,
     )
     request = preflight.request
     quote = preflight.quote
@@ -504,9 +511,10 @@ def validate_gcp_cost_cleanup_guard(
     }
     if any(getattr(guard, key) != value for key, value in expected.items()):
         raise GcpCostGuardError("COST_GUARD_BINDING_MISMATCH")
-    now_value = _parse_timestamp(_timestamp(now))
-    if now_value >= _parse_timestamp(guard.controller_deadline_at):
-        raise GcpCostGuardError("COST_GUARD_DEADLINE_EXPIRED")
+    if enforce_freshness and enforce_controller_deadline:
+        now_value = _parse_timestamp(_timestamp(now))
+        if now_value >= _parse_timestamp(guard.controller_deadline_at):
+            raise GcpCostGuardError("COST_GUARD_DEADLINE_EXPIRED")
     if record is not None and (
         record.plan_id != guard.plan_id
         or record.request_digest != guard.request_digest

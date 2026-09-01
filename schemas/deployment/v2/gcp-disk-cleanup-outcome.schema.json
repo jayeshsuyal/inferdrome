@@ -1,0 +1,182 @@
+{
+  "$defs": {
+    "GcpExecutionLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_execution_v1",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "plan_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "provider-envelope",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "controller_id",
+        "plan_id",
+        "arm_id",
+        "managed_by",
+        "role"
+      ],
+      "title": "GcpExecutionLabels",
+      "type": "object"
+    },
+    "GcpV2DiskAbsenceObservation": {
+      "additionalProperties": false,
+      "description": "Authoritative absence confirmation for the one bound disk identity.",
+      "properties": {
+        "disk_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Disk Name",
+          "type": "string"
+        },
+        "instance_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Instance Name",
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/$defs/GcpExecutionLabels"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "request_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Request Digest",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-disk-absence-observation.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state": {
+          "const": "NOT_FOUND",
+          "title": "State",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_digest",
+        "project_id",
+        "zone",
+        "instance_name",
+        "disk_name",
+        "labels",
+        "state"
+      ],
+      "title": "GcpV2DiskAbsenceObservation",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-disk-cleanup-outcome:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Terminal local outcome; only exact absence counts as cleanup proof.",
+  "properties": {
+    "absence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GcpV2DiskAbsenceObservation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "binding_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Binding Id",
+      "type": "string"
+    },
+    "delete_attempts": {
+      "maximum": 16,
+      "minimum": 0,
+      "title": "Delete Attempts",
+      "type": "integer"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "operation_id": {
+      "anyOf": [
+        {
+          "pattern": "^disk-op-[a-z0-9]{8,64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Operation Id"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-disk-cleanup-outcome.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "ABSENCE_CONFIRMED",
+        "BLOCKED"
+      ],
+      "title": "State",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "binding_id",
+    "state",
+    "delete_attempts"
+  ],
+  "title": "GcpV2DiskCleanupOutcome",
+  "type": "object"
+}

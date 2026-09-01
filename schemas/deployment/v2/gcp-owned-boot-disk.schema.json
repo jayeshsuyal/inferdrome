@@ -1,0 +1,212 @@
+{
+  "$defs": {
+    "GcpExecutionLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_execution_v1",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "plan_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "provider-envelope",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "controller_id",
+        "plan_id",
+        "arm_id",
+        "managed_by",
+        "role"
+      ],
+      "title": "GcpExecutionLabels",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-owned-boot-disk:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One provider-observed owned boot disk with immutable provenance.\n\nThe disk's labels and provenance alone are insufficient: a matching data\ndisk must never become a cleanup target.  This record therefore carries\nthe exact provider observation of the instance attachment and its boot\nsource.  All of those facts are immutable input to the content-addressed\ncleanup binding; callers cannot derive a target from an instance name.\n\n``boot_attachment`` and the attached-instance fields are the immutable\nprovenance observed before workload execution.  ``attachment_state`` is\nthe *current* read-only state: after exact instance deletion, GCE can\nreport the same owned boot disk as detached.  That does not discard the\noriginal provenance or permit a same-name/data-disk substitution.",
+  "properties": {
+    "attached_instance_provider_id": {
+      "anyOf": [
+        {
+          "maximum": 10000000000000000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Attached Instance Provider Id"
+    },
+    "attached_instance_self_link": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Attached Instance Self Link"
+    },
+    "attachment_state": {
+      "default": "ATTACHED",
+      "enum": [
+        "ATTACHED",
+        "DETACHED"
+      ],
+      "title": "Attachment State",
+      "type": "string"
+    },
+    "boot_attachment": {
+      "const": true,
+      "title": "Boot Attachment",
+      "type": "boolean"
+    },
+    "boot_device_name": {
+      "pattern": "^[a-z][a-z0-9-]{0,61}$",
+      "title": "Boot Device Name",
+      "type": "string"
+    },
+    "boot_source_disk_self_link": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Boot Source Disk Self Link",
+      "type": "string"
+    },
+    "disk_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Disk Name",
+      "type": "string"
+    },
+    "disk_type": {
+      "enum": [
+        "pd-balanced",
+        "pd-ssd"
+      ],
+      "title": "Disk Type",
+      "type": "string"
+    },
+    "instance_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "labels": {
+      "$ref": "#/$defs/GcpExecutionLabels"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "provider_disk_id": {
+      "maximum": 10000000000000000000,
+      "minimum": 1,
+      "title": "Provider Disk Id",
+      "type": "integer"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-owned-boot-disk.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "self_link": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Self Link",
+      "type": "string"
+    },
+    "size_gib": {
+      "maximum": 16384,
+      "minimum": 10,
+      "title": "Size Gib",
+      "type": "integer"
+    },
+    "source_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Source Image Digest",
+      "type": "string"
+    },
+    "source_image_name": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Source Image Name",
+      "type": "string"
+    },
+    "source_image_provider_id": {
+      "maximum": 10000000000000000000,
+      "minimum": 1,
+      "title": "Source Image Provider Id",
+      "type": "integer"
+    },
+    "state": {
+      "const": "PRESENT",
+      "title": "State",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "request_digest",
+    "project_id",
+    "zone",
+    "instance_name",
+    "disk_name",
+    "provider_disk_id",
+    "self_link",
+    "boot_device_name",
+    "boot_source_disk_self_link",
+    "boot_attachment",
+    "labels",
+    "source_image_name",
+    "source_image_provider_id",
+    "source_image_digest",
+    "disk_type",
+    "size_gib",
+    "state"
+  ],
+  "title": "GcpV2ExactOwnedBootDisk",
+  "type": "object"
+}

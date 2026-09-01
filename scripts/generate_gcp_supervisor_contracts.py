@@ -14,6 +14,10 @@ from inferdrome.deployment.gcp_lifecycle import (
 from inferdrome.deployment.gcp_supervisor import (
     gcp_execution_supervisor_contract_schemas,
 )
+from inferdrome.deployment.gcp_v2_contracts import gcp_v2_activation_contract_schemas
+from inferdrome.deployment.gcp_v2_disk_cleanup import (
+    gcp_v2_disk_cleanup_contract_schemas,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = ROOT / "schemas/deployment/v2"
@@ -31,6 +35,8 @@ def _render() -> dict[Path, bytes]:
         **gcp_execution_v2_safety_contract_schemas(),
         **gcp_execution_supervisor_contract_schemas(),
         **gcp_cost_guard_contract_schemas(),
+        **gcp_v2_activation_contract_schemas(),
+        **gcp_v2_disk_cleanup_contract_schemas(),
     }
     return {
         SCHEMA_ROOT / filename: _pretty(schema)

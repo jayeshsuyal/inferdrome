@@ -9,11 +9,6 @@
           "title": "Approval Digest",
           "type": "string"
         },
-        "boot_disk_name": {
-          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
-          "title": "Boot Disk Name",
-          "type": "string"
-        },
         "cleanup_state": {
           "const": "unconfirmed_exact_owned_resource",
           "title": "Cleanup State",
@@ -87,7 +82,6 @@
         "region",
         "zone",
         "instance_name",
-        "boot_disk_name",
         "labels",
         "cleanup_state",
         "reason_code",
@@ -146,6 +140,11 @@
       "additionalProperties": false,
       "description": "Immutable exact resource/approval binding repeated in every event.",
       "properties": {
+        "activation_deadline_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Activation Deadline Digest",
+          "type": "string"
+        },
         "approval_digest": {
           "pattern": "^sha256:[0-9a-f]{64}$",
           "title": "Approval Digest",
@@ -161,6 +160,12 @@
           "title": "Arm Id",
           "type": "string"
         },
+        "cleanup_timeout_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Cleanup Timeout Seconds",
+          "type": "integer"
+        },
         "controller_deadline_at": {
           "maxLength": 32,
           "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
@@ -172,6 +177,11 @@
           "title": "Controller Id",
           "type": "string"
         },
+        "execution_payload_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Execution Payload Digest",
+          "type": "string"
+        },
         "instance_name": {
           "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
           "title": "Instance Name",
@@ -179,6 +189,12 @@
         },
         "labels": {
           "$ref": "#/$defs/GcpExecutionLabels"
+        },
+        "max_cleanup_attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Cleanup Attempts",
+          "type": "integer"
         },
         "plan_id": {
           "pattern": "^sha256:[0-9a-f]{64}$",
@@ -189,6 +205,12 @@
           "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
           "title": "Project Id",
           "type": "string"
+        },
+        "provider_runtime_seconds": {
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Provider Runtime Seconds",
+          "type": "integer"
         },
         "region": {
           "maxLength": 32,
@@ -206,6 +228,23 @@
           "const": "inferdrome.gcp-supervisor-binding.v2",
           "title": "Schema Version",
           "type": "string"
+        },
+        "setup_deadline_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Setup Deadline At",
+          "type": "string"
+        },
+        "startup_projection_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Startup Projection Digest",
+          "type": "string"
+        },
+        "watchdog_cleanup_horizon_seconds": {
+          "maximum": 7200,
+          "minimum": 1,
+          "title": "Watchdog Cleanup Horizon Seconds",
+          "type": "integer"
         },
         "watchdog_deadline_at": {
           "maxLength": 32,
@@ -225,15 +264,23 @@
         "schema_version",
         "approval_id",
         "approval_digest",
+        "activation_deadline_digest",
         "controller_id",
         "arm_id",
         "plan_id",
         "request_digest",
+        "startup_projection_digest",
+        "execution_payload_digest",
         "project_id",
         "region",
         "zone",
         "instance_name",
         "labels",
+        "setup_deadline_at",
+        "provider_runtime_seconds",
+        "watchdog_cleanup_horizon_seconds",
+        "max_cleanup_attempts",
+        "cleanup_timeout_seconds",
         "controller_deadline_at",
         "watchdog_deadline_at"
       ],

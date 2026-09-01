@@ -1,0 +1,47 @@
+{
+  "$id": "urn:inferdrome:gcp-disk-delete-result:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Reconciled result for exactly one named-disk delete operation.",
+  "properties": {
+    "error_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z][A-Z0-9_]{2,47}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "operation_id": {
+      "pattern": "^disk-op-[a-z0-9]{8,64}$",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-disk-delete-result.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "DONE",
+        "ERROR",
+        "TIMEOUT"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "operation_id",
+    "status"
+  ],
+  "title": "GcpV2DiskDeleteResult",
+  "type": "object"
+}

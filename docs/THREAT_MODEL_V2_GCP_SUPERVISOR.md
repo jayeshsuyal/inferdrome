@@ -15,29 +15,35 @@ billing access remain outside this implementation and disabled by default.
 ## Principal threats and fail-closed responses
 
 - A substituted plan, project, region, zone, A100 profile, boot image, runner
-  image, runtime image, request, quote, capacity input, cap, deadline, or
-  operator approval is rejected by canonical digest-bound validation before a
-  future SDK/ADC factory can be invoked.
+  image, runtime image, request, quote, capacity input, cap, deadline,
+  operator approval, startup projection, or opaque execution-payload digest is
+  rejected by canonical digest-bound validation before a future SDK/ADC factory
+  can be invoked. The execution-payload binding contains a digest only; it
+  neither interprets bytes nor grants shell, transfer, credential, evidence,
+  or execution authority.
 - A missing, stale, malformed, duplicate-key, unknown-field, or expired
   approval/rate/guard artifact is rejected. Pricing and capacity inputs are
   deliberately read-only and cannot themselves authorize a create. The same
-  expiring inputs are rechecked at the final create edge and before work.
+  expiring inputs are rechecked at the final activation/create edge. After a
+  capability is activated, post-create work is bounded by its provider-runtime
+  and watchdog-cleanup horizons rather than by the frozen v1 arm timestamp.
 - A watchdog that cannot produce an exact independently-durable receipt with
   controller-death and hung-work coverage prevents `CREATE_INTENT`. The
-  receipt must remain valid through the quote-bound cleanup and exact-absence
-  tail, not merely through provider runtime. The sidecar persists
-  `ARM_CONSUMED` and `WATCHDOG_READY` before the future create boundary; no
-  live watchdog is armed by this local-only implementation.
-- Delayed setup, insert, reconciliation, or readback cannot silently consume
-  an absolute execution deadline. Create requires the complete immutable
-  provider runtime and watchdog cleanup horizon still to remain; work repeats
-  absolute controller/watchdog deadline checks and fails into cleanup instead
-  of starting after expiry.
+  receipt must remain valid through the v2 cleanup and exact-absence tail, not
+  merely through provider runtime. The sidecar persists `ARM_CONSUMED` and
+  `WATCHDOG_READY` before the future create boundary; no live watchdog is
+  armed by this local-only implementation.
+- Delayed setup cannot silently consume runtime: v2 setup and authorization
+  horizons are checked only at activation, then the actual activation time
+  starts the explicit provider-runtime clock and independently durable
+  watchdog-cleanup clock. An overlong or substituted horizon is rejected.
 - Journal replacement, symlink traversal, partial writes, corruption,
   noncanonical content, timestamp regression, or state-transition regression
   is rejected. The sidecar uses exact controller file names, no-follow opens,
-  locking, fsync, a hash chain, and bounded event/file sizes. Any unresolved
-  sidecar lease blocks every later reservation until authoritative cleanup.
+  locking, fsync, a hash chain, and bounded event/file sizes. Initial partial
+  prefixes, no-provider crashes, and core/sidecar terminal mismatches have
+  explicit local reconciliation; remaining unresolved state blocks later
+  reservation until authoritative cleanup.
 - A kill marker that is unsafe, malformed, modified while read, or bound to a
   different approval/request/controller fails closed. An active exact marker
   is durably recorded as `KILLED` before cleanup proceeds.
@@ -50,6 +56,12 @@ billing access remain outside this implementation and disabled by default.
 - Controller restart can resume exact cleanup only. It never resumes work,
   replays an unknown create, substitutes a resource identity, or converts an
   unconfirmed cleanup state into absence.
+- The file watchdog persists the full exact disk binding before cleanup intent,
+  uses a lease before retrying a dead worker, kills a bounded worker process
+  group on timeout, and stores authoritative instance-inventory plus named-disk
+  absence facts before terminal confirmation. A terminal core journal durably
+  fences a still-active watchdog intent, prevents a restart from initializing a
+  cleanup supplier, and settles it locally after its bounded lease.
 
 ## Boundaries and remaining limitations
 
@@ -59,12 +71,12 @@ must fail closed if the exact observed state changes. The local watchdog receipt
 is an activation prerequisite, not proof that a real future watchdog or
 provider TTL has run.
 
-The frozen v1 arm equates controller duration with provider runtime and has no
-separate setup margin. The v0.2 layer intentionally treats any elapsed setup
-as a create-time safety failure rather than assuming extra time. This leaves
-the path non-activatable by design until a future separately reviewed arm
-version introduces an explicit margin while retaining the cleanup watchdog
-tail.
+The frozen v1 arm equates controller duration with provider runtime and remains
+unchanged historical evidence. The additive v2 contract supplies a separate
+setup margin, authorization horizon, provider-runtime horizon, and watchdog
+cleanup horizon; it does not reinterpret the frozen arm or keep a full future
+runtime under that historical deadline. The default provider gate remains
+disabled pending separate review and explicit operator approval.
 
 The rate basis and hard ceiling are exact local arithmetic over a supplied
 estimate. They are not provider/account billing enforcement and do not prove
