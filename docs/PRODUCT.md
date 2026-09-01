@@ -250,7 +250,11 @@ v0.1 contains:
   evaluation are not Inferdrome implementation; and
 - producer-side genuine GPU evidence plus corrupted-evidence and
   synthetic-evidence rejection demonstrations. ExitSpec `PASS`, `FAIL`, and
-  `NOT_PROVEN` demonstrations remain external release blockers.
+  `NOT_PROVEN` demonstrations remain external release blockers for independent
+  customer acceptance. For the producer-side `v0.1.0` release, they and the
+  receipt are `NOT_RECORDED` and deferred post-v0.1 by the
+  [owner policy exception](reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md);
+  that exception does not claim them.
 
 ## v0.1 non-goals
 

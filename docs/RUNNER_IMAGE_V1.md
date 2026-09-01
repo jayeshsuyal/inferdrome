@@ -25,7 +25,7 @@ the source revision and package version; callers cannot override either.
 | Argument | Development default | Proof/release requirement |
 | --- | --- | --- |
 | `SOURCE_REPOSITORY_COMMIT` | `development-unpinned` | 40–64 lowercase hexadecimal characters |
-| `INFERDROME_VERSION` | `0.1.0.dev0` | bounded version string |
+| `INFERDROME_VERSION` | `0.1.0` | bounded version string |
 | `BUILD_FLAVOR` | `development` | `proof` or `release` requires both identities |
 
 Proof and release builds fail closed when the source commit or version is

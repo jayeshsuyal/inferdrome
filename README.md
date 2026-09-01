@@ -61,11 +61,13 @@ loopback-only, database-free, and outside the v0.1 release gate.
 
 Release status is intentionally mixed: genuine Linux/NVIDIA captures are
 producer-side evidence; the Docker Compose qualification is local synthetic
-qualification; Lambda/GCP/Kubernetes surfaces are dry-run, reference, or
-simulation boundaries; and ExitSpec acceptance, human security review, license
-decisions for external materials, archive publication, and final release
-approval remain external or owner-controlled inputs. The repository is not
-release-ready merely because a local gate or a genuine measurement passes.
+qualification; and Lambda/GCP/Kubernetes surfaces are dry-run, reference, or
+simulation boundaries. Human security approval is recorded and the raw A10
+archive remains `KEEP_EXTERNAL_ONLY`/`EXTERNAL_ONLY` and unpublished. ExitSpec
+acceptance remains independently owned: its prospective `PASS`, `FAIL`, and
+`NOT_PROVEN` evaluations and receipt are `NOT_RECORDED`, are deferred
+post-v0.1 by the [owner policy exception](docs/reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md),
+and are not claimed by the producer-side `v0.1.0` release.
 
 The provider-neutral deployment layer begins with a strict, non-executing
 [`inferdrome.deployment.v1` contract](docs/DEPLOYMENT_SPEC_V1.md). It pins
@@ -187,6 +189,12 @@ commit after both version locations have been changed to `0.1.0`:
 It performs no cloud/provider operation, GPU launch, deployment, publication,
 tagging, or merge. The exact final release procedure is recorded in the
 [v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md).
+
+For the specifically authorized producer-side `v0.1.0` release, CI uses the
+repository-only preflight so the still-pending ExitSpec inputs are reported,
+not hidden. The bounded exception is recorded in
+[V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md](docs/reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md);
+it does not make an ExitSpec result or receipt exist.
 
 ```bash
 uv run inferdrome validate examples/fake-smoke.yaml

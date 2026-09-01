@@ -49,6 +49,11 @@ def _minimal_repository(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    _set_package_versions(
+        root,
+        project_version=release_preflight.DEVELOPMENT_VERSION,
+        package_version=release_preflight.DEVELOPMENT_VERSION,
+    )
 
 
 def _set_package_versions(
@@ -492,14 +497,14 @@ def test_package_license_metadata_fails_closed_on_drift(
 def test_repository_only_preflight_is_deterministic() -> None:
     first = release_preflight.run_preflight(
         REPOSITORY_ROOT,
-        phase="candidate",
+        phase="auto",
         repository_only=True,
         require_clean=False,
         run_gates=False,
     )
     second = release_preflight.run_preflight(
         REPOSITORY_ROOT,
-        phase="candidate",
+        phase="auto",
         repository_only=True,
         require_clean=False,
         run_gates=False,
@@ -974,7 +979,8 @@ def test_release_docs_do_not_require_a_post_tag_repository_commit() -> None:
     assert "Post-tag verification facts belong in that external record" in normalized
     assert (
         "After all three jobs pass, put the exact release SHA, three CI run URLs, "
-        "tag verification, and remaining external sign-off in the GitHub Release "
+        "tag verification, producer-side limitation, owner-exception source, and "
+        "remaining external sign-off in the GitHub Release "
         "or another explicit external immutable release record."
         in normalized
     )
@@ -1092,7 +1098,7 @@ def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> N
 
 
 def test_release_closure_reports_open_manual_inputs(capsys) -> None:
-    result = release_preflight.main(["--allow-dirty"])
+    result = release_preflight.main(["--phase", "candidate", "--allow-dirty"])
 
     captured = capsys.readouterr().out
     assert result == 1
@@ -1104,6 +1110,7 @@ def test_release_closure_reports_open_manual_inputs(capsys) -> None:
 
 def test_main_resolves_auto_phase_once(monkeypatch, capsys) -> None:
     original_resolve_phase = release_preflight._resolve_phase
+    expected_phase, _ = original_resolve_phase(REPOSITORY_ROOT, "auto")
     calls = 0
 
     def resolve_phase_once(repository_root: Path, requested_phase):
@@ -1116,4 +1123,4 @@ def test_main_resolves_auto_phase_once(monkeypatch, capsys) -> None:
 
     assert result == 0
     assert calls == 1
-    assert "phase: candidate" in capsys.readouterr().out
+    assert f"phase: {expected_phase}" in capsys.readouterr().out
