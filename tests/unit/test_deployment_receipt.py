@@ -54,11 +54,18 @@ SCHEMA_PATH = (
     / "v1"
     / "deployment-receipt.schema.json"
 )
-FIXTURE_PATH = (
+V1_FIXTURE_PATH = (
     REPOSITORY_ROOT
     / "tests"
     / "fixtures"
     / "receipt-v1"
+    / "local-synthetic-receipt.json"
+)
+V2_FIXTURE_PATH = (
+    REPOSITORY_ROOT
+    / "tests"
+    / "fixtures"
+    / "receipt-v2"
     / "local-synthetic-receipt.json"
 )
 SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -95,12 +102,12 @@ def _receipt():
     return spec, outcome, receipt
 
 
-def _expected(spec, outcome) -> dict[str, Any]:
+def _expected(spec, outcome, *, version: str = "0.2.0.dev0") -> dict[str, Any]:
     return {
         "expected_spec": spec,
         "expected_outcome": outcome,
         "expected_source_repository_commit": SOURCE_COMMIT,
-        "expected_inferdrome_version": "0.1.0",
+        "expected_inferdrome_version": version,
         "expected_provider_adapter": PROVIDER_IDENTITY,
         "expected_runtime_adapter": RUNTIME_IDENTITY,
     }
@@ -136,16 +143,35 @@ def test_committed_schema_is_closed_and_current() -> None:
     assert_closed(committed)
 
 
-def test_deterministic_synthetic_vector_and_identity_rules() -> None:
-    spec, outcome, receipt = _receipt()
-    fixture_bytes = FIXTURE_PATH.read_bytes()
-    assert fixture_bytes == canonical_deployment_receipt_bytes(receipt)
-    assert parse_deployment_receipt_json(fixture_bytes) == receipt
+def test_frozen_v1_synthetic_vector_is_preserved_byte_for_byte() -> None:
+    spec = _spec()
+    outcome = _outcome(spec)
+    fixture_bytes = V1_FIXTURE_PATH.read_bytes()
+    receipt = parse_deployment_receipt_json(fixture_bytes)
+
     assert receipt.receipt_id == deployment_receipt_id(receipt)
     assert sha256_digest(fixture_bytes) == (
         "sha256:f38482a3966797447610904af75f2b8b9a9c52531f48784727c063f55aa570e0"
     )
-    assert deployment_receipt_sha256(receipt) == sha256_digest(fixture_bytes)
+    assert verify_deployment_receipt(
+        receipt, **_expected(spec, outcome, version="0.1.0")
+    ) == receipt
+
+
+def test_deterministic_v2_synthetic_vector_and_identity_rules() -> None:
+    spec, outcome, receipt = _receipt()
+    fixture_bytes = V2_FIXTURE_PATH.read_bytes()
+    # This additive fixture remains exact canonical receipt bytes; the frozen
+    # v1 fixture above remains byte-for-byte historical evidence.
+    assert fixture_bytes == canonical_deployment_receipt_bytes(receipt)
+    assert parse_deployment_receipt_json(fixture_bytes) == receipt
+    assert receipt.receipt_id == deployment_receipt_id(receipt)
+    assert sha256_digest(fixture_bytes) == (
+        "sha256:6864fce81ca9331442c2597d6898474a0311048a007232e25f8a8b21dbc4e7ff"
+    )
+    assert deployment_receipt_sha256(receipt) == sha256_digest(
+        canonical_deployment_receipt_bytes(receipt)
+    )
     assert verify_deployment_receipt(receipt, **_expected(spec, outcome)) == receipt
     assert (
         verify_deployment_receipt_bytes(fixture_bytes, **_expected(spec, outcome))

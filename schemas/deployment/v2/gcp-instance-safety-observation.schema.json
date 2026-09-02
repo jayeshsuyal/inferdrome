@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "GcpExecutionLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_execution_v1",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "plan_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "provider-envelope",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "controller_id",
+        "plan_id",
+        "arm_id",
+        "managed_by",
+        "role"
+      ],
+      "title": "GcpExecutionLabels",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-instance-safety-observation:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Provider-observed termination and boot-disk safeguards after create.",
+  "properties": {
+    "automatic_restart": {
+      "const": false,
+      "title": "Automatic Restart",
+      "type": "boolean"
+    },
+    "boot_disk_auto_delete": {
+      "const": true,
+      "title": "Boot Disk Auto Delete",
+      "type": "boolean"
+    },
+    "deletion_protection": {
+      "const": false,
+      "title": "Deletion Protection",
+      "type": "boolean"
+    },
+    "instance_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "instance_termination_action": {
+      "const": "DELETE",
+      "title": "Instance Termination Action",
+      "type": "string"
+    },
+    "labels": {
+      "$ref": "#/$defs/GcpExecutionLabels"
+    },
+    "maintenance_policy": {
+      "const": "TERMINATE",
+      "title": "Maintenance Policy",
+      "type": "string"
+    },
+    "max_run_duration_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Max Run Duration Seconds",
+      "type": "integer"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-instance-safety-observation.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "request_digest",
+    "project_id",
+    "zone",
+    "instance_name",
+    "labels",
+    "boot_disk_auto_delete",
+    "deletion_protection",
+    "automatic_restart",
+    "maintenance_policy",
+    "max_run_duration_seconds",
+    "instance_termination_action"
+  ],
+  "title": "GcpInstanceSafetyObservation",
+  "type": "object"
+}

@@ -1,0 +1,126 @@
+{
+  "$defs": {
+    "GcpExecutionLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_execution_v1",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "plan_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "provider-envelope",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "controller_id",
+        "plan_id",
+        "arm_id",
+        "managed_by",
+        "role"
+      ],
+      "title": "GcpExecutionLabels",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-owned-instance:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One exact provider-observed instance attached to a v2 boot disk.\n\nThe frozen v1 instance observation does not expose a stable provider ID.\nThis additive read-only fact prevents a same-name replacement instance\nfrom being treated as the one that owns the observed boot attachment.",
+  "properties": {
+    "instance_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "labels": {
+      "$ref": "#/$defs/GcpExecutionLabels"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "provider_instance_id": {
+      "maximum": 10000000000000000000,
+      "minimum": 1,
+      "title": "Provider Instance Id",
+      "type": "integer"
+    },
+    "region": {
+      "maxLength": 32,
+      "minLength": 5,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+      "title": "Region",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-owned-instance.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "self_link": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Self Link",
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "RUNNING",
+        "TERMINATED"
+      ],
+      "title": "State",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "request_digest",
+    "project_id",
+    "region",
+    "zone",
+    "instance_name",
+    "provider_instance_id",
+    "self_link",
+    "labels",
+    "state"
+  ],
+  "title": "GcpV2ExactOwnedInstance",
+  "type": "object"
+}

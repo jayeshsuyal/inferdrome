@@ -1,0 +1,61 @@
+{
+  "$id": "urn:inferdrome:gcp-startup-projection:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Content-addressed local payload binding, not a signature or authority.",
+  "properties": {
+    "environment_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Environment Digest",
+      "type": "string"
+    },
+    "execution_payload_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Execution Payload Digest",
+      "type": "string"
+    },
+    "projection_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Projection Id",
+      "type": "string"
+    },
+    "projection_kind": {
+      "const": "opaque_execution_payload_binding",
+      "title": "Projection Kind",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-startup-projection.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "startup_script_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Startup Script Digest"
+    }
+  },
+  "required": [
+    "schema_version",
+    "projection_kind",
+    "request_digest",
+    "environment_digest",
+    "startup_script_digest",
+    "execution_payload_digest",
+    "projection_id"
+  ],
+  "title": "GcpV2StartupProjection",
+  "type": "object"
+}

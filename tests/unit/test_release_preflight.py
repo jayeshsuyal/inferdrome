@@ -30,17 +30,42 @@ def _minimal_repository(root: Path) -> None:
         (root / relative_path).write_bytes(
             (REPOSITORY_ROOT / relative_path).read_bytes()
         )
+    for relative_path, _expected_digest in (
+        release_preflight.FROZEN_V0_1_CLOSURE_FILE_SHA256
+    ):
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((REPOSITORY_ROOT / relative_path).read_bytes())
+    for relative_path, _expected_digest in (
+        release_preflight.FROZEN_PROTECTED_PATH_SHA256
+    ):
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((REPOSITORY_ROOT / relative_path).read_bytes())
     (root / "src/inferdrome/__init__.py").write_text(
-        '__version__ = "0.1.0.dev0"\n',
+        f'__version__ = "{release_preflight.DEVELOPMENT_VERSION}"\n',
         encoding="utf-8",
     )
+    document_markers = dict(release_preflight.DOCUMENT_MARKERS)
     for relative_path, markers in release_preflight.DOCUMENT_MARKERS:
         (root / relative_path).write_text("\n".join(markers), encoding="utf-8")
-    checklist = root / "docs/V0_1_RELEASE_CHECKLIST.md"
+    inputs = root / release_preflight.ACTIVE_RELEASE_SERIES.inputs_path
+    inputs.write_text(
+        "\n".join(
+            (
+                *document_markers[release_preflight.ACTIVE_RELEASE_SERIES.inputs_path],
+                *release_preflight.ACTIVE_RELEASE_SERIES.input_markers,
+            )
+        ),
+        encoding="utf-8",
+    )
+    checklist = root / release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
     checklist.write_text(
         "\n".join(
             [
-                *release_preflight.DOCUMENT_MARKERS[3][1],
+                *document_markers[
+                    release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
+                ],
                 *(
                     f"- [ ] {item.marker}"
                     for item in release_preflight.MANUAL_RELEASE_ITEMS
@@ -119,6 +144,207 @@ def test_engineering_ci_preflight_resolves_phase_and_fetches_tags() -> None:
     assert '--phase "$RELEASE_PREFLIGHT_PHASE"' in engineering_job
 
 
+def test_active_preflight_series_uses_distinct_v0_2_release_inputs() -> None:
+    series = release_preflight.ACTIVE_RELEASE_SERIES
+    source = (REPOSITORY_ROOT / "scripts/release_preflight.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert series.name == "v0.2"
+    assert series.development_version == "0.2.0.dev0"
+    assert series.final_version == "0.2.0"
+    assert series.final_tag == "v0.2.0"
+    assert series.checklist_path == "docs/V0_2_RELEASE_CHECKLIST.md"
+    assert series.inputs_path == "docs/V0_2_RELEASE_INPUTS.md"
+    assert "docs/V0_1_RELEASE_CHECKLIST.md" not in release_preflight.REQUIRED_FILES
+    assert "active v0.2 release-series preflight" in source
+    assert "Inferdrome {ACTIVE_RELEASE_SERIES.name} release preflight" in source
+    assert (
+        "offline v0.2 release preflight"
+        in release_preflight.build_parser().format_help()
+    )
+
+
+def test_v0_2_release_inputs_fail_closed_when_a_required_input_is_missing(
+    tmp_path: Path,
+) -> None:
+    _minimal_repository(tmp_path)
+    inputs_path = tmp_path / release_preflight.ACTIVE_RELEASE_SERIES.inputs_path
+    missing_marker = release_preflight.ACTIVE_RELEASE_SERIES.input_markers[-1]
+    inputs_path.write_text(
+        inputs_path.read_text(encoding="utf-8").replace(missing_marker, ""),
+        encoding="utf-8",
+    )
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    input_check = _named_check(checks, "release-series-inputs")
+    assert input_check.status == "FAIL"
+    assert missing_marker in input_check.detail
+
+
+@pytest.mark.parametrize("relative_path", release_preflight.REQUIRED_FILES)
+def test_active_release_files_reject_symlink_indirection(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    path = tmp_path / relative_path
+    outside_target = tmp_path / "outside-release-input"
+    outside_target.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(outside_target)
+
+    with pytest.raises(release_preflight._RepositoryFileError, match="unsafe"):
+        release_preflight._read_repository_regular_bytes(tmp_path, relative_path)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    required = _named_check(checks, "required-files")
+    assert required.status == "FAIL"
+    assert relative_path in required.detail
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    release_preflight.ACTIVE_RELEASE_SERIES.required_files,
+)
+def test_active_v0_2_input_and_checklist_symlinks_fail_their_own_checks(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    path = tmp_path / relative_path
+    outside_target = tmp_path / "outside-v0-2-input"
+    outside_target.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(outside_target)
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    assert _named_check(checks, "release-series-inputs").status == "FAIL"
+    assert relative_path in _named_check(checks, "release-series-inputs").detail
+    if relative_path == release_preflight.ACTIVE_RELEASE_SERIES.checklist_path:
+        assert all(
+            _named_check(checks, f"manual-{item.name}").status == "FAIL"
+            for item in release_preflight.MANUAL_RELEASE_ITEMS
+        )
+
+
+def test_active_v0_2_inputs_reject_an_intermediate_directory_symlink(
+    tmp_path: Path,
+) -> None:
+    _minimal_repository(tmp_path)
+    docs = tmp_path / "docs"
+    relocated_docs = tmp_path / "relocated-docs"
+    docs.rename(relocated_docs)
+    docs.symlink_to(relocated_docs, target_is_directory=True)
+
+    with pytest.raises(release_preflight._RepositoryFileError, match="unsafe"):
+        release_preflight._read_repository_regular_text(
+            tmp_path,
+            release_preflight.ACTIVE_RELEASE_SERIES.inputs_path,
+        )
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    assert _named_check(checks, "release-series-inputs").status == "FAIL"
+
+
+def test_frozen_v0_1_closure_records_match_the_v0_1_0_baseline() -> None:
+    check = release_preflight._check_frozen_v0_1_closure_records(REPOSITORY_ROOT)
+
+    assert (
+        release_preflight.V0_1_RELEASE_BASE_COMMIT
+        == "a9e325de4794f741453e37df515a595060d5a2ca"
+    )
+    assert check.status == "PASS"
+    assert "frozen SHA-256" in check.detail
+
+
+def test_frozen_protected_path_baseline_matches_the_v0_1_0_manifest() -> None:
+    check = release_preflight._check_frozen_protected_path_baseline(
+        REPOSITORY_ROOT
+    )
+
+    assert len(release_preflight.FROZEN_PROTECTED_PATH_SHA256) == 43
+    assert check.status == "PASS"
+    assert "match their v0.1.0 baseline" in check.detail
+
+
+@pytest.mark.parametrize("mode", ("drift", "extra", "symlink"))
+def test_frozen_protected_path_baseline_fails_closed(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    relative_path = release_preflight.FROZEN_PROTECTED_PATH_SHA256[-1][0]
+    path = tmp_path / relative_path
+    if mode == "drift":
+        path.write_bytes(path.read_bytes() + b"\nlocal mutation\n")
+    elif mode == "extra":
+        extra = tmp_path / "evidence/gpu/2026-08-23-qwen3-8b-a100-sxm4/extra.json"
+        extra.write_text("{}\n", encoding="utf-8")
+    else:
+        outside_target = tmp_path / "outside-frozen-record"
+        outside_target.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(outside_target)
+
+    check = release_preflight._check_frozen_protected_path_baseline(tmp_path)
+
+    assert check.status == "FAIL"
+    if mode == "drift":
+        assert "SHA-256 differs" in check.detail
+    elif mode == "extra":
+        assert "not present in v0.1.0 protected baseline" in check.detail
+    else:
+        assert "symlink" in check.detail
+
+
+def test_v0_1_closure_record_hash_drift_fails_closed(tmp_path: Path) -> None:
+    _minimal_repository(tmp_path)
+    relative_path, _expected_digest = (
+        release_preflight.FROZEN_V0_1_CLOSURE_FILE_SHA256[0]
+    )
+    path = tmp_path / relative_path
+    path.write_bytes(path.read_bytes() + b"\nlocal mutation\n")
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    check = _named_check(checks, "frozen-v0-1-closure-records")
+    assert check.status == "FAIL"
+    assert relative_path in check.detail
+
+
 def test_python_ci_uses_the_hash_locked_frozen_environment() -> None:
     workflow = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
@@ -194,8 +420,11 @@ def test_uv_lock_metadata_drift_fails_lock_check(tmp_path: Path) -> None:
     lock_path = tmp_path / "uv.lock"
     lock_path.write_text(
         lock_path.read_text(encoding="utf-8").replace(
-            'name = "inferdrome"\nversion = "0.1.0.dev0"',
-            'name = "inferdrome"\nversion = "0.1.0"',
+            (
+                'name = "inferdrome"\nversion = '
+                f'"{release_preflight.DEVELOPMENT_VERSION}"'
+            ),
+            f'name = "inferdrome"\nversion = "{release_preflight.FINAL_VERSION}"',
             1,
         ),
         encoding="utf-8",
@@ -539,8 +768,8 @@ def test_development_version_mismatch_fails_closed(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
     _set_package_versions(
         tmp_path,
-        project_version="0.1.0",
-        package_version="0.1.0.dev0",
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.DEVELOPMENT_VERSION,
     )
 
     checks = release_preflight.run_preflight(
@@ -553,7 +782,7 @@ def test_development_version_mismatch_fails_closed(tmp_path: Path) -> None:
 
     version_check = next(check for check in checks if check.name == "package-version")
     assert version_check.status == "FAIL"
-    assert "0.1.0.dev0" in version_check.detail
+    assert release_preflight.DEVELOPMENT_VERSION in version_check.detail
 
 
 def test_auto_phase_selects_candidate_for_exact_development_versions(
@@ -583,7 +812,11 @@ def test_auto_phase_selects_final_pre_tag_for_exact_final_versions(
     monkeypatch,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
 
     def fake_run(
         command: list[str],
@@ -621,7 +854,10 @@ def test_auto_phase_selects_final_pre_tag_for_exact_final_versions(
 
 @pytest.mark.parametrize(
     ("project_version", "package_version"),
-    (("0.2.0", "0.2.0"), ("0.1.0", "0.1.0.dev0")),
+    (
+        ("0.1.0", "0.1.0"),
+        (release_preflight.FINAL_VERSION, release_preflight.DEVELOPMENT_VERSION),
+    ),
 )
 def test_auto_phase_rejects_unknown_or_mismatched_versions(
     tmp_path: Path,
@@ -688,12 +924,14 @@ def test_final_pre_tag_requires_final_version_and_license_artifact(
 ) -> None:
     _minimal_repository(tmp_path)
     (tmp_path / "LICENSE").unlink()
-    (tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md").write_text(
-        (tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md")
+    checklist_path = tmp_path / release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
+    authorization = release_preflight.MANUAL_RELEASE_ITEMS[-1]
+    checklist_path.write_text(
+        checklist_path
         .read_text(encoding="utf-8")
         .replace(
-            "- [ ] Select and add the repository license",
-            "- [x] Select and add the repository license",
+            f"- [ ] {authorization.marker}",
+            f"- [x] {authorization.marker}",
         ),
         encoding="utf-8",
     )
@@ -715,12 +953,12 @@ def test_final_pre_tag_requires_final_version_and_license_artifact(
 
     version_check = next(check for check in checks if check.name == "package-version")
     license_check = next(check for check in checks if check.name == "license-artifact")
-    manual_license = next(
-        check for check in checks if check.name == "manual-license-selection"
+    manual_authorization = next(
+        check for check in checks if check.name == f"manual-{authorization.name}"
     )
     assert version_check.status == "FAIL"
     assert license_check.status == "FAIL"
-    assert manual_license.status == "MANUAL"
+    assert manual_authorization.status == "MANUAL"
 
 
 def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
@@ -728,7 +966,11 @@ def test_final_pre_tag_can_pass_machine_checks_without_a_tag(
     monkeypatch,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
 
     def fake_run(
         command: list[str],
@@ -767,8 +1009,12 @@ def test_pre_tag_ready_without_aggregate_ci_or_tag(
     capsys,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
-    checklist = tmp_path / "docs/V0_1_RELEASE_CHECKLIST.md"
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
+    checklist = tmp_path / release_preflight.ACTIVE_RELEASE_SERIES.checklist_path
     checklist_text = checklist.read_text(encoding="utf-8")
     for item in release_preflight.MANUAL_RELEASE_ITEMS:
         checklist_text = checklist_text.replace(
@@ -819,9 +1065,78 @@ def test_pre_tag_ready_without_aggregate_ci_or_tag(
     assert "explicit owner authorization" in output
 
 
+def test_completed_v0_1_records_cannot_yield_v0_2_pre_tag_ready(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _minimal_repository(tmp_path)
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
+    completed_legacy_record = tmp_path / "historical/V0_1_RELEASE_CHECKLIST.md"
+    completed_legacy_record.parent.mkdir(parents=True)
+    completed_legacy_record.write_text(
+        re.sub(
+            r"(?m)^- \[ \]",
+            "- [x]",
+            (REPOSITORY_ROOT / "docs/V0_1_RELEASE_CHECKLIST.md").read_text(
+                encoding="utf-8"
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["git", "status", "--porcelain=v1"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "show-ref", "--verify", "--quiet"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        assert Path(command[0]).name in {"engineering_gate.sh", "dashboard_gate.sh"}
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(release_preflight.subprocess, "run", fake_run)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="final-pre-tag",
+        repository_only=False,
+        require_clean=True,
+        run_gates=True,
+    )
+
+    assert _named_check(checks, "release-series-inputs").status == "PASS"
+    assert _named_check(checks, "frozen-v0-1-closure-records").status == "PASS"
+    assert all(
+        _named_check(checks, f"manual-{item.name}").status == "PENDING"
+        for item in release_preflight.MANUAL_RELEASE_ITEMS
+    )
+    assert release_preflight._has_pending_manual_input(checks)
+
+    release_preflight._print_report(
+        checks,
+        phase="final-pre-tag",
+        repository_only=False,
+        run_gates=True,
+    )
+    output = capsys.readouterr().out
+    assert "result: BLOCKED" in output
+    assert "PRE_TAG_READY" not in output
+
+
 def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     _git(
@@ -843,9 +1158,9 @@ def test_post_tag_auto_selects_tag_at_head(tmp_path: Path) -> None:
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
 
     checks = release_preflight.run_preflight(
@@ -867,7 +1182,11 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
     tmp_path: Path,
 ) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     commit_arguments = (
@@ -882,7 +1201,7 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
     )
     _git(tmp_path, *commit_arguments)
 
-    _git(tmp_path, "tag", "v0.1.0")
+    _git(tmp_path, "tag", release_preflight.FINAL_TAG)
     lightweight_checks = release_preflight.run_preflight(
         tmp_path,
         phase="post-tag",
@@ -896,7 +1215,7 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
     assert lightweight_tag_check.status == "FAIL"
     assert "not an annotated tag" in lightweight_tag_check.detail
 
-    _git(tmp_path, "tag", "--delete", "v0.1.0")
+    _git(tmp_path, "tag", "--delete", release_preflight.FINAL_TAG)
     _git(
         tmp_path,
         "-c",
@@ -905,9 +1224,9 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
     annotated_checks = release_preflight.run_preflight(
         tmp_path,
@@ -924,7 +1243,11 @@ def test_post_tag_rejects_lightweight_tag_but_accepts_annotated_tag(
 
 def test_post_tag_auto_rejects_tag_elsewhere(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     commit_arguments = (
@@ -945,9 +1268,9 @@ def test_post_tag_auto_rejects_tag_elsewhere(tmp_path: Path) -> None:
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
     (tmp_path / "README.md").write_text("post-tag commit\n", encoding="utf-8")
     _git(tmp_path, "add", "README.md")
@@ -993,7 +1316,11 @@ def test_release_docs_do_not_require_a_post_tag_repository_commit() -> None:
 
 def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
 
     def fake_run(
         command: list[str],
@@ -1003,7 +1330,7 @@ def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> 
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[:3] == ["git", "cat-file", "-t"]:
             return subprocess.CompletedProcess(command, 0, stdout="tag\n", stderr="")
-        if "refs/tags/v0.1.0^{commit}" in command:
+        if f"refs/tags/{release_preflight.FINAL_TAG}^{{commit}}" in command:
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -1034,7 +1361,11 @@ def test_post_tag_requires_tag_to_point_to_head(tmp_path: Path, monkeypatch) -> 
 
 def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> None:
     _minimal_repository(tmp_path)
-    _set_package_versions(tmp_path, project_version="0.1.0", package_version="0.1.0")
+    _set_package_versions(
+        tmp_path,
+        project_version=release_preflight.FINAL_VERSION,
+        package_version=release_preflight.FINAL_VERSION,
+    )
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "add", ".")
     _git(
@@ -1069,9 +1400,9 @@ def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> N
         "user.email=test@example.invalid",
         "tag",
         "-a",
-        "v0.1.0",
+        release_preflight.FINAL_TAG,
         "-m",
-        "Inferdrome v0.1.0",
+        f"Inferdrome {release_preflight.FINAL_TAG}",
     )
     pre_tag_after_tag = release_preflight.run_preflight(
         tmp_path,
@@ -1094,7 +1425,7 @@ def test_tag_phases_use_the_actual_repository_tag_namespace(tmp_path: Path) -> N
     )
     tag_check = next(check for check in post_tag_checks if check.name == "release-tag")
     assert tag_check.status == "PASS"
-    assert "v0.1.0 points to HEAD" in tag_check.detail
+    assert f"{release_preflight.FINAL_TAG} points to HEAD" in tag_check.detail
 
 
 def test_release_closure_reports_open_manual_inputs(capsys) -> None:
@@ -1104,7 +1435,7 @@ def test_release_closure_reports_open_manual_inputs(capsys) -> None:
     assert result == 1
     assert "[SKIPPED] engineering-gate" in captured
     assert "phase: candidate" in captured
-    assert "[PENDING] manual-exitspec-outcomes" in captured
+    assert "[PENDING] manual-v0-2-scope-review" in captured
     assert "result: BLOCKED" in captured
 
 

@@ -1,0 +1,257 @@
+{
+  "$defs": {
+    "GcpExecutionLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_execution_v1",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "plan_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "provider-envelope",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "controller_id",
+        "plan_id",
+        "arm_id",
+        "managed_by",
+        "role"
+      ],
+      "title": "GcpExecutionLabels",
+      "type": "object"
+    },
+    "GcpInstanceObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "accelerator_count": {
+          "maximum": 16,
+          "minimum": 1,
+          "title": "Accelerator Count",
+          "type": "integer"
+        },
+        "accelerator_model": {
+          "const": "NVIDIA A100-SXM4-40GB",
+          "title": "Accelerator Model",
+          "type": "string"
+        },
+        "accelerator_provider_type": {
+          "anyOf": [
+            {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Accelerator Provider Type"
+        },
+        "external_access_config": {
+          "const": "absent",
+          "title": "External Access Config",
+          "type": "string"
+        },
+        "external_ipv6_present": {
+          "const": false,
+          "default": false,
+          "title": "External Ipv6 Present",
+          "type": "boolean"
+        },
+        "instance_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Instance Name",
+          "type": "string"
+        },
+        "ip_forwarding": {
+          "const": false,
+          "title": "Ip Forwarding",
+          "type": "boolean"
+        },
+        "labels": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GcpExecutionLabels"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "machine_type": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?$",
+          "title": "Machine Type",
+          "type": "string"
+        },
+        "network": {
+          "anyOf": [
+            {
+              "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Network"
+        },
+        "private_ipv4_addresses": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Private Ipv4 Addresses",
+          "type": "array"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "stack_type": {
+          "const": "IPV4_ONLY",
+          "default": "IPV4_ONLY",
+          "title": "Stack Type",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "RUNNING",
+            "TERMINATED",
+            "NOT_FOUND"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "subnetwork": {
+          "anyOf": [
+            {
+              "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subnetwork"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instance_name",
+        "project_id",
+        "zone",
+        "machine_type",
+        "accelerator_model",
+        "accelerator_count",
+        "state",
+        "labels",
+        "external_access_config",
+        "ip_forwarding"
+      ],
+      "title": "GcpInstanceObservation",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-owned-resource-inventory:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A bounded, exhaustive read-only owned-instance inventory.\n\nThis is a v0.2 supervisory input, not a replacement for the frozen v1\nexecution request or lease.  A controller must never treat an empty\npartial page as evidence that an owned resource is absent.",
+  "properties": {
+    "instances": {
+      "items": {
+        "$ref": "#/$defs/GcpInstanceObservation"
+      },
+      "maxItems": 256,
+      "title": "Instances",
+      "type": "array"
+    },
+    "labels": {
+      "$ref": "#/$defs/GcpExecutionLabels"
+    },
+    "pagination_complete": {
+      "const": true,
+      "title": "Pagination Complete",
+      "type": "boolean"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "region": {
+      "maxLength": 32,
+      "minLength": 5,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+      "title": "Region",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-owned-resource-inventory.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "request_digest",
+    "project_id",
+    "region",
+    "zone",
+    "labels",
+    "instances",
+    "pagination_complete"
+  ],
+  "title": "GcpOwnedResourceInventory",
+  "type": "object"
+}

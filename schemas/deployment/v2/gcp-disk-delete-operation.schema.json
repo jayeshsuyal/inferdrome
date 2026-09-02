@@ -1,0 +1,119 @@
+{
+  "$defs": {
+    "GcpExecutionLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "arm_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_execution_v1",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "plan_id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "role": {
+          "const": "provider-envelope",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "controller_id",
+        "plan_id",
+        "arm_id",
+        "managed_by",
+        "role"
+      ],
+      "title": "GcpExecutionLabels",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-disk-delete-operation:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An exact delete operation returned by an injected local transport.",
+  "properties": {
+    "disk_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Disk Name",
+      "type": "string"
+    },
+    "instance_name": {
+      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "labels": {
+      "$ref": "#/$defs/GcpExecutionLabels"
+    },
+    "operation_id": {
+      "pattern": "^disk-op-[a-z0-9]{8,64}$",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "operation_name": {
+      "pattern": "^[a-zA-Z0-9_./-]{1,256}$",
+      "title": "Operation Name",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Digest",
+      "type": "string"
+    },
+    "request_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-disk-delete-operation.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "operation_id",
+    "operation_name",
+    "request_id",
+    "request_digest",
+    "project_id",
+    "zone",
+    "instance_name",
+    "disk_name",
+    "labels"
+  ],
+  "title": "GcpV2DiskDeleteOperation",
+  "type": "object"
+}
