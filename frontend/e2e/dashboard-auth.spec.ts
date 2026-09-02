@@ -17,6 +17,7 @@ interface DashboardRoots {
   readonly trialSets: string;
   readonly comparisonPlans: string;
   readonly comparisonResults: string;
+  readonly routingCampaigns: string;
 }
 
 function pythonExecutable(): string {
@@ -63,12 +64,36 @@ function prepareFixture(root: string): DashboardRoots {
   if (summary.claim_boundary !== "SYNTHETIC_ONLY") {
     throw new Error("authenticated dashboard fixture was not synthetic-only");
   }
+  const routingCampaigns = join(root, "routing-campaign-package");
+  const campaignRoot = join(REPOSITORY_ROOT, "campaigns", "routing-campaign-v1");
+  const campaign = spawnSync(
+    pythonExecutable(),
+    [
+      "-m", "inferdrome.routing_campaign", "run",
+      "--campaign-plan", join(campaignRoot, "stale-load-fresh-health.plan.json"),
+      "--request-trace", join(campaignRoot, "stale-load-fresh-health.trace.jsonl"),
+      "--fault-schedule", join(campaignRoot, "stale-load-fresh-health.fault-schedule.json"),
+      "--trial-plan", join(campaignRoot, "trial-plan.json"),
+      "--output", routingCampaigns,
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+      env: environment(),
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    },
+  );
+  if (campaign.status !== 0 || campaign.error || !existsSync(routingCampaigns)) {
+    throw new Error(`authenticated routing-campaign fixture failed:\n${campaign.stderr || campaign.stdout}`);
+  }
   return {
     root,
     runs: summary.roots.runs,
     trialSets: summary.roots.trial_sets,
     comparisonPlans: summary.roots.comparison_plans,
     comparisonResults: summary.roots.comparison_results,
+    routingCampaigns,
   };
 }
 
@@ -110,7 +135,9 @@ async function startServer(paths: DashboardRoots, keyring: string): Promise<{ re
       "-m", "inferdrome", "dashboard", "--keyring", keyring,
       "--runs-root", paths.runs, "--trial-sets-root", paths.trialSets,
       "--comparison-plans-root", paths.comparisonPlans,
-      "--comparison-results-root", paths.comparisonResults, "--port", String(port),
+      "--comparison-results-root", paths.comparisonResults,
+      "--routing-campaigns-root", paths.routingCampaigns,
+      "--port", String(port),
     ],
     { cwd: REPOSITORY_ROOT, env: environment(), stdio: ["ignore", "ignore", "pipe"] },
   );
@@ -160,13 +187,19 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     const started = await startServer(paths, keyring.path);
     server = started.process;
     const unauthenticated = await page.request.get(`${started.url}/api/v1/runs`);
+    const unauthenticatedCampaigns = await page.request.get(`${started.url}/api/v1/routing-campaigns`);
     const health = await page.request.get(`${started.url}/api/v1/health`);
     const authenticated = await page.request.get(`${started.url}/api/v1/runs`, {
       headers: { Authorization: `Bearer ${keyring.token}` },
     });
+    const authenticatedCampaigns = await page.request.get(`${started.url}/api/v1/routing-campaigns`, {
+      headers: { Authorization: `Bearer ${keyring.token}` },
+    });
     expect(unauthenticated.status()).toBe(401);
+    expect(unauthenticatedCampaigns.status()).toBe(401);
     expect(health.status()).toBe(200);
     expect(authenticated.status()).toBe(200);
+    expect(authenticatedCampaigns.status()).toBe(200);
 
     const protectedRequests: Array<{ readonly url: string; readonly authorization: string | undefined }> = [];
     const browserErrors: string[] = [];
@@ -206,6 +239,13 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     await page.getByRole("link", { name: "Controlled comparisons", exact: true }).click();
     await page.getByRole("link", { name: "Compare two runs", exact: true }).first().click();
     await expect(page.getByRole("heading", { name: "Compare runs", level: 1 })).toBeVisible();
+    await page.getByRole("link", { name: "Routing campaigns", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Verified routing campaigns", level: 2 })).toBeVisible();
+    const routingHref = await page.locator("a.routing-campaign-link:visible").first().getAttribute("href");
+    expect(routingHref).toBe("/routing-campaigns/routing-campaign-v1");
+    await page.locator(`a[href="${routingHref}"]`).first().click();
+    await expect(page.getByRole("heading", { name: "Fault timeline", level: 2 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Complete terminal population", level: 2 }).first()).toBeVisible();
     await page.getByRole("button", { name: "Lock dashboard" }).click();
     await expect(page.getByRole("heading", { name: "Unlock evidence views" })).toBeVisible();
 

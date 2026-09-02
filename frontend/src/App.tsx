@@ -9,6 +9,8 @@ import { ControlledComparisonDetailView } from "./views/ControlledComparisonDeta
 import { ControlledComparisonsView } from "./views/ControlledComparisonsView";
 import { EvidenceView } from "./views/EvidenceView";
 import { RunDetailView } from "./views/RunDetailView";
+import { RoutingCampaignDetailView } from "./views/RoutingCampaignDetailView";
+import { RoutingCampaignsView } from "./views/RoutingCampaignsView";
 import { RunsView } from "./views/RunsView";
 import { TrialSetDetailView } from "./views/TrialSetDetailView";
 import { TrialSetsView } from "./views/TrialSetsView";
@@ -34,6 +36,8 @@ export function App() {
   else if (/^\/runs\/[^/]+\/?$/.test(pathname)) view = <RunDetailView />;
   else if (pathname === "/trial-sets" || pathname === "/trial-sets/") view = <TrialSetsView />;
   else if (/^\/trial-sets\/[^/]+\/?$/.test(pathname)) view = <TrialSetDetailView />;
+  else if (pathname === "/routing-campaigns" || pathname === "/routing-campaigns/") view = <RoutingCampaignsView />;
+  else if (/^\/routing-campaigns\/[^/]+\/?$/.test(pathname)) view = <RoutingCampaignDetailView />;
   else if (pathname === "/comparisons" || pathname === "/comparisons/") view = <ControlledComparisonsView />;
   else if (/^\/comparisons\/[^/]+\/?$/.test(pathname)) view = <ControlledComparisonDetailView />;
   else if (pathname === "/compare" || pathname === "/compare/") view = <CompareView />;

@@ -25,6 +25,7 @@ const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../.."
 const SOURCE_ROOT = join(REPOSITORY_ROOT, "src");
 const FIXTURE_PREFIX = "inferdrome-dashboard-e2e-";
 const PLAN_ID = "comparison-plan-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const ROUTING_CAMPAIGN_ID = "routing-campaign-v1";
 
 interface LocalDemoSummary {
   readonly claim_boundary: string;
@@ -48,6 +49,7 @@ interface FixturePaths {
   readonly trialSets: string;
   readonly comparisonPlans: string;
   readonly comparisonResults: string;
+  readonly routingCampaigns: string;
 }
 
 let fixture: FixturePaths | undefined;
@@ -107,6 +109,34 @@ function prepareLocalDemoFixture(root: string): LocalDemoSummary {
   }
 }
 
+function prepareRoutingCampaignFixture(root: string): string {
+  const routingCampaigns = join(root, "routing-campaign-package");
+  const campaignRoot = join(REPOSITORY_ROOT, "campaigns", "routing-campaign-v1");
+  const result = spawnSync(
+    pythonExecutable(),
+    [
+      "-m", "inferdrome.routing_campaign", "run",
+      "--campaign-plan", join(campaignRoot, "stale-load-fresh-health.plan.json"),
+      "--request-trace", join(campaignRoot, "stale-load-fresh-health.trace.jsonl"),
+      "--fault-schedule", join(campaignRoot, "stale-load-fresh-health.fault-schedule.json"),
+      "--trial-plan", join(campaignRoot, "trial-plan.json"),
+      "--output", routingCampaigns,
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+      env: inferdromeEnvironment(),
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0 || !existsSync(routingCampaigns)) {
+    throw new Error(`routing-campaign fixture preparation failed:\n${result.stderr || result.stdout}`);
+  }
+  return routingCampaigns;
+}
+
 function createPopulatedFixture(): FixturePaths {
   const root = mkdtempSync(join(tmpdir(), FIXTURE_PREFIX));
   const paths: FixturePaths = {
@@ -115,6 +145,7 @@ function createPopulatedFixture(): FixturePaths {
     trialSets: join(root, "trial-sets"),
     comparisonPlans: join(root, "comparison-plans"),
     comparisonResults: join(root, "comparison-results"),
+    routingCampaigns: join(root, "routing-campaign-package"),
   };
   try {
     const prepared = prepareLocalDemoFixture(root);
@@ -135,6 +166,9 @@ function createPopulatedFixture(): FixturePaths {
       || resolve(preparedRoots.comparison_results) !== resolve(paths.comparisonResults)
     ) {
       throw new Error("The local demo prepared dashboard roots outside its fixture.");
+    }
+    if (resolve(prepareRoutingCampaignFixture(root)) !== resolve(paths.routingCampaigns)) {
+      throw new Error("The routing-campaign fixture was prepared outside its fixture root.");
     }
     return paths;
   } catch (error) {
@@ -185,6 +219,8 @@ async function startDashboardServer(paths: FixturePaths): Promise<string> {
       paths.comparisonPlans,
       "--comparison-results-root",
       paths.comparisonResults,
+      "--routing-campaigns-root",
+      paths.routingCampaigns,
       "--port",
       String(port),
     ],
@@ -413,6 +449,21 @@ test.describe("populated dashboard", () => {
     await expect(baseline).toHaveValue(candidateBefore);
     await expect(candidate).toHaveValue(baselineBefore);
 
+    await dashboardNavigation(page).getByRole("link", { name: "Routing campaigns", exact: true }).click();
+    await expectPath(page, "/routing-campaigns");
+    visitedByClick.add("/routing-campaigns");
+    await expect(page.getByRole("heading", { name: "Verified routing campaigns", level: 2 })).toBeVisible();
+    const routingCampaignLink = page.locator("a.routing-campaign-link:visible").first();
+    const routingCampaignHref = await routingCampaignLink.getAttribute("href");
+    expect(routingCampaignHref).toBe(`/routing-campaigns/${ROUTING_CAMPAIGN_ID}`);
+    const routingCampaignPath = routingCampaignHref as string;
+    await routingCampaignLink.click();
+    await expectPath(page, routingCampaignPath);
+    visitedByClick.add(routingCampaignPath);
+    await expect(page.getByRole("heading", { name: "Fault timeline", level: 2 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Cold reset receipt", level: 2 }).first()).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Complete terminal population", level: 2 }).first()).toBeVisible();
+
     expect(visitedByClick).toEqual(new Set([
       "/runs",
       runPath,
@@ -422,6 +473,8 @@ test.describe("populated dashboard", () => {
       comparisonPath,
       "/compare",
       evidencePath,
+      "/routing-campaigns",
+      routingCampaignPath,
     ]));
 
     const deepLinks = [
@@ -432,6 +485,8 @@ test.describe("populated dashboard", () => {
       ["/comparisons", "Controlled comparisons"],
       [comparisonPath, "Inferdrome local product demo"],
       ["/compare", "Compare runs"],
+      ["/routing-campaigns", "Routing campaigns"],
+      [routingCampaignPath, ROUTING_CAMPAIGN_ID],
       ["/evidence", "Evidence"],
       [evidencePath, "Evidence"],
     ] as const;

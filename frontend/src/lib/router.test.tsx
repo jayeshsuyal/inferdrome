@@ -17,6 +17,7 @@ function RouterProbe() {
   return (
     <>
       <output aria-label="Current path">{location.pathname}</output>
+      <output aria-label="Current campaign">{params.campaignId ?? "none"}</output>
       <output aria-label="Current run">{params.runId ?? "none"}</output>
       <output aria-label="Current trial set">{params.trialSetId ?? "none"}</output>
       <output aria-label="Current comparison">{params.comparisonPlanId ?? "none"}</output>
@@ -24,6 +25,7 @@ function RouterProbe() {
       <NavLink to="/comparisons" activeOn={["/compare"]}>Comparisons</NavLink>
       <Link to="/runs/run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">Open run</Link>
       <Link to="/trial-sets/trial-set-11111111111111111111111111111111">Open trial set</Link>
+      <Link to="/routing-campaigns/routing-campaign-v1">Open routing campaign</Link>
       <Link to="/comparisons/comparison-plan-11111111111111111111111111111111">Open comparison</Link>
       <Link to="/compare">Ad hoc compare</Link>
     </>
@@ -71,6 +73,19 @@ describe("local dashboard router", () => {
       "trial-set-11111111111111111111111111111111",
     );
     expect(screen.getByLabelText("Current run")).toHaveTextContent("none");
+  });
+
+  it("decodes a routing-campaign detail route independently from run and trial-set routes", async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={["/routing-campaigns"]}><RouterProbe /></MemoryRouter>);
+
+    await user.click(screen.getByRole("link", { name: "Open routing campaign" }));
+
+    expect(screen.getByLabelText("Current campaign")).toHaveTextContent(
+      "routing-campaign-v1",
+    );
+    expect(screen.getByLabelText("Current run")).toHaveTextContent("none");
+    expect(screen.getByLabelText("Current trial set")).toHaveTextContent("none");
   });
 
   it("decodes controlled-comparison plans and keeps the shared nav active for ad hoc compare", async () => {

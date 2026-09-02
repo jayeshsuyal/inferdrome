@@ -121,6 +121,127 @@ const trialSetDetail = {
   request_population_policy: "separate_per_run_v1" as const,
 };
 
+const routingSummary = {
+  campaign_id: "routing-campaign-v1" as const,
+  retained_digest: `sha256:${"f".repeat(64)}`,
+  execution_mode: "SYNTHETIC_CPU_ONLY" as const,
+  trial_count: 3,
+  planned_request_count: 18,
+  policy_ids: [
+    "fail_closed_required_load_v1",
+    "explicit_fail_open_stale_load_v1",
+    "typed_admissible_state_only_v1",
+  ],
+  verified_by_replay: true as const,
+};
+
+function routingTelemetry(
+  signal: "HEALTH" | "LOAD" | "KV",
+  endpointId: "endpoint-a" | "endpoint-b",
+  decisionTime: number,
+) {
+  const observedAt = signal === "LOAD" && decisionTime >= 20 ? 10 : decisionTime;
+  const age = decisionTime - observedAt;
+  return {
+    signal,
+    observer_id: `${signal.toLowerCase()}-observer-v1`,
+    endpoint_id: endpointId,
+    epoch: signal === "LOAD" ? (decisionTime === 0 ? 1 : 2) : decisionTime / 5 + 1,
+    observed_at_ms: observedAt,
+    decision_time_ms: decisionTime,
+    age_ms: age,
+    freshness_bound_ms: 5,
+    value: signal === "HEALTH" ? "HEALTHY" : signal === "LOAD" ? (endpointId === "endpoint-a" ? 4 : 1) : "NO_USABLE_SESSION_CLAIM",
+    admissibility: age <= 5 ? "ADMISSIBLE" as const : "INADMISSIBLE" as const,
+  };
+}
+
+function routingTrial(trialId: string, policyId: string) {
+  const token = trialId.replace("trial-", "");
+  const requests = Array.from({ length: 6 }, (_, sequenceIndex) => {
+    const decisionTime = sequenceIndex * 10;
+    const stale = decisionTime >= 20;
+    const selected = !stale || policyId === "explicit_fail_open_stale_load_v1"
+      ? "endpoint-b"
+      : policyId === "typed_admissible_state_only_v1" ? "endpoint-a" : null;
+    const status = selected === null ? "NO_SAFE_ROUTE" : selected === "endpoint-b" && stale ? "TIMED_OUT" : "SUCCEEDED";
+    const fallback = !stale
+      ? "NONE"
+      : policyId === "fail_closed_required_load_v1"
+        ? "REQUIRED_LOAD_STALE"
+        : policyId === "explicit_fail_open_stale_load_v1" ? "STALE_LOAD_FAIL_OPEN" : "HEALTH_ONLY_TIE_BREAK";
+    const decisionId = `decision-${token}-${String(sequenceIndex).padStart(3, "0")}`;
+    return {
+      request_id: `request-${String(sequenceIndex).padStart(3, "0")}`,
+      sequence_index: sequenceIndex,
+      decision_id: decisionId,
+      decision_time_ms: decisionTime,
+      candidates: (["endpoint-a", "endpoint-b"] as const).map((endpointId) => ({
+        endpoint_id: endpointId,
+        eligible: policyId !== "fail_closed_required_load_v1" || !stale,
+        health: routingTelemetry("HEALTH", endpointId, decisionTime),
+        load: routingTelemetry("LOAD", endpointId, decisionTime),
+        kv: routingTelemetry("KV", endpointId, decisionTime),
+      })),
+      selected_endpoint_id: selected,
+      claims_used: stale && policyId !== "explicit_fail_open_stale_load_v1" ? ["health"] : ["health", "load"],
+      claims_permitted_stale: stale && policyId === "explicit_fail_open_stale_load_v1" ? ["load"] : [],
+      claims_discarded: stale && policyId !== "explicit_fail_open_stale_load_v1" ? ["load:stale", "kv:no_session_claim"] : ["kv:no_session_claim"],
+      fallback_reason: fallback,
+      terminal: {
+        terminal_outcome_id: `terminal-${token}-${String(sequenceIndex).padStart(3, "0")}`,
+        decision_id: decisionId,
+        status,
+        reason: status === "TIMED_OUT" ? "SIMULATED_ENDPOINT_B_SATURATED" : fallback,
+        started_at_ms: decisionTime,
+        ended_at_ms: decisionTime + (status === "TIMED_OUT" ? 5 : status === "SUCCEEDED" ? 1 : 0),
+      },
+    };
+  });
+  return {
+    trial_id: trialId,
+    policy_id: policyId,
+    reset: {
+      virtual_time_ms: 0,
+      endpoint_instances: [
+        { endpoint_id: "endpoint-a", instance_id: `${trialId}-endpoint-a-instance-v1` },
+        { endpoint_id: "endpoint-b", instance_id: `${trialId}-endpoint-b-instance-v1` },
+      ],
+      observer_epochs: [
+        { observer_id: "health-observer-v1", epoch: 1 },
+        { observer_id: "kv-observer-v1", epoch: 1 },
+        { observer_id: "load-observer-v1", epoch: 1 },
+      ],
+      queue_cleared: true,
+      load_state_cleared: true,
+      kv_state_cleared: true,
+    },
+    requests,
+    terminal_population: ["SUCCEEDED", "TIMED_OUT", "FAILED", "CANCELLED", "NO_SAFE_ROUTE"].map((status) => ({
+      status,
+      count: requests.filter((request) => request.terminal.status === status).length,
+    })),
+    terminal_population_total: 6,
+  };
+}
+
+const routingDetail = {
+  projection_version: "inferdrome.routing-campaign-dashboard.v1",
+  summary: routingSummary,
+  fault_timeline: {
+    load_collection_paused_at_ms: 15,
+    health_collection_continues: true,
+    load_freshness_bound_ms: 5,
+    health_freshness_bound_ms: 5,
+  },
+  trials: [
+    routingTrial("trial-fail-closed-v1", "fail_closed_required_load_v1"),
+    routingTrial("trial-fail-open-v1", "explicit_fail_open_stale_load_v1"),
+    routingTrial("trial-typed-v1", "typed_admissible_state_only_v1"),
+  ],
+  interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY" as const,
+};
+
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status: 200,
@@ -307,6 +428,57 @@ describe("dashboard API client", () => {
     await expect(api.getTrialSet(trialSetId)).rejects.toMatchObject({
       status: 502,
       message: expect.stringContaining("ordered and contiguous"),
+    });
+  });
+
+  it("reads the one-root routing-campaign projection only after replay verification", async () => {
+    const index = {
+      projection_version: "inferdrome.routing-campaign-dashboard.v1",
+      routing_campaigns: [routingSummary],
+      rejected: [],
+      page: { limit: 25, returned: 1, total: 1, has_more: false, next_cursor: null },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(index))
+      .mockResolvedValueOnce(jsonResponse(routingDetail));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const campaigns = await api.listRoutingCampaigns();
+    const detail = await api.getRoutingCampaign("routing-campaign-v1");
+
+    expect(campaigns.routing_campaigns).toHaveLength(1);
+    expect(campaigns.routing_campaigns[0]?.verified_by_replay).toBe(true);
+    expect(detail.trials).toHaveLength(3);
+    expect(detail.trials[0]?.requests).toHaveLength(6);
+    expect(detail.trials[0]?.terminal_population_total).toBe(6);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/routing-campaigns?limit=25");
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "/api/v1/routing-campaigns/routing-campaign-v1",
+    );
+    expect(fetchMock.mock.calls.every(([, options]) => options.method === "GET")).toBe(true);
+  });
+
+  it("fails closed when routing telemetry is inconsistent with its freshness receipt", async () => {
+    const malformed = structuredClone(routingDetail);
+    malformed.trials[0].requests[2].candidates[0].load.admissibility = "ADMISSIBLE";
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(malformed))));
+
+    await expect(api.getRoutingCampaign("routing-campaign-v1")).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("admissibility disagrees with freshness"),
+    });
+  });
+
+  it("fails closed when a routing response includes an unallowlisted field", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...routingDetail,
+      raw_package_content: "must never render",
+    }))));
+
+    await expect(api.getRoutingCampaign("routing-campaign-v1")).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("allowlist"),
     });
   });
 

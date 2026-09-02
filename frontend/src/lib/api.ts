@@ -13,8 +13,21 @@ import type {
   ControlledComparisonSummary,
   MetricView,
   RejectedControlledComparison,
+  RejectedRoutingCampaign,
   RejectedRun,
   RejectedTrialSet,
+  RoutingCandidateView,
+  RoutingCampaignDetail,
+  RoutingCampaignIndex,
+  RoutingCampaignPageResponse,
+  RoutingCampaignSummary,
+  RoutingCampaignTrialView,
+  RoutingEndpointId,
+  RoutingResetView,
+  RoutingRequestView,
+  RoutingTelemetryView,
+  RoutingTerminalOutcomeView,
+  RoutingTerminalPopulationView,
   RunDetail,
   RunIndex,
   RunSummary,
@@ -40,6 +53,20 @@ const TRIAL_SET_PAGE_LIMIT = 100;
 const MAX_TRIAL_SET_PAGES = 2;
 const CONTROLLED_COMPARISON_PAGE_LIMIT = 100;
 const MAX_CONTROLLED_COMPARISON_PAGES = 4;
+const ROUTING_CAMPAIGN_PAGE_LIMIT = 25;
+const ROUTING_CAMPAIGN_PROJECTION = "inferdrome.routing-campaign-dashboard.v1";
+const ROUTING_POLICY_IDS = [
+  "fail_closed_required_load_v1",
+  "explicit_fail_open_stale_load_v1",
+  "typed_admissible_state_only_v1",
+] as const;
+const ROUTING_TERMINAL_STATUSES = [
+  "SUCCEEDED",
+  "TIMED_OUT",
+  "FAILED",
+  "CANCELLED",
+  "NO_SAFE_ROUTE",
+] as const;
 
 const CONTROL_CHECKS: readonly ControlledComparisonCheckId[] = [
   "LOCAL_PLAN_ORDER",
@@ -629,6 +656,445 @@ function parseTrialSetDetail(payload: unknown): TrialSetDetail {
     throw protocolError("trial-set evidence eligibilities disagree with members");
   }
   return payload as unknown as TrialSetDetail;
+}
+
+function assertRoutingKeys(
+  object: Record<string, unknown>,
+  allowed: readonly string[],
+  context: string,
+): void {
+  if (Object.keys(object).some((key) => !allowed.includes(key))) {
+    throw protocolError(`${context} contains a field outside the routing projection allowlist`);
+  }
+}
+
+function routingEndpointId(value: unknown, context: string): RoutingEndpointId {
+  if (value !== "endpoint-a" && value !== "endpoint-b") {
+    throw protocolError(`${context} must be endpoint-a or endpoint-b`);
+  }
+  return value;
+}
+
+function routingClaims(
+  object: Record<string, unknown>,
+  key: string,
+  context: string,
+): readonly string[] {
+  const claims = stringArray(object, key, context);
+  if (claims.length > 3 || new Set(claims).size !== claims.length) {
+    throw protocolError(`${context}.${key} must contain at most three unique claims`);
+  }
+  return claims;
+}
+
+function parseRoutingCampaignSummary(
+  value: unknown,
+  context: string,
+): RoutingCampaignSummary {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "campaign_id",
+    "retained_digest",
+    "execution_mode",
+    "trial_count",
+    "planned_request_count",
+    "policy_ids",
+    "verified_by_replay",
+  ], context);
+  if (value.campaign_id !== "routing-campaign-v1") {
+    throw protocolError(`${context}.campaign_id is unsupported`);
+  }
+  const retainedDigest = requiredString(value, "retained_digest", context);
+  if (!/^sha256:[0-9a-f]{64}$/.test(retainedDigest)) {
+    throw protocolError(`${context}.retained_digest is invalid`);
+  }
+  if (value.execution_mode !== "SYNTHETIC_CPU_ONLY") {
+    throw protocolError(`${context}.execution_mode is unsupported`);
+  }
+  if (requiredInteger(value, "trial_count", context, 1) !== ROUTING_POLICY_IDS.length) {
+    throw protocolError(`${context}.trial_count is unsupported`);
+  }
+  if (requiredInteger(value, "planned_request_count", context, 1) !== 18) {
+    throw protocolError(`${context}.planned_request_count is unsupported`);
+  }
+  const policies = stringArray(value, "policy_ids", context);
+  if (
+    policies.length !== ROUTING_POLICY_IDS.length
+    || policies.some((policy, index) => policy !== ROUTING_POLICY_IDS[index])
+  ) {
+    throw protocolError(`${context}.policy_ids are not the frozen R1 policy order`);
+  }
+  if (value.verified_by_replay !== true) {
+    throw protocolError(`${context}.verified_by_replay must be true`);
+  }
+  return value as unknown as RoutingCampaignSummary;
+}
+
+function parseRejectedRoutingCampaign(
+  value: unknown,
+  context: string,
+): RejectedRoutingCampaign {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, ["entry", "status", "code", "message"], context);
+  requiredString(value, "entry", context);
+  const message = requiredString(value, "message", context);
+  if (message.length === 0 || message.length > 160) {
+    throw protocolError(`${context}.message is not bounded`);
+  }
+  if (value.status !== "REJECTED") {
+    throw protocolError(`${context}.status must be REJECTED`);
+  }
+  if (value.code !== "VERIFICATION_FAILED" && value.code !== "UNSAFE_ENTRY") {
+    throw protocolError(`${context}.code is unknown`);
+  }
+  return value as unknown as RejectedRoutingCampaign;
+}
+
+function parseRoutingCampaignPage(payload: unknown): RoutingCampaignPageResponse {
+  if (!isRecord(payload)) throw protocolError("the routing-campaign index is not an object");
+  assertRoutingKeys(payload, ["projection_version", "routing_campaigns", "rejected", "page"], "routing-campaign index");
+  if (payload.projection_version !== ROUTING_CAMPAIGN_PROJECTION) {
+    throw protocolError("the routing-campaign index projection version is unsupported");
+  }
+  if (!Array.isArray(payload.routing_campaigns) || !Array.isArray(payload.rejected)) {
+    throw protocolError("routing-campaign index entries must be arrays");
+  }
+  payload.routing_campaigns.forEach((summary, index) => (
+    parseRoutingCampaignSummary(summary, `routing_campaigns[${index}]`)
+  ));
+  payload.rejected.forEach((entry, index) => (
+    parseRejectedRoutingCampaign(entry, `rejected[${index}]`)
+  ));
+  if (payload.routing_campaigns.length > 1 || payload.rejected.length > 1) {
+    throw protocolError("routing-campaign index exceeds its one-root bound");
+  }
+  if (!isRecord(payload.page)) throw protocolError("routing-campaign page metadata is missing");
+  assertRoutingKeys(payload.page, ["limit", "returned", "total", "has_more", "next_cursor"], "routing-campaign page");
+  const { has_more: hasMore, limit, next_cursor: nextCursor, returned, total } = payload.page;
+  if (
+    typeof limit !== "number"
+    || !Number.isInteger(limit)
+    || limit < 1
+    || limit > ROUTING_CAMPAIGN_PAGE_LIMIT
+    || typeof returned !== "number"
+    || !Number.isInteger(returned)
+    || returned !== payload.routing_campaigns.length + payload.rejected.length
+    || typeof total !== "number"
+    || !Number.isInteger(total)
+    || total !== returned
+    || total > 1
+    || hasMore !== false
+    || nextCursor !== null
+  ) {
+    throw protocolError("routing-campaign page metadata is invalid");
+  }
+  return payload as unknown as RoutingCampaignPageResponse;
+}
+
+function parseRoutingTelemetry(
+  value: unknown,
+  context: string,
+  expectedSignal: "HEALTH" | "LOAD" | "KV",
+  expectedEndpoint: RoutingEndpointId,
+  expectedDecisionTime: number,
+): RoutingTelemetryView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "signal",
+    "observer_id",
+    "endpoint_id",
+    "epoch",
+    "observed_at_ms",
+    "decision_time_ms",
+    "age_ms",
+    "freshness_bound_ms",
+    "value",
+    "admissibility",
+  ], context);
+  if (value.signal !== expectedSignal) {
+    throw protocolError(`${context}.signal must be ${expectedSignal}`);
+  }
+  requiredString(value, "observer_id", context);
+  if (routingEndpointId(value.endpoint_id, `${context}.endpoint_id`) !== expectedEndpoint) {
+    throw protocolError(`${context}.endpoint_id disagrees with its candidate`);
+  }
+  requiredInteger(value, "epoch", context, 1);
+  const observedAt = requiredInteger(value, "observed_at_ms", context);
+  const decisionAt = requiredInteger(value, "decision_time_ms", context);
+  const age = requiredInteger(value, "age_ms", context);
+  const freshnessBound = requiredInteger(value, "freshness_bound_ms", context);
+  if (decisionAt !== expectedDecisionTime || observedAt > decisionAt || age !== decisionAt - observedAt) {
+    throw protocolError(`${context} clock values disagree`);
+  }
+  if (
+    (typeof value.value !== "string" && (typeof value.value !== "number" || !Number.isFinite(value.value)))
+    || (value.admissibility !== "ADMISSIBLE" && value.admissibility !== "INADMISSIBLE")
+  ) {
+    throw protocolError(`${context} value or admissibility is invalid`);
+  }
+  const expectedAdmissibility = age <= freshnessBound ? "ADMISSIBLE" : "INADMISSIBLE";
+  if (value.admissibility !== expectedAdmissibility) {
+    throw protocolError(`${context}.admissibility disagrees with freshness`);
+  }
+  return value as unknown as RoutingTelemetryView;
+}
+
+function parseRoutingCandidate(
+  value: unknown,
+  context: string,
+  expectedEndpoint: RoutingEndpointId,
+  decisionTime: number,
+): RoutingCandidateView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, ["endpoint_id", "eligible", "health", "load", "kv"], context);
+  if (routingEndpointId(value.endpoint_id, `${context}.endpoint_id`) !== expectedEndpoint) {
+    throw protocolError(`${context}.endpoint_id is out of order`);
+  }
+  if (typeof value.eligible !== "boolean") {
+    throw protocolError(`${context}.eligible must be boolean`);
+  }
+  parseRoutingTelemetry(value.health, `${context}.health`, "HEALTH", expectedEndpoint, decisionTime);
+  parseRoutingTelemetry(value.load, `${context}.load`, "LOAD", expectedEndpoint, decisionTime);
+  parseRoutingTelemetry(value.kv, `${context}.kv`, "KV", expectedEndpoint, decisionTime);
+  return value as unknown as RoutingCandidateView;
+}
+
+function parseRoutingReset(value: unknown, context: string): RoutingResetView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "virtual_time_ms",
+    "endpoint_instances",
+    "observer_epochs",
+    "queue_cleared",
+    "load_state_cleared",
+    "kv_state_cleared",
+  ], context);
+  if (requiredInteger(value, "virtual_time_ms", context) !== 0) {
+    throw protocolError(`${context}.virtual_time_ms must be zero`);
+  }
+  if (!Array.isArray(value.endpoint_instances) || value.endpoint_instances.length !== 2) {
+    throw protocolError(`${context}.endpoint_instances must contain both endpoints`);
+  }
+  const instanceIds = new Set<string>();
+  value.endpoint_instances.forEach((instance, index) => {
+    if (!isRecord(instance)) throw protocolError(`${context}.endpoint_instances[${index}] must be an object`);
+    assertRoutingKeys(instance, ["endpoint_id", "instance_id"], `${context}.endpoint_instances[${index}]`);
+    if (routingEndpointId(instance.endpoint_id, `${context}.endpoint_instances[${index}].endpoint_id`) !== (index === 0 ? "endpoint-a" : "endpoint-b")) {
+      throw protocolError(`${context}.endpoint_instances are not in endpoint order`);
+    }
+    const instanceId = requiredString(instance, "instance_id", `${context}.endpoint_instances[${index}]`);
+    if (instanceId.length === 0 || instanceIds.has(instanceId)) {
+      throw protocolError(`${context}.endpoint_instances repeat an identity`);
+    }
+    instanceIds.add(instanceId);
+  });
+  if (!Array.isArray(value.observer_epochs) || value.observer_epochs.length !== 3) {
+    throw protocolError(`${context}.observer_epochs must contain three observers`);
+  }
+  const observerIds = new Set<string>();
+  value.observer_epochs.forEach((observer, index) => {
+    if (!isRecord(observer)) throw protocolError(`${context}.observer_epochs[${index}] must be an object`);
+    assertRoutingKeys(observer, ["observer_id", "epoch"], `${context}.observer_epochs[${index}]`);
+    const observerId = requiredString(observer, "observer_id", `${context}.observer_epochs[${index}]`);
+    if (observerIds.has(observerId)) {
+      throw protocolError(`${context}.observer_epochs repeat an observer`);
+    }
+    observerIds.add(observerId);
+    requiredInteger(observer, "epoch", `${context}.observer_epochs[${index}]`, 1);
+  });
+  for (const key of ["queue_cleared", "load_state_cleared", "kv_state_cleared"] as const) {
+    if (value[key] !== true) throw protocolError(`${context}.${key} must be true`);
+  }
+  return value as unknown as RoutingResetView;
+}
+
+function parseRoutingTerminal(value: unknown, context: string): RoutingTerminalOutcomeView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "terminal_outcome_id",
+    "decision_id",
+    "status",
+    "reason",
+    "started_at_ms",
+    "ended_at_ms",
+  ], context);
+  requiredString(value, "terminal_outcome_id", context);
+  requiredString(value, "decision_id", context);
+  requiredString(value, "reason", context);
+  if (!ROUTING_TERMINAL_STATUSES.includes(value.status as typeof ROUTING_TERMINAL_STATUSES[number])) {
+    throw protocolError(`${context}.status is unknown`);
+  }
+  const startedAt = requiredInteger(value, "started_at_ms", context);
+  const endedAt = requiredInteger(value, "ended_at_ms", context);
+  if (endedAt < startedAt) throw protocolError(`${context} ends before it starts`);
+  return value as unknown as RoutingTerminalOutcomeView;
+}
+
+function parseRoutingRequest(value: unknown, context: string, sequenceIndex: number): RoutingRequestView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "request_id",
+    "sequence_index",
+    "decision_id",
+    "decision_time_ms",
+    "candidates",
+    "selected_endpoint_id",
+    "claims_used",
+    "claims_permitted_stale",
+    "claims_discarded",
+    "fallback_reason",
+    "terminal",
+  ], context);
+  const expectedRequestId = `request-${String(sequenceIndex).padStart(3, "0")}`;
+  if (requiredString(value, "request_id", context) !== expectedRequestId) {
+    throw protocolError(`${context}.request_id is out of trace order`);
+  }
+  if (requiredInteger(value, "sequence_index", context) !== sequenceIndex) {
+    throw protocolError(`${context}.sequence_index is not contiguous`);
+  }
+  const decisionId = requiredString(value, "decision_id", context);
+  if (!/^decision-[a-z0-9-]+$/.test(decisionId)) {
+    throw protocolError(`${context}.decision_id is invalid`);
+  }
+  const decisionTime = requiredInteger(value, "decision_time_ms", context);
+  if (decisionTime !== sequenceIndex * 10) {
+    throw protocolError(`${context}.decision_time_ms is not the frozen trace time`);
+  }
+  if (!Array.isArray(value.candidates) || value.candidates.length !== 2) {
+    throw protocolError(`${context}.candidates must contain both endpoints`);
+  }
+  const candidates = [
+    parseRoutingCandidate(value.candidates[0], `${context}.candidates[0]`, "endpoint-a", decisionTime),
+    parseRoutingCandidate(value.candidates[1], `${context}.candidates[1]`, "endpoint-b", decisionTime),
+  ];
+  if (candidates[0].endpoint_id === candidates[1].endpoint_id) {
+    throw protocolError(`${context}.candidates repeat an endpoint`);
+  }
+  const selected = value.selected_endpoint_id;
+  if (selected !== null) routingEndpointId(selected, `${context}.selected_endpoint_id`);
+  routingClaims(value, "claims_used", context);
+  routingClaims(value, "claims_permitted_stale", context);
+  routingClaims(value, "claims_discarded", context);
+  if (![
+    "NONE",
+    "REQUIRED_LOAD_STALE",
+    "STALE_LOAD_FAIL_OPEN",
+    "HEALTH_ONLY_TIE_BREAK",
+  ].includes(value.fallback_reason as string)) {
+    throw protocolError(`${context}.fallback_reason is unknown`);
+  }
+  const terminal = parseRoutingTerminal(value.terminal, `${context}.terminal`);
+  if (terminal.decision_id !== decisionId || terminal.started_at_ms !== decisionTime) {
+    throw protocolError(`${context}.terminal does not close its decision`);
+  }
+  if (
+    (value.fallback_reason === "REQUIRED_LOAD_STALE" && (selected !== null || terminal.status !== "NO_SAFE_ROUTE"))
+    || (value.fallback_reason !== "REQUIRED_LOAD_STALE" && selected === null)
+    || (terminal.status === "NO_SAFE_ROUTE" && selected !== null)
+    || (terminal.status !== "NO_SAFE_ROUTE" && selected === null)
+  ) {
+    throw protocolError(`${context}.selection, fallback, and terminal disagree`);
+  }
+  return value as unknown as RoutingRequestView;
+}
+
+function parseRoutingTrial(
+  value: unknown,
+  context: string,
+  expectedPolicyId: string,
+): RoutingCampaignTrialView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "trial_id",
+    "policy_id",
+    "reset",
+    "requests",
+    "terminal_population",
+    "terminal_population_total",
+  ], context);
+  const trialId = requiredString(value, "trial_id", context);
+  if (!/^trial-[a-z-]+-v1$/.test(trialId)) {
+    throw protocolError(`${context}.trial_id is invalid`);
+  }
+  if (requiredString(value, "policy_id", context) !== expectedPolicyId) {
+    throw protocolError(`${context}.policy_id is out of frozen order`);
+  }
+  parseRoutingReset(value.reset, `${context}.reset`);
+  if (!Array.isArray(value.requests) || value.requests.length !== 6) {
+    throw protocolError(`${context}.requests must contain the six-request trace`);
+  }
+  const requests = value.requests.map((request, index) => (
+    parseRoutingRequest(request, `${context}.requests[${index}]`, index)
+  ));
+  if (!Array.isArray(value.terminal_population) || value.terminal_population.length !== ROUTING_TERMINAL_STATUSES.length) {
+    throw protocolError(`${context}.terminal_population is incomplete`);
+  }
+  const population = value.terminal_population.map((entry, index) => {
+    if (!isRecord(entry)) throw protocolError(`${context}.terminal_population[${index}] must be an object`);
+    assertRoutingKeys(entry, ["status", "count"], `${context}.terminal_population[${index}]`);
+    if (entry.status !== ROUTING_TERMINAL_STATUSES[index]) {
+      throw protocolError(`${context}.terminal_population is not in terminal-status order`);
+    }
+    return requiredInteger(entry, "count", `${context}.terminal_population[${index}]`);
+  });
+  const declaredTotal = requiredInteger(value, "terminal_population_total", context);
+  if (declaredTotal !== requests.length || population.reduce((total, count) => total + count, 0) !== declaredTotal) {
+    throw protocolError(`${context}.terminal population does not close the trace`);
+  }
+  const actualPopulation = new Map<string, number>();
+  requests.forEach((request) => {
+    actualPopulation.set(request.terminal.status, (actualPopulation.get(request.terminal.status) ?? 0) + 1);
+  });
+  if (population.some((count, index) => count !== (actualPopulation.get(ROUTING_TERMINAL_STATUSES[index]) ?? 0))) {
+    throw protocolError(`${context}.terminal population disagrees with terminal receipts`);
+  }
+  return value as unknown as RoutingCampaignTrialView;
+}
+
+function parseRoutingCampaignDetail(payload: unknown): RoutingCampaignDetail {
+  if (!isRecord(payload)) throw protocolError("the routing-campaign detail is not an object");
+  assertRoutingKeys(payload, [
+    "projection_version",
+    "summary",
+    "fault_timeline",
+    "trials",
+    "interpretation_boundary",
+  ], "routing-campaign detail");
+  if (payload.projection_version !== ROUTING_CAMPAIGN_PROJECTION) {
+    throw protocolError("the routing-campaign detail projection version is unsupported");
+  }
+  const summary = parseRoutingCampaignSummary(payload.summary, "routing-campaign summary");
+  if (!isRecord(payload.fault_timeline)) {
+    throw protocolError("routing-campaign fault_timeline must be an object");
+  }
+  const timeline = payload.fault_timeline;
+  assertRoutingKeys(timeline, [
+    "load_collection_paused_at_ms",
+    "health_collection_continues",
+    "load_freshness_bound_ms",
+    "health_freshness_bound_ms",
+  ], "routing-campaign fault_timeline");
+  if (
+    requiredInteger(timeline, "load_collection_paused_at_ms", "routing-campaign fault_timeline") !== 15
+    || timeline.health_collection_continues !== true
+    || requiredInteger(timeline, "load_freshness_bound_ms", "routing-campaign fault_timeline") !== 5
+    || requiredInteger(timeline, "health_freshness_bound_ms", "routing-campaign fault_timeline") !== 5
+  ) {
+    throw protocolError("routing-campaign fault_timeline is not the frozen R1 boundary");
+  }
+  if (!Array.isArray(payload.trials) || payload.trials.length !== summary.trial_count) {
+    throw protocolError("routing-campaign trials do not match the verified summary");
+  }
+  const trials = payload.trials.map((trial, index) => (
+    parseRoutingTrial(trial, `routing-campaign trials[${index}]`, summary.policy_ids[index] ?? "")
+  ));
+  if (new Set(trials.map((trial) => trial.trial_id)).size !== trials.length) {
+    throw protocolError("routing-campaign trials repeat an identity");
+  }
+  if (payload.interpretation_boundary !== "MEASUREMENT_EVIDENCE_ONLY") {
+    throw protocolError("routing-campaign interpretation boundary is unsupported");
+  }
+  return payload as unknown as RoutingCampaignDetail;
 }
 
 function parseControlledSummary(
@@ -1439,6 +1905,30 @@ export const api = {
     return parseTrialSetDetail(
       await fetchJson(`/trial-sets/${encodeURIComponent(trialSetId)}`, signal),
     );
+  },
+
+  async listRoutingCampaigns(signal?: AbortSignal): Promise<RoutingCampaignIndex> {
+    const page = parseRoutingCampaignPage(
+      await fetchJson(`/routing-campaigns?limit=${ROUTING_CAMPAIGN_PAGE_LIMIT}`, signal),
+    );
+    return {
+      projection_version: ROUTING_CAMPAIGN_PROJECTION,
+      routing_campaigns: page.routing_campaigns,
+      rejected: page.rejected,
+    };
+  },
+
+  async getRoutingCampaign(
+    campaignId: string,
+    signal?: AbortSignal,
+  ): Promise<RoutingCampaignDetail> {
+    const detail = parseRoutingCampaignDetail(
+      await fetchJson(`/routing-campaigns/${encodeURIComponent(campaignId)}`, signal),
+    );
+    if (detail.summary.campaign_id !== campaignId) {
+      throw protocolError("routing-campaign detail identity disagrees with its requested URL");
+    }
+    return detail;
   },
 
   async listControlledComparisons(signal?: AbortSignal): Promise<ControlledComparisonIndex> {

@@ -7,8 +7,10 @@ import os
 import re
 import secrets
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -44,6 +46,8 @@ from inferdrome.routing_campaign.replay import (
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _MAX_FILES = 64
+_MAX_DIRECTORIES = 64
+_MAX_ENTRIES = 128
 _MAX_FILE_BYTES = 8_388_608
 _MAX_TOTAL_BYTES = 67_108_864
 _MAX_DEPTH = 5
@@ -71,6 +75,28 @@ class VerificationReport:
     planned_request_count: int
     trial_ids: tuple[str, ...]
     terminal_populations: tuple[dict[TerminalStatus, int], ...]
+
+
+@dataclass(frozen=True)
+class VerifiedCampaign:
+    """Typed R1 records bound to one verified immutable package snapshot.
+
+    This is intentionally a read-only view over the bytes that were parsed,
+    hash-checked, replayed, and followed by the verifier's final identity
+    scan. Consumers must not re-open package paths after calling this API.
+    """
+
+    report: VerificationReport
+    plan: RoutingCampaignPlan
+    trace: tuple[RequestTraceRecord, ...]
+    fault_schedule: FaultSchedule
+    trial_plan: TrialPlan
+    resets: Mapping[str, ResetReceipt]
+    observations: Mapping[str, tuple[StateObservationRecord, ...]]
+    decisions: Mapping[str, tuple[RouteDecisionReceipt, ...]]
+    terminals: Mapping[str, tuple[TerminalOutcomeReceipt, ...]]
+    summaries: Mapping[str, TrialSummary]
+    campaign_summary: CampaignSummary
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
@@ -470,6 +496,7 @@ def _scan_package(root: Path, *, require_immutable: bool) -> _PackageScan:
     files: dict[str, _ScannedFile] = {}
     directories: dict[str, _ScannedDirectory] = {}
     total_bytes = 0
+    scanned_entries = 0
     pending = [(root, "", 0)]
     casefold_paths: set[str] = set()
     while pending:
@@ -478,7 +505,15 @@ def _scan_package(root: Path, *, require_immutable: bool) -> _PackageScan:
             raise VerificationError("routing package exceeds directory-depth limit")
         try:
             with os.scandir(directory) as iterator:
-                entries = sorted(iterator, key=lambda entry: entry.name)
+                entries = []
+                for entry in iterator:
+                    if scanned_entries >= _MAX_ENTRIES:
+                        raise VerificationError(
+                            "routing package exceeds its bounded inventory"
+                        )
+                    entries.append(entry)
+                    scanned_entries += 1
+                entries.sort(key=lambda entry: entry.name)
         except OSError:
             raise VerificationError(
                 "routing package directory cannot be scanned"
@@ -506,6 +541,10 @@ def _scan_package(root: Path, *, require_immutable: bool) -> _PackageScan:
             if stat.S_ISDIR(metadata.st_mode):
                 if require_immutable and stat.S_IMODE(metadata.st_mode) & 0o222:
                     raise VerificationError("routing package directory is writable")
+                if len(directories) >= _MAX_DIRECTORIES:
+                    raise VerificationError(
+                        "routing package exceeds its bounded inventory"
+                    )
                 directories[relative_path] = _ScannedDirectory(
                     relative_path=relative_path,
                     path=Path(entry.path),
@@ -614,13 +653,19 @@ def _assert_scan_unchanged(initial: _PackageScan, final: _PackageScan) -> None:
         raise VerificationError("routing package changed during verification")
 
 
-def verify_campaign(
+def load_verified_campaign(
     package_path: Path,
     *,
     expected_digest: str | None = None,
     require_immutable: bool = True,
-) -> VerificationReport:
-    """Verify a closed R1 package by canonical re-parse and fresh replay only."""
+) -> VerifiedCampaign:
+    """Return records from one canonical, replay-verified immutable snapshot.
+
+    The returned models originate from the same no-follow file reads whose
+    hashes and receipt relationships were checked below.  A final inventory
+    identity scan happens before this function returns, so a consumer can
+    safely project these in-memory values without reopening package paths.
+    """
 
     initial_scan = _scan_package(package_path, require_immutable=require_immutable)
     files = initial_scan.files
@@ -761,7 +806,7 @@ def verify_campaign(
         raise VerificationError(str(error)) from error
     final_scan = _scan_package(package_path, require_immutable=require_immutable)
     _assert_scan_unchanged(initial_scan, final_scan)
-    return VerificationReport(
+    report = VerificationReport(
         path=package_path.absolute(),
         retained_digest=retained_digest,
         trial_count=len(trial_plan.trials),
@@ -774,3 +819,31 @@ def verify_campaign(
             for summary in campaign_summary.trial_summaries
         ),
     )
+    return VerifiedCampaign(
+        report=report,
+        plan=plan,
+        trace=trace,
+        fault_schedule=fault_schedule,
+        trial_plan=trial_plan,
+        resets=MappingProxyType(dict(resets)),
+        observations=MappingProxyType(dict(observations)),
+        decisions=MappingProxyType(dict(decisions)),
+        terminals=MappingProxyType(dict(terminals)),
+        summaries=MappingProxyType(dict(summaries)),
+        campaign_summary=campaign_summary,
+    )
+
+
+def verify_campaign(
+    package_path: Path,
+    *,
+    expected_digest: str | None = None,
+    require_immutable: bool = True,
+) -> VerificationReport:
+    """Verify a closed R1 package by canonical re-parse and fresh replay only."""
+
+    return load_verified_campaign(
+        package_path,
+        expected_digest=expected_digest,
+        require_immutable=require_immutable,
+    ).report

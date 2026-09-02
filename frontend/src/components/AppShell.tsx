@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   Layers3,
   Moon,
+  Route,
   Sun,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -35,6 +36,8 @@ function selectedRunFromPath(pathname: string): string | null {
 }
 
 function pathLabel(pathname: string): string {
+  if (/^\/routing-campaigns\/.+/.test(pathname)) return "Evidence / Routing campaign detail";
+  if (pathname.startsWith("/routing-campaigns")) return "Evidence / Routing campaigns";
   if (/^\/trial-sets\/.+/.test(pathname)) return "Evidence / Trial set detail";
   if (pathname.startsWith("/trial-sets")) return "Evidence / Trial sets";
   if (/^\/comparisons\/.+/.test(pathname)) return "Evidence / Comparison detail";
@@ -80,6 +83,7 @@ export function AppShell({ children }: PropsWithChildren) {
     () => [
       { label: "Runs", to: "/runs", icon: LayoutDashboard, end: true },
       { label: "Trial sets", to: "/trial-sets", icon: Layers3 },
+      { label: "Routing campaigns", to: "/routing-campaigns", icon: Route },
       {
         label: "Run detail",
         to: selectedRunId ? `/runs/${encodeURIComponent(selectedRunId)}` : null,

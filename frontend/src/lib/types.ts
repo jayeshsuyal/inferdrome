@@ -347,6 +347,152 @@ export interface TrialSetIndex extends ApiObject {
   readonly rejected: readonly RejectedTrialSet[];
 }
 
+/**
+ * Read-only projection types for the sealed R1 routing-campaign package.
+ *
+ * These deliberately do not share the v0.1 run, trial-set, or comparison
+ * contracts.  A campaign appears only after the backend has independently
+ * verified its closed package and replayed the declared synthetic scenario.
+ */
+export type RoutingCampaignProjectionVersion = "inferdrome.routing-campaign-dashboard.v1";
+export type RoutingCampaignId = "routing-campaign-v1";
+export type RoutingEndpointId = "endpoint-a" | "endpoint-b";
+export type RoutingSignal = "HEALTH" | "LOAD" | "KV";
+export type RoutingAdmissibility = "ADMISSIBLE" | "INADMISSIBLE";
+export type RoutingTerminalStatus =
+  | "SUCCEEDED"
+  | "TIMED_OUT"
+  | "FAILED"
+  | "CANCELLED"
+  | "NO_SAFE_ROUTE";
+export type RoutingFallbackReason =
+  | "NONE"
+  | "REQUIRED_LOAD_STALE"
+  | "STALE_LOAD_FAIL_OPEN"
+  | "HEALTH_ONLY_TIE_BREAK";
+
+export interface RoutingCampaignSummary extends ApiObject {
+  readonly campaign_id: RoutingCampaignId;
+  readonly retained_digest: string;
+  readonly execution_mode: "SYNTHETIC_CPU_ONLY";
+  readonly trial_count: number;
+  readonly planned_request_count: number;
+  readonly policy_ids: readonly string[];
+  readonly verified_by_replay: true;
+}
+
+export interface RoutingFaultTimelineView extends ApiObject {
+  readonly load_collection_paused_at_ms: number;
+  readonly health_collection_continues: true;
+  readonly load_freshness_bound_ms: number;
+  readonly health_freshness_bound_ms: number;
+}
+
+export interface RoutingEndpointInstanceView extends ApiObject {
+  readonly endpoint_id: RoutingEndpointId;
+  readonly instance_id: string;
+}
+
+export interface RoutingObserverEpochView extends ApiObject {
+  readonly observer_id: string;
+  readonly epoch: number;
+}
+
+export interface RoutingResetView extends ApiObject {
+  readonly virtual_time_ms: number;
+  readonly endpoint_instances: readonly RoutingEndpointInstanceView[];
+  readonly observer_epochs: readonly RoutingObserverEpochView[];
+  readonly queue_cleared: true;
+  readonly load_state_cleared: true;
+  readonly kv_state_cleared: true;
+}
+
+export interface RoutingTelemetryView extends ApiObject {
+  readonly signal: RoutingSignal;
+  readonly observer_id: string;
+  readonly endpoint_id: RoutingEndpointId;
+  readonly epoch: number;
+  readonly observed_at_ms: number;
+  readonly decision_time_ms: number;
+  readonly age_ms: number;
+  readonly freshness_bound_ms: number;
+  readonly value: string | number;
+  readonly admissibility: RoutingAdmissibility;
+}
+
+export interface RoutingCandidateView extends ApiObject {
+  readonly endpoint_id: RoutingEndpointId;
+  readonly eligible: boolean;
+  readonly health: RoutingTelemetryView;
+  readonly load: RoutingTelemetryView;
+  readonly kv: RoutingTelemetryView;
+}
+
+export interface RoutingTerminalOutcomeView extends ApiObject {
+  readonly terminal_outcome_id: string;
+  readonly decision_id: string;
+  readonly status: RoutingTerminalStatus;
+  readonly reason: string;
+  readonly started_at_ms: number;
+  readonly ended_at_ms: number;
+}
+
+export interface RoutingRequestView extends ApiObject {
+  readonly request_id: string;
+  readonly sequence_index: number;
+  readonly decision_id: string;
+  readonly decision_time_ms: number;
+  readonly candidates: readonly RoutingCandidateView[];
+  readonly selected_endpoint_id: RoutingEndpointId | null;
+  readonly claims_used: readonly string[];
+  readonly claims_permitted_stale: readonly string[];
+  readonly claims_discarded: readonly string[];
+  readonly fallback_reason: RoutingFallbackReason;
+  readonly terminal: RoutingTerminalOutcomeView;
+}
+
+export interface RoutingTerminalPopulationView extends ApiObject {
+  readonly status: RoutingTerminalStatus;
+  readonly count: number;
+}
+
+export interface RoutingCampaignTrialView extends ApiObject {
+  readonly trial_id: string;
+  readonly policy_id: string;
+  readonly reset: RoutingResetView;
+  readonly requests: readonly RoutingRequestView[];
+  readonly terminal_population: readonly RoutingTerminalPopulationView[];
+  readonly terminal_population_total: number;
+}
+
+export interface RoutingCampaignDetail extends ApiObject {
+  readonly projection_version: RoutingCampaignProjectionVersion;
+  readonly summary: RoutingCampaignSummary;
+  readonly fault_timeline: RoutingFaultTimelineView;
+  readonly trials: readonly RoutingCampaignTrialView[];
+  readonly interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY";
+}
+
+export interface RejectedRoutingCampaign extends ApiObject {
+  readonly entry: string;
+  readonly status: "REJECTED";
+  readonly code: "VERIFICATION_FAILED" | "UNSAFE_ENTRY";
+  readonly message: string;
+}
+
+export interface RoutingCampaignPageResponse extends ApiObject {
+  readonly projection_version: RoutingCampaignProjectionVersion;
+  readonly routing_campaigns: readonly RoutingCampaignSummary[];
+  readonly rejected: readonly RejectedRoutingCampaign[];
+  readonly page: PageView;
+}
+
+export interface RoutingCampaignIndex extends ApiObject {
+  readonly projection_version: RoutingCampaignProjectionVersion;
+  readonly routing_campaigns: readonly RoutingCampaignSummary[];
+  readonly rejected: readonly RejectedRoutingCampaign[];
+}
+
 export type ControlledComparisonResultStatus =
   | "COMPARABLE"
   | "INCOMPARABLE"

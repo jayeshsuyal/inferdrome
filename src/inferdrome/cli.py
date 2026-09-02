@@ -688,6 +688,7 @@ def _command_dashboard(namespace: argparse.Namespace) -> int:
         trial_sets_root=_path(namespace, "trial_sets_root"),
         comparison_plans_root=_path(namespace, "comparison_plans_root"),
         comparison_results_root=_path(namespace, "comparison_results_root"),
+        routing_campaigns_root=_optional_path(namespace, "routing_campaigns_root"),
         port=cast(int, namespace.port),
         open_browser=cast(bool, namespace.open_browser),
         keyring_path=_optional_path(namespace, "keyring"),
@@ -1135,6 +1136,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--comparison-results-root",
         default="comparison-results",
         help="controlled-comparison result root",
+    )
+    dashboard.add_argument(
+        "--routing-campaigns-root",
+        help="one sealed routing-campaign-v1 package root to project read-only",
     )
     dashboard.add_argument(
         "--port",
