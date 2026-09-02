@@ -18,6 +18,7 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/generate_capability_profiles.py --check
 "$inferdrome_python" scripts/generate_gpu_campaign.py --check
 "$inferdrome_python" scripts/generate_qwen3_launch_profile.py --check
+"$inferdrome_python" scripts/generate_routing_execution_contracts.py --check
 "$inferdrome_python" scripts/generate_fake_golden.py --check
 "$inferdrome_python" scripts/generate_vllm_golden.py --check
 "$inferdrome_python" scripts/generate_sglang_normalization.py --check
@@ -73,6 +74,7 @@ bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/generate_capability_profiles.py
 "$inferdrome_python" -m py_compile scripts/generate_gpu_campaign.py
 "$inferdrome_python" -m py_compile scripts/generate_qwen3_launch_profile.py
+"$inferdrome_python" -m py_compile scripts/generate_routing_execution_contracts.py
 "$inferdrome_python" -m py_compile scripts/generate_sglang_normalization.py
 "$inferdrome_python" -m py_compile scripts/review_gpu_evidence_publication.py
 "$inferdrome_python" -m py_compile scripts/review_qwen3_gpu_evidence_publication.py
