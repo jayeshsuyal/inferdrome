@@ -17,6 +17,7 @@ def run_dashboard(
     trial_sets_root: Path | None = None,
     comparison_plans_root: Path | None = None,
     comparison_results_root: Path | None = None,
+    routing_campaigns_root: Path | None = None,
     port: int = 8787,
     open_browser: bool = False,
     keyring_path: Path | None = None,
@@ -39,6 +40,7 @@ def run_dashboard(
             comparison_plans_root=comparison_plans_root,
             comparison_results_root=comparison_results_root,
         ),
+        routing_campaigns_root=routing_campaigns_root,
         keyring_path=keyring_path,
     )
     url = f"http://{_LOOPBACK_HOST}:{port}"

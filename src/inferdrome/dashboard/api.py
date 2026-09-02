@@ -22,11 +22,17 @@ from inferdrome.dashboard.models import (
     TrialSetDetail,
     TrialSetIndexResponse,
 )
+from inferdrome.dashboard.routing_campaign import RoutingCampaignDashboardIndex
+from inferdrome.dashboard.routing_campaign_models import (
+    RoutingCampaignDetail,
+    RoutingCampaignIndexResponse,
+)
 from inferdrome.errors import (
     DashboardAuthError,
     DashboardControlledComparisonNotFound,
     DashboardError,
     DashboardPaginationError,
+    DashboardRoutingCampaignNotFound,
     DashboardRunNotFound,
     DashboardTrialSetNotFound,
 )
@@ -95,6 +101,8 @@ def create_app(
     index: DashboardIndex | None = None,
     *,
     runs_root: Path | None = None,
+    routing_campaign_index: RoutingCampaignDashboardIndex | None = None,
+    routing_campaigns_root: Path | None = None,
     static_dir: Path | None = None,
     keyring_path: Path | None = None,
 ) -> FastAPI:
@@ -104,6 +112,12 @@ def create_app(
         index = DashboardIndex(runs_root)
     elif runs_root is not None:
         raise ValueError("create_app accepts either an index or runs root, not both")
+    if routing_campaign_index is not None and routing_campaigns_root is not None:
+        raise ValueError(
+            "create_app accepts either a routing campaign index or root, not both"
+        )
+    if routing_campaign_index is None:
+        routing_campaign_index = RoutingCampaignDashboardIndex(routing_campaigns_root)
 
     auth_store = (
         DashboardKeyringStore(keyring_path) if keyring_path is not None else None
@@ -295,6 +309,47 @@ def create_app(
             raise HTTPException(
                 status_code=503,
                 detail="dashboard verification work is temporarily unavailable",
+            ) from None
+
+    @app.get(
+        "/api/v1/routing-campaigns",
+        response_model=RoutingCampaignIndexResponse,
+        dependencies=protected_dependencies,
+    )
+    def list_routing_campaigns(
+        cursor: Annotated[str | None, Query(max_length=128)] = None,
+        limit: Annotated[int, Query(ge=1, le=25)] = 25,
+    ) -> RoutingCampaignIndexResponse:
+        try:
+            return routing_campaign_index.refresh(cursor=cursor, limit=limit)
+        except DashboardPaginationError:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid routing-campaign pagination cursor",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="routing-campaign verification work is temporarily unavailable",
+            ) from None
+
+    @app.get(
+        "/api/v1/routing-campaigns/{campaign_id}",
+        response_model=RoutingCampaignDetail,
+        dependencies=protected_dependencies,
+    )
+    def get_routing_campaign(campaign_id: str) -> RoutingCampaignDetail:
+        try:
+            return routing_campaign_index.get_campaign(campaign_id)
+        except DashboardRoutingCampaignNotFound:
+            raise HTTPException(
+                status_code=404,
+                detail="routing campaign not found",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail="routing-campaign verification work is temporarily unavailable",
             ) from None
 
     selected_static = static_dir or Path(__file__).with_name("static")

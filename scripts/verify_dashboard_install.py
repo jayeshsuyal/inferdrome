@@ -146,8 +146,12 @@ def verify_install(expected_package_root: Path | None = None) -> None:
             dashboard = client.get("/")
             deep_link = client.get("/compare")
             trial_deep_link = client.get("/trial-sets")
+            routing_campaign_deep_link = client.get(
+                "/routing-campaigns/routing-campaign-v1"
+            )
             health = client.get("/api/v1/health")
             trial_sets = client.get("/api/v1/trial-sets?limit=200")
+            routing_campaigns = client.get("/api/v1/routing-campaigns?limit=25")
             assets = [client.get(asset_path) for asset_path in sorted(asset_paths)]
 
     if dashboard.status_code != 200 or "Inferdrome" not in dashboard.text:
@@ -159,10 +163,20 @@ def verify_install(expected_package_root: Path | None = None) -> None:
         or trial_deep_link.content != dashboard.content
     ):
         raise AssertionError("installed trial-set deep link is not served")
+    if (
+        routing_campaign_deep_link.status_code != 200
+        or routing_campaign_deep_link.content != dashboard.content
+    ):
+        raise AssertionError("installed routing-campaign deep link is not served")
     if health.status_code != 200 or health.json() != {"status": "ok"}:
         raise AssertionError("installed dashboard API health route failed")
     if trial_sets.status_code != 200 or trial_sets.json().get("trial_sets") != []:
         raise AssertionError("installed trial-set API route failed")
+    if (
+        routing_campaigns.status_code != 200
+        or routing_campaigns.json().get("routing_campaigns") != []
+    ):
+        raise AssertionError("installed routing-campaign API route failed")
     if any(response.status_code != 200 for response in assets):
         raise AssertionError("one or more installed dashboard assets are not served")
 

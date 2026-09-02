@@ -73,6 +73,10 @@ class DashboardControlledComparisonNotFound(DashboardError):
     """A comparison-plan ID was not present in the verified dashboard index."""
 
 
+class DashboardRoutingCampaignNotFound(DashboardError):
+    """A routing campaign ID was not present in the verified dashboard index."""
+
+
 class DashboardPaginationError(DashboardError):
     """A dashboard collection cursor or page bound was invalid."""
 
