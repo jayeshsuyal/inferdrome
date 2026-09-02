@@ -14,6 +14,8 @@ import re
 import select
 import signal
 import stat
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -64,6 +66,7 @@ from inferdrome.deployment.gcp_lifecycle import (
     validate_gcp_a2_profile,
     validate_gcp_execution_preflight_freshness,
 )
+from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.deployment.gcp_v2_contracts import (
     GcpCleanupRecoveryAuthorization,
     GcpV2ActivationDeadline,
@@ -96,9 +99,7 @@ GCP_EXACT_ORPHAN_REPORT_SCHEMA_VERSION: Final = "inferdrome.gcp-exact-orphan-rep
 GCP_WATCHDOG_ACTIVATION_RECEIPT_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-watchdog-activation-receipt.v2"
 )
-GCP_FILE_WATCHDOG_EVENT_SCHEMA_VERSION: Final = (
-    "inferdrome.gcp-file-watchdog-event.v2"
-)
+GCP_FILE_WATCHDOG_EVENT_SCHEMA_VERSION: Final = "inferdrome.gcp-file-watchdog-event.v2"
 GCP_WATCHDOG_CLEANUP_RESULT_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-watchdog-cleanup-result.v2"
 )
@@ -107,15 +108,11 @@ GCP_SUPERVISOR_BINDING_SCHEMA_ID: Final = "urn:inferdrome:gcp-supervisor-binding
 GCP_SUPERVISOR_EVENT_SCHEMA_ID: Final = "urn:inferdrome:gcp-supervisor-event:v2"
 GCP_WATCHDOG_RECEIPT_SCHEMA_ID: Final = "urn:inferdrome:gcp-watchdog-receipt:v2"
 GCP_KILL_SWITCH_SCHEMA_ID: Final = "urn:inferdrome:gcp-kill-switch:v2"
-GCP_EXACT_ORPHAN_REPORT_SCHEMA_ID: Final = (
-    "urn:inferdrome:gcp-exact-orphan-report:v2"
-)
+GCP_EXACT_ORPHAN_REPORT_SCHEMA_ID: Final = "urn:inferdrome:gcp-exact-orphan-report:v2"
 GCP_WATCHDOG_ACTIVATION_RECEIPT_SCHEMA_ID: Final = (
     "urn:inferdrome:gcp-watchdog-activation-receipt:v2"
 )
-GCP_FILE_WATCHDOG_EVENT_SCHEMA_ID: Final = (
-    "urn:inferdrome:gcp-file-watchdog-event:v2"
-)
+GCP_FILE_WATCHDOG_EVENT_SCHEMA_ID: Final = "urn:inferdrome:gcp-file-watchdog-event:v2"
 GCP_WATCHDOG_CLEANUP_RESULT_SCHEMA_ID: Final = (
     "urn:inferdrome:gcp-watchdog-cleanup-result:v2"
 )
@@ -136,12 +133,53 @@ GCP_FILE_WATCHDOG_TERMINAL_EVENT_RESERVE: Final = 1
 
 _OPERATOR_ID_RE = re.compile(r"^operator-[a-z0-9][a-z0-9_-]{2,61}$")
 _WATCHDOG_ID_RE = re.compile(r"^watchdog-[a-z][a-z0-9-]{2,61}$")
-_EVENT_PATH_RE = re.compile(
-    r"^(ctl-[a-z0-9]{8,24})\.safety-v2\.events\.jsonl$"
-)
+_EVENT_PATH_RE = re.compile(r"^(ctl-[a-z0-9]{8,24})\.safety-v2\.events\.jsonl$")
 _WATCHDOG_EVENT_PATH_RE = re.compile(
     r"^(ctl-[a-z0-9]{8,24})\.file-watchdog-v2\.events\.jsonl$"
 )
+
+# Every exec-isolated worker imports only this already-loaded source tree.  It
+# is deliberately independent of the controller's current working directory
+# and inherited environment: a hostile checkout directory must not be able to
+# shadow ``inferdrome`` between watchdog activation and child exec.
+_WATCHDOG_WORKER_SOURCE_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+
+# A fresh runner intentionally outlives an individual controller/watchdog
+# object.  Keep its Popen handle process-wide until it exits or is explicitly
+# stopped, so object collection cannot silently abandon a zombie.  The table
+# contains only local PIDs/handles; it is never authorization or inventory.
+_LIVE_FILE_WATCHDOG_RUNNERS: dict[int, subprocess.Popen[bytes]] = {}
+_LIVE_FILE_WATCHDOG_RUNNERS_LOCK = threading.Lock()
+
+
+def _reap_file_watchdog_runners() -> None:
+    with _LIVE_FILE_WATCHDOG_RUNNERS_LOCK:
+        for runner_pid, process in tuple(_LIVE_FILE_WATCHDOG_RUNNERS.items()):
+            if process.poll() is not None:
+                _LIVE_FILE_WATCHDOG_RUNNERS.pop(runner_pid, None)
+
+
+def _stop_file_watchdog_runners_for_tests() -> None:
+    """Stop only runners created by the current local test interpreter.
+
+    This intentionally has no ``atexit`` registration.  A production
+    controller's normal interpreter exit must leave its independently spawned
+    runner alive.  Unit-test fixtures call this private helper explicitly so
+    their local fake workers do not outlive a completed test process.
+    """
+
+    with _LIVE_FILE_WATCHDOG_RUNNERS_LOCK:
+        runners = tuple(_LIVE_FILE_WATCHDOG_RUNNERS.items())
+        _LIVE_FILE_WATCHDOG_RUNNERS.clear()
+    for runner_pid, process in runners:
+        if process.poll() is None:
+            try:
+                os.killpg(runner_pid, signal.SIGKILL)
+            except (AttributeError, OSError):
+                with suppress(OSError):
+                    process.kill()
+        with suppress(subprocess.TimeoutExpired, OSError):
+            process.wait(timeout=0.1)
 
 
 def _same_managed_root(left: Path, right: Path) -> bool:
@@ -229,9 +267,19 @@ class GcpExecutionApprovalPayload(GcpExecutionModel):
     request_digest: Sha256Digest
     startup_projection_digest: Sha256Digest
     execution_payload_digest: Sha256Digest
-    quote_digest: Sha256Digest
+    read_only_quote_digest: Sha256Digest = Field(
+        description=(
+            "Digest of the exact frozen v1 read-only quote observation. This is "
+            "distinct from the v2 rational rate-basis digest below."
+        )
+    )
     capacity_digest: Sha256Digest
-    rate_basis_digest: Sha256Digest
+    rate_basis_digest: Sha256Digest = Field(
+        description=(
+            "Digest of the separate v2 read-only rational USD rate basis; it "
+            "is neither a provider invoice nor billing/launch authority."
+        )
+    )
     cost_guard_digest: Sha256Digest
     activation_deadline_digest: Sha256Digest
     quote_currency: Literal["USD"]
@@ -331,9 +379,7 @@ class GcpSupervisorBinding(GcpExecutionModel):
     approval_id: Sha256Digest
     approval_digest: Sha256Digest
     activation_deadline_digest: Sha256Digest
-    controller_id: Annotated[
-        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
-    ]
+    controller_id: Annotated[str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")]
     arm_id: Sha256Digest
     plan_id: Sha256Digest
     request_digest: Sha256Digest
@@ -361,9 +407,7 @@ class GcpExactOrphanReport(GcpExecutionModel):
     schema_version: Literal["inferdrome.gcp-exact-orphan-report.v2"]
     approval_digest: Sha256Digest
     request_digest: Sha256Digest
-    controller_id: Annotated[
-        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
-    ]
+    controller_id: Annotated[str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")]
     project_id: GcpProjectId
     region: GcpRegion
     zone: GcpZone
@@ -392,9 +436,7 @@ class GcpKillSwitchRecord(GcpExecutionModel):
     operator_confirmation: Literal["KILL_GCP_V2_EXACT"]
     approval_digest: Sha256Digest
     request_digest: Sha256Digest
-    controller_id: Annotated[
-        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
-    ]
+    controller_id: Annotated[str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")]
     issued_at: GcpTimestamp
     kill_id: Sha256Digest
 
@@ -415,9 +457,7 @@ class GcpWatchdogReceipt(GcpExecutionModel):
     request_digest: Sha256Digest
     startup_projection_digest: Sha256Digest
     execution_payload_digest: Sha256Digest
-    controller_id: Annotated[
-        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
-    ]
+    controller_id: Annotated[str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")]
     armed_at: GcpTimestamp
     expires_at: GcpTimestamp
     ready: Literal[True]
@@ -442,9 +482,7 @@ class GcpWatchdogActivationReceipt(GcpExecutionModel):
     request_digest: Sha256Digest
     startup_projection_digest: Sha256Digest
     execution_payload_digest: Sha256Digest
-    controller_id: Annotated[
-        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
-    ]
+    controller_id: Annotated[str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")]
     capability_id: Sha256Digest
     activated_at: GcpTimestamp
     provider_runtime_deadline_at: GcpTimestamp
@@ -472,10 +510,21 @@ class GcpWatchdogActivationReceipt(GcpExecutionModel):
 
 
 _MUTATION_ACTIVATION_PROOF_SEAL = object()
+_FUTURE_MUTATION_ACTIVATION_GUARD_SEAL = object()
+_WATCHDOG_CLEANUP_HANDLE_SEAL = object()
+_RECOVERY_CLEANUP_HANDLE_SEAL = object()
 
 
 class _MutationProofUse:
     """Private, purpose-scoped uses retained with an activation proof."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.consumed: set[Literal["transport", "disk_cleanup"]] = set()
+
+
+class _CleanupHandleUse:
+    """One-shot local use tracking for a cleanup-only opaque handoff."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -496,6 +545,53 @@ class GcpV2ActivatedMutationProof:
     receipt: GcpWatchdogActivationReceipt
     _seal: object
     _use: _MutationProofUse
+
+
+@dataclass(frozen=True)
+class _GcpV2FutureMutationActivationGuard:
+    """Private supervisor-issued handoff for a future executable factory.
+
+    A post-watchdog proof alone represents the narrow one-shot capability
+    handoff.  This additional object records that the concrete lifecycle
+    supervisor revalidated the exact approval, read-only quote/cap guard,
+    kill switch, and fsync-backed watchdog activation immediately before a
+    future SDK/component construction edge.  It is deliberately not a public
+    artifact or a serializable authorization: the object-identity seal only
+    transports the already validated local decision across the one internal
+    factory boundary.
+    """
+
+    proof: GcpV2ActivatedMutationProof
+    binding: GcpSupervisorBinding
+    rate_basis_digest: Sha256Digest
+    cost_guard_digest: Sha256Digest
+    _seal: object
+
+
+@dataclass(frozen=True)
+class _GcpV2WatchdogCleanupHandle:
+    """Private cleanup-only handoff minted from a durable active watchdog task.
+
+    The nested capability is never accepted directly at a cleanup factory
+    edge.  This in-memory handle can only be made by the watchdog after it has
+    reopened and validated its fsync-backed activation event.
+    """
+
+    binding: GcpSupervisorBinding
+    capability: GcpV2MutationCapability
+    activation_receipt_id: Sha256Digest
+    _seal: object
+    _use: _CleanupHandleUse
+
+
+@dataclass(frozen=True)
+class _GcpV2RecoveryCleanupHandle:
+    """Private cleanup-only handoff minted after supervisor recovery checks."""
+
+    binding: GcpSupervisorBinding
+    authorization: GcpCleanupRecoveryAuthorization
+    _seal: object
+    _use: _CleanupHandleUse
 
 
 def _strict_mutation_capability(
@@ -537,6 +633,188 @@ def _strict_disk_cleanup_binding(
     return parsed
 
 
+def _mint_gcp_v2_watchdog_cleanup_handle(
+    *,
+    event: GcpFileWatchdogEvent,
+    now: datetime,
+) -> _GcpV2WatchdogCleanupHandle:
+    """Mint cleanup authority only from a durable active watchdog event."""
+
+    if event.state not in {
+        "ACTIVE",
+        "RUNNER_READY",
+        "DISK_BOUND",
+        "PREBIND_RETRY_PENDING",
+        "RETRY_PENDING",
+        "PREBIND_CLEANUP_INTENT",
+        "CLEANUP_INTENT",
+    }:
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_STATE_INVALID")
+    if (
+        event.mutation_capability is None
+        or event.activation_receipt_id is None
+        or event.executor_config_digest is None
+    ):
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_EVENT_INVALID")
+    capability = _strict_mutation_capability(event.mutation_capability)
+    binding = event.binding
+    if (
+        capability.capability_id != event.capability_id
+        or capability.request_digest != binding.request_digest
+        or capability.startup_projection_digest != binding.startup_projection_digest
+        or capability.execution_payload_digest != binding.execution_payload_digest
+        or capability.project_id != binding.project_id
+        or capability.region != binding.region
+        or capability.zone != binding.zone
+        or capability.instance_name != binding.instance_name
+        or capability.labels != binding.labels
+    ):
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_BINDING_MISMATCH")
+    try:
+        now_value = _parse_timestamp(_timestamp(now))
+        deadline = _parse_timestamp(capability.watchdog_cleanup_deadline_at)
+    except ValueError:
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_TIME_INVALID") from None
+    if not now_value < deadline:
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_EXPIRED")
+    return _GcpV2WatchdogCleanupHandle(
+        binding=binding,
+        capability=capability,
+        activation_receipt_id=event.activation_receipt_id,
+        _seal=_WATCHDOG_CLEANUP_HANDLE_SEAL,
+        _use=_CleanupHandleUse(),
+    )
+
+
+def _consume_gcp_v2_watchdog_cleanup_handle(
+    handle: object,
+    *,
+    now: datetime,
+    purpose: Literal["transport", "disk_cleanup"],
+) -> _GcpV2WatchdogCleanupHandle:
+    """Consume one watchdog-issued cleanup handle at an internal factory edge."""
+
+    if (
+        not isinstance(handle, _GcpV2WatchdogCleanupHandle)
+        or handle._seal is not _WATCHDOG_CLEANUP_HANDLE_SEAL
+    ):
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_INVALID")
+    capability = _strict_mutation_capability(handle.capability)
+    binding = handle.binding
+    if (
+        capability.request_digest != binding.request_digest
+        or capability.startup_projection_digest != binding.startup_projection_digest
+        or capability.execution_payload_digest != binding.execution_payload_digest
+        or capability.project_id != binding.project_id
+        or capability.region != binding.region
+        or capability.zone != binding.zone
+        or capability.instance_name != binding.instance_name
+        or capability.labels != binding.labels
+    ):
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_BINDING_MISMATCH")
+    try:
+        now_value = _parse_timestamp(_timestamp(now))
+    except ValueError:
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_TIME_INVALID") from None
+    if now_value >= _parse_timestamp(capability.watchdog_cleanup_deadline_at):
+        raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_EXPIRED")
+    with handle._use.lock:
+        if purpose in handle._use.consumed:
+            raise GcpSupervisorError("WATCHDOG_CLEANUP_HANDLE_CONSUMED")
+        handle._use.consumed.add(purpose)
+    return handle
+
+
+def _mint_gcp_v2_recovery_cleanup_handle(
+    *,
+    binding: GcpSupervisorBinding,
+    authorization: GcpCleanupRecoveryAuthorization,
+    now: datetime,
+) -> _GcpV2RecoveryCleanupHandle:
+    """Mint cleanup-only authority after canonical recovery validation."""
+
+    try:
+        raw = canonical_json_bytes(_model_value(authorization))
+        parsed = GcpCleanupRecoveryAuthorization.model_validate_json(raw)
+        now_value = _parse_timestamp(_timestamp(now))
+        issued = _parse_timestamp(parsed.issued_at)
+        expires = _parse_timestamp(parsed.expires_at)
+        deadline = _parse_timestamp(parsed.recovery_deadline_at)
+    except (AttributeError, ValidationError, ValueError, TypeError):
+        raise GcpSupervisorError("RECOVERY_CLEANUP_HANDLE_INVALID") from None
+    if (
+        canonical_json_bytes(_model_value(parsed)) != raw
+        or parsed.create_authority is not False
+        or not (issued <= now_value < expires <= deadline)
+        or parsed.request_digest != binding.request_digest
+        or parsed.startup_projection_digest != binding.startup_projection_digest
+        or parsed.execution_payload_digest != binding.execution_payload_digest
+        or parsed.controller_id != binding.controller_id
+        or parsed.project_id != binding.project_id
+        or parsed.region != binding.region
+        or parsed.zone != binding.zone
+        or parsed.instance_name != binding.instance_name
+        or parsed.labels != binding.labels
+    ):
+        raise GcpSupervisorError("RECOVERY_CLEANUP_HANDLE_BINDING_MISMATCH")
+    return _GcpV2RecoveryCleanupHandle(
+        binding=binding,
+        authorization=parsed,
+        _seal=_RECOVERY_CLEANUP_HANDLE_SEAL,
+        _use=_CleanupHandleUse(),
+    )
+
+
+def _consume_gcp_v2_recovery_cleanup_handle(
+    handle: object,
+    *,
+    now: datetime,
+    purpose: Literal["transport", "disk_cleanup"],
+) -> _GcpV2RecoveryCleanupHandle:
+    """Consume one supervisor-issued cleanup recovery handle."""
+
+    if (
+        not isinstance(handle, _GcpV2RecoveryCleanupHandle)
+        or handle._seal is not _RECOVERY_CLEANUP_HANDLE_SEAL
+    ):
+        raise GcpSupervisorError("RECOVERY_CLEANUP_HANDLE_INVALID")
+    validated = _mint_gcp_v2_recovery_cleanup_handle(
+        binding=handle.binding,
+        authorization=handle.authorization,
+        now=now,
+    )
+    del validated
+    with handle._use.lock:
+        if purpose in handle._use.consumed:
+            raise GcpSupervisorError("RECOVERY_CLEANUP_HANDLE_CONSUMED")
+        handle._use.consumed.add(purpose)
+    return handle
+
+
+def _inspect_gcp_v2_recovery_cleanup_handle(
+    handle: object, *, now: datetime
+) -> GcpCleanupRecoveryAuthorization:
+    """Validate an opaque recovery handoff without consuming either purpose.
+
+    This is intentionally private plumbing for the exact disk-sidecar factory:
+    it needs the immutable disk binding to choose a journal file before the
+    subsequent provider adapter consumes the ``disk_cleanup`` use.  It never
+    returns create authority and never accepts a raw authorization artifact.
+    """
+
+    if (
+        not isinstance(handle, _GcpV2RecoveryCleanupHandle)
+        or handle._seal is not _RECOVERY_CLEANUP_HANDLE_SEAL
+    ):
+        raise GcpSupervisorError("RECOVERY_CLEANUP_HANDLE_INVALID")
+    validated = _mint_gcp_v2_recovery_cleanup_handle(
+        binding=handle.binding,
+        authorization=handle.authorization,
+        now=now,
+    )
+    return validated.authorization
+
+
 def validate_gcp_v2_activated_mutation_proof(
     proof: object, *, now: datetime
 ) -> GcpV2ActivatedMutationProof:
@@ -552,11 +830,9 @@ def validate_gcp_v2_activated_mutation_proof(
     if (
         receipt.capability_id != capability.capability_id
         or receipt.approval_digest != capability.approval_digest
-        or receipt.activation_deadline_digest
-        != capability.activation_contract_digest
+        or receipt.activation_deadline_digest != capability.activation_contract_digest
         or receipt.request_digest != capability.request_digest
-        or receipt.startup_projection_digest
-        != capability.startup_projection_digest
+        or receipt.startup_projection_digest != capability.startup_projection_digest
         or receipt.execution_payload_digest != capability.execution_payload_digest
         or receipt.controller_id != capability.controller_id
         or receipt.activated_at != capability.activated_at
@@ -605,6 +881,50 @@ def consume_gcp_v2_activated_mutation_proof(
     return parsed
 
 
+def consume_gcp_v2_future_mutation_activation_guard(
+    guard: object,
+    *,
+    now: datetime,
+    purpose: Literal["transport", "disk_cleanup"] = "transport",
+) -> GcpV2ActivatedMutationProof:
+    """Consume one purpose of a concrete-supervisor factory handoff.
+
+    This is intentionally private plumbing for the v2 capability-bound
+    transport and exact disk-sidecar factories.  A caller cannot substitute a
+    standalone capability or even a valid-looking post-watchdog proof: only
+    ``GcpLifecycleSupervisor.issue_future_mutation_activation_guard`` mints
+    this sealed object after all local approval/cost/watchdog checks hold.
+    ``consume_gcp_v2_activated_mutation_proof`` still supplies the independent
+    one-shot accounting for the create and post-create disk purposes.
+    """
+
+    if (
+        not isinstance(guard, _GcpV2FutureMutationActivationGuard)
+        or guard._seal is not _FUTURE_MUTATION_ACTIVATION_GUARD_SEAL
+    ):
+        raise GcpSupervisorError("MUTATION_ACTIVATION_GUARD_INVALID")
+    proof = validate_gcp_v2_activated_mutation_proof(guard.proof, now=now)
+    capability = proof.capability
+    binding = guard.binding
+    if (
+        capability.approval_digest != binding.approval_digest
+        or capability.activation_contract_digest != binding.activation_deadline_digest
+        or capability.request_digest != binding.request_digest
+        or capability.startup_projection_digest != binding.startup_projection_digest
+        or capability.execution_payload_digest != binding.execution_payload_digest
+        or capability.controller_id != binding.controller_id
+        or capability.project_id != binding.project_id
+        or capability.region != binding.region
+        or capability.zone != binding.zone
+        or capability.instance_name != binding.instance_name
+        or capability.labels != binding.labels
+        or not guard.rate_basis_digest.startswith("sha256:")
+        or not guard.cost_guard_digest.startswith("sha256:")
+    ):
+        raise GcpSupervisorError("MUTATION_ACTIVATION_GUARD_BINDING_MISMATCH")
+    return consume_gcp_v2_activated_mutation_proof(proof, now=now, purpose=purpose)
+
+
 GcpFileWatchdogState = Literal[
     "ARMED",
     "READY",
@@ -649,7 +969,7 @@ class GcpFileWatchdogEvent(GcpExecutionModel):
     cleanup_result: GcpWatchdogCleanupResult | None = None
     prebind_cleanup_result: GcpWatchdogPrebindCleanupResult | None = None
     # A core journal can authoritatively confirm this exact lease absent while
-    # a locally forked cleanup child still owns an intent.  This fsync-backed
+    # an exec-isolated cleanup worker still owns an intent.  This fsync-backed
     # fence prevents a later runner restart from launching that stale intent;
     # it is not a provider result or an authority expansion.
     core_terminal_fenced_at: GcpTimestamp | None = None
@@ -694,8 +1014,7 @@ class GcpFileWatchdogEvent(GcpExecutionModel):
             raise ValueError("watchdog event lacks sealed executor configuration")
         if self.mutation_capability is not None and (
             self.capability_id != self.mutation_capability.capability_id
-            or self.mutation_capability.approval_digest
-            != self.binding.approval_digest
+            or self.mutation_capability.approval_digest != self.binding.approval_digest
             or self.mutation_capability.activation_contract_digest
             != self.binding.activation_deadline_digest
             or self.mutation_capability.request_digest != self.binding.request_digest
@@ -728,15 +1047,18 @@ class GcpFileWatchdogEvent(GcpExecutionModel):
         ):
             raise ValueError("active watchdog event lacks independent runner receipt")
         if self.state in {"ARMED", "READY", "ACTIVE"} and (
-            self.runner_process_id is not None
-            or self.runner_ready_at is not None
+            self.runner_process_id is not None or self.runner_ready_at is not None
         ):
             raise ValueError("unready watchdog event carries a runner receipt")
-        if self.state == "CLEANUP_NOT_REQUIRED" and carries_runtime_binding and (
-            self.capability_id is None
-            or self.activation_receipt_id is None
-            or self.provider_runtime_deadline_at is None
-            or self.watchdog_cleanup_deadline_at is None
+        if (
+            self.state == "CLEANUP_NOT_REQUIRED"
+            and carries_runtime_binding
+            and (
+                self.capability_id is None
+                or self.activation_receipt_id is None
+                or self.provider_runtime_deadline_at is None
+                or self.watchdog_cleanup_deadline_at is None
+            )
         ):
             raise ValueError("terminal watchdog event has partial runtime binding")
         if self.state in {"ARMED", "READY"} and self.cleanup_attempts != 0:
@@ -808,9 +1130,7 @@ class GcpWatchdogCleanupResult(GcpExecutionModel):
     """Exact result returned by an injected cleanup-only executor."""
 
     schema_version: Literal["inferdrome.gcp-watchdog-cleanup-result.v2"]
-    controller_id: Annotated[
-        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
-    ]
+    controller_id: Annotated[str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")]
     request_digest: Sha256Digest
     project_id: GcpProjectId
     region: GcpRegion
@@ -868,9 +1188,7 @@ class GcpWatchdogPrebindCleanupResult(GcpExecutionModel):
     """
 
     schema_version: Literal["inferdrome.gcp-watchdog-prebind-cleanup-result.v2"]
-    controller_id: Annotated[
-        str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")
-    ]
+    controller_id: Annotated[str, StringConstraints(pattern=r"^ctl-[a-z0-9]{8,24}$")]
     request_digest: Sha256Digest
     project_id: GcpProjectId
     region: GcpRegion
@@ -1007,6 +1325,24 @@ def gcp_watchdog_activation_receipt_id(
     )
 
 
+def _issued_gcp_watchdog_activation_receipt(
+    payload: dict[str, Any],
+) -> GcpWatchdogActivationReceipt:
+    """Validate and content-address an issuance payload without bypassing Pydantic.
+
+    ``model_construct`` is deliberately avoided on normal issuance paths: the
+    same strict parser that accepts a receipt also validates its placeholder-
+    free digest binding before the object reaches an authority boundary.
+    """
+
+    receipt_id = digest_bytes(
+        DigestDomain.GCP_EXECUTION_WATCHDOG, canonical_json_bytes(payload)
+    )
+    return GcpWatchdogActivationReceipt.model_validate_json(
+        canonical_json_bytes({**payload, "receipt_id": receipt_id})
+    )
+
+
 def _strict_approval(approval: GcpExecutionApproval) -> GcpExecutionApproval:
     raw = canonical_gcp_execution_approval_bytes(approval)
     try:
@@ -1080,11 +1416,9 @@ def issue_gcp_execution_approval(
         plan_sha256=preflight.arm.plan_sha256,
         arm_id=preflight.arm.arm_id,
         request_digest=gcp_execution_request_digest(request),
-        startup_projection_digest=gcp_v2_startup_projection_digest(
-            startup_projection
-        ),
+        startup_projection_digest=gcp_v2_startup_projection_digest(startup_projection),
         execution_payload_digest=startup_projection.execution_payload_digest,
-        quote_digest=gcp_cost_quote_digest(preflight.quote),
+        read_only_quote_digest=gcp_cost_quote_digest(preflight.quote),
         capacity_digest=gcp_capacity_digest(preflight.capacity),
         rate_basis_digest=gcp_read_only_quote_basis_digest(quote_basis),
         cost_guard_digest=gcp_cost_cleanup_guard_digest(cost_guard),
@@ -1118,9 +1452,7 @@ def issue_gcp_execution_approval(
         ),
         watchdog_deadline_at=activation_deadline.watchdog_deadline_at,
         hard_cost_ceiling=preflight.arm.cost_ceiling,
-        hard_ceiling_microusd=gcp_hard_usd_ceiling_microusd(
-            preflight.arm.cost_ceiling
-        ),
+        hard_ceiling_microusd=gcp_hard_usd_ceiling_microusd(preflight.arm.cost_ceiling),
         estimated_max_microusd=preflight.quote.worst_case_microusd,
         issued_at=issued_text,
         expires_at=expires_text,
@@ -1183,7 +1515,7 @@ def validate_gcp_execution_approval(
             startup_projection
         ),
         "execution_payload_digest": startup_projection.execution_payload_digest,
-        "quote_digest": gcp_cost_quote_digest(preflight.quote),
+        "read_only_quote_digest": gcp_cost_quote_digest(preflight.quote),
         "capacity_digest": gcp_capacity_digest(preflight.capacity),
         "rate_basis_digest": gcp_read_only_quote_basis_digest(quote_basis),
         "cost_guard_digest": gcp_cost_cleanup_guard_digest(cost_guard),
@@ -1270,9 +1602,7 @@ def gcp_supervisor_binding(
         labels=record.labels,
         setup_deadline_at=approval.setup_deadline_at,
         provider_runtime_seconds=approval.provider_runtime_seconds,
-        watchdog_cleanup_horizon_seconds=(
-            approval.watchdog_cleanup_horizon_seconds
-        ),
+        watchdog_cleanup_horizon_seconds=(approval.watchdog_cleanup_horizon_seconds),
         max_cleanup_attempts=record.max_cleanup_attempts,
         cleanup_timeout_seconds=record.cleanup_timeout_seconds,
         controller_deadline_at=approval.controller_deadline_at,
@@ -1441,39 +1771,116 @@ class GcpSupervisorJournal:
         if self._crash_hook is not None:
             self._crash_hook(point)
 
-    def _checked_root(self) -> Path:
+    def _open_root(self) -> SafeDirFD:
+        """Open one owner-controlled journal directory for a whole operation.
+
+        All subsequent journal reads, writes, scans, and fsyncs are relative
+        to this descriptor. The configured path is used only to obtain the
+        descriptor and to detect a concurrent root replacement before a
+        successful operation is reported.
+        """
+
         if not self.root.is_absolute():
             raise GcpSupervisorError("SUPERVISOR_JOURNAL_PATH_INVALID")
         try:
-            metadata = self.root.lstat()
-        except OSError:
+            return SafeDirFD.open(self.root)
+        except FileNotFoundError:
             raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNAVAILABLE") from None
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_mode & 0o022
-        ):
-            raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE")
-        return self.root
+        except SafeDirFSError:
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE") from None
+        except OSError:
+            # O_NOFOLLOW reports a final-component symlink as ELOOP on POSIX.
+            # Treat a failure to obtain an unambiguous root as unsafe instead
+            # of retrying through a path.
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE") from None
 
     @staticmethod
-    def _path_for(root: Path, controller_id: str) -> Path:
+    def _path_for(root: SafeDirFD, controller_id: str) -> str:
         if _CONTROLLER_RE.fullmatch(controller_id) is None:
             raise GcpSupervisorError("SUPERVISOR_CONTROLLER_INVALID")
-        return root / f"{controller_id}.safety-v2.events.jsonl"
+        try:
+            root.assert_open()
+        except SafeDirFSError:
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE") from None
+        return f"{controller_id}.safety-v2.events.jsonl"
+
+    @staticmethod
+    def _validated_regular_child(
+        root: SafeDirFD,
+        name: str,
+        *,
+        descriptor: int | None = None,
+    ) -> os.stat_result:
+        """Require an owner-controlled regular child bound to one dirfd."""
+
+        try:
+            metadata = (
+                os.fstat(descriptor)
+                if descriptor is not None
+                else root.stat_child(name)
+            )
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o022
+                or metadata.st_uid != os.getuid()
+            ):
+                raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE")
+            if descriptor is not None:
+                named = root.stat_child(name)
+                if (
+                    named.st_dev != metadata.st_dev
+                    or named.st_ino != metadata.st_ino
+                    or not stat.S_ISREG(named.st_mode)
+                    or named.st_mode & 0o022
+                    or named.st_uid != os.getuid()
+                ):
+                    raise GcpSupervisorError("SUPERVISOR_JOURNAL_CHANGED")
+            return metadata
+        except FileNotFoundError:
+            raise
+        except GcpSupervisorError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE") from None
+
+    @staticmethod
+    def _assert_root_path_current(root: SafeDirFD) -> None:
+        """Fail closed if the configured root path was swapped mid-operation.
+
+        This comparison does not authorize a child operation. Those are
+        already descriptor-relative; it merely prevents claiming durable
+        success when the configured journal path no longer names that verified
+        directory.
+        """
+
+        try:
+            metadata = os.stat(root.path, follow_symlinks=False)
+        except OSError:
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_ROOT_CHANGED") from None
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_dev != root.device
+            or metadata.st_ino != root.inode
+            or metadata.st_mode & 0o022
+            or metadata.st_uid != os.getuid()
+        ):
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_ROOT_CHANGED")
 
     @contextmanager
-    def _exclusive(self) -> Iterator[Path]:
-        root = self._checked_root()
+    def _exclusive(self) -> Iterator[SafeDirFD]:
+        root = self._open_root()
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                root / ".safety-v2.lock",
+            descriptor = root.open_child(
+                ".safety-v2.lock",
                 os.O_RDWR
                 | os.O_CREAT
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
+            )
+            self._validated_regular_child(
+                root, ".safety-v2.lock", descriptor=descriptor
             )
             try:
                 import fcntl
@@ -1483,6 +1890,11 @@ class GcpSupervisorJournal:
                 raise GcpSupervisorError("SUPERVISOR_LOCK_UNAVAILABLE") from None
             with self._lock:
                 yield root
+            self._assert_root_path_current(root)
+        except GcpSupervisorError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpSupervisorError("SUPERVISOR_LOCK_UNAVAILABLE") from None
         finally:
             if descriptor is not None:
                 try:
@@ -1492,31 +1904,28 @@ class GcpSupervisorJournal:
                 except (ImportError, OSError):
                     pass
                 os.close(descriptor)
+            root.close()
 
-    def _fsync_directory(self) -> None:
-        descriptor = os.open(
-            self._checked_root(), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        )
+    @staticmethod
+    def _fsync_directory(root: SafeDirFD) -> None:
         try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            root.fsync()
+        except (OSError, SafeDirFSError):
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNAVAILABLE") from None
 
-    def _read_events_locked(self, path: Path) -> tuple[GcpSupervisorJournalEvent, ...]:
+    def _read_events_locked(
+        self, root: SafeDirFD, name: str
+    ) -> tuple[GcpSupervisorJournalEvent, ...]:
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
+            descriptor = root.open_child(
+                name,
                 os.O_RDONLY
                 | getattr(os, "O_NOFOLLOW", 0)
                 | getattr(os, "O_CLOEXEC", 0),
             )
-            metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_size > GCP_SUPERVISOR_MAX_EVENT_BYTES
-                or metadata.st_mode & 0o022
-            ):
+            metadata = self._validated_regular_child(root, name, descriptor=descriptor)
+            if metadata.st_size > GCP_SUPERVISOR_MAX_EVENT_BYTES:
                 raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE")
             raw = os.read(descriptor, GCP_SUPERVISOR_MAX_EVENT_BYTES + 1)
             final = os.fstat(descriptor)
@@ -1526,6 +1935,7 @@ class GcpSupervisorJournal:
                 or final.st_size != len(raw)
             ):
                 raise GcpSupervisorError("SUPERVISOR_JOURNAL_CHANGED")
+            self._validated_regular_child(root, name, descriptor=descriptor)
             if not raw.endswith(b"\n"):
                 newline = raw.rfind(b"\n")
                 raw = raw[: newline + 1] if newline >= 0 else b""
@@ -1560,7 +1970,7 @@ class GcpSupervisorJournal:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _repair_partial_tail_locked(self, path: Path) -> bool:
+    def _repair_partial_tail_locked(self, root: SafeDirFD, name: str) -> bool:
         """Repair one incomplete tail and report whether an event history remains.
 
         A process can die after creating its exact controller path but before a
@@ -1572,18 +1982,12 @@ class GcpSupervisorJournal:
 
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
-                os.O_RDWR
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+            descriptor = root.open_child(
+                name,
+                os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             )
-            metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_size > GCP_SUPERVISOR_MAX_EVENT_BYTES
-                or metadata.st_mode & 0o022
-            ):
+            metadata = self._validated_regular_child(root, name, descriptor=descriptor)
+            if metadata.st_size > GCP_SUPERVISOR_MAX_EVENT_BYTES:
                 raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE")
             raw = os.read(descriptor, GCP_SUPERVISOR_MAX_EVENT_BYTES + 1)
             if len(raw) > GCP_SUPERVISOR_MAX_EVENT_BYTES:
@@ -1593,18 +1997,20 @@ class GcpSupervisorJournal:
                 if newline < 0:
                     os.ftruncate(descriptor, 0)
                     os.fsync(descriptor)
-                    os.unlink(path)
-                    self._fsync_directory()
+                    self._validated_regular_child(root, name, descriptor=descriptor)
+                    root.unlink_child(name)
+                    self._fsync_directory(root)
                     return False
                 os.ftruncate(descriptor, newline + 1)
                 os.fsync(descriptor)
-                self._fsync_directory()
+                self._validated_regular_child(root, name, descriptor=descriptor)
+                self._fsync_directory(root)
             return True
         except FileNotFoundError:
             return False
         except GcpSupervisorError:
             raise
-        except OSError:
+        except (OSError, SafeDirFSError):
             raise GcpSupervisorError("SUPERVISOR_JOURNAL_REPAIR_FAILED") from None
         finally:
             if descriptor is not None:
@@ -1665,23 +2071,84 @@ class GcpSupervisorJournal:
             ):
                 raise GcpSupervisorError("SUPERVISOR_TIMESTAMP_REGRESSED")
 
-    def _scan_locked(self, root: Path) -> tuple[GcpSupervisorJournalEvent, ...]:
+    def _scan_locked(self, root: SafeDirFD) -> tuple[GcpSupervisorJournalEvent, ...]:
         try:
-            entries = sorted(root.iterdir(), key=lambda path: path.name)
-        except OSError:
+            entries = sorted(os.listdir(root.fd))
+        except (OSError, SafeDirFSError):
             raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNAVAILABLE") from None
         latest: list[GcpSupervisorJournalEvent] = []
-        for entry in entries:
-            if entry.name == ".safety-v2.lock":
+        for name in entries:
+            if name == ".safety-v2.lock":
                 continue
-            match = _EVENT_PATH_RE.fullmatch(entry.name)
+            match = _EVENT_PATH_RE.fullmatch(name)
             if match is None:
                 raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNEXPECTED_ENTRY")
-            if stat.S_ISLNK(entry.lstat().st_mode):
-                raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE")
-            if self._repair_partial_tail_locked(entry):
-                latest.append(self._read_events_locked(entry)[-1])
+            try:
+                self._validated_regular_child(root, name)
+            except FileNotFoundError:
+                # A concurrent removal is ambiguous under a journal scan.
+                raise GcpSupervisorError("SUPERVISOR_JOURNAL_CHANGED") from None
+            if self._repair_partial_tail_locked(root, name):
+                latest.append(self._read_events_locked(root, name)[-1])
         return tuple(latest)
+
+    @staticmethod
+    def _append_event_locked(root: SafeDirFD, name: str, raw: bytes) -> None:
+        descriptor: int | None = None
+        try:
+            descriptor = root.open_child(
+                name,
+                os.O_WRONLY
+                | os.O_APPEND
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            GcpSupervisorJournal._validated_regular_child(
+                root, name, descriptor=descriptor
+            )
+            _write_all(descriptor, raw)
+            os.fsync(descriptor)
+            GcpSupervisorJournal._validated_regular_child(
+                root, name, descriptor=descriptor
+            )
+        except GcpSupervisorError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_APPEND_FAILED") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    @staticmethod
+    def _create_event_locked(root: SafeDirFD, name: str, raw: bytes) -> None:
+        descriptor: int | None = None
+        try:
+            descriptor = root.open_child(
+                name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            GcpSupervisorJournal._validated_regular_child(
+                root, name, descriptor=descriptor
+            )
+            _write_all(descriptor, raw)
+            os.fsync(descriptor)
+            GcpSupervisorJournal._validated_regular_child(
+                root, name, descriptor=descriptor
+            )
+        except FileExistsError:
+            raise
+        except GcpSupervisorError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpSupervisorError("SUPERVISOR_JOURNAL_RESERVE_FAILED") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def reserve(self, binding: GcpSupervisorBinding, *, now: datetime) -> None:
         """Persist exact approval intent and block every unresolved next run."""
@@ -1691,7 +2158,7 @@ class GcpSupervisorJournal:
             for existing in self._scan_locked(root):
                 if existing.state != "CLEANUP_CONFIRMED":
                     raise GcpSupervisorError("SUPERVISOR_UNRESOLVED_LEASE")
-            path = self._path_for(root, binding.controller_id)
+            name = self._path_for(root, binding.controller_id)
             event = _event(
                 sequence=0,
                 state="PREPARED",
@@ -1704,27 +2171,12 @@ class GcpSupervisorJournal:
             )
             raw = canonical_json_bytes(_model_value(event)) + b"\n"
             try:
-                descriptor = os.open(
-                    path,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
-                    0o600,
-                )
-                try:
-                    _write_all(descriptor, raw)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                self._create_event_locked(root, name, raw)
                 self._crash_point("reserve_after_event_fsync")
-                self._fsync_directory()
+                self._fsync_directory(root)
                 self._crash_point("reserve_after_directory_fsync")
             except FileExistsError:
                 raise GcpSupervisorError("SUPERVISOR_LEASE_EXISTS") from None
-            except OSError:
-                raise GcpSupervisorError("SUPERVISOR_JOURNAL_RESERVE_FAILED") from None
 
     def _reserve_exact_for_reconciliation(
         self, binding: GcpSupervisorBinding, *, now: datetime
@@ -1738,17 +2190,13 @@ class GcpSupervisorJournal:
 
         occurred_at = _timestamp(now)
         with self._exclusive() as root:
-            path = self._path_for(root, binding.controller_id)
+            name = self._path_for(root, binding.controller_id)
             try:
-                metadata = path.lstat()
+                self._validated_regular_child(root, name)
             except FileNotFoundError:
-                metadata = None
-            except OSError:
-                raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNAVAILABLE") from None
-            if metadata is not None:
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                    raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNSAFE")
-                if self._repair_partial_tail_locked(path):
+                pass
+            else:
+                if self._repair_partial_tail_locked(root, name):
                     return
             event = _event(
                 sequence=0,
@@ -1762,27 +2210,10 @@ class GcpSupervisorJournal:
             )
             raw = canonical_json_bytes(_model_value(event)) + b"\n"
             try:
-                descriptor = os.open(
-                    path,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
-                    0o600,
-                )
-                try:
-                    _write_all(descriptor, raw)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                self._fsync_directory()
+                self._create_event_locked(root, name, raw)
+                self._fsync_directory(root)
             except FileExistsError:
                 return
-            except OSError:
-                raise GcpSupervisorError(
-                    "SUPERVISOR_JOURNAL_RESERVE_FAILED"
-                ) from None
 
     def reconcile_core_terminal(
         self,
@@ -1823,10 +2254,10 @@ class GcpSupervisorJournal:
 
     def load(self, controller_id: str) -> GcpSupervisorJournalEvent:
         with self._exclusive() as root:
-            path = self._path_for(root, controller_id)
-            if not self._repair_partial_tail_locked(path):
+            name = self._path_for(root, controller_id)
+            if not self._repair_partial_tail_locked(root, name):
                 raise GcpSupervisorError("SUPERVISOR_JOURNAL_MISSING")
-            return self._read_events_locked(path)[-1]
+            return self._read_events_locked(root, name)[-1]
 
     def advance(
         self,
@@ -1842,10 +2273,10 @@ class GcpSupervisorJournal:
 
         occurred_at = _timestamp(now)
         with self._exclusive() as root:
-            path = self._path_for(root, binding.controller_id)
-            if not self._repair_partial_tail_locked(path):
+            name = self._path_for(root, binding.controller_id)
+            if not self._repair_partial_tail_locked(root, name):
                 raise GcpSupervisorError("SUPERVISOR_JOURNAL_MISSING")
-            events = self._read_events_locked(path)
+            events = self._read_events_locked(root, name)
             previous = events[-1]
             if previous.binding != binding:
                 raise GcpSupervisorError("SUPERVISOR_BINDING_MISMATCH")
@@ -1866,32 +2297,18 @@ class GcpSupervisorJournal:
             self._validate_transitions(candidate)
             raw = canonical_json_bytes(_model_value(event)) + b"\n"
             try:
-                size = path.stat().st_size
-            except OSError:
-                raise GcpSupervisorError("SUPERVISOR_JOURNAL_UNAVAILABLE") from None
+                size = self._validated_regular_child(root, name).st_size
+            except FileNotFoundError:
+                raise GcpSupervisorError("SUPERVISOR_JOURNAL_CHANGED") from None
             if (
                 len(candidate) > GCP_SUPERVISOR_MAX_EVENTS
                 or size + len(raw) > GCP_SUPERVISOR_MAX_EVENT_BYTES
             ):
                 raise GcpSupervisorError("SUPERVISOR_JOURNAL_BOUND_EXCEEDED")
-            try:
-                descriptor = os.open(
-                    path,
-                    os.O_WRONLY
-                    | os.O_APPEND
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
-                )
-                try:
-                    _write_all(descriptor, raw)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                self._crash_point("advance_after_event_fsync")
-                self._fsync_directory()
-                self._crash_point("advance_after_directory_fsync")
-            except OSError:
-                raise GcpSupervisorError("SUPERVISOR_JOURNAL_APPEND_FAILED") from None
+            self._append_event_locked(root, name, raw)
+            self._crash_point("advance_after_event_fsync")
+            self._fsync_directory(root)
+            self._crash_point("advance_after_directory_fsync")
             return event
 
 
@@ -1959,14 +2376,16 @@ class GcpV2ExactWatchdogCleanupExecutor:
         # happens to satisfy the structural protocol.
         try:
             from inferdrome.deployment.gcp_compute_transport import (
+                _recovery_cleanup_authority_id,
+                _recovery_cleanup_transport_matches,
+                _watchdog_cleanup_authority_id,
+                _watchdog_cleanup_transport_matches,
                 is_gcp_v2_cleanup_authorization_bound_transport,
                 is_gcp_v2_watchdog_cleanup_bound_transport,
             )
         except ImportError:
             raise GcpSupervisorError("WATCHDOG_EXECUTOR_TRANSPORT_INVALID") from None
-        cleanup_authorized = is_gcp_v2_cleanup_authorization_bound_transport(
-            transport
-        )
+        cleanup_authorized = is_gcp_v2_cleanup_authorization_bound_transport(transport)
         watchdog_authorized = is_gcp_v2_watchdog_cleanup_bound_transport(transport)
         if not cleanup_authorized and not watchdog_authorized:
             raise GcpSupervisorError("WATCHDOG_EXECUTOR_TRANSPORT_INVALID")
@@ -1976,58 +2395,46 @@ class GcpV2ExactWatchdogCleanupExecutor:
         self._disk_cleanup = disk_cleanup
         self._now_fn = now_fn
         if cleanup_authorized:
-            authorization = getattr(transport, "authorization", None)
             if (
                 type(disk_cleanup) is not GcpV2ExactDiskCleanupCoordinator
-                or authorization is None
-                or getattr(authorization, "approval_digest", None)
-                != supervisor_binding.approval_digest
-                or getattr(authorization, "lease_intent_anchor_digest", None)
-                != record.intent_anchor_digest
-                or getattr(authorization, "arm_id", None) != record.arm_id
-                or getattr(authorization, "plan_id", None) != record.plan_id
-                or getattr(authorization, "create_authority", None) is not False
-                or getattr(authorization, "allowed_actions", None)
-                != (
-                    "reconcile_operation",
-                    "get_exact_instance",
-                    "list_exact_label_inventory",
-                    "delete_exact_instance",
-                    "get_exact_disk",
-                    "delete_exact_disk",
-                    "confirm_absence",
+                or not _recovery_cleanup_transport_matches(
+                    transport,
+                    approval_digest=supervisor_binding.approval_digest,
+                    lease_intent_anchor_digest=record.intent_anchor_digest,
+                    arm_id=record.arm_id,
+                    plan_id=record.plan_id,
+                    request_digest=record.request_digest,
+                    startup_projection_digest=supervisor_binding.startup_projection_digest,
+                    execution_payload_digest=supervisor_binding.execution_payload_digest,
+                    project_id=record.project_id,
+                    region=record.region,
+                    zone=record.zone,
+                    instance_name=record.instance_name,
+                    labels=record.labels,
+                    disk_cleanup_binding=disk_cleanup.binding,
                 )
-                or getattr(authorization, "request_digest", None)
-                != record.request_digest
-                or getattr(authorization, "startup_projection_digest", None)
-                != supervisor_binding.startup_projection_digest
-                or getattr(authorization, "execution_payload_digest", None)
-                != supervisor_binding.execution_payload_digest
-                or getattr(authorization, "project_id", None) != record.project_id
-                or getattr(authorization, "region", None) != record.region
-                or getattr(authorization, "zone", None) != record.zone
-                or getattr(authorization, "instance_name", None) != record.instance_name
-                or getattr(authorization, "labels", None) != record.labels
-                or getattr(authorization, "disk_cleanup_binding", None)
-                != disk_cleanup.binding
             ):
                 raise GcpSupervisorError("WATCHDOG_EXECUTOR_TRANSPORT_MISMATCH")
         else:
-            capability = getattr(transport, "capability", None)
-            if (
-                capability is None
-                or getattr(capability, "request_digest", None) != record.request_digest
-                or getattr(capability, "startup_projection_digest", None)
-                != supervisor_binding.startup_projection_digest
-                or getattr(capability, "execution_payload_digest", None)
-                != supervisor_binding.execution_payload_digest
-                or getattr(capability, "project_id", None) != record.project_id
-                or getattr(capability, "region", None) != record.region
-                or getattr(capability, "zone", None) != record.zone
-                or getattr(capability, "instance_name", None) != record.instance_name
-                or getattr(capability, "labels", None) != record.labels
+            if not _watchdog_cleanup_transport_matches(
+                transport,
+                request_digest=record.request_digest,
+                startup_projection_digest=supervisor_binding.startup_projection_digest,
+                execution_payload_digest=supervisor_binding.execution_payload_digest,
+                project_id=record.project_id,
+                region=record.region,
+                zone=record.zone,
+                instance_name=record.instance_name,
+                labels=record.labels,
             ):
                 raise GcpSupervisorError("WATCHDOG_EXECUTOR_TRANSPORT_MISMATCH")
+        self._cleanup_authority_id = (
+            _recovery_cleanup_authority_id(transport)
+            if cleanup_authorized
+            else _watchdog_cleanup_authority_id(transport)
+        )
+        if self._cleanup_authority_id is None:
+            raise GcpSupervisorError("WATCHDOG_EXECUTOR_TRANSPORT_INVALID")
 
     def _validate_event(self, event: GcpFileWatchdogEvent) -> None:
         record = self._record
@@ -2052,13 +2459,6 @@ class GcpV2ExactWatchdogCleanupExecutor:
         executor cannot inherit a ready task and reach a provider boundary.
         """
 
-        authorization = getattr(self._transport, "authorization", None)
-        capability = getattr(self._transport, "capability", None)
-        authority_id = getattr(authorization, "authorization_id", None) or getattr(
-            capability, "capability_id", None
-        )
-        if authority_id is None:
-            raise GcpSupervisorError("WATCHDOG_EXECUTOR_TRANSPORT_INVALID")
         payload = {
             "kind": "gcp_v2_exact_cleanup_executor",
             "lease_intent_anchor_digest": self._record.intent_anchor_digest,
@@ -2080,7 +2480,7 @@ class GcpV2ExactWatchdogCleanupExecutor:
                 if self._disk_cleanup is not None
                 else None
             ),
-            "cleanup_authority_id": authority_id,
+            "cleanup_authority_id": self._cleanup_authority_id,
         }
         return digest_bytes(
             DigestDomain.GCP_EXECUTION_WATCHDOG, canonical_json_bytes(payload)
@@ -2090,9 +2490,8 @@ class GcpV2ExactWatchdogCleanupExecutor:
         """Check the exact persisted controller binding without I/O."""
 
         try:
-            return (
-                binding == self._binding
-                and self.configuration_digest.startswith("sha256:")
+            return binding == self._binding and self.configuration_digest.startswith(
+                "sha256:"
             )
         except (GcpSupervisorError, ValueError, TypeError):
             return False
@@ -2145,11 +2544,9 @@ class GcpV2ExactWatchdogCleanupExecutor:
         request = self._record.request
         try:
             observation, inventory = self._validate_exact_instance_and_inventory(
-                self._transport.get_instance(
-                request, timeout_seconds=timeout_seconds
-                ),
+                self._transport.get_instance(request, timeout_seconds=timeout_seconds),
                 self._transport.list_owned_complete(
-                request, timeout_seconds=timeout_seconds
+                    request, timeout_seconds=timeout_seconds
                 ),
             )
             if observation.state != "NOT_FOUND" or inventory.instances:
@@ -2187,10 +2584,10 @@ class GcpV2ExactWatchdogCleanupExecutor:
                     raise GcpSupervisorError("WATCHDOG_DELETE_UNCONFIRMED")
                 observation, inventory = self._validate_exact_instance_and_inventory(
                     self._transport.get_instance(
-                    request, timeout_seconds=timeout_seconds
+                        request, timeout_seconds=timeout_seconds
                     ),
                     self._transport.list_owned_complete(
-                    request, timeout_seconds=timeout_seconds
+                        request, timeout_seconds=timeout_seconds
                     ),
                 )
         except (GcpExecutionError, ValidationError, ValueError, TypeError) as error:
@@ -2331,18 +2728,14 @@ class GcpV2LocalWatchdogExecutorFactory:
             "instance_name": record.instance_name,
             "labels": _model_value(record.labels),
             "supervisor_binding": _model_value(binding),
-            "core_journal_root": os.path.realpath(
-                os.fspath(self._core_journal.root)
-            ),
+            "core_journal_root": os.path.realpath(os.fspath(self._core_journal.root)),
             "disk_cleanup_factory": self._disk_cleanup_factory.configuration_digest,
         }
         return digest_bytes(
             DigestDomain.GCP_EXECUTION_WATCHDOG, canonical_json_bytes(payload)
         )
 
-    def _transport_for(
-        self, capability: GcpV2MutationCapability
-    ) -> GcpComputeTransport:
+    def _transport_for(self, authority: object) -> GcpComputeTransport:
         factory = self._transport_factory
         try:
             from inferdrome.deployment.gcp_compute_transport import (
@@ -2353,39 +2746,21 @@ class GcpV2LocalWatchdogExecutorFactory:
         if type(factory) is not GcpV2LocalTransportFactory:
             raise GcpSupervisorError("FILE_WATCHDOG_EXECUTOR_FACTORY_INVALID")
         try:
-            return factory.bind_watchdog_cleanup(capability)
+            return factory.bind_watchdog_cleanup(authority)
         except GcpExecutionError as error:
             raise GcpSupervisorError(str(error)) from None
         except BaseException:
             raise GcpSupervisorError("FILE_WATCHDOG_EXECUTOR_FACTORY_INVALID") from None
 
-    def bind_for_capability(
-        self,
-        *,
-        binding: GcpSupervisorBinding,
-        capability: GcpV2MutationCapability,
-    ) -> GcpV2ExactWatchdogCleanupExecutor:
-        record = self._record_for(binding)
-        return GcpV2ExactWatchdogCleanupExecutor(
-            record=record,
-            supervisor_binding=binding,
-            transport=self._transport_for(capability),
-            disk_cleanup=None,
-            now_fn=self._now_fn,
-        )
-
     def bind_for_event(
-        self, event: GcpFileWatchdogEvent
+        self, event: GcpFileWatchdogEvent, *, authority: object
     ) -> GcpV2ExactWatchdogCleanupExecutor:
-        capability = event.mutation_capability
-        if capability is None:
-            raise GcpSupervisorError("FILE_WATCHDOG_CAPABILITY_MISSING")
         record = self._record_for(event.binding)
         disk_cleanup = (
             self._disk_cleanup_factory.bind(
                 record=record,
                 binding=event.disk_cleanup_binding,
-                authority=capability,
+                authority=authority,
                 now=self._now_fn(),
             )
             if event.disk_cleanup_binding is not None
@@ -2394,7 +2769,7 @@ class GcpV2LocalWatchdogExecutorFactory:
         return GcpV2ExactWatchdogCleanupExecutor(
             record=record,
             supervisor_binding=event.binding,
-            transport=self._transport_for(capability),
+            transport=self._transport_for(authority),
             disk_cleanup=disk_cleanup,
             now_fn=self._now_fn,
         )
@@ -2429,9 +2804,7 @@ class FakeGcpWatchdog:
             raise GcpSupervisorError("WATCHDOG_NOT_READY")
         return GcpWatchdogReceipt(
             schema_version=GCP_WATCHDOG_RECEIPT_SCHEMA_VERSION,
-            watchdog_id=(
-                f"watchdog-wd-{binding.controller_id.removeprefix('ctl-')}"
-            ),
+            watchdog_id=(f"watchdog-wd-{binding.controller_id.removeprefix('ctl-')}"),
             approval_digest=gcp_execution_approval_digest(approval),
             activation_deadline_digest=binding.activation_deadline_digest,
             request_digest=binding.request_digest,
@@ -2471,19 +2844,11 @@ class FakeGcpWatchdog:
             "capability_id": capability.capability_id,
             "activated_at": capability.activated_at,
             "provider_runtime_deadline_at": capability.provider_runtime_deadline_at,
-            "watchdog_cleanup_deadline_at": (
-                capability.watchdog_cleanup_deadline_at
-            ),
+            "watchdog_cleanup_deadline_at": (capability.watchdog_cleanup_deadline_at),
             "ready": True,
             "independently_durable": True,
         }
-        provisional = GcpWatchdogActivationReceipt.model_construct(
-            **{**payload, "receipt_id": "sha256:" + "0" * 64}
-        )
-        payload["receipt_id"] = gcp_watchdog_activation_receipt_id(provisional)
-        return GcpWatchdogActivationReceipt.model_validate_json(
-            canonical_json_bytes(payload)
-        )
+        return _issued_gcp_watchdog_activation_receipt(payload)
 
 
 def _file_watchdog_event(
@@ -2579,6 +2944,7 @@ class FileGcpWatchdog:
         root: Path,
         *,
         executor: GcpWatchdogCleanupExecutor | GcpV2LocalWatchdogExecutorFactory,
+        worker_backend: object | None = None,
         crash_hook: Callable[[str], None] | None = None,
         runner_enabled: bool = False,
         runner_poll_seconds: float = 0.05,
@@ -2586,9 +2952,7 @@ class FileGcpWatchdog:
     ) -> None:
         self.root = root
         if type(executor) is GcpV2LocalWatchdogExecutorFactory:
-            self._executor_factory: GcpV2LocalWatchdogExecutorFactory | None = (
-                executor
-            )
+            self._executor_factory: GcpV2LocalWatchdogExecutorFactory | None = executor
             # The nominal factory is deliberately not itself executable.  It
             # is replaced by an exact executor only after a durable event
             # validates its sealed configuration.
@@ -2596,26 +2960,92 @@ class FileGcpWatchdog:
         else:
             self._executor_factory = None
             self.executor = cast(GcpWatchdogCleanupExecutor, executor)
+        self._worker_backend: Any | None = None
+        if worker_backend is None and self._executor_factory is not None:
+            # The nominal v2 local factory already has a validated core
+            # journal root but cannot safely cross an exec boundary with its
+            # in-memory suppliers. Attach the only local reconstructible fake
+            # backend by default so existing injected-fake factory coverage
+            # gains the stricter route without turning a generic executor
+            # into future mutation authority.
+            try:
+                from inferdrome.deployment.gcp_watchdog_backend import (
+                    FileBackedFakeWatchdogBackend,
+                )
+
+                worker_backend = FileBackedFakeWatchdogBackend(
+                    core_journal_root=self._executor_factory.core_journal_root
+                )
+            except (ImportError, ValueError, TypeError):
+                raise GcpSupervisorError(
+                    "FILE_WATCHDOG_WORKER_BACKEND_UNAVAILABLE"
+                ) from None
+        if worker_backend is not None:
+            try:
+                from inferdrome.deployment.gcp_watchdog_backend import (
+                    FileBackedFakeWatchdogBackend,
+                )
+            except ImportError:
+                raise GcpSupervisorError(
+                    "FILE_WATCHDOG_WORKER_BACKEND_UNAVAILABLE"
+                ) from None
+            if (
+                type(worker_backend) is not FileBackedFakeWatchdogBackend
+                or self._executor_factory is None
+                or not worker_backend.matches_core_journal_root(
+                    self._executor_factory.core_journal_root
+                )
+            ):
+                raise GcpSupervisorError("FILE_WATCHDOG_WORKER_BACKEND_INVALID")
+            self._worker_backend = worker_backend
         self._lock = threading.Lock()
         self._crash_hook = crash_hook
         self._runner_enabled = runner_enabled
+        # Test-only injection for exercising the exec worker's hard timeout.
+        # It is private, defaults to zero, and is never persisted or supplied
+        # by operator input.
+        self._test_cleanup_worker_hang_milliseconds = 0
         if not 0.01 <= runner_poll_seconds <= 5.0:
             raise GcpSupervisorError("FILE_WATCHDOG_RUNNER_INTERVAL_INVALID")
         self._runner_poll_seconds = runner_poll_seconds
+        self._runner_uses_wall_clock = runner_now_fn is None
         self._runner_now_fn = runner_now_fn or (lambda: datetime.now(UTC))
 
     @property
     def independently_running(self) -> bool:
         """Whether this instance can launch an autonomous local runner."""
 
-        return self._runner_enabled and hasattr(os, "fork")
+        # The watchdog deliberately uses a fresh interpreter with ``exec``;
+        # it never relies on a Python-after-process-clone child.  Keep the
+        # capability explicit rather than probing a low-level primitive: a future
+        # platform may support ``subprocess``/``exec`` without exposing that
+        # implementation detail to this module.
+        return self._runner_enabled
 
     def configure_lease(self, record: GcpLeaseRecord) -> None:
         """Bind a nominal executor factory to the core lease before arming."""
 
-        if self._executor_factory is None:
-            return
-        self._executor_factory.configure_lease(record)
+        if self._executor_factory is not None:
+            self._executor_factory.configure_lease(record)
+        if self._worker_backend is not None:
+            try:
+                self._worker_backend.configure_lease(record)
+            except (AttributeError, ValueError, TypeError):
+                raise GcpSupervisorError(
+                    "FILE_WATCHDOG_WORKER_BACKEND_LEASE_INVALID"
+                ) from None
+
+    @property
+    def has_reconstructible_worker_backend(self) -> bool:
+        """Whether a fresh worker can clean this lease without parent memory.
+
+        The generic injected cleanup factory is intentionally insufficient for
+        the future mutation route: it can retain an in-memory supplier that a
+        restarted worker cannot prove or reconstruct.  Only the explicit
+        file-backed fake backend has a no-secret durable worker specification.
+        """
+
+        return self._worker_backend is not None and self._executor_factory is not None
 
     @property
     def v2_disk_cleanup_factory(self) -> GcpV2LocalDiskCleanupFactory | None:
@@ -2639,47 +3069,75 @@ class FileGcpWatchdog:
         if self._crash_hook is not None:
             self._crash_hook(point)
 
-    def _checked_root(self) -> Path:
+    def _checked_root(self) -> SafeDirFD:
         if not self.root.is_absolute():
             raise GcpSupervisorError("FILE_WATCHDOG_PATH_INVALID")
         try:
-            metadata = self.root.lstat()
-            resolved = os.path.realpath(os.fspath(self.root))
+            return SafeDirFD.open(self.root)
+        except SafeDirFSError:
+            raise GcpSupervisorError("FILE_WATCHDOG_PATH_UNSAFE") from None
         except OSError:
             raise GcpSupervisorError("FILE_WATCHDOG_UNAVAILABLE") from None
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_mode & 0o022
-            or os.path.normcase(os.path.abspath(os.fspath(self.root)))
-            != os.path.normcase(resolved)
-        ):
-            raise GcpSupervisorError("FILE_WATCHDOG_PATH_UNSAFE")
-        return self.root
 
     @staticmethod
-    def _path_for(root: Path, controller_id: str) -> Path:
+    def _path_for(root: SafeDirFD, controller_id: str) -> str:
+        del root
         if _CONTROLLER_RE.fullmatch(controller_id) is None:
             raise GcpSupervisorError("FILE_WATCHDOG_CONTROLLER_INVALID")
-        return root / f"{controller_id}.file-watchdog-v2.events.jsonl"
+        name = f"{controller_id}.file-watchdog-v2.events.jsonl"
+        if _WATCHDOG_EVENT_PATH_RE.fullmatch(name) is None:
+            raise GcpSupervisorError("FILE_WATCHDOG_CONTROLLER_INVALID")
+        return name
+
+    @staticmethod
+    def _validated_journal_child(
+        root: SafeDirFD, path: str, descriptor: int | None = None
+    ) -> os.stat_result:
+        """Validate the named private journal file before/after descriptor I/O.
+
+        Holding a safe directory FD alone does not prove that a child still
+        names the object that was opened before a read, truncate, append, or
+        fsync.  The secure-fs primitive compares ``fstat`` with no-follow
+        ``statat`` and enforces owner/mode/nlink, making a replacement race a
+        local fail-closed condition rather than a lifecycle transition.
+        """
+
+        try:
+            return root.validated_regular_child(path, descriptor=descriptor)
+        except (OSError, SafeDirFSError):
+            raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_UNSAFE") from None
 
     @contextmanager
-    def _exclusive(self) -> Iterator[Path]:
+    def _exclusive(self) -> Iterator[SafeDirFD]:
+        # Reap any runner that has already reached a durable terminal state
+        # before taking the next journal lock.  This is intentionally local
+        # bookkeeping only; stale/missing PIDs are never used as ownership or
+        # provider evidence.
+        _reap_file_watchdog_runners()
         root = self._checked_root()
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                root / ".file-watchdog-v2.lock",
-                os.O_RDWR
-                | os.O_CREAT
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+            descriptor = root.open_child(
+                ".file-watchdog-v2.lock",
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
                 0o600,
             )
+            metadata = self._validated_journal_child(
+                root, ".file-watchdog-v2.lock", descriptor
+            )
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o022
+                or metadata.st_uid != os.getuid()
+            ):
+                raise GcpSupervisorError("FILE_WATCHDOG_LOCK_UNSAFE")
             try:
                 import fcntl
 
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
+                self._validated_journal_child(
+                    root, ".file-watchdog-v2.lock", descriptor
+                )
             except (ImportError, OSError):
                 raise GcpSupervisorError("FILE_WATCHDOG_LOCK_UNAVAILABLE") from None
             with self._lock:
@@ -2693,6 +3151,7 @@ class FileGcpWatchdog:
                 except (ImportError, OSError):
                     pass
                 os.close(descriptor)
+            root.close()
 
     @staticmethod
     def _watchdog_id(binding: GcpSupervisorBinding) -> GcpWatchdogId:
@@ -2732,7 +3191,12 @@ class FileGcpWatchdog:
     def _validate_executor_for_event(self, event: GcpFileWatchdogEvent) -> None:
         self._validate_executor_config_for_event(event)
         if self._executor_factory is not None:
-            self.executor = self._executor_factory.bind_for_event(event)
+            handle = _mint_gcp_v2_watchdog_cleanup_handle(
+                event=event, now=self._runner_now_fn()
+            )
+            self.executor = self._executor_factory.bind_for_event(
+                event, authority=handle
+            )
 
     def _validate_executor_config_for_event(self, event: GcpFileWatchdogEvent) -> None:
         """Validate a persisted executor identity without constructing it.
@@ -2745,6 +3209,58 @@ class FileGcpWatchdog:
         expected = self._executor_config_for_binding(event.binding)
         if event.executor_config_digest != expected:
             raise GcpSupervisorError("FILE_WATCHDOG_EXECUTOR_MISMATCH")
+
+    def _prepare_worker_backend_locked(
+        self, root: SafeDirFD, event: GcpFileWatchdogEvent
+    ) -> None:
+        """Persist the sealed no-secret worker specification before readiness.
+
+        This intentionally happens only after ``ACTIVE`` has fsync-recorded
+        the exact mutation capability and before a runner PID is published.
+        The backend receives the held watchdog directory descriptor, never an
+        approval object, payload, provider client, or mutable root pathname.
+        """
+
+        backend = self._worker_backend
+        if backend is None:
+            return
+        try:
+            backend.prepare_active(root, event)
+        except (AttributeError, ValueError, TypeError):
+            raise GcpSupervisorError(
+                "FILE_WATCHDOG_WORKER_BACKEND_PREPARE_FAILED"
+            ) from None
+
+    def _bind_worker_backend_disk_locked(
+        self, root: SafeDirFD, event: GcpFileWatchdogEvent
+    ) -> None:
+        """Durably add only the provider-observed exact disk to worker state."""
+
+        backend = self._worker_backend
+        if backend is None:
+            return
+        try:
+            backend.bind_disk_cleanup(root, event)
+        except (AttributeError, ValueError, TypeError):
+            raise GcpSupervisorError(
+                "FILE_WATCHDOG_WORKER_BACKEND_DISK_BIND_FAILED"
+            ) from None
+
+    def _validate_worker_backend_for_event_locked(
+        self, root: SafeDirFD, event: GcpFileWatchdogEvent
+    ) -> None:
+        """Read all durable backend identities without building a transport."""
+
+        backend = self._worker_backend
+        if backend is None:
+            self._validate_executor_for_event(event)
+            return
+        try:
+            backend.validate_ready(root, event)
+        except (AttributeError, ValueError, TypeError):
+            raise GcpSupervisorError(
+                "FILE_WATCHDOG_WORKER_BACKEND_UNAVAILABLE"
+            ) from None
 
     @staticmethod
     def _runner_resume_count(events: tuple[GcpFileWatchdogEvent, ...]) -> int:
@@ -2767,7 +3283,7 @@ class FileGcpWatchdog:
 
     def _orphan_for_journal_budget_locked(
         self,
-        root: Path,
+        root: SafeDirFD,
         events: tuple[GcpFileWatchdogEvent, ...],
         *,
         binding: GcpSupervisorBinding,
@@ -2799,7 +3315,7 @@ class FileGcpWatchdog:
 
     def _settle_core_terminal_fence_locked(
         self,
-        root: Path,
+        root: SafeDirFD,
         events: tuple[GcpFileWatchdogEvent, ...],
         *,
         now: datetime,
@@ -2848,9 +3364,11 @@ class FileGcpWatchdog:
 
         config_digest = self._executor_config_for_binding(binding)
         if self._executor_factory is not None:
-            self.executor = self._executor_factory.bind_for_capability(
-                binding=binding, capability=capability
-            )
+            # A factory is bound only from the fsync-persisted active event
+            # below.  Passing a raw capability here would reintroduce a
+            # self-addressed cleanup edge before the watchdog has durable
+            # evidence of activation.
+            return config_digest
         if (
             type(self.executor) is not GcpV2ExactWatchdogCleanupExecutor
             or not self.executor.matches_watchdog_binding(binding)
@@ -2858,51 +3376,55 @@ class FileGcpWatchdog:
             raise GcpSupervisorError("FILE_WATCHDOG_EXECUTOR_INVALID")
         return config_digest
 
-    def _fsync_directory(self, root: Path) -> None:
-        descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    def _fsync_directory(self, root: SafeDirFD) -> None:
+        """Persist a verified journal directory without reopening its path."""
 
-    def _repair_partial_tail_locked(self, path: Path, root: Path) -> bool:
+        try:
+            root.fsync()
+        except (SafeDirFSError, OSError):
+            raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_APPEND_FAILED") from None
+
+    def _repair_partial_tail_locked(self, path: str, root: SafeDirFD) -> bool:
         """Repair only an incomplete tail; remove a zero-event crash prefix."""
 
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
-                os.O_RDWR
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-            )
-            metadata = os.fstat(descriptor)
+            descriptor = root.open_child(path, os.O_RDWR)
+            metadata = self._validated_journal_child(root, path, descriptor)
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_size > GCP_FILE_WATCHDOG_MAX_EVENT_BYTES
                 or metadata.st_mode & 0o022
+                or metadata.st_uid != os.getuid()
             ):
                 raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_UNSAFE")
             raw = os.read(descriptor, GCP_FILE_WATCHDOG_MAX_EVENT_BYTES + 1)
+            self._validated_journal_child(root, path, descriptor)
             if len(raw) > GCP_FILE_WATCHDOG_MAX_EVENT_BYTES:
                 raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_UNSAFE")
             if not raw.endswith(b"\n"):
                 newline = raw.rfind(b"\n")
                 if newline < 0:
+                    expected = self._validated_journal_child(root, path, descriptor)
                     os.ftruncate(descriptor, 0)
                     os.fsync(descriptor)
-                    os.unlink(path)
+                    self._validated_journal_child(root, path, descriptor)
+                    root.unlink_child(path, expected=expected)
                     self._fsync_directory(root)
                     return False
+                self._validated_journal_child(root, path, descriptor)
                 os.ftruncate(descriptor, newline + 1)
                 os.fsync(descriptor)
+                truncated = self._validated_journal_child(root, path, descriptor)
+                if truncated.st_size != newline + 1:
+                    raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_CHANGED")
                 self._fsync_directory(root)
             return True
         except FileNotFoundError:
             return False
         except GcpSupervisorError:
             raise
-        except OSError:
+        except (SafeDirFSError, OSError):
             raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_REPAIR_FAILED") from None
         finally:
             if descriptor is not None:
@@ -3004,39 +3526,39 @@ class FileGcpWatchdog:
                 current.executor_config_digest != previous.executor_config_digest
             ):
                 raise GcpSupervisorError("FILE_WATCHDOG_EXECUTOR_CHANGED")
-            if previous.runner_process_id is not None and (
-                current.runner_process_id != previous.runner_process_id
-                or current.runner_ready_at != previous.runner_ready_at
-            ) and current.state != previous.state:
+            if (
+                previous.runner_process_id is not None
+                and (
+                    current.runner_process_id != previous.runner_process_id
+                    or current.runner_ready_at != previous.runner_ready_at
+                )
+                and current.state != previous.state
+            ):
                 raise GcpSupervisorError("FILE_WATCHDOG_RUNNER_BINDING_CHANGED")
 
     def _read_locked(
-        self, root: Path, controller_id: str
+        self, root: SafeDirFD, controller_id: str
     ) -> tuple[GcpFileWatchdogEvent, ...]:
         path = self._path_for(root, controller_id)
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
-                os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-            )
+            descriptor = root.open_child(path, os.O_RDONLY)
         except FileNotFoundError:
             return ()
         except OSError:
             raise GcpSupervisorError("FILE_WATCHDOG_UNAVAILABLE") from None
         try:
-            metadata = os.fstat(descriptor)
+            metadata = self._validated_journal_child(root, path, descriptor)
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_size <= 0
                 or metadata.st_size > GCP_FILE_WATCHDOG_MAX_EVENT_BYTES
                 or metadata.st_mode & 0o022
+                or metadata.st_uid != os.getuid()
             ):
                 raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_UNSAFE")
             raw = os.read(descriptor, GCP_FILE_WATCHDOG_MAX_EVENT_BYTES + 1)
-            final = os.fstat(descriptor)
+            final = self._validated_journal_child(root, path, descriptor)
             if (
                 len(raw) > GCP_FILE_WATCHDOG_MAX_EVENT_BYTES
                 or final.st_ino != metadata.st_ino
@@ -3082,14 +3604,14 @@ class FileGcpWatchdog:
             return tuple(events)
         except GcpSupervisorError:
             raise
-        except (OSError, ValidationError, ValueError):
+        except (SafeDirFSError, OSError, ValidationError, ValueError):
             raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_INVALID") from None
         finally:
             os.close(descriptor)
 
     def _append_locked(
         self,
-        root: Path,
+        root: SafeDirFD,
         events: tuple[GcpFileWatchdogEvent, ...],
         *,
         state: GcpFileWatchdogState,
@@ -3110,9 +3632,7 @@ class FileGcpWatchdog:
         prior = events[-1] if events else None
         if prior is not None and prior.binding != binding:
             raise GcpSupervisorError("FILE_WATCHDOG_BINDING_MISMATCH")
-        prior_disk_binding = (
-            prior.disk_cleanup_binding if prior is not None else None
-        )
+        prior_disk_binding = prior.disk_cleanup_binding if prior is not None else None
         if prior_disk_binding is not None and (
             disk_cleanup_binding is not None
             and disk_cleanup_binding != prior_disk_binding
@@ -3217,24 +3737,31 @@ class FileGcpWatchdog:
         raw = canonical_json_bytes(_model_value(event)) + b"\n"
         path = self._path_for(root, binding.controller_id)
         try:
-            descriptor = os.open(
+            descriptor = root.open_child(
                 path,
-                os.O_WRONLY
-                | os.O_APPEND
-                | os.O_CREAT
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
                 0o600,
             )
+            metadata = self._validated_journal_child(root, path, descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o022
+                or metadata.st_uid != os.getuid()
+            ):
+                raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_UNSAFE")
             try:
+                self._validated_journal_child(root, path, descriptor)
                 _write_all(descriptor, raw)
                 os.fsync(descriptor)
+                final = self._validated_journal_child(root, path, descriptor)
+                if final.st_size != metadata.st_size + len(raw):
+                    raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_CHANGED")
             finally:
                 os.close(descriptor)
             self._crash_point("file_watchdog_after_event_fsync")
             self._fsync_directory(root)
             self._crash_point("file_watchdog_after_directory_fsync")
-        except OSError:
+        except (SafeDirFSError, OSError):
             raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_APPEND_FAILED") from None
         return event
 
@@ -3279,13 +3806,7 @@ class FileGcpWatchdog:
             "ready": True,
             "independently_durable": True,
         }
-        provisional = GcpWatchdogActivationReceipt.model_construct(
-            **{**value, "receipt_id": "sha256:" + "0" * 64}
-        )
-        value["receipt_id"] = gcp_watchdog_activation_receipt_id(provisional)
-        return GcpWatchdogActivationReceipt.model_validate_json(
-            canonical_json_bytes(value)
-        )
+        return _issued_gcp_watchdog_activation_receipt(value)
 
     @staticmethod
     def _validate_capability_for_binding(
@@ -3305,10 +3826,8 @@ class FileGcpWatchdog:
             != binding.activation_deadline_digest
             or capability.controller_id != binding.controller_id
             or capability.request_digest != binding.request_digest
-            or capability.startup_projection_digest
-            != binding.startup_projection_digest
-            or capability.execution_payload_digest
-            != binding.execution_payload_digest
+            or capability.startup_projection_digest != binding.startup_projection_digest
+            or capability.execution_payload_digest != binding.execution_payload_digest
             or capability.project_id != binding.project_id
             or capability.region != binding.region
             or capability.zone != binding.zone
@@ -3406,9 +3925,7 @@ class FileGcpWatchdog:
             or approval.watchdog_deadline_at != binding.watchdog_deadline_at
         ):
             raise GcpSupervisorError("FILE_WATCHDOG_APPROVAL_MISMATCH")
-        capability = self._validate_capability_for_binding(
-            capability, binding, now=now
-        )
+        capability = self._validate_capability_for_binding(capability, binding, now=now)
         executor_config_digest = self._activate_executor(binding, capability)
         receipt = self._activation_receipt(binding, capability)
 
@@ -3431,7 +3948,7 @@ class FileGcpWatchdog:
                 ):
                     raise GcpSupervisorError("FILE_WATCHDOG_CAPABILITY_MISMATCH")
                 if latest.state == "RUNNER_READY":
-                    self._validate_executor_for_event(latest)
+                    self._validate_worker_backend_for_event_locked(root, latest)
                     existing_ready = True
             elif latest.state == "READY":
                 self._append_locked(
@@ -3445,17 +3962,24 @@ class FileGcpWatchdog:
                 )
             else:
                 raise GcpSupervisorError("FILE_WATCHDOG_TASK_UNAVAILABLE")
+            active_event = self._read_locked(root, binding.controller_id)[-1]
+            if active_event.state == "ACTIVE":
+                self._prepare_worker_backend_locked(root, active_event)
+                if self._worker_backend is None:
+                    self._validate_executor_for_event(active_event)
+            else:
+                self._validate_worker_backend_for_event_locked(root, active_event)
 
         if existing_ready:
             self.resume_runner(controller_id=binding.controller_id)
             return receipt
 
-        # The child starts in a new session and is held behind a one-byte gate
-        # until its ready acknowledgement is itself fsync-recorded.  It has no
-        # create authority and receives only this watchdog object/executor.
-        runner_pid, runner_gate, runner_ready = self._spawn_runner(
-            binding.controller_id
-        )
+        # The fresh interpreter receives only an already-open, verified
+        # watchdog directory descriptor plus the bounded controller identity.
+        # It acknowledges only after reopening and validating the durable
+        # RUNNER_READY event written below; approval data, payload bytes,
+        # suppliers, and credentials are never inherited.
+        runner_pid, runner_ready = self._spawn_runner(binding.controller_id)
         launched = False
         try:
             with self._exclusive() as root:
@@ -3482,26 +4006,30 @@ class FileGcpWatchdog:
                     executor_config_digest=executor_config_digest,
                 )
                 self._crash_point("file_watchdog_after_runner_ready")
-            _write_all(runner_gate, b"G")
             self._await_runner_ready(runner_ready)
+            self._crash_point("file_watchdog_exec_after_post_validation")
             launched = True
             return receipt
         finally:
-            with suppress(OSError):
-                os.close(runner_gate)
             with suppress(OSError):
                 os.close(runner_ready)
             if not launched:
                 self._kill_runner(runner_pid)
 
     def _kill_runner(self, runner_pid: int) -> None:
+        with _LIVE_FILE_WATCHDOG_RUNNERS_LOCK:
+            process = _LIVE_FILE_WATCHDOG_RUNNERS.pop(runner_pid, None)
         try:
             os.killpg(runner_pid, signal.SIGKILL)
         except (AttributeError, OSError):
             with suppress(OSError):
                 os.kill(runner_pid, signal.SIGKILL)
-        with suppress(OSError):
-            os.waitpid(runner_pid, os.WNOHANG)
+        if process is not None:
+            with suppress(subprocess.TimeoutExpired, OSError):
+                process.wait(timeout=0.1)
+        else:
+            with suppress(OSError):
+                os.waitpid(runner_pid, os.WNOHANG)
 
     def _runner_loop(self, controller_id: str) -> None:
         """Run the detached exact task until a durable terminal event exists."""
@@ -3532,19 +4060,26 @@ class FileGcpWatchdog:
             if not self._repair_partial_tail_locked(path, root):
                 raise GcpSupervisorError("FILE_WATCHDOG_TASK_MISSING")
             latest = self._read_locked(root, controller_id)[-1]
-            if latest.state not in {
-                "RUNNER_READY",
-                "DISK_BOUND",
-                "PREBIND_RETRY_PENDING",
-                "RETRY_PENDING",
-                "PREBIND_CLEANUP_INTENT",
-                "CLEANUP_INTENT",
-            } or latest.runner_process_id != runner_pid:
+            if (
+                latest.state
+                not in {
+                    "RUNNER_READY",
+                    "DISK_BOUND",
+                    "PREBIND_RETRY_PENDING",
+                    "RETRY_PENDING",
+                    "PREBIND_CLEANUP_INTENT",
+                    "CLEANUP_INTENT",
+                }
+                or latest.runner_process_id != runner_pid
+            ):
                 raise GcpSupervisorError("FILE_WATCHDOG_RUNNER_BINDING_MISMATCH")
             # Do not construct a future executor/provider merely because this
             # sidecar is due.  The sealed configuration can be checked locally
             # here; construction waits until a durable intent owns the task.
-            self._validate_executor_config_for_event(latest)
+            if self._worker_backend is not None:
+                self._validate_worker_backend_for_event_locked(root, latest)
+            else:
+                self._validate_executor_config_for_event(latest)
 
     @staticmethod
     def _await_runner_ready(ready_read: int) -> None:
@@ -3555,81 +4090,156 @@ class FileGcpWatchdog:
         except OSError:
             raise GcpSupervisorError("FILE_WATCHDOG_RUNNER_UNAVAILABLE") from None
 
-    def _spawn_runner(self, controller_id: str) -> tuple[int, int, int]:
-        """Fork a detached runner and retain its post-gate readiness channel."""
+    @staticmethod
+    def _worker_environment() -> dict[str, str]:
+        """Return a minimal non-secret environment for an exec worker.
+
+        A worker gets its import root from this installed/source tree, not the
+        caller's environment.  In particular, do not inherit cloud credential
+        variables, HOME, proxy settings, approvals, or payload material.
+        """
+
+        return {
+            "PATH": os.defpath,
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            # ``-P`` below also enforces this policy at interpreter startup.
+            # Retaining the flag in this minimal environment prevents a
+            # wrapper interpreter from reintroducing its current directory.
+            "PYTHONSAFEPATH": "1",
+            "PYTHONPATH": os.fspath(_WATCHDOG_WORKER_SOURCE_ROOT),
+        }
+
+    @staticmethod
+    def _worker_cwd() -> str:
+        """Return a verified, fixed cwd for every fresh watchdog worker.
+
+        The worker never inherits the controller's cwd.  Re-open the exact
+        source root using the same no-follow owner/mode checks used by the v2
+        journals before handing it to ``Popen``.  This is an import boundary,
+        not a journal authority: the child still receives provider-relevant
+        state only through its explicitly inherited directory descriptors.
+        """
+
+        root: SafeDirFD | None = None
+        try:
+            root = SafeDirFD.open(_WATCHDOG_WORKER_SOURCE_ROOT)
+            return os.fspath(_WATCHDOG_WORKER_SOURCE_ROOT)
+        except (OSError, SafeDirFSError):
+            raise GcpSupervisorError(
+                "FILE_WATCHDOG_WORKER_IMPORT_ROOT_UNSAFE"
+            ) from None
+        finally:
+            if root is not None:
+                root.close()
+
+    @classmethod
+    def _worker_command(cls, mode: Literal["runner", "cleanup"]) -> list[str]:
+        """Build the fixed, safe-import interpreter prefix for a worker."""
+
+        return [
+            sys.executable,
+            "-P",
+            "-m",
+            "inferdrome.deployment.gcp_watchdog_worker",
+            mode,
+        ]
+
+    def _open_worker_core_root(self) -> SafeDirFD | None:
+        """Open the second descriptor a reconstructible backend must verify.
+
+        A worker receives this descriptor through ``pass_fds`` instead of a
+        pathname.  It is optional only for legacy offline fixture tests; the
+        capability-only future activation route requires the durable backend
+        and therefore always receives both trusted roots.
+        """
+
+        backend = self._worker_backend
+        if backend is None:
+            return None
+        try:
+            return SafeDirFD.open(Path(os.fspath(backend.core_journal_root)))
+        except (AttributeError, OSError, SafeDirFSError):
+            raise GcpSupervisorError(
+                "FILE_WATCHDOG_WORKER_CORE_ROOT_UNAVAILABLE"
+            ) from None
+
+    def _spawn_runner(self, controller_id: str) -> tuple[int, int]:
+        """Exec a detached runner with only verified directory descriptors.
+
+        ``subprocess`` performs the platform spawn/exec boundary; no Python
+        code in this watchdog runs after ``fork``.  The child creates its own
+        session and validates the fsync-backed event record before writing its
+        one-byte readiness acknowledgement.
+        """
 
         if not self.independently_running:
             raise GcpSupervisorError("FILE_WATCHDOG_RUNNER_DISABLED")
         ready_read: int | None = None
         ready_write: int | None = None
-        gate_read: int | None = None
-        gate_write: int | None = None
-        runner_pid: int | None = None
+        root: SafeDirFD | None = None
+        core_root: SafeDirFD | None = None
+        process: subprocess.Popen[bytes] | None = None
         handed_off = False
         try:
+            root = self._checked_root()
+            core_root = self._open_worker_core_root()
             ready_read, ready_write = os.pipe()
-            gate_read, gate_write = os.pipe()
-            runner_pid = os.fork()
-            if runner_pid == 0:
-                try:
-                    os.close(ready_read)
-                    os.close(gate_write)
-                    self._lock = threading.Lock()
-                    os.setsid()
-                    null_descriptor = os.open(os.devnull, os.O_RDWR)
-                    try:
-                        for target in (0, 1, 2):
-                            os.dup2(null_descriptor, target)
-                    finally:
-                        if null_descriptor > 2:
-                            os.close(null_descriptor)
-                    # Session creation is only the first acknowledgement; it
-                    # does not prove the child can read its exact task.
-                    _write_all(ready_write, b"R")
-                    readable, _, _ = select.select([gate_read], [], [], 2.0)
-                    if not readable or os.read(gate_read, 1) != b"G":
-                        os._exit(0)
-                    os.close(gate_read)
-                    gate_read = None
-                    self._runner_post_gate_ready(
-                        controller_id, runner_pid=os.getpid()
-                    )
-                    self._crash_point("file_watchdog_child_after_post_gate_validation")
-                    _write_all(ready_write, b"A")
-                    os.close(ready_write)
-                    ready_write = None
-                    self._runner_loop(controller_id)
-                    os._exit(0)
-                except BaseException:
-                    os._exit(1)
+            poll_ms = max(10, int(self._runner_poll_seconds * 1000))
+            command = [
+                *self._worker_command("runner"),
+                "--root-fd",
+                str(root.fd),
+                "--controller-id",
+                controller_id,
+                "--ready-fd",
+                str(ready_write),
+                "--poll-ms",
+                str(poll_ms),
+            ]
+            pass_descriptors = [root.fd, ready_write]
+            if core_root is not None:
+                command.extend(("--core-root-fd", str(core_root.fd)))
+                pass_descriptors.append(core_root.fd)
+            # A frozen clock is an injected local-test fixture only.  It is
+            # neither provider input nor authorization; production workers
+            # always read their own wall clock after exec.
+            if not self._runner_uses_wall_clock:
+                command.extend(
+                    ("--clock-epoch", str(self._runner_now_fn().timestamp()))
+                )
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                pass_fds=tuple(pass_descriptors),
+                start_new_session=True,
+                env=self._worker_environment(),
+                cwd=self._worker_cwd(),
+            )
             os.close(ready_write)
             ready_write = None
-            os.close(gate_read)
-            gate_read = None
-            readable, _, _ = select.select([ready_read], [], [], 2.0)
-            if not readable or os.read(ready_read, 1) != b"R":
-                raise GcpSupervisorError("FILE_WATCHDOG_RUNNER_UNAVAILABLE")
+            with _LIVE_FILE_WATCHDOG_RUNNERS_LOCK:
+                _LIVE_FILE_WATCHDOG_RUNNERS[process.pid] = process
             handed_off = True
-            return runner_pid, gate_write, ready_read
-        except GcpSupervisorError:
-            raise
-        except OSError:
+            return process.pid, ready_read
+        except (OSError, ValueError):
             raise GcpSupervisorError("FILE_WATCHDOG_RUNNER_UNAVAILABLE") from None
         finally:
-            if ready_read is not None and not handed_off:
-                with suppress(OSError):
-                    os.close(ready_read)
+            if root is not None:
+                root.close()
+            if core_root is not None:
+                core_root.close()
             if ready_write is not None:
                 with suppress(OSError):
                     os.close(ready_write)
-            if gate_read is not None:
+            if ready_read is not None and not handed_off:
                 with suppress(OSError):
-                    os.close(gate_read)
-            if not handed_off and gate_write is not None:
-                with suppress(OSError):
-                    os.close(gate_write)
-            if runner_pid is not None and not handed_off:
-                self._kill_runner(runner_pid)
+                    os.close(ready_read)
+            if process is not None and not handed_off:
+                self._kill_runner(process.pid)
 
     def resume_runner(self, *, controller_id: str) -> int:
         """Durably replace a dead runner only with the same sealed executor."""
@@ -3651,9 +4261,7 @@ class FileGcpWatchdog:
                 raise GcpSupervisorError("FILE_WATCHDOG_TASK_UNAVAILABLE")
             now = self._runner_now_fn()
             if latest.core_terminal_fenced_at is not None:
-                settled = self._settle_core_terminal_fence_locked(
-                    root, events, now=now
-                )
+                settled = self._settle_core_terminal_fence_locked(root, events, now=now)
                 if settled.state == "CLEANUP_NOT_REQUIRED":
                     raise GcpSupervisorError("FILE_WATCHDOG_TASK_UNAVAILABLE")
                 raise GcpSupervisorError("FILE_WATCHDOG_CORE_TERMINAL_PENDING")
@@ -3685,8 +4293,7 @@ class FileGcpWatchdog:
             # journal slot for that nonterminal progress marker: reserve it
             # for an explicit fail-closed settlement.
             if len(events) >= (
-                GCP_FILE_WATCHDOG_MAX_EVENTS
-                - GCP_FILE_WATCHDOG_TERMINAL_EVENT_RESERVE
+                GCP_FILE_WATCHDOG_MAX_EVENTS - GCP_FILE_WATCHDOG_TERMINAL_EVENT_RESERVE
             ):
                 self._orphan_for_journal_budget_locked(
                     root,
@@ -3697,7 +4304,7 @@ class FileGcpWatchdog:
                 )
                 raise GcpSupervisorError("FILE_WATCHDOG_JOURNAL_HEADROOM_EXHAUSTED")
             expected_event_digest = latest.event_digest
-        runner_pid, runner_gate, runner_ready = self._spawn_runner(controller_id)
+        runner_pid, runner_ready = self._spawn_runner(controller_id)
         launched = False
         try:
             with self._exclusive() as root:
@@ -3742,14 +4349,12 @@ class FileGcpWatchdog:
                     runner_ready_at=_timestamp(self._runner_now_fn()),
                     executor_config_digest=latest.executor_config_digest,
                 )
-            _write_all(runner_gate, b"G")
             self._await_runner_ready(runner_ready)
             launched = True
             return runner_pid
         finally:
-            for descriptor in (runner_gate, runner_ready):
-                with suppress(OSError):
-                    os.close(descriptor)
+            with suppress(OSError):
+                os.close(runner_ready)
             if not launched:
                 self._kill_runner(runner_pid)
 
@@ -3787,7 +4392,7 @@ class FileGcpWatchdog:
                 return latest
             if latest.state != "RUNNER_READY":
                 raise GcpSupervisorError("FILE_WATCHDOG_TASK_UNAVAILABLE")
-            return self._append_locked(
+            bound_event = self._append_locked(
                 root,
                 events,
                 state="DISK_BOUND",
@@ -3795,6 +4400,13 @@ class FileGcpWatchdog:
                 now=now,
                 disk_cleanup_binding=disk_cleanup_binding,
             )
+            # This additive local fake backend is only configured from the
+            # already-observed exact disk binding.  A failure after the
+            # sidecar transition is fail-closed: a fresh worker will reject
+            # the missing/mismatched durable backend state rather than infer
+            # a disk name or construct a supplier.
+            self._bind_worker_backend_disk_locked(root, bound_event)
+            return bound_event
 
     @staticmethod
     def _cleanup_result_matches_binding(
@@ -3826,9 +4438,7 @@ class FileGcpWatchdog:
             return False
         return (
             result.disk_cleanup_binding == intent.disk_cleanup_binding
-            and FileGcpWatchdog._cleanup_result_matches_binding(
-                result, intent.binding
-            )
+            and FileGcpWatchdog._cleanup_result_matches_binding(result, intent.binding)
         )
 
     @staticmethod
@@ -3856,149 +4466,88 @@ class FileGcpWatchdog:
         timeout_seconds: int,
         prebind: bool = False,
     ) -> GcpWatchdogCleanupResult | GcpWatchdogPrebindCleanupResult | None:
-        """Run cleanup in a local child so a hung executor cannot strand it.
+        """Run one bounded cleanup in a fresh, credential-free interpreter.
 
-        The child receives no credentials from this class.  It receives only a
-        canonical exact event and must persist any provider-facing result via
-        its own injected cleanup boundary.  A timeout kills that child and the
-        durable ``CLEANUP_INTENT`` remains recoverable on the next watchdog
-        process.
+        The subprocess receives only a verified journal descriptor, controller
+        ID, intent digest, prebind bit, and result pipe.  It cannot inherit an
+        approval, execution payload, provider client, or callable supplier.
+        A timeout kills its private session and leaves the durable intent for
+        deterministic retry/reconciliation.
         """
 
-        if timeout_seconds < 1 or not hasattr(os, "fork"):
+        if timeout_seconds < 1:
             return None
+        deadline = time.monotonic() + float(timeout_seconds)
+        root: SafeDirFD | None = None
+        core_root: SafeDirFD | None = None
         read_descriptor: int | None = None
         write_descriptor: int | None = None
-        session_read: int | None = None
-        session_write: int | None = None
-        child_pid: int | None = None
-        worker_process_group: int | None = None
+        worker: subprocess.Popen[bytes] | None = None
 
-        def kill_direct(pid: int) -> None:
-            with suppress(OSError):
-                os.kill(pid, signal.SIGKILL)
-
-        def kill_worker(pid: int) -> None:
-            """End a known private session before the leader can be reaped."""
-
-            nonlocal worker_process_group
-            group = worker_process_group
-            if group is None:
-                kill_direct(pid)
+        def stop_worker() -> None:
+            if worker is None or worker.poll() is not None:
                 return
             try:
-                os.killpg(group, signal.SIGKILL)
+                os.killpg(worker.pid, signal.SIGKILL)
             except (AttributeError, OSError):
-                kill_direct(pid)
-            # Do not retain a PGID after its leader is reaped: a later
-            # killpg could target an unrelated process if the numeric ID were
-            # reused.  Every path below kills this private session first.
-            worker_process_group = None
+                with suppress(OSError):
+                    worker.kill()
+            # SIGKILL has already bounded the worker's authority.  Give the
+            # direct child a tiny fixed reap window even when the cleanup
+            # budget expired, otherwise dropping ``Popen`` could leave a
+            # zombie/ResourceWarning rather than a durable retry state.
+            with suppress(subprocess.TimeoutExpired, OSError):
+                worker.wait(timeout=0.1)
 
         try:
-            # The watchdog's one bounded cleanup budget includes child setup;
-            # a delayed session handshake must not buy the executor a second
-            # full timeout window.
-            deadline = time.monotonic() + float(timeout_seconds)
-
-            def reap_bounded(pid: int) -> int | None:
-                """Return a child status without extending the watchdog bound.
-
-                SIGKILL normally makes a direct child immediately reapable,
-                but that is not an authority to block forever in ``waitpid``.
-                A non-reapable child remains a recoverable local timeout; its
-                process group has already been killed and the parent can
-                return to the durable journal on schedule.
-                """
-
-                while True:
-                    try:
-                        reaped_pid, status = os.waitpid(pid, os.WNOHANG)
-                    except ChildProcessError:
-                        return None
-                    except OSError:
-                        return None
-                    if reaped_pid == pid:
-                        return status
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return None
-                    time.sleep(min(0.01, remaining))
-
+            root = self._checked_root()
+            core_root = self._open_worker_core_root()
             read_descriptor, write_descriptor = os.pipe()
-            session_read, session_write = os.pipe()
-            child_pid = os.fork()
-            if child_pid == 0:
-                try:
-                    # A separate session lets the parent bound grandchildren
-                    # spawned by a misbehaving executor, not merely its direct
-                    # child process.
-                    os.setsid()
-                    os.close(read_descriptor)
-                    os.close(session_read)
-                    _write_all(session_write, b"S")
-                    os.close(session_write)
-                    session_write = None
-                    raw_result = (
-                        self.executor.cleanup_prebind(
-                            intent, timeout_seconds=timeout_seconds
-                        )
-                        if prebind
-                        else self.executor.cleanup_exact(
-                            intent, timeout_seconds=timeout_seconds
-                        )
+            command = [
+                *self._worker_command("cleanup"),
+                "--root-fd",
+                str(root.fd),
+                "--controller-id",
+                str(intent.binding.controller_id),
+                "--intent-digest",
+                str(intent.event_digest),
+                "--result-fd",
+                str(write_descriptor),
+                "--prebind",
+                "1" if prebind else "0",
+            ]
+            pass_descriptors = [root.fd, write_descriptor]
+            if core_root is not None:
+                command.extend(("--core-root-fd", str(core_root.fd)))
+                pass_descriptors.append(core_root.fd)
+            if self._test_cleanup_worker_hang_milliseconds:
+                command.extend(
+                    (
+                        "--test-hang-milliseconds",
+                        str(self._test_cleanup_worker_hang_milliseconds),
                     )
-                    result = (
-                        GcpWatchdogPrebindCleanupResult.model_validate(raw_result)
-                        if prebind
-                        else GcpWatchdogCleanupResult.model_validate(raw_result)
-                    )
-                    raw = canonical_json_bytes(_model_value(result))
-                    if len(raw) > GCP_FILE_WATCHDOG_MAX_RESULT_BYTES:
-                        os._exit(2)
-                    _write_all(write_descriptor, raw)
-                    os._exit(0)
-                except BaseException:
-                    os._exit(1)
+                )
+            worker = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                pass_fds=tuple(pass_descriptors),
+                start_new_session=True,
+                env=self._worker_environment(),
+                cwd=self._worker_cwd(),
+            )
             os.close(write_descriptor)
             write_descriptor = None
-            os.close(session_write)
-            session_write = None
-            setup_remaining = deadline - time.monotonic()
-            if setup_remaining <= 0:
-                kill_direct(child_pid)
-                reap_bounded(child_pid)
-                child_pid = None
-                return None
-            readable, _, _ = select.select(
-                [session_read], [], [], setup_remaining
-            )
-            if not readable or os.read(session_read, 1) != b"S":
-                kill_direct(child_pid)
-                reap_bounded(child_pid)
-                child_pid = None
-                return None
-            os.close(session_read)
-            session_read = None
-            # The child has acknowledged ``setsid``.  It is now safe to use
-            # this exact PGID for the rest of this bounded invocation.
-            worker_process_group = child_pid
             chunks: list[bytes] = []
             total = 0
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    kill_worker(child_pid)
-                    reap_bounded(child_pid)
-                    child_pid = None
                     return None
-                readable, _, _ = select.select(
-                    [read_descriptor], [], [], remaining
-                )
+                readable, _, _ = select.select([read_descriptor], [], [], remaining)
                 if not readable:
-                    kill_worker(child_pid)
-                    reap_bounded(child_pid)
-                    child_pid = None
                     return None
                 chunk = os.read(
                     read_descriptor, GCP_FILE_WATCHDOG_MAX_RESULT_BYTES + 1 - total
@@ -4008,25 +4557,11 @@ class FileGcpWatchdog:
                 chunks.append(chunk)
                 total += len(chunk)
                 if total > GCP_FILE_WATCHDOG_MAX_RESULT_BYTES:
-                    kill_worker(child_pid)
-                    reap_bounded(child_pid)
-                    child_pid = None
                     return None
-            # A valid direct-child result is not enough: an executor can fork
-            # a descendant, close the result pipe, and return immediately.
-            # End that known private process group *before* reaping its
-            # leader, which keeps the PGID unambiguous.
-            kill_worker(child_pid)
-            status = reap_bounded(child_pid)
-            child_pid = None
+            while worker.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
             raw = b"".join(chunks)
-            if (
-                status is None
-                or not isinstance(status, int)
-                or not os.WIFEXITED(status)
-                or os.WEXITSTATUS(status) != 0
-                or not raw
-            ):
+            if worker.poll() != 0 or not raw:
                 return None
             result = (
                 GcpWatchdogPrebindCleanupResult.model_validate_json(raw)
@@ -4039,26 +4574,19 @@ class FileGcpWatchdog:
         except (OSError, ValidationError, ValueError):
             return None
         finally:
-            if child_pid is not None:
-                kill_worker(child_pid)
-                with suppress(OSError):
-                    os.waitpid(child_pid, os.WNOHANG)
+            stop_worker()
+            if root is not None:
+                root.close()
+            if core_root is not None:
+                core_root.close()
             if read_descriptor is not None:
                 with suppress(OSError):
                     os.close(read_descriptor)
             if write_descriptor is not None:
                 with suppress(OSError):
                     os.close(write_descriptor)
-            if session_read is not None:
-                with suppress(OSError):
-                    os.close(session_read)
-            if session_write is not None:
-                with suppress(OSError):
-                    os.close(session_write)
 
-    def run_due(
-        self, *, controller_id: str, now: datetime
-    ) -> GcpFileWatchdogEvent:
+    def run_due(self, *, controller_id: str, now: datetime) -> GcpFileWatchdogEvent:
         """Run one exact overdue cleanup task from an independent process."""
 
         with self._exclusive() as root:
@@ -4095,7 +4623,7 @@ class FileGcpWatchdog:
                     now=now,
                     error_code="WATCHDOG_CLEANUP_HORIZON_EXPIRED",
                 )
-            self._validate_executor_for_event(latest)
+            self._validate_worker_backend_for_event_locked(root, latest)
             prebind = latest.disk_cleanup_binding is None
             intent_state: GcpFileWatchdogState = (
                 "PREBIND_CLEANUP_INTENT" if prebind else "CLEANUP_INTENT"
@@ -4107,9 +4635,9 @@ class FileGcpWatchdog:
                 # Another worker may still own this durable intent.  Do not
                 # launch a second exact delete/reconcile before its bounded
                 # lease expires; a crash is retried only after that horizon.
-                intent_lease_until = _parse_timestamp(
-                    latest.occurred_at
-                ) + timedelta(seconds=latest.cleanup_timeout_seconds)
+                intent_lease_until = _parse_timestamp(latest.occurred_at) + timedelta(
+                    seconds=latest.cleanup_timeout_seconds
+                )
                 if now_value < intent_lease_until:
                     return latest
                 if now_value >= cleanup_deadline or (
@@ -4189,7 +4717,7 @@ class FileGcpWatchdog:
                 cleanup_attempts=latest.cleanup_attempts + 1,
             )
             self._crash_point("file_watchdog_after_cleanup_intent")
-        # Re-read immediately before a worker can be forked.  Core terminal
+        # Re-read immediately before an exec-isolated worker is started. Core terminal
         # reconciliation treats a durable intent as an exclusion lease (see
         # ``reconcile_core_terminal``), so this local check plus that durable
         # state prevents a concurrent core confirmation from racing a raw
@@ -4208,7 +4736,7 @@ class FileGcpWatchdog:
                 }:
                     return latest
                 raise GcpSupervisorError("FILE_WATCHDOG_CONCURRENT_UPDATE")
-            self._validate_executor_for_event(intent)
+            self._validate_worker_backend_for_event_locked(root, intent)
         result = self._run_executor_bounded(
             intent, timeout_seconds=timeout_seconds, prebind=prebind
         )
@@ -4260,11 +4788,7 @@ class FileGcpWatchdog:
             state: GcpFileWatchdogState = (
                 "ORPHANED"
                 if latest.cleanup_attempts >= latest.max_cleanup_attempts
-                else (
-                    "PREBIND_RETRY_PENDING"
-                    if prebind
-                    else "RETRY_PENDING"
-                )
+                else ("PREBIND_RETRY_PENDING" if prebind else "RETRY_PENDING")
             )
             return self._append_locked(
                 root,
@@ -4323,9 +4847,7 @@ class FileGcpWatchdog:
                         error_code=reason_code,
                     )
                     events = (*events, latest)
-                return self._settle_core_terminal_fence_locked(
-                    root, events, now=now
-                )
+                return self._settle_core_terminal_fence_locked(root, events, now=now)
             if latest.state in {"CLEANUP_CONFIRMED", "CLEANUP_NOT_REQUIRED"}:
                 return latest
             return self._append_locked(
@@ -4380,6 +4902,29 @@ class FileGcpWatchdog:
             return self._validate_disk_binding_for_supervisor(
                 binding, latest.disk_cleanup_binding
             )
+
+    def durable_active_mutation_capability(
+        self, binding: GcpSupervisorBinding, *, now: datetime
+    ) -> GcpV2MutationCapability:
+        """Load the exact activated capability from fsync-backed sidecar state.
+
+        Restart recovery never trusts controller memory or a caller-supplied
+        capability.  This read checks the active event, its content-addressed
+        binding, and the actual watchdog cleanup horizon before a cleanup-only
+        authorization can be validated or re-minted.
+        """
+
+        with self._exclusive() as root:
+            path = self._path_for(root, binding.controller_id)
+            if not self._repair_partial_tail_locked(path, root):
+                raise GcpSupervisorError("FILE_WATCHDOG_TASK_MISSING")
+            events = self._read_locked(root, binding.controller_id)
+            latest = events[-1]
+            if latest.binding != binding:
+                raise GcpSupervisorError("FILE_WATCHDOG_BINDING_MISMATCH")
+            return _mint_gcp_v2_watchdog_cleanup_handle(
+                event=latest, now=now
+            ).capability
 
 
 class InMemoryGcpKillSwitch:
@@ -4656,18 +5201,14 @@ class GcpLifecycleSupervisor:
             raise GcpSupervisorError("WATCHDOG_RECEIPT_INVALID") from None
         if (
             receipt.approval_digest != binding.approval_digest
-            or receipt.activation_deadline_digest
-            != binding.activation_deadline_digest
+            or receipt.activation_deadline_digest != binding.activation_deadline_digest
             or receipt.request_digest != binding.request_digest
-            or receipt.startup_projection_digest
-            != binding.startup_projection_digest
+            or receipt.startup_projection_digest != binding.startup_projection_digest
             or receipt.execution_payload_digest != binding.execution_payload_digest
             or receipt.controller_id != binding.controller_id
             or receipt.armed_at != _timestamp(now)
             or receipt.expires_at != binding.watchdog_deadline_at
-            or _parse_timestamp(receipt.armed_at) > _parse_timestamp(
-                receipt.expires_at
-            )
+            or _parse_timestamp(receipt.armed_at) > _parse_timestamp(receipt.expires_at)
         ):
             raise GcpSupervisorError("WATCHDOG_BINDING_MISMATCH")
         self.journal.advance(
@@ -4731,11 +5272,9 @@ class GcpLifecycleSupervisor:
             raise GcpSupervisorError("MUTATION_CAPABILITY_UNAVAILABLE")
         if (
             parsed.approval_digest != binding.approval_digest
-            or parsed.activation_contract_digest
-            != binding.activation_deadline_digest
+            or parsed.activation_contract_digest != binding.activation_deadline_digest
             or parsed.request_digest != binding.request_digest
-            or parsed.startup_projection_digest
-            != binding.startup_projection_digest
+            or parsed.startup_projection_digest != binding.startup_projection_digest
             or parsed.execution_payload_digest != binding.execution_payload_digest
             or parsed.project_id != binding.project_id
             or parsed.region != binding.region
@@ -4766,11 +5305,9 @@ class GcpLifecycleSupervisor:
             raise GcpSupervisorError("WATCHDOG_ACTIVATION_RECEIPT_INVALID") from None
         if (
             receipt.approval_digest != binding.approval_digest
-            or receipt.activation_deadline_digest
-            != binding.activation_deadline_digest
+            or receipt.activation_deadline_digest != binding.activation_deadline_digest
             or receipt.request_digest != binding.request_digest
-            or receipt.startup_projection_digest
-            != binding.startup_projection_digest
+            or receipt.startup_projection_digest != binding.startup_projection_digest
             or receipt.execution_payload_digest != binding.execution_payload_digest
             or receipt.controller_id != binding.controller_id
             or receipt.capability_id != parsed.capability_id
@@ -4789,6 +5326,67 @@ class GcpLifecycleSupervisor:
             _use=_MutationProofUse(),
         )
 
+    def issue_future_mutation_activation_guard(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        capability: object,
+        now: datetime,
+    ) -> object:
+        """Return the only handoff accepted by a future mutation factory.
+
+        The existing v1-compatible ``consume_mutation_capability`` route is
+        intentionally retained for exact in-memory offline fakes.  An
+        authority-scoped v2 factory, however, must come through this stricter
+        edge: it repeats the approval/quote/cap validation and kill check,
+        requires the concrete file watchdog, activates it durably, then
+        rereads the fsync-backed capability before a component supplier can be
+        retained.  The returned object is opaque and has no create method.
+        """
+
+        self._validate_bound_inputs(
+            record, preflight=preflight, now=now, activation_edge=True
+        )
+        watchdog = self._file_watchdog()
+        if watchdog is None or not watchdog.has_reconstructible_worker_backend:
+            raise GcpSupervisorError("MUTATION_ACTIVATION_DURABLE_WATCHDOG_REQUIRED")
+        binding = self._binding(record)
+        self._assert_not_killed(binding, now=now)
+        proof = self.consume_mutation_capability(record, capability=capability, now=now)
+        try:
+            durable_capability = watchdog.durable_active_mutation_capability(
+                binding, now=now
+            )
+            rate_basis_digest = gcp_read_only_quote_basis_digest(self.quote_basis)
+            cost_guard_digest = gcp_cost_cleanup_guard_digest(self.cost_guard)
+        except (GcpSupervisorError, GcpExecutionError, ValueError, TypeError):
+            raise GcpSupervisorError("MUTATION_ACTIVATION_GUARD_UNAVAILABLE") from None
+        if (
+            durable_capability != proof.capability
+            or self.approval.rate_basis_digest != rate_basis_digest
+            or self.approval.cost_guard_digest != cost_guard_digest
+        ):
+            raise GcpSupervisorError("MUTATION_ACTIVATION_GUARD_BINDING_MISMATCH")
+        # The runner acknowledgement is useful only when the independent
+        # process can re-open the exact lease/spec roots itself.  Re-read the
+        # durable local backend after activation and before returning the only
+        # factory handoff; this performs no supplier, SDK, credential, or
+        # provider action.
+        try:
+            with watchdog._exclusive() as root:
+                events = watchdog._read_locked(root, binding.controller_id)
+                watchdog._validate_worker_backend_for_event_locked(root, events[-1])
+        except (GcpSupervisorError, IndexError):
+            raise GcpSupervisorError("MUTATION_ACTIVATION_GUARD_UNAVAILABLE") from None
+        return _GcpV2FutureMutationActivationGuard(
+            proof=proof,
+            binding=binding,
+            rate_basis_digest=rate_basis_digest,
+            cost_guard_digest=cost_guard_digest,
+            _seal=_FUTURE_MUTATION_ACTIVATION_GUARD_SEAL,
+        )
+
     def _active_capability(
         self, record: GcpLeaseRecord, *, now: datetime
     ) -> GcpV2MutationCapability:
@@ -4801,8 +5399,7 @@ class GcpLifecycleSupervisor:
             capability is None
             or capability.controller_id != binding.controller_id
             or capability.request_digest != binding.request_digest
-            or capability.startup_projection_digest
-            != binding.startup_projection_digest
+            or capability.startup_projection_digest != binding.startup_projection_digest
             or capability.execution_payload_digest != binding.execution_payload_digest
         ):
             raise GcpSupervisorError("MUTATION_CAPABILITY_UNAVAILABLE")
@@ -4903,9 +5500,7 @@ class GcpLifecycleSupervisor:
                 reason_code="CORE_CLEANUP_CONFIRMED",
             )
 
-    def block(
-        self, record: GcpLeaseRecord, *, error_code: str, now: datetime
-    ) -> None:
+    def block(self, record: GcpLeaseRecord, *, error_code: str, now: datetime) -> None:
         self.journal.advance(
             self._binding(record), state="BLOCKED", now=now, error_code=error_code
         )
@@ -4932,33 +5527,61 @@ class GcpLifecycleSupervisor:
         authorization: object,
         now: datetime,
     ) -> GcpCleanupRecoveryAuthorization:
-        """Validate narrowly scoped cleanup authority without reusing create auth."""
+        """Validate narrowly scoped cleanup authority without reusing create auth.
+
+        The recovery artifact is checked against the *actual* fsync-recorded
+        activated capability, not merely the activation contract's maximum
+        watchdog ceiling.  This keeps cleanup valid after create authority
+        expires while preventing a delayed setup margin from extending it.
+        """
 
         try:
             parsed = GcpCleanupRecoveryAuthorization.model_validate(authorization)
+            watchdog = self._file_watchdog()
+            if watchdog is None:
+                raise GcpSupervisorError("CLEANUP_RECOVERY_DURABLE_WATCHDOG_REQUIRED")
+            binding = self._binding(record)
+            capability = watchdog.durable_active_mutation_capability(binding, now=now)
             validated = validate_gcp_cleanup_recovery_authorization(
                 parsed,
                 record=record,
                 approval_digest=gcp_execution_approval_digest(self.approval),
                 startup_projection_digest=self.approval.startup_projection_digest,
                 execution_payload_digest=self.approval.execution_payload_digest,
+                activation_deadline=self.activation_deadline,
+                mutation_capability=capability,
                 now=now,
-                watchdog_cleanup_deadline_at=_parse_timestamp(
-                    self.approval.watchdog_deadline_at
-                ),
             )
-            watchdog = self._file_watchdog()
-            if watchdog is not None:
-                durable_binding = watchdog.durable_disk_cleanup_binding(
-                    self._binding(record)
+            durable_binding = watchdog.durable_disk_cleanup_binding(binding)
+            if validated.disk_cleanup_binding != durable_binding:
+                raise GcpSupervisorError(
+                    "CLEANUP_RECOVERY_DURABLE_DISK_BINDING_MISMATCH"
                 )
-                if validated.disk_cleanup_binding != durable_binding:
-                    raise GcpSupervisorError(
-                        "CLEANUP_RECOVERY_DURABLE_DISK_BINDING_MISMATCH"
-                    )
             return validated
         except (GcpExecutionError, ValidationError) as error:
             raise GcpSupervisorError(str(error)) from None
+
+    def issue_cleanup_recovery_handle(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        authorization: object,
+        now: datetime,
+    ) -> object:
+        """Mint the opaque two-purpose recovery cleanup handoff.
+
+        The caller may retain the canonical recovery artifact for audit, but
+        transport and disk-sidecar factories only receive this private object.
+        It contains no creation authority and validates the original lease,
+        durable disk binding, approval, and actual activated watchdog horizon.
+        """
+
+        validated = self.validate_cleanup_recovery_authorization(
+            record, authorization=authorization, now=now
+        )
+        return _mint_gcp_v2_recovery_cleanup_handle(
+            binding=self._binding(record), authorization=validated, now=now
+        )
 
     def reconcile_no_provider_mutation(
         self, record: GcpLeaseRecord, *, now: datetime
@@ -4966,8 +5589,7 @@ class GcpLifecycleSupervisor:
         """Settle PREPARED/ARM_CONSUMED crashes without a transport boundary."""
 
         if (
-            record.state
-            not in {"PREPARED", "ARM_CONSUMED", "CLEANUP_CONFIRMED"}
+            record.state not in {"PREPARED", "ARM_CONSUMED", "CLEANUP_CONFIRMED"}
             or record.provider_mutation_attempted
             or record.provider_mutation_ambiguous
             or record.provider_operation_id is not None

@@ -21,9 +21,11 @@ The matching manual requirements are deliberately maintained in
 from the historical v0.1 checklist so a completed or deferred v0.1 record
 cannot be reused as v0.2 authorization.
 
-The active preflight also hashes the named frozen v0.1 closure and review
-files against their `v0.1.0` bytes. That is a historical-integrity check only:
-it preserves those records without turning them into v0.2 release inputs.
+The active preflight also verifies the exact `v0.1.0` baseline for every file
+under `schemas/public/v1`, `schemas/deployment/v1`, `evidence`, and
+`docs/reviews`, including the named v0.1 closure and review records. That is a
+historical-integrity check only: it preserves those records without turning
+them into v0.2 release inputs.
 
 ## Authority and integrity boundary
 

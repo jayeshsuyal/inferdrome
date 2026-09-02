@@ -125,6 +125,7 @@
       "type": "string"
     },
     "execution_payload_digest": {
+      "description": "Domain-separated digest of opaque execution-payload bytes. It binds bytes only and carries no command, transfer, credential, or evidence semantics.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Execution Payload Digest",
       "type": "string"
@@ -170,6 +171,7 @@
       "type": "integer"
     },
     "quote_digest": {
+      "description": "Digest of the frozen v1 read-only quote observation.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Quote Digest",
       "type": "string"
@@ -181,6 +183,7 @@
       "type": "integer"
     },
     "rate_basis_digest": {
+      "description": "Digest of the separate GCP read-only rational rate basis, not a provider invoice, billing authority, or launch authority.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Rate Basis Digest",
       "type": "string"
@@ -234,6 +237,7 @@
       "type": "integer"
     },
     "watchdog_deadline_at": {
+      "description": "Maximum v2 activation-contract watchdog horizon. An activated capability and cleanup recovery authorization must use an equal or earlier exact watchdog-cleanup deadline.",
       "maxLength": 32,
       "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
       "title": "Watchdog Deadline At",

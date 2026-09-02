@@ -8,11 +8,15 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+from inferdrome.deployment import gcp_securefs
 from inferdrome.deployment.gcp_lifecycle import GcpExecutionLabels
 from inferdrome.deployment.gcp_v2_disk_cleanup import (
     GCP_V2_OWNED_BOOT_DISK_SCHEMA_VERSION,
     FileBackedFakeDiskProvider,
     GcpV2DiskCleanupBinding,
+    GcpV2DiskCleanupError,
     GcpV2DiskCleanupJournal,
     GcpV2ExactOwnedBootDisk,
     GcpV2ExactOwnedInstance,
@@ -105,6 +109,61 @@ def _journal(tmp_path: Path) -> GcpV2DiskCleanupJournal:
     root = tmp_path / "journal"
     root.mkdir()
     return GcpV2DiskCleanupJournal(root)
+
+
+def test_disk_cleanup_journal_rejects_symlinked_root_before_reservation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    linked_root = tmp_path / "journal"
+    linked_root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(GcpV2DiskCleanupError, match="DISK_JOURNAL_UNSAFE"):
+        GcpV2DiskCleanupJournal(linked_root).prepare(_binding(), now=NOW)
+
+    assert list(target.iterdir()) == []
+
+
+def test_disk_cleanup_journal_keeps_operations_on_verified_directory_fd_after_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "journal"
+    root.mkdir()
+    moved = tmp_path / "journal-held-by-directory-fd"
+    journal = GcpV2DiskCleanupJournal(root)
+    binding = _binding()
+    event_name = journal._path_for(binding.controller_id)
+    original_open_child = gcp_securefs.SafeDirFD.open_child
+    swapped = False
+
+    def rename_root_before_event_create(
+        directory: gcp_securefs.SafeDirFD,
+        name: str,
+        flags: int,
+        mode: int = 0o600,
+    ) -> int:
+        nonlocal swapped
+        if name == event_name and not swapped:
+            swapped = True
+            root.rename(moved)
+            root.mkdir()
+            (root / "replacement-marker").write_text("replacement")
+        return original_open_child(directory, name, flags, mode)
+
+    monkeypatch.setattr(
+        gcp_securefs.SafeDirFD,
+        "open_child",
+        rename_root_before_event_create,
+    )
+
+    event = journal.prepare(binding, now=NOW)
+
+    assert event.state == "PREPARED"
+    assert (moved / event_name).is_file()
+    assert not (root / event_name).exists()
+    assert (root / "replacement-marker").read_text() == "replacement"
 
 
 def test_exact_disk_cleanup_handles_instance_gone_disk_remains(tmp_path: Path) -> None:

@@ -43,14 +43,9 @@ from inferdrome.deployment.gcp import (
 )
 from inferdrome.deployment.gcp_compute_transport import (
     GcpOptionalDependencyUnavailable,
-    GcpV2CapabilityBoundTransport,
-    GcpV2CleanupAuthorizationBoundTransport,
     GcpV2LocalTransportFactory,
     GoogleComputeTransport,
-    bind_gcp_v2_cleanup_transport,
-    bind_gcp_v2_mutation_transport,
     create_google_compute_transport,
-    create_google_compute_transport_for_v2_capability,
 )
 from inferdrome.deployment.gcp_cost_guard import (
     GCP_COST_CLEANUP_GUARD_SCHEMA_ID,
@@ -448,8 +443,6 @@ __all__ = [
     "GcpSupervisorJournal",
     "GcpSupervisorJournalEvent",
     "GcpTransportError",
-    "GcpV2CapabilityBoundTransport",
-    "GcpV2CleanupAuthorizationBoundTransport",
     "GcpV2LocalTransportFactory",
     "GcpWatchdog",
     "GcpWatchdogReceipt",
@@ -497,8 +490,6 @@ __all__ = [
     "RuntimeAdapter",
     "RuntimeEndpoint",
     "RuntimeHandle",
-    "bind_gcp_v2_cleanup_transport",
-    "bind_gcp_v2_mutation_transport",
     "build_gcp_insert_request",
     "canonical_deployment_receipt_bytes",
     "canonical_deployment_receipt_payload_bytes",
@@ -525,7 +516,6 @@ __all__ = [
     "canonical_qualification_bytes",
     "canonical_qualification_payload_bytes",
     "create_google_compute_transport",
-    "create_google_compute_transport_for_v2_capability",
     "deployment_receipt_id",
     "deployment_receipt_schema",
     "deployment_receipt_sha256",

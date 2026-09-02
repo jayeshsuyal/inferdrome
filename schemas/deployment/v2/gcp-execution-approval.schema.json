@@ -214,14 +214,16 @@
       "title": "Quote Currency",
       "type": "string"
     },
-    "quote_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Quote Digest",
-      "type": "string"
-    },
     "rate_basis_digest": {
+      "description": "Digest of the separate v2 read-only rational USD rate basis; it is neither a provider invoice nor billing/launch authority.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Rate Basis Digest",
+      "type": "string"
+    },
+    "read_only_quote_digest": {
+      "description": "Digest of the exact frozen v1 read-only quote observation. This is distinct from the v2 rational rate-basis digest below.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Read Only Quote Digest",
       "type": "string"
     },
     "region": {
@@ -300,7 +302,7 @@
     "request_digest",
     "startup_projection_digest",
     "execution_payload_digest",
-    "quote_digest",
+    "read_only_quote_digest",
     "capacity_digest",
     "rate_basis_digest",
     "cost_guard_digest",

@@ -2,8 +2,8 @@
 
 This additive v0.2 development-cycle contract adds local-only cost, cleanup,
 and kill-switch protection around the frozen v0.1 GCP quote and capacity
-records. It does not enable Compute Engine execution, change any public v1
-schema, or make a provider billing claim.
+records. It does not enable generic/default Compute Engine execution, change
+any public v1 schema, or make a provider billing claim.
 
 ## Read-only rate and capability inputs
 
@@ -58,8 +58,9 @@ or mismatched marker fails closed; an absent exact marker is the only clear
 state. Markers carry bounded identity and digest values only, never provider
 credentials or secrets.
 
-The future activation path remains disabled in this repository. Local tests use
-fakes and temporary files only. In particular, the frozen v1 arm has no setup
-margin beyond its maximum provider runtime, so this v0.2 layer intentionally
-fail-closes after any elapsed setup time; a future reviewed arm version must
-provide that margin without reducing watchdog cleanup coverage.
+The frozen v1 arm remains unchanged historical evidence. The additive v0.2
+approval has a separately bounded setup margin and authorization horizon that
+are checked before activation; the later provider-runtime and watchdog-cleanup
+horizons do not have to fit within the frozen arm deadline. The default generic
+factory remains disabled; the separate sealed activation-guard route is
+exercised only with injected local fakes and temporary files in this task.

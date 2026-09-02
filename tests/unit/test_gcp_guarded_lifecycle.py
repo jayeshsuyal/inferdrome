@@ -6,7 +6,10 @@ import inspect
 import json
 import os
 import signal
+import subprocess
+import sys
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -38,6 +41,7 @@ from inferdrome.deployment import (
     InMemoryExecutionArmStore,
     canonical_gcp_execution_arm_bytes,
     canonical_gcp_execution_outcome_bytes,
+    gcp_cost_quote_digest,
     gcp_execution_contract_schemas,
     gcp_execution_environment_digest,
     gcp_execution_request_digest,
@@ -55,9 +59,9 @@ from inferdrome.deployment import (
 )
 from inferdrome.deployment.gcp_compute_transport import (
     GcpV2LocalTransportFactory,
+    GcpV2SealedComputeTransportFactory,
     _canonical_resource_ref,
     _observation,
-    bind_gcp_v2_watchdog_cleanup_transport,
     create_google_compute_transport,
     create_google_compute_transport_for_v2_capability,
 )
@@ -73,6 +77,7 @@ from inferdrome.deployment.gcp_cost_guard import (
     parse_gcp_cost_cleanup_guard_json,
     parse_gcp_read_only_quote_basis_json,
 )
+from inferdrome.deployment.gcp_securefs import SafeDirFD
 from inferdrome.deployment.gcp_supervisor import (
     _MUTATION_ACTIVATION_PROOF_SEAL,
     GCP_KILL_SWITCH_CONFIRMATION,
@@ -88,6 +93,7 @@ from inferdrome.deployment.gcp_supervisor import (
     GcpWatchdogActivationReceipt,
     InMemoryGcpKillSwitch,
     _MutationProofUse,
+    _stop_file_watchdog_runners_for_tests,
     canonical_gcp_execution_approval_bytes,
     canonical_gcp_kill_switch_bytes,
     gcp_execution_approval_digest,
@@ -101,6 +107,7 @@ from inferdrome.deployment.gcp_v2_contracts import (
     GCP_CLEANUP_RECOVERY_CONFIRMATION,
     GcpV2ContractError,
     GcpV2MutationCapability,
+    GcpV2MutationCapabilityPayload,
     canonical_gcp_v2_startup_projection_bytes,
     gcp_v2_execution_payload_digest,
     gcp_v2_mutation_capability_id,
@@ -121,7 +128,25 @@ from inferdrome.deployment.gcp_v2_disk_cleanup import (
     issue_gcp_v2_disk_cleanup_binding,
     issue_gcp_v2_owned_boot_disk_inventory,
 )
+from inferdrome.deployment.gcp_watchdog_backend import (
+    GcpFileBackedFakeCleanupState,
+    GcpFileWatchdogBackendError,
+    _read_json,
+    _spec_name,
+    _state_name,
+    worker_validate_ready,
+)
 from inferdrome.domain.digests import DigestDomain, canonical_json_bytes, digest_bytes
+
+
+@pytest.fixture(autouse=True)
+def _stop_local_file_watchdog_runners_after_test() -> Any:
+    """Keep test-only detached fake workers out of later test cases."""
+
+    try:
+        yield
+    finally:
+        _stop_file_watchdog_runners_for_tests()
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = ROOT / "deployments/v1/examples/gcp-dry-run-reference.json"
@@ -284,9 +309,7 @@ def _run(
         "inferdrome.deployment", fromlist=["build_gcp_insert_request"]
     ).build_gcp_insert_request(plan=plan, arm=arm, environment=environment)
     quote, capacity = _quote_and_capacity(plan, arm, request)
-    controller = _controller(
-        tmp_path, transport, safety_supervisor=safety_supervisor
-    )
+    controller = _controller(tmp_path, transport, safety_supervisor=safety_supervisor)
     outcome = controller.execute(
         plan=plan,
         expected_spec=spec,
@@ -441,28 +464,31 @@ def _v2_supervisor(
     )
 
 
-def _v2_disk_binding_for_record(record: Any) -> Any:
+def _v2_disk_binding_for_record(
+    record: Any, *, disk_name: str | None = None
+) -> Any:
     """Return a test-only externally observed disk binding.
 
     The disk/attachment values model one complete provider observation.  The
-    name happens to equal this fake's observed boot disk; it is supplied as a
-    fact and is separately checked against the post-create transport readback.
+    name is supplied as a provider fact and is separately checked against the
+    post-create transport readback; it need not equal the instance name.
     Production callers must obtain the equivalent binding from the dedicated
     exact inventory boundary.
     """
 
     request = record.request
+    disk_name = record.instance_name if disk_name is None else disk_name
     disk = GcpV2ExactOwnedBootDisk(
         schema_version=GCP_V2_OWNED_BOOT_DISK_SCHEMA_VERSION,
         request_digest=record.request_digest,
         project_id=record.project_id,
         zone=record.zone,
         instance_name=record.instance_name,
-        disk_name=record.instance_name,
+        disk_name=disk_name,
         provider_disk_id=987654321,
         self_link=(
             f"projects/{record.project_id}/zones/{record.zone}/disks/"
-            f"{record.instance_name}"
+            f"{disk_name}"
         ),
         attached_instance_provider_id=123456790,
         attached_instance_self_link=(
@@ -472,7 +498,7 @@ def _v2_disk_binding_for_record(record: Any) -> Any:
         boot_device_name="boot",
         boot_source_disk_self_link=(
             f"projects/{record.project_id}/zones/{record.zone}/disks/"
-            f"{record.instance_name}"
+            f"{disk_name}"
         ),
         boot_attachment=True,
         labels=record.labels,
@@ -742,9 +768,7 @@ def test_v2_supervisor_orders_approval_watchdog_and_intent_before_fake_create(
     inputs = _v2_inputs()
     safety_root = tmp_path / "safety"
     watchdog = FakeGcpWatchdog()
-    supervisor, approval = _v2_supervisor(
-        safety_root, inputs[-1], watchdog=watchdog
-    )
+    supervisor, approval = _v2_supervisor(safety_root, inputs[-1], watchdog=watchdog)
 
     # A direct exact fake remains an explicitly offline-only test route.  A
     # real v2 supervisor rejects generic lazy factories; those must instead
@@ -789,7 +813,10 @@ def test_v2_concrete_watchdog_factory_is_one_shot_and_request_bound(
         seed_root, FakeGcpComputeTransport(), return_controller=True
     )
     seed_record = seeded.journal.load("ctl-12345678")
-    disk_binding = _v2_disk_binding_for_record(seed_record)
+    observed_disk_name = "inferdrome-ctl-deadbeef"
+    disk_binding = _v2_disk_binding_for_record(
+        seed_record, disk_name=observed_disk_name
+    )
 
     watchdog_root = tmp_path / "watchdog"
     watchdog_root.mkdir()
@@ -806,7 +833,14 @@ def test_v2_concrete_watchdog_factory_is_one_shot_and_request_bound(
         now_fn=lambda: NOW,
         startup_projection=startup_projection,
     )
-    raw_transport = FakeGcpComputeTransport(
+    class ExactBootDiskOnlyTransport(FakeGcpComputeTransport):
+        """Fail visibly if a v2 path falls back to the frozen v1 lookup."""
+
+        def get_boot_disk(self, *args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            raise AssertionError("v2 must not derive a disk from instance name")
+
+    raw_transport = ExactBootDiskOnlyTransport(
         exact_boot_disk_observation=disk_binding.disk,
         exact_boot_disk_inventory=disk_binding.owned_inventory,
         exact_owned_instance_observation=disk_binding.attached_instance,
@@ -845,6 +879,8 @@ def test_v2_concrete_watchdog_factory_is_one_shot_and_request_bound(
 
     assert outcome.status == "SUCCEEDED"
     assert raw_transport.insert_calls == 1
+    assert controller._exact_disk_cleanup is not None
+    assert controller._exact_disk_cleanup.binding.disk.disk_name == observed_disk_name
     assert (
         watchdog.run_due(
             controller_id="ctl-12345678", now=NOW + timedelta(minutes=10)
@@ -853,6 +889,88 @@ def test_v2_concrete_watchdog_factory_is_one_shot_and_request_bound(
     )
 
     assert raw_transport.insert_calls == 1
+
+
+def test_v2_post_create_disk_binding_crash_reports_exact_unresolved_orphan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash before durable disk binding never guesses a boot-disk name."""
+
+    inputs = _v2_inputs()
+    startup_projection = _v2_startup_projection(inputs[-1])
+    seed_root = tmp_path / "seed-core"
+    seed_root.mkdir()
+    _seed_outcome, seeded = _run(
+        seed_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    disk_binding = _v2_disk_binding_for_record(seeded.journal.load("ctl-12345678"))
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    provider_root = tmp_path / "disk-provider"
+    disk_provider = FileBackedFakeDiskProvider.initialize(
+        provider_root, observation=disk_binding.disk
+    )
+    disk_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=lambda: disk_provider,
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+
+    def crash_after_insert_before_binding(**_: Any) -> Any:
+        raise RuntimeError("injected post-create binding crash")
+
+    monkeypatch.setattr(
+        disk_factory, "bind_inventory", crash_after_insert_before_binding
+    )
+    raw_transport = FakeGcpComputeTransport(
+        exact_boot_disk_observation=disk_binding.disk,
+        exact_boot_disk_inventory=disk_binding.owned_inventory,
+        exact_owned_instance_observation=disk_binding.attached_instance,
+    )
+    transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=lambda: raw_transport,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=GcpV2LocalWatchdogExecutorFactory(
+            transport_factory=transport_factory,
+            disk_cleanup_factory=disk_factory,
+            core_journal=GcpLeaseJournal(core_root),
+            now_fn=lambda: NOW,
+        ),
+        runner_enabled=True,
+        runner_poll_seconds=0.01,
+        runner_now_fn=lambda: NOW,
+    )
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    controller = GcpGuardedLifecycleController(
+        activation_transport_factory=transport_factory,
+        arm_store=InMemoryExecutionArmStore(),
+        journal=GcpLeaseJournal(core_root),
+        clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
+        safety_supervisor=supervisor,
+        exact_disk_cleanup_factory=disk_factory,
+    )
+
+    outcome = _execute_v2(controller, inputs)
+
+    assert raw_transport.insert_calls == 1
+    assert outcome.orphaned is True
+    assert outcome.cleanup_confirmed is False
+    assert outcome.cleanup_error_code == "GCP_V2_EXACT_DISK_BINDING_UNRESOLVED"
+    # The only provider-observed disk identity was never durably bound; the
+    # cleanup path therefore records an explicit orphan rather than deleting
+    # a hostname-derived or account-diff candidate.
+    assert b'"delete_calls":0' in (provider_root / "state.json").read_bytes()
 
 
 def test_v2_rejects_marker_generic_factory_fake_watchdog_and_fake_subclass(
@@ -871,6 +989,27 @@ def test_v2_rejects_marker_generic_factory_fake_watchdog_and_fake_subclass(
             journal=GcpLeaseJournal(tmp_path / "generic-core"),
             clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
             safety_supervisor=supervisor,
+        )
+
+    # A sealed component factory is still only a nominal adapter.  Without the
+    # exact concrete supervisor/watchdog construction edge it cannot be used
+    # to turn a later generic transport-gate change into a naked create path.
+    def unexpected_components() -> tuple[Any, Any, Any, Any, Any]:
+        raise AssertionError("naked controller reached sealed component supplier")
+
+    sealed_factory = GcpV2SealedComputeTransportFactory(
+        component_supplier=unexpected_components,
+        now_fn=lambda: NOW,
+        startup_projection=_v2_startup_projection(inputs[-1]),
+    )
+    with pytest.raises(
+        GcpExecutionError, match="GCP_V2_FACTORIES_REQUIRE_REAL_SUPERVISOR"
+    ):
+        GcpGuardedLifecycleController(
+            activation_transport_factory=sealed_factory,
+            arm_store=InMemoryExecutionArmStore(),
+            journal=GcpLeaseJournal(tmp_path / "sealed-naked-core"),
+            clock=GcpClock(now_fn=lambda: NOW, monotonic_fn=lambda: 0.0),
         )
 
     with pytest.raises(GcpExecutionError, match="GCP_V2_DURABLE_WATCHDOG_REQUIRED"):
@@ -998,15 +1137,30 @@ def test_v2_activation_deadline_keeps_runtime_distinct_from_setup_margin(
         )
 
 
-def test_v2_payload_substitution_blocks_supplier_before_factory(tmp_path: Path) -> None:
-    """A changed opaque digest cannot even initialize a future supplier."""
+def test_v2_mutation_capability_issuance_is_warning_free(tmp_path: Path) -> None:
+    """Normal typed issuance must not serialize an invalid constructed model."""
 
     inputs = _v2_inputs()
     supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
-    substituted_projection = issue_gcp_v2_startup_projection(
-        request=inputs[-1].request,
-        execution_payload=b"different-opaque-local-payload",
-    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        capability = issue_gcp_v2_mutation_capability(
+            contract=supervisor.activation_deadline,
+            approval_digest=gcp_execution_approval_digest(approval),
+            now=NOW,
+        )
+
+    assert capability.capability_id == gcp_v2_mutation_capability_id(capability)
+
+
+def test_v2_raw_cleanup_capability_blocks_supplier_before_factory(
+    tmp_path: Path,
+) -> None:
+    """A canonical raw capability is not a cleanup authority handoff."""
+
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
     capability = issue_gcp_v2_mutation_capability(
         contract=supervisor.activation_deadline,
         approval_digest=gcp_execution_approval_digest(approval),
@@ -1019,24 +1173,21 @@ def test_v2_payload_substitution_blocks_supplier_before_factory(tmp_path: Path) 
         supplier_calls += 1
         return FakeGcpComputeTransport()
 
-    with pytest.raises(
-        GcpTransportError, match="WATCHDOG_CLEANUP_PAYLOAD_MISMATCH"
-    ):
-        bind_gcp_v2_watchdog_cleanup_transport(
-            transport_supplier=supplier,
-            capability=capability,
-            startup_projection=substituted_projection,
-            now=NOW,
-            now_fn=lambda: NOW,
-        )
+    factory = GcpV2LocalTransportFactory(
+        transport_supplier=supplier,
+        now_fn=lambda: NOW,
+        startup_projection=supervisor.startup_projection,
+    )
+    with pytest.raises(GcpTransportError, match="WATCHDOG_CLEANUP_HANDLE_INVALID"):
+        factory.bind_watchdog_cleanup(capability)
 
     assert supplier_calls == 0
 
 
-def test_v2_public_capability_factory_checks_payload_before_sdk_boundary(
+def test_v2_direct_proof_factory_is_fail_closed_before_any_sdk_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The exported future seam cannot reach SDK/client construction on mismatch."""
+    """A standalone proof cannot revive either future construction seam."""
 
     inputs = _v2_inputs()
     supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
@@ -1060,10 +1211,6 @@ def test_v2_public_capability_factory_checks_payload_before_sdk_boundary(
         _seal=_MUTATION_ACTIVATION_PROOF_SEAL,
         _use=_MutationProofUse(),
     )
-    substituted_projection = issue_gcp_v2_startup_projection(
-        request=inputs[-1].request,
-        execution_payload=b"substituted-public-factory-payload",
-    )
     boundary_calls = 0
 
     def unexpected_sdk_boundary(**_: Any) -> Any:
@@ -1076,20 +1223,99 @@ def test_v2_public_capability_factory_checks_payload_before_sdk_boundary(
     monkeypatch.setattr(
         transport_module, "create_google_compute_transport", unexpected_sdk_boundary
     )
-    with pytest.raises(GcpTransportError, match="MUTATION_CAPABILITY_PAYLOAD_MISMATCH"):
+    with pytest.raises(GcpTransportError, match="MUTATION_ACTIVATION_GUARD_REQUIRED"):
         create_google_compute_transport_for_v2_capability(
             capability=proof,
-            startup_projection=substituted_projection,
+            startup_projection=supervisor.startup_projection,
             now=NOW,
         )
 
+    supplier_calls = 0
+
+    def supplier() -> FakeGcpComputeTransport:
+        nonlocal supplier_calls
+        supplier_calls += 1
+        return FakeGcpComputeTransport()
+
+    factory = GcpV2LocalTransportFactory(
+        transport_supplier=supplier,
+        now_fn=lambda: NOW,
+        startup_projection=supervisor.startup_projection,
+    )
+    with pytest.raises(GcpTransportError, match="MUTATION_ACTIVATION_GUARD_INVALID"):
+        factory.bind_mutation(proof)
+
     assert boundary_calls == 0
+    assert supplier_calls == 0
 
 
-def test_v2_disk_adapter_rechecks_payload_before_lazy_provider_supplier(
+def test_v2_future_activation_guard_requires_concrete_durable_watchdog(
     tmp_path: Path,
 ) -> None:
-    """A post-bind payload substitution cannot wake a deferred disk provider."""
+    """A fake watchdog can cover offline tests but cannot mint a factory guard."""
+
+    inputs = _v2_inputs()
+    watchdog = FakeGcpWatchdog()
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    record = _prepared_record(tmp_path / "prepared")
+
+    supervisor.reserve(record, preflight=inputs[-1], now=NOW)
+    supervisor.arm_watchdog(record, preflight=inputs[-1], now=NOW)
+    capability = supervisor.assert_create_permitted(
+        record, preflight=inputs[-1], now=NOW
+    )
+
+    with pytest.raises(
+        GcpSupervisorError,
+        match="MUTATION_ACTIVATION_DURABLE_WATCHDOG_REQUIRED",
+    ):
+        supervisor.issue_future_mutation_activation_guard(
+            record,
+            preflight=inputs[-1],
+            capability=capability,
+            now=NOW,
+        )
+
+    assert watchdog.activation_calls == 0
+
+
+def test_v2_future_activation_guard_rechecks_cost_before_watchdog_activation(
+    tmp_path: Path,
+) -> None:
+    """A changed local cost guard cannot be converted into a future factory."""
+
+    inputs = _v2_inputs()
+    watchdog = FakeGcpWatchdog()
+    supervisor, _approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    record = _prepared_record(tmp_path / "prepared")
+    supervisor.reserve(record, preflight=inputs[-1], now=NOW)
+    supervisor.arm_watchdog(record, preflight=inputs[-1], now=NOW)
+    capability = supervisor.assert_create_permitted(
+        record, preflight=inputs[-1], now=NOW
+    )
+    supervisor.cost_guard = supervisor.cost_guard.model_copy(
+        update={"max_cleanup_attempts": 2}
+    )
+
+    with pytest.raises(GcpSupervisorError):
+        supervisor.issue_future_mutation_activation_guard(
+            record,
+            preflight=inputs[-1],
+            capability=capability,
+            now=NOW,
+        )
+
+    assert watchdog.activation_calls == 0
+
+
+def test_v2_disk_adapter_rejects_raw_capability_before_lazy_provider_supplier(
+    tmp_path: Path,
+) -> None:
+    """A raw content-addressed capability cannot wake a deferred provider."""
 
     inputs = _v2_inputs()
     supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
@@ -1116,25 +1342,15 @@ def test_v2_disk_adapter_rechecks_payload_before_lazy_provider_supplier(
 
     disk_root = tmp_path / "disk-journal"
     disk_root.mkdir()
-    coordinator = GcpV2LocalDiskCleanupFactory(
+    factory = GcpV2LocalDiskCleanupFactory(
         provider_supplier=supplier,
         journal_root=disk_root,
         now_fn=lambda: NOW,
         startup_projection=supervisor.startup_projection,
-    ).bind(record=record, binding=binding, authority=capability, now=NOW)
-    tampered = capability.model_dump(mode="json")
-    tampered["execution_payload_digest"] = gcp_v2_execution_payload_digest(
-        b"tampered-deferred-disk-payload"
-    )
-    tampered["capability_id"] = "sha256:" + "0" * 64
-    provisional = GcpV2MutationCapability.model_construct(**tampered)
-    tampered["capability_id"] = gcp_v2_mutation_capability_id(provisional)
-    coordinator.provider._authority = GcpV2MutationCapability.model_validate_json(
-        canonical_json_bytes(tampered)
     )
 
-    with pytest.raises(GcpV2DiskCleanupError, match="DISK_CAPABILITY_PAYLOAD_MISMATCH"):
-        coordinator.provider.read_exact_owned_boot_disk(binding, timeout_seconds=1)
+    with pytest.raises(GcpV2DiskCleanupError, match="DISK_AUTHORITY_INVALID"):
+        factory.bind(record=record, binding=binding, authority=capability, now=NOW)
 
     assert supplier_calls == 0
 
@@ -1187,6 +1403,7 @@ def test_v2_tampered_watchdog_receipt_payload_is_rejected(tmp_path: Path) -> Non
     with pytest.raises(GcpSupervisorError, match="MUTATION_PROOF_BINDING_MISMATCH"):
         validate_gcp_v2_activated_mutation_proof(tampered_proof, now=NOW)
 
+
 def test_v2_read_only_cost_guard_binds_rate_cap_and_blocks_substitution(
     tmp_path: Path,
 ) -> None:
@@ -1209,9 +1426,7 @@ def test_v2_read_only_cost_guard_binds_rate_cap_and_blocks_substitution(
     assert guard.estimated_max_microusd <= guard.hard_ceiling_microusd
 
     invalid_guard = json.loads(canonical_gcp_cost_cleanup_guard_bytes(guard))
-    invalid_guard["estimated_max_microusd"] = (
-        invalid_guard["hard_ceiling_microusd"] + 1
-    )
+    invalid_guard["estimated_max_microusd"] = invalid_guard["hard_ceiling_microusd"] + 1
     with pytest.raises(GcpCostGuardError, match="COST_GUARD_INVALID"):
         parse_gcp_cost_cleanup_guard_json(json.dumps(invalid_guard))
 
@@ -1408,9 +1623,7 @@ def test_v2_final_create_rechecks_stale_capacity_without_insert(
     )
     inputs = _v2_inputs_with_observations(base_inputs, capacity=fresh_capacity)
     supervisor, _approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
-    clock_values = iter(
-        (NOW, NOW, NOW, NOW + timedelta(seconds=2))
-    )
+    clock_values = iter((NOW, NOW, NOW, NOW + timedelta(seconds=2)))
     transport = FakeGcpComputeTransport()
 
     core_root = tmp_path / "core"
@@ -1677,9 +1890,7 @@ def test_v2_file_kill_switch_is_exact_bound_and_fails_closed(
         core_root, FakeGcpComputeTransport(), return_controller=True
     )
     assert outcome.status == "SUCCEEDED"
-    binding = gcp_supervisor_binding(
-        approval, controller.journal.load("ctl-12345678")
-    )
+    binding = gcp_supervisor_binding(approval, controller.journal.load("ctl-12345678"))
     kill_root = tmp_path / "kill"
     kill_root.mkdir()
     marker = issue_gcp_kill_switch_record(
@@ -1711,8 +1922,16 @@ def test_v2_approval_parser_and_sidecar_journal_repair_fail_closed(
     inputs = _v2_inputs()
     safety_root = tmp_path / "safety"
     supervisor, approval = _v2_supervisor(safety_root, inputs[-1])
+    assert approval.read_only_quote_digest == gcp_cost_quote_digest(inputs[-1].quote)
+    assert approval.rate_basis_digest == gcp_read_only_quote_basis_digest(
+        supervisor.quote_basis
+    )
     approval_raw = canonical_gcp_execution_approval_bytes(approval)
     assert parse_gcp_execution_approval_json(approval_raw) == approval
+    legacy_quote_name = json.loads(approval_raw)
+    legacy_quote_name["quote_digest"] = legacy_quote_name.pop("read_only_quote_digest")
+    with pytest.raises(GcpSupervisorError, match="APPROVAL_INVALID"):
+        parse_gcp_execution_approval_json(json.dumps(legacy_quote_name))
     duplicate = approval_raw.replace(
         b'"provider":"gcp-compute-engine"',
         b'"provider":"gcp-compute-engine","provider":"gcp-compute-engine"',
@@ -1731,15 +1950,140 @@ def test_v2_approval_parser_and_sidecar_journal_repair_fail_closed(
         core_root, FakeGcpComputeTransport(), return_controller=True
     )
     assert outcome.status == "SUCCEEDED"
-    binding = gcp_supervisor_binding(
-        approval, controller.journal.load("ctl-12345678")
-    )
+    binding = gcp_supervisor_binding(approval, controller.journal.load("ctl-12345678"))
     supervisor.journal.reserve(binding, now=NOW)
     path = safety_root / "ctl-12345678.safety-v2.events.jsonl"
     path.write_bytes(path.read_bytes() + b'{"partial"')
     assert supervisor.journal.load("ctl-12345678").state == "PREPARED"
     with pytest.raises(GcpSupervisorError, match="SUPERVISOR_UNRESOLVED_LEASE"):
         supervisor.journal.reserve(binding, now=NOW)
+
+
+def test_v2_recovery_authorization_outlives_create_only_until_capability_deadline(
+    tmp_path: Path,
+) -> None:
+    """Cleanup can outlive v2 create authority, never its activated tail."""
+
+    inputs = _v2_inputs()
+    supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    _outcome, controller = _run(
+        core_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    record = controller.journal.load("ctl-12345678")
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    cleanup_deadline = datetime.fromisoformat(
+        str(capability.watchdog_cleanup_deadline_at).replace("Z", "+00:00")
+    )
+    authorization = issue_gcp_cleanup_recovery_authorization(
+        record=record,
+        approval_digest=gcp_execution_approval_digest(approval),
+        startup_projection_digest=approval.startup_projection_digest,
+        execution_payload_digest=approval.execution_payload_digest,
+        activation_deadline=supervisor.activation_deadline,
+        mutation_capability=capability,
+        disk_cleanup_binding=_v2_disk_binding_for_record(record),
+        operator_identity="operator-alice",
+        issued_at=NOW,
+        expires_at=cleanup_deadline,
+        confirmation=GCP_CLEANUP_RECOVERY_CONFIRMATION,
+    )
+    after_create_expiry = NOW + timedelta(minutes=6)
+    assert after_create_expiry > datetime.fromisoformat(
+        str(approval.authorization_expires_at).replace("Z", "+00:00")
+    )
+    assert (
+        validate_gcp_cleanup_recovery_authorization(
+            authorization,
+            record=record,
+            approval_digest=gcp_execution_approval_digest(approval),
+            startup_projection_digest=approval.startup_projection_digest,
+            execution_payload_digest=approval.execution_payload_digest,
+            activation_deadline=supervisor.activation_deadline,
+            mutation_capability=capability,
+            now=after_create_expiry,
+        )
+        == authorization
+    )
+    with pytest.raises(
+        GcpV2ContractError, match="CLEANUP_RECOVERY_AUTHORIZATION_EXPIRED"
+    ):
+        validate_gcp_cleanup_recovery_authorization(
+            authorization,
+            record=record,
+            approval_digest=gcp_execution_approval_digest(approval),
+            startup_projection_digest=approval.startup_projection_digest,
+            execution_payload_digest=approval.execution_payload_digest,
+            activation_deadline=supervisor.activation_deadline,
+            mutation_capability=capability,
+            now=cleanup_deadline,
+        )
+
+
+def test_v2_sidecar_journal_rejects_root_and_event_symlinks(
+    tmp_path: Path,
+) -> None:
+    """The v2 supervisor never follows a configured root or event symlink."""
+
+    inputs = _v2_inputs()
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    _outcome, controller = _run(
+        core_root, FakeGcpComputeTransport(), return_controller=True
+    )
+
+    real_root = tmp_path / "real-safety"
+    real_root.mkdir()
+    root_link = tmp_path / "safety-link"
+    root_link.symlink_to(real_root, target_is_directory=True)
+    _unused_supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    binding = gcp_supervisor_binding(approval, controller.journal.load("ctl-12345678"))
+    with pytest.raises(GcpSupervisorError, match="SUPERVISOR_JOURNAL_UNSAFE"):
+        GcpSupervisorJournal(root_link).reserve(binding, now=NOW)
+
+    event_name = "ctl-12345678.safety-v2.events.jsonl"
+    outside = tmp_path / "outside-events"
+    outside.write_bytes(b"outside must remain untouched\n")
+    (tmp_path / "safety" / event_name).symlink_to(outside)
+    with pytest.raises(GcpSupervisorError, match="SUPERVISOR_JOURNAL_UNSAFE"):
+        GcpSupervisorJournal(tmp_path / "safety").reserve(binding, now=NOW)
+    assert outside.read_bytes() == b"outside must remain untouched\n"
+
+
+def test_v2_sidecar_journal_root_rename_race_is_descriptor_anchored(
+    tmp_path: Path,
+) -> None:
+    """A rename race cannot redirect a reserved event into a replacement root."""
+
+    inputs = _v2_inputs()
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    _outcome, controller = _run(
+        core_root, FakeGcpComputeTransport(), return_controller=True
+    )
+    safety_root = tmp_path / "safety"
+    _unused_supervisor, approval = _v2_supervisor(safety_root, inputs[-1])
+    binding = gcp_supervisor_binding(approval, controller.journal.load("ctl-12345678"))
+    original_root = tmp_path / "safety-original"
+    event_name = "ctl-12345678.safety-v2.events.jsonl"
+
+    def rename_root(point: str) -> None:
+        if point == "reserve_after_event_fsync":
+            safety_root.rename(original_root)
+            safety_root.mkdir()
+
+    with pytest.raises(GcpSupervisorError, match="SUPERVISOR_JOURNAL_ROOT_CHANGED"):
+        GcpSupervisorJournal(safety_root, crash_hook=rename_root).reserve(
+            binding, now=NOW
+        )
+
+    assert (original_root / event_name).is_file()
+    assert not (safety_root / event_name).exists()
 
 
 @pytest.mark.parametrize(
@@ -1762,9 +2106,7 @@ def test_v2_sidecar_crash_prefix_is_durable_and_restartable(
     )
     assert outcome.status == "SUCCEEDED"
     supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
-    binding = gcp_supervisor_binding(
-        approval, controller.journal.load("ctl-12345678")
-    )
+    binding = gcp_supervisor_binding(approval, controller.journal.load("ctl-12345678"))
     if crash_point.startswith("advance"):
         supervisor.journal.reserve(binding, now=NOW)
 
@@ -1772,9 +2114,7 @@ def test_v2_sidecar_crash_prefix_is_durable_and_restartable(
     if pid == 0:
         journal = GcpSupervisorJournal(
             tmp_path / "safety",
-            crash_hook=lambda point: os._exit(77)
-            if point == crash_point
-            else None,
+            crash_hook=lambda point: os._exit(77) if point == crash_point else None,
         )
         if crash_point.startswith("reserve"):
             journal.reserve(binding, now=NOW)
@@ -1939,9 +2279,11 @@ def test_v2_file_watchdog_core_fence_survives_crash_and_settles_without_provider
             crashed = FileGcpWatchdog(
                 watchdog_root,
                 executor=executor,
-                crash_hook=lambda point: os._exit(77)
-                if point == "file_watchdog_after_cleanup_intent"
-                else None,
+                crash_hook=lambda point: (
+                    os._exit(77)
+                    if point == "file_watchdog_after_cleanup_intent"
+                    else None
+                ),
                 runner_enabled=True,
                 runner_poll_seconds=0.01,
                 runner_now_fn=lambda: NOW,
@@ -1972,9 +2314,7 @@ def test_v2_file_watchdog_core_fence_survives_crash_and_settles_without_provider
         assert provider_calls == 0
 
         settled_at = due + timedelta(seconds=record.cleanup_timeout_seconds + 1)
-        settled = restarted.run_due(
-            controller_id=binding.controller_id, now=settled_at
-        )
+        settled = restarted.run_due(controller_id=binding.controller_id, now=settled_at)
         assert settled.state == "CLEANUP_NOT_REQUIRED"
         assert provider_calls == 0
 
@@ -2075,19 +2415,11 @@ def test_v2_file_watchdog_hung_cleanup_is_bounded_and_restart_fences_locally(
                 -1
             ].runner_process_id
 
-        original_bind_for_event = executor_factory.bind_for_event
-
-        def bind_hanging_prebind(event: Any) -> Any:
-            executor = original_bind_for_event(event)
-
-            def hang(*_: Any, **__: Any) -> Any:
-                time.sleep(10)
-                raise AssertionError("hung worker should have been killed")
-
-            executor.cleanup_prebind = hang  # type: ignore[method-assign]
-            return executor
-
-        executor_factory.bind_for_event = bind_hanging_prebind  # type: ignore[method-assign]
+        # Exercise a real fresh interpreter that blocks before it can read a
+        # fake result.  No callable/provider object is passed into that
+        # process; the parent must kill its isolated process group at the
+        # bounded cleanup deadline.
+        watchdog._test_cleanup_worker_hang_milliseconds = 10_000
         started = time.monotonic()
         retry = watchdog.run_due(controller_id=binding.controller_id, now=due)
         elapsed = time.monotonic() - started
@@ -2140,6 +2472,379 @@ def test_v2_file_watchdog_hung_cleanup_is_bounded_and_restart_fences_locally(
             watchdog._kill_runner(runner_pid)
 
 
+def test_v2_exec_watchdog_multithreaded_activation_rejects_false_readiness(
+    tmp_path: Path,
+) -> None:
+    """Fresh-exec readiness is durable, PID-bound, and supplier-free.
+
+    Keep a second controller thread alive while the watchdog starts, then
+    launch a second fresh worker against the already-durable task.  Its PID
+    cannot match the persisted runner identity, so it must close its readiness
+    pipe rather than falsely acknowledge a valid-looking but wrong task.  No
+    provider/supplier object crosses either exec boundary.
+    """
+
+    inputs = _v2_inputs()
+    record = _prepared_record(tmp_path / "prepared")
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    core_journal = GcpLeaseJournal(core_root)
+    core_journal.reserve(record)
+    startup_projection = _v2_startup_projection(inputs[-1])
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    transport_supplier_calls = 0
+    disk_supplier_calls = 0
+
+    def transport_supplier() -> FakeGcpComputeTransport:
+        nonlocal transport_supplier_calls
+        transport_supplier_calls += 1
+        raise AssertionError("runner readiness must not construct a transport")
+
+    def disk_provider_supplier() -> Any:
+        nonlocal disk_supplier_calls
+        disk_supplier_calls += 1
+        raise AssertionError("runner readiness must not construct a disk provider")
+
+    transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=transport_supplier,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    disk_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=disk_provider_supplier,
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=GcpV2LocalWatchdogExecutorFactory(
+            transport_factory=transport_factory,
+            disk_cleanup_factory=disk_factory,
+            core_journal=core_journal,
+            now_fn=lambda: NOW,
+        ),
+        runner_enabled=True,
+        runner_poll_seconds=0.01,
+        runner_now_fn=lambda: NOW,
+    )
+    supervisor, approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    binding = gcp_supervisor_binding(approval, record)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    watchdog.configure_lease(record)
+    watchdog.arm(binding, approval=approval, now=NOW)
+
+    runner_pid: int | None = None
+    root = None
+    core = None
+    ready_read: int | None = None
+    ready_write: int | None = None
+    false_runner: subprocess.Popen[bytes] | None = None
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        background = pool.submit(lambda: time.sleep(2.5))
+        try:
+            # A real multithreaded parent must have no Python-after-fork
+            # warning or lazy fake-provider construction at this point.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", DeprecationWarning)
+                watchdog.activate(
+                    binding, approval=approval, capability=capability, now=NOW
+                )
+            with watchdog._exclusive() as locked_root:
+                runner_pid = watchdog._read_locked(locked_root, binding.controller_id)[
+                    -1
+                ].runner_process_id
+            assert runner_pid is not None
+            assert transport_supplier_calls == 0
+            assert disk_supplier_calls == 0
+
+            # The extra worker inherits only the descriptor and public task
+            # identity.  It sees a durable RUNNER_READY event for a different
+            # PID and must not emit the one-byte acknowledgement accepted by
+            # the parent watchdog.
+            root = watchdog._checked_root()
+            core = watchdog._open_worker_core_root()
+            assert core is not None
+            ready_read, ready_write = os.pipe()
+            false_runner = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "inferdrome.deployment.gcp_watchdog_worker",
+                    "runner",
+                    "--root-fd",
+                    str(root.fd),
+                    "--controller-id",
+                    binding.controller_id,
+                    "--ready-fd",
+                    str(ready_write),
+                    "--poll-ms",
+                    "10",
+                    "--core-root-fd",
+                    str(core.fd),
+                    "--clock-epoch",
+                    str(NOW.timestamp()),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                pass_fds=(root.fd, core.fd, ready_write),
+                start_new_session=True,
+                env=watchdog._worker_environment(),
+            )
+            os.close(ready_write)
+            ready_write = None
+            with pytest.raises(
+                GcpSupervisorError, match="FILE_WATCHDOG_RUNNER_UNAVAILABLE"
+            ):
+                watchdog._await_runner_ready(ready_read)
+            false_runner.wait(timeout=1.0)
+            assert false_runner.returncode == 3
+            assert transport_supplier_calls == 0
+            assert disk_supplier_calls == 0
+        finally:
+            if false_runner is not None and false_runner.poll() is None:
+                false_runner.kill()
+                false_runner.wait(timeout=1.0)
+            if ready_read is not None:
+                os.close(ready_read)
+            if ready_write is not None:
+                os.close(ready_write)
+            if root is not None:
+                root.close()
+            if core is not None:
+                core.close()
+            if runner_pid is not None:
+                watchdog._kill_runner(runner_pid)
+        background.result(timeout=1.0)
+
+
+def test_v2_exec_watchdog_restart_performs_durable_exact_fake_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A fresh watchdog object reconstructs local exact cleanup without suppliers.
+
+    This is deliberately not a fixture-result test: the fresh cleanup process
+    reopens the fsync-backed worker spec/state and changes the exact local fake
+    instance and disk records itself.  The original controller/watchdog object
+    is discarded before the due cleanup, so no in-memory lease, backend, or
+    supplier state may be required for the restart path.
+    """
+
+    inputs = _v2_inputs()
+    record = _prepared_record(tmp_path / "prepared")
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    core_journal = GcpLeaseJournal(core_root)
+    core_journal.reserve(record)
+    startup_projection = _v2_startup_projection(inputs[-1])
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    transport_supplier_marker = tmp_path / "unexpected-transport-supplier"
+    disk_supplier_marker = tmp_path / "unexpected-disk-supplier"
+
+    def transport_supplier() -> FakeGcpComputeTransport:
+        transport_supplier_marker.write_text("called", encoding="ascii")
+        raise AssertionError("restarted fake watchdog must not construct transport")
+
+    def disk_provider_supplier() -> Any:
+        disk_supplier_marker.write_text("called", encoding="ascii")
+        raise AssertionError("restarted fake watchdog must not construct disk provider")
+
+    transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=transport_supplier,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    disk_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=disk_provider_supplier,
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+
+    def make_watchdog() -> FileGcpWatchdog:
+        return FileGcpWatchdog(
+            watchdog_root,
+            executor=GcpV2LocalWatchdogExecutorFactory(
+                transport_factory=transport_factory,
+                disk_cleanup_factory=disk_factory,
+                core_journal=GcpLeaseJournal(core_root),
+                now_fn=lambda: NOW,
+            ),
+            runner_enabled=True,
+            runner_poll_seconds=0.01,
+            runner_now_fn=lambda: NOW,
+        )
+
+    watchdog = make_watchdog()
+    supervisor, approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    binding = gcp_supervisor_binding(approval, record)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    watchdog.configure_lease(record)
+    watchdog.arm(binding, approval=approval, now=NOW)
+    watchdog.activate(binding, approval=approval, capability=capability, now=NOW)
+    disk_binding = _v2_disk_binding_for_record(record)
+    watchdog.bind_disk_cleanup(binding, disk_cleanup_binding=disk_binding, now=NOW)
+    with watchdog._exclusive() as root:
+        runner_pid = watchdog._read_locked(root, binding.controller_id)[
+            -1
+        ].runner_process_id
+    assert runner_pid is not None
+    watchdog._kill_runner(runner_pid)
+
+    # A controller/process restart deliberately gets a new nominal factory
+    # with the same unsafe suppliers. The worker must instead reconstruct only
+    # its descriptor-bound fake backend from durable state.
+    restarted = make_watchdog()
+    due = datetime.fromisoformat(
+        str(capability.provider_runtime_deadline_at).replace("Z", "+00:00")
+    )
+    cleaned = restarted.run_due(controller_id=binding.controller_id, now=due)
+
+    assert cleaned.state == "CLEANUP_CONFIRMED"
+    assert cleaned.cleanup_result is not None
+    assert cleaned.cleanup_result.disk_cleanup_binding == disk_binding
+    assert cleaned.cleanup_result.disk_cleanup_outcome.state == "ABSENCE_CONFIRMED"
+    assert cleaned.cleanup_result.instance_observation.state == "NOT_FOUND"
+    assert cleaned.cleanup_result.owned_inventory.instances == ()
+    with restarted._exclusive() as root:
+        state = _read_json(
+            root,
+            _state_name(binding.controller_id),
+            GcpFileBackedFakeCleanupState,
+        )
+    assert state.binding == binding
+    assert state.disk_cleanup_binding == disk_binding
+    assert state.instance_present is False
+    assert state.disk_present is False
+    assert state.instance_delete_attempts == 1
+    assert state.disk_delete_attempts == 1
+    assert state.disk_delete_operation is not None
+    assert state.disk_delete_operation.disk_name == disk_binding.disk.disk_name
+    assert state.disk_absence is not None
+    assert state.disk_absence.disk_name == disk_binding.disk.disk_name
+    assert not transport_supplier_marker.exists()
+    assert not disk_supplier_marker.exists()
+
+
+def test_v2_exec_watchdog_rejects_tampered_durable_spec_before_resume(
+    tmp_path: Path,
+) -> None:
+    """A restarted worker must fail closed on a substituted durable spec."""
+
+    inputs = _v2_inputs()
+    record = _prepared_record(tmp_path / "prepared")
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    core_journal = GcpLeaseJournal(core_root)
+    core_journal.reserve(record)
+    startup_projection = _v2_startup_projection(inputs[-1])
+    watchdog_root = tmp_path / "watchdog"
+    watchdog_root.mkdir()
+    disk_journal_root = tmp_path / "disk-journal"
+    disk_journal_root.mkdir()
+    supplier_marker = tmp_path / "unexpected-supplier"
+
+    def forbidden_transport_supplier() -> FakeGcpComputeTransport:
+        supplier_marker.write_text("called", encoding="ascii")
+        raise AssertionError("tampered worker spec must block before supplier")
+
+    transport_factory = GcpV2LocalTransportFactory(
+        transport_supplier=forbidden_transport_supplier,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    disk_factory = GcpV2LocalDiskCleanupFactory(
+        provider_supplier=lambda: (_ for _ in ()).throw(
+            AssertionError("tampered worker spec must block before disk supplier")
+        ),
+        journal_root=disk_journal_root,
+        now_fn=lambda: NOW,
+        startup_projection=startup_projection,
+    )
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=GcpV2LocalWatchdogExecutorFactory(
+            transport_factory=transport_factory,
+            disk_cleanup_factory=disk_factory,
+            core_journal=core_journal,
+            now_fn=lambda: NOW,
+        ),
+        runner_enabled=True,
+        runner_poll_seconds=0.01,
+        runner_now_fn=lambda: NOW,
+    )
+    supervisor, approval = _v2_supervisor(
+        tmp_path / "safety", inputs[-1], watchdog=watchdog
+    )
+    binding = gcp_supervisor_binding(approval, record)
+    capability = issue_gcp_v2_mutation_capability(
+        contract=supervisor.activation_deadline,
+        approval_digest=gcp_execution_approval_digest(approval),
+        now=NOW,
+    )
+    watchdog.configure_lease(record)
+    watchdog.arm(binding, approval=approval, now=NOW)
+    watchdog.activate(binding, approval=approval, capability=capability, now=NOW)
+    with watchdog._exclusive() as root:
+        event = watchdog._read_locked(root, binding.controller_id)[-1]
+        runner_pid = event.runner_process_id
+    assert runner_pid is not None
+    watchdog._kill_runner(runner_pid)
+
+    # The bytes are deliberately noncanonical. A fresh worker needs both the
+    # event and this exact content-addressed spec; it cannot treat a retained
+    # in-memory factory/supplier as a replacement for the missing proof.
+    (watchdog_root / _spec_name(binding.controller_id)).write_bytes(b"{}")
+    root = SafeDirFD.open(watchdog_root)
+    core = SafeDirFD.open(core_root)
+    try:
+        with pytest.raises(GcpFileWatchdogBackendError):
+            worker_validate_ready(root, core, event)
+    finally:
+        core.close()
+        root.close()
+
+    restarted = FileGcpWatchdog(
+        watchdog_root,
+        executor=GcpV2LocalWatchdogExecutorFactory(
+            transport_factory=transport_factory,
+            disk_cleanup_factory=disk_factory,
+            core_journal=GcpLeaseJournal(core_root),
+            now_fn=lambda: NOW,
+        ),
+        runner_enabled=True,
+        runner_poll_seconds=0.01,
+        runner_now_fn=lambda: NOW,
+    )
+    # ``resume_runner`` publishes its replacement PID before awaiting the
+    # fresh interpreter.  The interpreter reopens the tampered spec and
+    # declines the acknowledgement, which is surfaced as unavailable rather
+    # than allowing a parent-side in-memory fallback.
+    with pytest.raises(GcpSupervisorError, match="FILE_WATCHDOG_RUNNER_UNAVAILABLE"):
+        restarted.resume_runner(controller_id=binding.controller_id)
+    assert not supplier_marker.exists()
+
+
 @pytest.mark.parametrize(
     ("crash_point", "phase", "expected_state"),
     [
@@ -2147,7 +2852,7 @@ def test_v2_file_watchdog_hung_cleanup_is_bounded_and_restart_fences_locally(
         ("file_watchdog_after_directory_fsync", "arm", "READY"),
         ("file_watchdog_after_runner_ready", "activate", "RUNNER_READY"),
         (
-            "file_watchdog_child_after_post_gate_validation",
+            "file_watchdog_exec_after_post_validation",
             "activate",
             "RUNNER_READY",
         ),
@@ -2240,8 +2945,8 @@ def test_v2_file_watchdog_crash_prefixes_restart_without_transport_activation(
                     binding, approval=approval, capability=capability, now=NOW
                 )
         except GcpSupervisorError:
-            # The post-gate runner crash is observed by its parent as an
-            # unavailable runner; the durable RUNNER_READY event remains.
+            # The fresh-exec runner acknowledgement crash is observed by its
+            # parent as unavailable; the durable RUNNER_READY event remains.
             pass
         os._exit(0)
     _, status = os.waitpid(pid, 0)
@@ -2251,7 +2956,17 @@ def test_v2_file_watchdog_crash_prefixes_restart_without_transport_activation(
     restarted = make_watchdog()
     restarted.configure_lease(record)
     runner_pid: int | None = None
+    crashed_runner_pid: int | None = None
     try:
+        # An activation crash deliberately leaves the independently durable
+        # runner alive.  Capture that exact PID from the durable event before
+        # the restart exercise, then retire it in this test's local cleanup.
+        # Production recovery keeps it alive; a test process must not leak it
+        # into unrelated later tests.
+        with restarted._exclusive() as root:
+            crashed_runner_pid = restarted._read_locked(
+                root, binding.controller_id
+            )[-1].runner_process_id
         if phase == "arm":
             restarted.arm(binding, approval=approval, now=NOW)
         else:
@@ -2265,8 +2980,9 @@ def test_v2_file_watchdog_crash_prefixes_restart_without_transport_activation(
         assert not transport_supplier_marker.exists()
         assert not disk_supplier_marker.exists()
     finally:
-        if runner_pid is not None:
-            restarted._kill_runner(runner_pid)
+        for candidate_pid in {runner_pid, crashed_runner_pid}:
+            if candidate_pid is not None:
+                restarted._kill_runner(candidate_pid)
 
 
 def test_v2_recovery_requires_exact_cleanup_authorization_and_sidecar(
@@ -2325,9 +3041,7 @@ def test_v2_recovery_requires_exact_cleanup_authorization_and_sidecar(
                 with candidate._exclusive() as locked_root:
                     runner_pids.update(
                         event.runner_process_id
-                        for event in candidate._read_locked(
-                            locked_root, "ctl-12345678"
-                        )
+                        for event in candidate._read_locked(locked_root, "ctl-12345678")
                         if event.runner_process_id is not None
                     )
             except (GcpSupervisorError, OSError):
@@ -2403,19 +3117,88 @@ def test_v2_recovery_requires_exact_cleanup_authorization_and_sidecar(
         exact_disk_cleanup_factory=disk_cleanup_factory,
     )
 
+    capability_watchdog_deadline = datetime.fromisoformat(
+        str(capability.watchdog_cleanup_deadline_at).replace("Z", "+00:00")
+    )
+    activation_watchdog_deadline = datetime.fromisoformat(
+        str(approval.watchdog_deadline_at).replace("Z", "+00:00")
+    )
+    assert capability_watchdog_deadline < activation_watchdog_deadline
+    with pytest.raises(GcpV2ContractError, match="CLEANUP_RECOVERY_HORIZON_INVALID"):
+        issue_gcp_cleanup_recovery_authorization(
+            record=recovery_record,
+            approval_digest=gcp_execution_approval_digest(approval),
+            startup_projection_digest=approval.startup_projection_digest,
+            execution_payload_digest=approval.execution_payload_digest,
+            activation_deadline=supervisor.activation_deadline,
+            mutation_capability=capability,
+            disk_cleanup_binding=disk_binding,
+            operator_identity="operator-alice",
+            issued_at=NOW,
+            expires_at=capability_watchdog_deadline + timedelta(seconds=1),
+            confirmation=GCP_CLEANUP_RECOVERY_CONFIRMATION,
+        )
+
+    tampered_capability_value = capability.model_dump(mode="json")
+    tampered_capability_value["execution_payload_digest"] = (
+        gcp_v2_execution_payload_digest(b"substituted-recovery-payload")
+    )
+    tampered_capability_value.pop("capability_id")
+    tampered_payload = GcpV2MutationCapabilityPayload.model_validate(
+        tampered_capability_value
+    )
+    tampered_capability = GcpV2MutationCapability.model_validate(
+        {
+            **tampered_capability_value,
+            "capability_id": gcp_v2_mutation_capability_id(tampered_payload),
+        }
+    )
+    with pytest.raises(
+        GcpV2ContractError, match="CLEANUP_RECOVERY_CAPABILITY_MISMATCH"
+    ):
+        issue_gcp_cleanup_recovery_authorization(
+            record=recovery_record,
+            approval_digest=gcp_execution_approval_digest(approval),
+            startup_projection_digest=approval.startup_projection_digest,
+            execution_payload_digest=approval.execution_payload_digest,
+            activation_deadline=supervisor.activation_deadline,
+            mutation_capability=tampered_capability,
+            disk_cleanup_binding=disk_binding,
+            operator_identity="operator-alice",
+            issued_at=NOW,
+            expires_at=capability_watchdog_deadline,
+            confirmation=GCP_CLEANUP_RECOVERY_CONFIRMATION,
+        )
+
     cleanup_authorization = issue_gcp_cleanup_recovery_authorization(
         record=recovery_record,
         approval_digest=gcp_execution_approval_digest(approval),
         startup_projection_digest=approval.startup_projection_digest,
         execution_payload_digest=approval.execution_payload_digest,
+        activation_deadline=supervisor.activation_deadline,
+        mutation_capability=capability,
         disk_cleanup_binding=disk_binding,
         operator_identity="operator-alice",
         issued_at=NOW,
-        expires_at=NOW + timedelta(minutes=10),
-        watchdog_cleanup_deadline_at=datetime.fromisoformat(
-            str(approval.watchdog_deadline_at).replace("Z", "+00:00")
-        ),
+        expires_at=capability_watchdog_deadline,
         confirmation=GCP_CLEANUP_RECOVERY_CONFIRMATION,
+    )
+    # A canonical, content-addressed recovery artifact is audit input, not a
+    # cleanup factory capability.  Both factory edges must reject it before
+    # evaluating their lazy provider suppliers; only the resumed supervisor
+    # may mint the opaque handle after reopening the active sidecar and exact
+    # disk binding.
+    with pytest.raises(GcpTransportError, match="RECOVERY_CLEANUP_HANDLE_INVALID"):
+        cleanup_transport_factory.bind_cleanup(cleanup_authorization)
+    with pytest.raises(GcpV2DiskCleanupError, match="DISK_AUTHORITY_INVALID"):
+        disk_cleanup_factory.bind(
+            record=recovery_record,
+            binding=disk_binding,
+            authority=cleanup_authorization,
+            now=NOW,
+        )
+    assert (
+        b'"delete_calls":0' in (tmp_path / "disk-provider" / "state.json").read_bytes()
     )
     # Create authorization expires at five minutes, while this distinct,
     # exact cleanup-only authorization remains valid only through the durable
@@ -2425,17 +3208,19 @@ def test_v2_recovery_requires_exact_cleanup_authorization_and_sidecar(
     assert cleanup_after_create_expiry > datetime.fromisoformat(
         str(approval.expires_at).replace("Z", "+00:00")
     )
-    assert validate_gcp_cleanup_recovery_authorization(
-        cleanup_authorization,
-        record=recovery_record,
-        approval_digest=gcp_execution_approval_digest(approval),
-        startup_projection_digest=approval.startup_projection_digest,
-        execution_payload_digest=approval.execution_payload_digest,
-        now=cleanup_after_create_expiry,
-        watchdog_cleanup_deadline_at=datetime.fromisoformat(
-            str(approval.watchdog_deadline_at).replace("Z", "+00:00")
-        ),
-    ) == cleanup_authorization
+    assert (
+        validate_gcp_cleanup_recovery_authorization(
+            cleanup_authorization,
+            record=recovery_record,
+            approval_digest=gcp_execution_approval_digest(approval),
+            startup_projection_digest=approval.startup_projection_digest,
+            execution_payload_digest=approval.execution_payload_digest,
+            activation_deadline=supervisor.activation_deadline,
+            mutation_capability=capability,
+            now=cleanup_after_create_expiry,
+        )
+        == cleanup_authorization
+    )
     recovered = recovery.recover_cleanup(
         controller_id="ctl-12345678", cleanup_authorization=cleanup_authorization
     )
@@ -2475,9 +3260,7 @@ def test_incomplete_owned_inventory_blocks_before_create(tmp_path: Path) -> None
 
 
 def test_post_create_safety_mismatch_cleans_up_before_work(tmp_path: Path) -> None:
-    transport = FakeGcpComputeTransport(
-        instance_safety_error="INSTANCE_TTL_MISMATCH"
-    )
+    transport = FakeGcpComputeTransport(instance_safety_error="INSTANCE_TTL_MISMATCH")
 
     outcome = _run(tmp_path, transport)
 
@@ -2922,6 +3705,7 @@ def test_real_sdk_operation_states_keep_empty_done_errors_nonterminal() -> None:
         target_link=target_link,
     )
     handle = transport._remember(client.operation, "insert", request)
+
     class FreshOperations:
         def get(self, **_: Any) -> Any:
             return sdk.Operation(
@@ -3463,9 +4247,7 @@ def test_journal_cannot_remove_pending_insert_operation_identity(
     root = tmp_path / "pending-insert"
     root.mkdir()
     journal = GcpLeaseJournal(root)
-    armed = record.model_copy(
-        update={"state": "ARM_CONSUMED", "arm_consumed": True}
-    )
+    armed = record.model_copy(update={"state": "ARM_CONSUMED", "arm_consumed": True})
     journal.reserve(record)
     journal.update(armed)
     pending = armed.model_copy(
@@ -3503,9 +4285,7 @@ def test_journal_cannot_remove_pending_delete_operation_identity(
     root = tmp_path / "pending-delete"
     root.mkdir()
     journal = GcpLeaseJournal(root)
-    armed = record.model_copy(
-        update={"state": "ARM_CONSUMED", "arm_consumed": True}
-    )
+    armed = record.model_copy(update={"state": "ARM_CONSUMED", "arm_consumed": True})
     journal.reserve(record)
     journal.update(armed)
     insert_pending = armed.model_copy(
@@ -3675,9 +4455,9 @@ def test_anchor_only_reserve_prefix_can_be_discarded_and_retried(
     root.mkdir()
     child = GcpLeaseJournal(
         root,
-        crash_hook=lambda point: os._exit(77)
-        if point == "reserve_after_anchor_fsync"
-        else None,
+        crash_hook=lambda point: (
+            os._exit(77) if point == "reserve_after_anchor_fsync" else None
+        ),
     )
     pid = os.fork()
     if pid == 0:
@@ -3772,9 +4552,7 @@ def test_delete_attempt_sequence_rejects_replay_retarget_and_overflow(
     root = tmp_path / "journal"
     root.mkdir()
     journal = GcpLeaseJournal(root)
-    armed = record.model_copy(
-        update={"state": "ARM_CONSUMED", "arm_consumed": True}
-    )
+    armed = record.model_copy(update={"state": "ARM_CONSUMED", "arm_consumed": True})
     journal.reserve(record)
     journal.update(armed)
     insert_pending = armed.model_copy(
@@ -3842,9 +4620,7 @@ def test_delete_attempt_sequence_rejects_replay_retarget_and_overflow(
     journal.update(delete_done)
     with pytest.raises(GcpJournalError, match="terminal operation"):
         journal.update(delete_pending)
-    forged_intent = delete_done.model_copy(
-        update={"provider_mutation_ambiguous": True}
-    )
+    forged_intent = delete_done.model_copy(update={"provider_mutation_ambiguous": True})
     with pytest.raises(GcpJournalError, match="did not consume an attempt"):
         journal.update(forged_intent)
     forged_handle = delete_done.model_copy(
@@ -3859,9 +4635,7 @@ def test_delete_attempt_sequence_rejects_replay_retarget_and_overflow(
             "provider_mutation_ambiguous": True,
         }
     )
-    with pytest.raises(
-        GcpJournalError, match=r"terminal operation|operation identity"
-    ):
+    with pytest.raises(GcpJournalError, match=r"terminal operation|operation identity"):
         journal.update(forged_handle)
     second_intent = delete_done.model_copy(
         update={
@@ -3893,9 +4667,7 @@ def test_delete_attempt_jump_cannot_skip_the_prepared_intent(
     root = tmp_path / "journal"
     root.mkdir()
     journal = GcpLeaseJournal(root)
-    armed = record.model_copy(
-        update={"state": "ARM_CONSUMED", "arm_consumed": True}
-    )
+    armed = record.model_copy(update={"state": "ARM_CONSUMED", "arm_consumed": True})
     journal.reserve(record)
     journal.update(armed)
     insert_pending = armed.model_copy(
@@ -4132,15 +4904,21 @@ def test_a2_mapping_rejects_every_non_closed_machine(machine_type: str) -> None:
         validate_gcp_a2_profile(
             machine_type, "NVIDIA A100-SXM4-40GB", "nvidia-tesla-a100", 1
         )
-    assert validate_gcp_a2_profile(
-        "a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", "nvidia-tesla-a100", 1
-    ) == "provider"
-    assert validate_gcp_a2_profile(
-        "synthetic-a2-highgpu-1g",
-        "NVIDIA A100-SXM4-40GB",
-        "synthetic-a100-sxm4-40gb",
-        1,
-    ) == "synthetic"
+    assert (
+        validate_gcp_a2_profile(
+            "a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", "nvidia-tesla-a100", 1
+        )
+        == "provider"
+    )
+    assert (
+        validate_gcp_a2_profile(
+            "synthetic-a2-highgpu-1g",
+            "NVIDIA A100-SXM4-40GB",
+            "synthetic-a100-sxm4-40gb",
+            1,
+        )
+        == "synthetic"
+    )
     with pytest.raises(GcpExecutionError, match="closed A2 profile"):
         validate_gcp_a2_profile(
             "a2-highgpu-1g", "NVIDIA A100-SXM4-40GB", "nvidia-h100-80gb", 1
@@ -4161,13 +4939,11 @@ def test_image_observation_mismatch_blocks_insert_before_provider_mutation(
     tmp_path: Path,
 ) -> None:
     class WrongImage(FakeGcpComputeTransport):
-        def get_image(
-            self, request: GcpInsertRequest, *, timeout_seconds: int
-        ) -> Any:
-            return super().get_image(
-                request, timeout_seconds=timeout_seconds
-            ).model_copy(
-                update={"provider_image_id": 999999999}
+        def get_image(self, request: GcpInsertRequest, *, timeout_seconds: int) -> Any:
+            return (
+                super()
+                .get_image(request, timeout_seconds=timeout_seconds)
+                .model_copy(update={"provider_image_id": 999999999})
             )
 
     transport = WrongImage()
@@ -4176,6 +4952,7 @@ def test_image_observation_mismatch_blocks_insert_before_provider_mutation(
     assert outcome.error_code == "BOOT_IMAGE_OBSERVATION_MISMATCH"
     assert transport.insert_calls == 0
 
+
 def test_boot_disk_source_mismatch_triggers_cleanup_before_work(
     tmp_path: Path,
 ) -> None:
@@ -4183,10 +4960,10 @@ def test_boot_disk_source_mismatch_triggers_cleanup_before_work(
         def get_boot_disk(
             self, request: GcpInsertRequest, *, timeout_seconds: int
         ) -> Any:
-            return super().get_boot_disk(
-                request, timeout_seconds=timeout_seconds
-            ).model_copy(
-                update={"source_image_id": 999999999}
+            return (
+                super()
+                .get_boot_disk(request, timeout_seconds=timeout_seconds)
+                .model_copy(update={"source_image_id": 999999999})
             )
 
     transport = WrongDisk()
@@ -4465,3 +5242,80 @@ def test_optional_sdk_surface_matches_compute_1_50_when_extra_is_installed() -> 
             request, timeout_seconds=7, request_id=request.delete_request_id
         )
     assert not hasattr(client, "delete_request")
+
+
+def test_file_watchdog_journal_fd_survives_root_rename_and_symlink_swap(
+    tmp_path: Path,
+) -> None:
+    """A held watchdog directory descriptor cannot be retargeted by its path."""
+
+    inputs = _v2_inputs()
+    record = _prepared_record(tmp_path)
+    _supervisor, approval = _v2_supervisor(tmp_path / "safety", inputs[-1])
+    binding = gcp_supervisor_binding(approval, record)
+    watchdog_root = tmp_path / "watchdog"
+    parked_root = tmp_path / "parked-watchdog"
+    attacker_root = tmp_path / "attacker"
+    watchdog_root.mkdir()
+    attacker_root.mkdir()
+    swapped = False
+
+    def swap_after_file_fsync(point: str) -> None:
+        nonlocal swapped
+        if point != "file_watchdog_after_event_fsync" or swapped:
+            return
+        swapped = True
+        watchdog_root.rename(parked_root)
+        watchdog_root.symlink_to(attacker_root, target_is_directory=True)
+
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=_UnexpectedFileWatchdogExecutor(),
+        crash_hook=swap_after_file_fsync,
+    )
+    with watchdog._exclusive() as root:
+        event = watchdog._append_locked(
+            root,
+            (),
+            state="ARMED",
+            binding=binding,
+            now=NOW,
+            executor_config_digest="sha256:" + "1" * 64,
+        )
+        # Read through the original descriptor after the configured root path
+        # has become an attacker-controlled symlink.
+        assert watchdog._read_locked(root, binding.controller_id) == (event,)
+
+    journal_name = f"{binding.controller_id}.file-watchdog-v2.events.jsonl"
+    assert swapped is True
+    assert (parked_root / journal_name).is_file()
+    assert (parked_root / ".file-watchdog-v2.lock").is_file()
+    assert not (attacker_root / journal_name).exists()
+    assert not (attacker_root / ".file-watchdog-v2.lock").exists()
+
+
+def test_file_watchdog_repair_uses_held_fd_after_root_symlink_swap(
+    tmp_path: Path,
+) -> None:
+    """Partial-tail repair never follows a root path swapped after locking."""
+
+    watchdog_root = tmp_path / "watchdog"
+    parked_root = tmp_path / "parked-watchdog"
+    attacker_root = tmp_path / "attacker"
+    watchdog_root.mkdir()
+    attacker_root.mkdir()
+    controller_id = "ctl-12345678"
+    journal_name = f"{controller_id}.file-watchdog-v2.events.jsonl"
+    (watchdog_root / journal_name).write_bytes(b'{"partial"')
+    watchdog = FileGcpWatchdog(
+        watchdog_root,
+        executor=_UnexpectedFileWatchdogExecutor(),
+    )
+
+    with watchdog._exclusive() as root:
+        watchdog_root.rename(parked_root)
+        watchdog_root.symlink_to(attacker_root, target_is_directory=True)
+        assert watchdog._repair_partial_tail_locked(journal_name, root) is False
+
+    assert not (parked_root / journal_name).exists()
+    assert not (attacker_root / journal_name).exists()

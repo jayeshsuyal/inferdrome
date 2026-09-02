@@ -13,6 +13,7 @@ without contacting a provider.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat
@@ -24,7 +25,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
-from typing import Annotated, Any, Final, Literal, Protocol, Self
+from typing import Annotated, Any, Final, Literal, Protocol, Self, cast
 
 from pydantic import Field, StringConstraints, ValidationError, model_validator
 
@@ -42,6 +43,7 @@ from inferdrome.deployment.gcp_lifecycle import (
     _timestamp,
     _write_all,
 )
+from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.domain.digests import DigestDomain, canonical_json_bytes, digest_bytes
 from inferdrome.domain.ids import Sha256Digest
 
@@ -892,13 +894,26 @@ class GcpV2AuthorityBoundDiskCleanupTransport:
         ):
             raise GcpV2DiskCleanupError("DISK_RECOVERY_AUTHORIZATION_MISMATCH")
 
-    def _provider_after_authority(self) -> GcpV2DiskCleanupTransport:
-        """Lazily construct the raw boundary only after current local checks.
+    def _call_provider_after_authority(
+        self,
+        operation: Literal[
+            "read_exact_owned_boot_disk",
+            "delete_exact_boot_disk",
+            "reconcile_exact_disk_delete",
+            "confirm_exact_boot_disk_absent",
+        ],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        """Dispatch one allowlisted cleanup operation without exposing raw I/O.
 
-        This is intentionally inside the sealed adapter rather than the
-        factory.  Expired/tampered authority must not even initialize a future
-        SDK/ADC supplier; every provider-facing method also rechecks its live
-        horizon immediately before dispatch.
+        The durable supervisor/watchdog-issued handle is consumed before this
+        sealed adapter exists.  Returning its underlying provider would turn
+        that narrow edge back into a broad same-process escape hatch.  Keep
+        lazy construction private and expose only the four exact cleanup
+        operations; each dispatch repeats the live authority check before the
+        supplier can run and immediately before its selected provider method.
         """
 
         self._assert_authority()
@@ -913,7 +928,18 @@ class GcpV2AuthorityBoundDiskCleanupTransport:
                 if candidate is None:
                     raise GcpV2DiskCleanupError("DISK_PROVIDER_SUPPLIER_FAILED")
                 self._provider = candidate
-            return self._provider
+            provider = self._provider
+        try:
+            method = getattr(provider, operation)
+        except AttributeError:
+            raise GcpV2DiskCleanupError("DISK_PROVIDER_SUPPLIER_FAILED") from None
+        if not callable(method):
+            raise GcpV2DiskCleanupError("DISK_PROVIDER_SUPPLIER_FAILED")
+        self._assert_authority()
+        try:
+            return method(*args, **kwargs)
+        except GcpV2DiskCleanupError:
+            raise
 
     def _exact_binding(self, binding: GcpV2DiskCleanupBinding) -> None:
         if _strict_binding(binding) != self.binding:
@@ -924,8 +950,11 @@ class GcpV2AuthorityBoundDiskCleanupTransport:
     ) -> GcpV2ExactOwnedBootDisk:
         self._assert_authority()
         self._exact_binding(binding)
-        return self._provider_after_authority().read_exact_owned_boot_disk(
-            binding, timeout_seconds=timeout_seconds
+        return cast(
+            GcpV2ExactOwnedBootDisk,
+            self._call_provider_after_authority(
+                "read_exact_owned_boot_disk", binding, timeout_seconds=timeout_seconds
+            ),
         )
 
     def delete_exact_boot_disk(
@@ -937,8 +966,14 @@ class GcpV2AuthorityBoundDiskCleanupTransport:
     ) -> GcpV2DiskDeleteOperation:
         self._assert_authority()
         self._exact_binding(binding)
-        return self._provider_after_authority().delete_exact_boot_disk(
-            binding, request_id=request_id, timeout_seconds=timeout_seconds
+        return cast(
+            GcpV2DiskDeleteOperation,
+            self._call_provider_after_authority(
+                "delete_exact_boot_disk",
+                binding,
+                request_id=request_id,
+                timeout_seconds=timeout_seconds,
+            ),
         )
 
     def reconcile_exact_disk_delete(
@@ -950,8 +985,13 @@ class GcpV2AuthorityBoundDiskCleanupTransport:
         self._assert_authority()
         if not _operation_matches_binding(operation, self.binding):
             raise GcpV2DiskCleanupError("DISK_AUTHORITY_OPERATION_MISMATCH")
-        return self._provider_after_authority().reconcile_exact_disk_delete(
-            operation, timeout_seconds=timeout_seconds
+        return cast(
+            GcpV2DiskDeleteResult,
+            self._call_provider_after_authority(
+                "reconcile_exact_disk_delete",
+                operation,
+                timeout_seconds=timeout_seconds,
+            ),
         )
 
     def confirm_exact_boot_disk_absent(
@@ -959,8 +999,13 @@ class GcpV2AuthorityBoundDiskCleanupTransport:
     ) -> GcpV2DiskAbsenceObservation:
         self._assert_authority()
         self._exact_binding(binding)
-        return self._provider_after_authority().confirm_exact_boot_disk_absent(
-            binding, timeout_seconds=timeout_seconds
+        return cast(
+            GcpV2DiskAbsenceObservation,
+            self._call_provider_after_authority(
+                "confirm_exact_boot_disk_absent",
+                binding,
+                timeout_seconds=timeout_seconds,
+            ),
         )
 
 
@@ -1000,43 +1045,101 @@ class GcpV2DiskCleanupJournal:
         if self._crash_hook is not None:
             self._crash_hook(point)
 
-    def _checked_root(self) -> Path:
+    def _open_root(self) -> SafeDirFD:
         if not self.root.is_absolute():
             raise GcpV2DiskCleanupError("DISK_JOURNAL_PATH_INVALID")
         try:
-            metadata = self.root.lstat()
-            resolved = os.path.realpath(os.fspath(self.root))
-        except OSError:
+            return SafeDirFD.open(self.root)
+        except SafeDirFSError:
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
             raise GcpV2DiskCleanupError("DISK_JOURNAL_UNAVAILABLE") from None
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_mode & 0o022
-            or os.path.normcase(os.path.abspath(os.fspath(self.root)))
-            != os.path.normcase(resolved)
-        ):
-            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
-        return self.root
+
+    def _checked_root(self) -> Path:
+        """Validate the configured root for callers that need a display path.
+
+        Active journal operations deliberately do not use this pathname after
+        checking it.  They retain one ``SafeDirFD`` for the complete locked
+        operation so a later rename or symlink substitution cannot redirect a
+        journal child operation.
+        """
+
+        root = self._open_root()
+        try:
+            return root.path
+        finally:
+            root.close()
 
     @staticmethod
-    def _path_for(root: Path, controller_id: str) -> Path:
+    def _path_for(controller_id: str) -> str:
         if _CONTROLLER_RE.fullmatch(controller_id) is None:
             raise GcpV2DiskCleanupError("DISK_JOURNAL_CONTROLLER_INVALID")
-        return root / f"{controller_id}.disk-cleanup-v2.events.jsonl"
+        return f"{controller_id}.disk-cleanup-v2.events.jsonl"
+
+    @staticmethod
+    def _assert_safe_event_file(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > GCP_V2_DISK_CLEANUP_MAX_EVENT_BYTES
+            or metadata.st_mode & 0o022
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
+
+    @classmethod
+    def _assert_named_event_matches(
+        cls,
+        root: SafeDirFD,
+        name: str,
+        expected: os.stat_result,
+    ) -> None:
+        """Reject replacement of a checked journal child before mutation.
+
+        An opened descriptor prevents writes through a substituted pathname.
+        The extra no-follow ``statat`` check makes replacement visible rather
+        than silently accepting a now-unlinked history file.
+        """
+
+        try:
+            current = root.stat_child(name)
+        except FileNotFoundError:
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED") from None
+        except SafeDirFSError:
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
+        except OSError:
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNAVAILABLE") from None
+        cls._assert_safe_event_file(current)
+        if (
+            current.st_dev != expected.st_dev
+            or current.st_ino != expected.st_ino
+            or current.st_size != expected.st_size
+        ):
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED")
 
     @contextmanager
-    def _exclusive(self) -> Iterator[Path]:
-        root = self._checked_root()
+    def _exclusive(self) -> Iterator[SafeDirFD]:
+        root = self._open_root()
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                root / ".disk-cleanup-v2.lock",
+            descriptor = root.open_child(
+                ".disk-cleanup-v2.lock",
                 os.O_RDWR
                 | os.O_CREAT
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
             )
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o022
+                or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+            ):
+                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
             try:
                 import fcntl
 
@@ -1045,6 +1148,8 @@ class GcpV2DiskCleanupJournal:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_LOCK_UNAVAILABLE") from None
             with self._lock:
                 yield root
+        except SafeDirFSError:
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
         finally:
             if descriptor is not None:
                 try:
@@ -1054,34 +1159,25 @@ class GcpV2DiskCleanupJournal:
                 except (ImportError, OSError):
                     pass
                 os.close(descriptor)
+            root.close()
 
-    def _fsync_directory(self) -> None:
-        descriptor = os.open(
-            self._checked_root(), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    @staticmethod
+    def _fsync_directory(root: SafeDirFD) -> None:
+        root.fsync()
 
     def _read_events_locked(
-        self, path: Path
+        self, root: SafeDirFD, name: str
     ) -> tuple[GcpV2DiskCleanupJournalEvent, ...]:
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
+            descriptor = root.open_child(
+                name,
                 os.O_RDONLY
                 | getattr(os, "O_NOFOLLOW", 0)
                 | getattr(os, "O_CLOEXEC", 0),
             )
             metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_size > GCP_V2_DISK_CLEANUP_MAX_EVENT_BYTES
-                or metadata.st_mode & 0o022
-            ):
-                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
+            self._assert_safe_event_file(metadata)
             raw = os.read(descriptor, GCP_V2_DISK_CLEANUP_MAX_EVENT_BYTES + 1)
             final = os.fstat(descriptor)
             if (
@@ -1090,6 +1186,7 @@ class GcpV2DiskCleanupJournal:
                 or final.st_size != len(raw)
             ):
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED")
+            self._assert_named_event_matches(root, name, final)
             if not raw.endswith(b"\n"):
                 newline = raw.rfind(b"\n")
                 raw = raw[: newline + 1] if newline >= 0 else b""
@@ -1118,55 +1215,57 @@ class GcpV2DiskCleanupJournal:
             return tuple(events)
         except GcpV2DiskCleanupError:
             raise
+        except SafeDirFSError:
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
         except (OSError, ValidationError, ValueError):
             raise GcpV2DiskCleanupError("DISK_JOURNAL_UNAVAILABLE") from None
         finally:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _repair_partial_tail_locked(self, path: Path) -> bool:
+    def _repair_partial_tail_locked(self, root: SafeDirFD, name: str) -> bool:
         """Repair one incomplete final write and report whether history remains.
 
         A crash before the very first event reaches a newline leaves no durable
         cleanup authority to preserve.  Under the exact controller lock and
-        no-follow checks, that zero-history prefix is removed so a restart can
-        reserve the same binding.  Once any complete event exists, only the
-        incomplete *tail* is truncated; malformed completed history remains
-        fail-closed.
+        no-follow checks, that zero-history prefix is truncated and safely
+        reused by a restart.  It is not unlinked by pathname, because an
+        unlink after a check could target a substituted child.  Once any
+        complete event exists, only the incomplete *tail* is truncated;
+        malformed completed history remains fail-closed.
         """
 
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
+            descriptor = root.open_child(
+                name,
                 os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             )
             metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_size > GCP_V2_DISK_CLEANUP_MAX_EVENT_BYTES
-                or metadata.st_mode & 0o022
-            ):
-                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
+            self._assert_safe_event_file(metadata)
             raw = os.read(descriptor, GCP_V2_DISK_CLEANUP_MAX_EVENT_BYTES + 1)
             if len(raw) > GCP_V2_DISK_CLEANUP_MAX_EVENT_BYTES:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
             if not raw.endswith(b"\n"):
                 newline = raw.rfind(b"\n")
+                self._assert_named_event_matches(root, name, metadata)
                 if newline < 0:
                     os.ftruncate(descriptor, 0)
                     os.fsync(descriptor)
-                    os.unlink(path)
-                    self._fsync_directory()
+                    self._assert_named_event_matches(root, name, os.fstat(descriptor))
+                    self._fsync_directory(root)
                     return False
                 os.ftruncate(descriptor, newline + 1)
                 os.fsync(descriptor)
-                self._fsync_directory()
+                self._assert_named_event_matches(root, name, os.fstat(descriptor))
+                self._fsync_directory(root)
             return True
         except FileNotFoundError:
             return False
         except GcpV2DiskCleanupError:
             raise
+        except SafeDirFSError:
+            raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
         except OSError:
             raise GcpV2DiskCleanupError("DISK_JOURNAL_REPAIR_FAILED") from None
         finally:
@@ -1230,21 +1329,33 @@ class GcpV2DiskCleanupJournal:
         except ValueError:
             raise GcpV2DiskCleanupError("DISK_JOURNAL_TIME_INVALID") from None
         with self._exclusive() as root:
-            path = self._path_for(root, binding.controller_id)
+            name = self._path_for(binding.controller_id)
             try:
-                metadata = path.lstat()
+                metadata = root.stat_child(name)
             except FileNotFoundError:
                 metadata = None
+            except SafeDirFSError:
+                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
             except OSError:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_UNAVAILABLE") from None
             if metadata is not None:
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                    raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
-                if self._repair_partial_tail_locked(path):
-                    latest = self._read_events_locked(path)[-1]
+                self._assert_safe_event_file(metadata)
+                if self._repair_partial_tail_locked(root, name):
+                    latest = self._read_events_locked(root, name)[-1]
                     if latest.binding != binding:
                         raise GcpV2DiskCleanupError("DISK_JOURNAL_BINDING_MISMATCH")
                     return latest
+                try:
+                    metadata = root.stat_child(name)
+                except FileNotFoundError:
+                    raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED") from None
+                except SafeDirFSError:
+                    raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
+                except OSError:
+                    raise GcpV2DiskCleanupError("DISK_JOURNAL_UNAVAILABLE") from None
+                self._assert_safe_event_file(metadata)
+                if metadata.st_size != 0:
+                    raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED")
             event = _event(
                 sequence=0,
                 state="PREPARED",
@@ -1257,36 +1368,62 @@ class GcpV2DiskCleanupJournal:
                 previous_event_digest=None,
             )
             raw = canonical_json_bytes(_model_value(event)) + b"\n"
+            descriptor: int | None = None
             try:
-                descriptor = os.open(
-                    path,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
-                    0o600,
-                )
-                try:
-                    _write_all(descriptor, raw)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                if metadata is None:
+                    descriptor = root.open_child(
+                        name,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                    )
+                else:
+                    descriptor = root.open_child(
+                        name,
+                        os.O_WRONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                    )
+                    opened = os.fstat(descriptor)
+                    self._assert_safe_event_file(opened)
+                    if (
+                        opened.st_dev != metadata.st_dev
+                        or opened.st_ino != metadata.st_ino
+                        or opened.st_size != 0
+                    ):
+                        raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED")
+                    self._assert_named_event_matches(root, name, opened)
+                opened = os.fstat(descriptor)
+                self._assert_safe_event_file(opened)
+                _write_all(descriptor, raw)
+                os.fsync(descriptor)
+                final = os.fstat(descriptor)
+                if final.st_size != len(raw):
+                    raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED")
+                self._assert_named_event_matches(root, name, final)
                 self._crash_point("disk_cleanup_prepare_after_event_fsync")
-                self._fsync_directory()
+                self._fsync_directory(root)
                 self._crash_point("disk_cleanup_prepare_after_directory_fsync")
+            except SafeDirFSError:
+                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
             except FileExistsError:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_ALREADY_EXISTS") from None
             except OSError:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_RESERVE_FAILED") from None
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
             return event
 
     def load(self, controller_id: str) -> GcpV2DiskCleanupJournalEvent:
         with self._exclusive() as root:
-            path = self._path_for(root, controller_id)
-            if not self._repair_partial_tail_locked(path):
+            name = self._path_for(controller_id)
+            if not self._repair_partial_tail_locked(root, name):
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_MISSING")
-            return self._read_events_locked(path)[-1]
+            return self._read_events_locked(root, name)[-1]
 
     def advance(
         self,
@@ -1309,10 +1446,10 @@ class GcpV2DiskCleanupJournal:
         except ValueError:
             raise GcpV2DiskCleanupError("DISK_JOURNAL_TIME_INVALID") from None
         with self._exclusive() as root:
-            path = self._path_for(root, binding.controller_id)
-            if not self._repair_partial_tail_locked(path):
+            name = self._path_for(binding.controller_id)
+            if not self._repair_partial_tail_locked(root, name):
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_MISSING")
-            events = self._read_events_locked(path)
+            events = self._read_events_locked(root, name)
             previous = events[-1]
             if previous.binding != binding:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_BINDING_MISMATCH")
@@ -1334,39 +1471,52 @@ class GcpV2DiskCleanupJournal:
             self._validate_transitions(candidate)
             raw = canonical_json_bytes(_model_value(event)) + b"\n"
             try:
-                metadata = path.lstat()
+                metadata = root.stat_child(name)
+            except SafeDirFSError:
+                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
             except OSError:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_UNAVAILABLE") from None
-            if (
-                stat.S_ISLNK(metadata.st_mode)
-                or not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_mode & 0o022
-            ):
-                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE")
+            self._assert_safe_event_file(metadata)
             size = metadata.st_size
             if (
                 len(candidate) > GCP_V2_DISK_CLEANUP_MAX_EVENTS
                 or size + len(raw) > GCP_V2_DISK_CLEANUP_MAX_EVENT_BYTES
             ):
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_BOUND_EXCEEDED")
+            descriptor: int | None = None
             try:
-                descriptor = os.open(
-                    path,
+                descriptor = root.open_child(
+                    name,
                     os.O_WRONLY
                     | os.O_APPEND
                     | getattr(os, "O_NOFOLLOW", 0)
                     | getattr(os, "O_CLOEXEC", 0),
                 )
-                try:
-                    _write_all(descriptor, raw)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                opened = os.fstat(descriptor)
+                self._assert_safe_event_file(opened)
+                if (
+                    opened.st_dev != metadata.st_dev
+                    or opened.st_ino != metadata.st_ino
+                    or opened.st_size != size
+                ):
+                    raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED")
+                self._assert_named_event_matches(root, name, opened)
+                _write_all(descriptor, raw)
+                os.fsync(descriptor)
+                final = os.fstat(descriptor)
+                if final.st_size != size + len(raw):
+                    raise GcpV2DiskCleanupError("DISK_JOURNAL_CHANGED")
+                self._assert_named_event_matches(root, name, final)
                 self._crash_point("disk_cleanup_advance_after_event_fsync")
-                self._fsync_directory()
+                self._fsync_directory(root)
                 self._crash_point("disk_cleanup_advance_after_directory_fsync")
+            except SafeDirFSError:
+                raise GcpV2DiskCleanupError("DISK_JOURNAL_UNSAFE") from None
             except OSError:
                 raise GcpV2DiskCleanupError("DISK_JOURNAL_APPEND_FAILED") from None
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
             return event
 
 
@@ -1953,17 +2103,19 @@ class GcpV2LocalDiskCleanupFactory:
     ) -> GcpV2AuthorityBoundDiskCleanupTransport:
         """Mint the only coordinator-visible provider adapter after authority.
 
-        A sealed activation proof is required on the post-create controller
-        path.  The independently durable watchdog reconstructs from its
-        persisted capability, and recovery uses the already-validated exact
-        cleanup authorization.  All three adapters recheck their horizon on
-        every provider method.
+        A sealed supervisor activation guard is required on the post-create
+        controller path.  The independently durable watchdog and recovery path
+        each use a supervisor-minted opaque cleanup handle; a structurally
+        valid, content-addressed capability or recovery artifact is
+        deliberately not an authority at this factory edge.  All adapters
+        recheck their horizon on every provider method.
         """
 
         try:
             from inferdrome.deployment.gcp_supervisor import (
-                GcpV2ActivatedMutationProof,
-                consume_gcp_v2_activated_mutation_proof,
+                _consume_gcp_v2_recovery_cleanup_handle,
+                _consume_gcp_v2_watchdog_cleanup_handle,
+                consume_gcp_v2_future_mutation_activation_guard,
             )
             from inferdrome.deployment.gcp_v2_contracts import (
                 GcpCleanupRecoveryAuthorization,
@@ -1974,29 +2126,49 @@ class GcpV2LocalDiskCleanupFactory:
         except ImportError:
             raise GcpV2DiskCleanupError("DISK_AUTHORITY_UNAVAILABLE") from None
         authority_kind: Literal["capability", "recovery"]
-        sealed_authority: object
+        sealed_authority: (
+            GcpV2MutationCapability | GcpCleanupRecoveryAuthorization | None
+        )
         seal: object
-        if isinstance(authority, GcpV2ActivatedMutationProof):
+        try:
+            sealed_authority = consume_gcp_v2_future_mutation_activation_guard(
+                authority, now=now, purpose="disk_cleanup"
+            ).capability
+        except GcpExecutionError:
+            sealed_authority = None
+        if sealed_authority is not None:
             try:
-                sealed_authority = consume_gcp_v2_activated_mutation_proof(
-                    authority, now=now, purpose="disk_cleanup"
-                ).capability
-            except GcpExecutionError:
-                raise GcpV2DiskCleanupError("DISK_CAPABILITY_INVALID") from None
-            authority_kind = "capability"
-            seal = _CAPABILITY_BOUND_DISK_TRANSPORT_SEAL
-        elif type(authority) is GcpV2MutationCapability:
-            # This route is only used by FileGcpWatchdog after it has loaded
-            # and validated its own fsync-backed activation event.  It is not
-            # exposed through the guarded controller's post-create path.
-            sealed_authority = authority
-            authority_kind = "capability"
-            seal = _CAPABILITY_BOUND_DISK_TRANSPORT_SEAL
-        elif type(authority) is GcpCleanupRecoveryAuthorization:
-            sealed_authority = authority
-            authority_kind = "recovery"
-            seal = _RECOVERY_BOUND_DISK_TRANSPORT_SEAL
+                # The type is narrowed only after the sealed consumer.  It
+                # remains a capability-bound, no-raw-proof factory edge.
+                if not isinstance(sealed_authority, GcpV2MutationCapability):
+                    raise TypeError("invalid guarded capability")
+                authority_kind = "capability"
+                seal = _CAPABILITY_BOUND_DISK_TRANSPORT_SEAL
+            except TypeError:
+                raise GcpV2DiskCleanupError("DISK_AUTHORITY_INVALID") from None
         else:
+            # The private helpers also verify the durable watchdog activation
+            # event or the exact recovery lease/disk binding.  They reject
+            # forged canonical capability and recovery-authorization models
+            # before this lazy provider supplier can be evaluated.
+            try:
+                watchdog_handle = _consume_gcp_v2_watchdog_cleanup_handle(
+                    authority, now=now, purpose="disk_cleanup"
+                )
+                sealed_authority = watchdog_handle.capability
+                authority_kind = "capability"
+                seal = _CAPABILITY_BOUND_DISK_TRANSPORT_SEAL
+            except GcpExecutionError:
+                try:
+                    recovery_handle = _consume_gcp_v2_recovery_cleanup_handle(
+                        authority, now=now, purpose="disk_cleanup"
+                    )
+                    sealed_authority = recovery_handle.authorization
+                    authority_kind = "recovery"
+                    seal = _RECOVERY_BOUND_DISK_TRANSPORT_SEAL
+                except GcpExecutionError:
+                    raise GcpV2DiskCleanupError("DISK_AUTHORITY_INVALID") from None
+        if sealed_authority is None:
             raise GcpV2DiskCleanupError("DISK_AUTHORITY_INVALID")
         try:
             expected_projection_digest = sealed_authority.startup_projection_digest
@@ -2125,10 +2297,10 @@ class GcpV2LocalDiskCleanupFactory:
         self,
         *,
         record: GcpLeaseRecord,
-        authorization: object,
+        authority: object,
         now: datetime,
     ) -> GcpV2ExactDiskCleanupCoordinator:
-        """Bind one existing exact disk only for a validated cleanup recovery.
+        """Bind one existing exact disk only for an opaque recovery handoff.
 
         This nominal factory cannot issue an authorization and has no create
         method.  It rechecks the narrow recovery shape before it can produce a
@@ -2136,7 +2308,19 @@ class GcpV2LocalDiskCleanupFactory:
         a cleanup-only action while rebuilding its sidecar state.
         """
 
-        binding = getattr(authorization, "disk_cleanup_binding", None)
+        try:
+            from inferdrome.deployment.gcp_supervisor import (
+                _inspect_gcp_v2_recovery_cleanup_handle,
+            )
+
+            authorization = _inspect_gcp_v2_recovery_cleanup_handle(
+                authority, now=now
+            )
+        except GcpExecutionError:
+            raise GcpV2DiskCleanupError("DISK_RECOVERY_HANDLE_INVALID") from None
+        except BaseException:
+            raise GcpV2DiskCleanupError("DISK_RECOVERY_HANDLE_INVALID") from None
+        binding = authorization.disk_cleanup_binding
         if type(binding) is not GcpV2DiskCleanupBinding:
             raise GcpV2DiskCleanupError("DISK_RECOVERY_BINDING_INVALID")
         if (
@@ -2168,7 +2352,7 @@ class GcpV2LocalDiskCleanupFactory:
         return self.bind(
             record=record,
             binding=binding,
-            authority=authorization,
+            authority=authority,
             now=now,
         )
 

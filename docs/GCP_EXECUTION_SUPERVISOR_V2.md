@@ -2,7 +2,7 @@
 
 This is an additive v0.2 development-cycle contract. It does not change the
 frozen v0.1 plan, request, lease, result, public schema, receipt, or evidence
-meanings. It also does not enable Compute Engine execution.
+meanings. It does not enable generic/default Compute Engine execution.
 
 ## Approval before any future provider client
 
@@ -10,7 +10,8 @@ meanings. It also does not enable Compute Engine execution.
 It binds asserted operator identity and exact confirmation to the provider,
 project, region, zone, fixed single-A100 profile, boot image identity/digest,
 runner image digest, serving-runtime image digest, plan ID/hash, request
-digest, v1 quote/capacity digests, v2 rate-basis/cost-guard digests, USD
+digest, the exact v1 read-only quote digest (`read_only_quote_digest`), v1
+capacity digest, the distinct v2 rational rate-basis/cost-guard digests, USD
 currency, a frozen v1 controller-deadline observation, v2 authorization expiry,
 explicit setup deadline/margin, provider runtime, independently durable
 watchdog-cleanup deadline, exact fixed-point hard USD ceiling, maximum estimate,
@@ -42,9 +43,11 @@ The enforced ordering is:
    and records `WATCHDOG_READY`.
 6. At the v2 setup edge, one exact capability is issued, the watchdog records
    `ACTIVE` and returns an activation receipt, and the controller consumes both
-   into a one-shot sealed factory proof.
-7. Only that proof can reach the capability-bound future transport factory;
-   the production/default factory remains disabled in this development cycle.
+   into a one-shot supervisor-issued activation guard.
+7. Only that guard can reach the sealed capability-bound transport factory.
+   The generic/default factory remains disabled in this development cycle;
+   the sealed route accepts only an injected lazy component supplier and is
+   exercised here solely with fake SDK clients.
 
 The sidecar repeats exact approval, rate-basis, quote, capacity, cost-guard,
 setup/authorization deadline, and kill validation immediately before
@@ -81,12 +84,29 @@ A watchdog receipt must bind the approval digest, request digest, controller,
 the distinct watchdog cleanup deadline, and independently-durable
 controller-death/hung-work coverage before create intent is durable. The
 concrete file watchdog persists a complete exact disk-cleanup binding before
-any cleanup intent, bounds a separate worker process group, retains the full
-authoritative instance-inventory and named-disk absence result, and resumes a
-timed-out intent only after its bounded lease expires. The watchdog horizon
-includes the v2 cleanup tail after the provider runtime. The kill switch is
-checked before the future factory, before create intent, and before work;
-failure or uncertainty blocks the run.
+any cleanup intent, starts its runner and bounded cleanup worker in fresh
+interpreters using descriptor-scoped durable state, and resumes a timed-out
+intent only after its bounded lease expires. In this local-only development
+cycle its capability-only route uses a generated, content-addressed
+`GcpFileWatchdogWorkerSpec` and fsync-backed fake-cleanup state that bind the
+active watchdog event, exact lease anchor, inherited root identities, and—when
+observed—the exact disk binding. A fresh worker validates those records before
+readiness, then performs deterministic local fake instance termination plus
+named-disk delete-operation reconciliation and absence confirmation. It does
+not inherit a provider client, credential, approval, payload, or callable. The
+legacy canonical fake-result fixture branch remains offline compatibility
+coverage only and cannot mint a future mutation guard. A future real-worker
+backend must be separately reviewed and durably reconstructible. The watchdog
+horizon includes the v2 cleanup tail after the provider runtime. The kill
+switch is checked before the future factory, before create intent, and before
+work; failure or uncertainty blocks the run.
+
+If a create returns but the process stops before the provider-observed exact
+boot-disk binding is fsync-recorded, the sidecar records only a durable
+unresolved/orphan report for the already-bound instance identity and immutable
+labels. It neither invents a disk identity nor records a disk-cleanup intent
+for that gap. Exact disk cleanup can resume only after a later complete,
+label-scoped observation has been durably bound.
 
 The supervisor delegates discovery and termination to exact-label,
 project/region/zone/instance boundaries. The v2 disk sidecar additionally
@@ -105,11 +125,18 @@ The separate v0.2 threat analysis is
 
 ## Deliberate non-live posture
 
-The v2 contract is activation-capable only as a local, injected-fake boundary:
+The v2 contract is activation-capable through its sealed activation-guard boundary:
 its explicit setup margin gates activation, provider runtime starts at that
 activation edge, and a distinct watchdog-cleanup horizon is durably covered
 before a future create could be enabled. The frozen v1 arm remains unchanged and
 is retained as canonical audit evidence; it does not require the entire future
 provider runtime to remain at activation. `GCP_LIVE_MUTATIONS_ENABLED` remains
-`False`, so no SDK/ADC initialization, provider mutation, or default execution
-route is enabled by this work.
+`False`, so no generic SDK/ADC initialization, provider mutation, or default
+execution route is enabled by this work. Local tests use injected fake SDK
+components only and take no provider, credential, SSH, GPU, billing, or spend
+action.
+
+The canary route's provider `maxRunDuration` with `DELETE` is a cleanup
+backstop. The local watchdog and controller evidence do not prove a provider
+invoice, provider-side billing enforcement, or universal cleanup after every
+theoretical controller crash.

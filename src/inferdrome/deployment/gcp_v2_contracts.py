@@ -249,10 +249,23 @@ class GcpV2ActivationDeadlinePayload(GcpExecutionModel):
     arm_sha256: Sha256Digest
     request_digest: Sha256Digest
     startup_projection_digest: Sha256Digest
-    execution_payload_digest: Sha256Digest
-    quote_digest: Sha256Digest
+    execution_payload_digest: Sha256Digest = Field(
+        description=(
+            "Domain-separated digest of opaque execution-payload bytes. It binds "
+            "bytes only and carries no command, transfer, credential, or evidence "
+            "semantics."
+        )
+    )
+    quote_digest: Sha256Digest = Field(
+        description="Digest of the frozen v1 read-only quote observation."
+    )
     capacity_digest: Sha256Digest
-    rate_basis_digest: Sha256Digest
+    rate_basis_digest: Sha256Digest = Field(
+        description=(
+            "Digest of the separate GCP read-only rational rate basis, not a "
+            "provider invoice, billing authority, or launch authority."
+        )
+    )
     cost_guard_digest: Sha256Digest
     controller_id: str = Field(pattern=r"^ctl-[a-z0-9]{8,24}$")
     project_id: str = Field(pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
@@ -276,7 +289,13 @@ class GcpV2ActivationDeadlinePayload(GcpExecutionModel):
     provider_runtime_seconds: int = Field(strict=True, ge=1, le=86_400)
     quoted_cleanup_horizon_seconds: int = Field(strict=True, ge=1, le=7_200)
     watchdog_cleanup_horizon_seconds: int = Field(strict=True, ge=1, le=7_200)
-    watchdog_deadline_at: GcpTimestamp
+    watchdog_deadline_at: GcpTimestamp = Field(
+        description=(
+            "Maximum v2 activation-contract watchdog horizon. An activated "
+            "capability and cleanup recovery authorization must use an equal or "
+            "earlier exact watchdog-cleanup deadline."
+        )
+    )
 
     @model_validator(mode="after")
     def validate_horizons(self) -> Self:
@@ -502,8 +521,14 @@ def validate_gcp_v2_activation_deadline(
     return parsed
 
 
-class GcpV2MutationCapability(GcpExecutionModel):
-    """One exact in-memory future-create capability; it is not a credential."""
+class GcpV2MutationCapabilityPayload(GcpExecutionModel):
+    """Typed pre-identity payload for one exact future-create capability.
+
+    Keeping this as a real Pydantic model avoids calculating a content address
+    by serializing a model_construct object with an invalid nested-label type.
+    The payload contains no authority by itself; the final capability remains
+    the content-addressed model below.
+    """
 
     schema_version: Literal["inferdrome.gcp-mutation-capability.v2"]
     capability_kind: Literal["one_exact_future_create"]
@@ -521,7 +546,6 @@ class GcpV2MutationCapability(GcpExecutionModel):
     activated_at: GcpTimestamp
     provider_runtime_deadline_at: GcpTimestamp
     watchdog_cleanup_deadline_at: GcpTimestamp
-    capability_id: Sha256Digest
 
     @model_validator(mode="after")
     def validate_capability(self) -> Self:
@@ -531,20 +555,40 @@ class GcpV2MutationCapability(GcpExecutionModel):
             < _parse_timestamp(self.watchdog_cleanup_deadline_at)
         ):
             raise ValueError("mutation capability horizons are inconsistent")
+        return self
+
+
+class GcpV2MutationCapability(GcpV2MutationCapabilityPayload):
+    """One exact in-memory future-create capability; it is not a credential."""
+
+    capability_id: Sha256Digest
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> Self:
         if self.capability_id != gcp_v2_mutation_capability_id(self):
             raise ValueError("mutation capability identity does not match payload")
         return self
 
 
 def canonical_gcp_v2_mutation_capability_payload_bytes(
-    capability: GcpV2MutationCapability,
+    capability: GcpV2MutationCapability | GcpV2MutationCapabilityPayload,
 ) -> bytes:
     value = _model_value(capability)
     value.pop("capability_id", None)
     return canonical_json_bytes(value)
 
 
-def gcp_v2_mutation_capability_id(capability: GcpV2MutationCapability) -> Sha256Digest:
+def canonical_gcp_v2_mutation_capability_bytes(
+    capability: GcpV2MutationCapability,
+) -> bytes:
+    """Encode the complete content-addressed mutation capability canonically."""
+
+    return canonical_json_bytes(_model_value(capability))
+
+
+def gcp_v2_mutation_capability_id(
+    capability: GcpV2MutationCapability | GcpV2MutationCapabilityPayload,
+) -> Sha256Digest:
     return digest_bytes(
         DigestDomain.GCP_EXECUTION_APPROVAL,
         canonical_gcp_v2_mutation_capability_payload_bytes(capability),
@@ -560,9 +604,12 @@ def issue_gcp_v2_mutation_capability(
     """Derive one capability only while setup/auth/watchdog horizons hold."""
 
     try:
+        contract = GcpV2ActivationDeadline.model_validate_json(
+            canonical_gcp_v2_activation_deadline_bytes(contract)
+        )
         activated_at = _timestamp(now)
         now_value = _parse_timestamp(activated_at)
-    except ValueError:
+    except (ValidationError, ValueError, TypeError):
         raise GcpV2ContractError("ACTIVATION_TIME_INVALID") from None
     if now_value >= _parse_timestamp(contract.authorization_expires_at):
         raise GcpV2ContractError("ACTIVATION_AUTHORIZATION_EXPIRED")
@@ -576,31 +623,32 @@ def issue_gcp_v2_mutation_capability(
     )
     if cleanup_deadline > _parse_timestamp(contract.watchdog_deadline_at):
         raise GcpV2ContractError("ACTIVATION_WATCHDOG_HORIZON_INSUFFICIENT")
-    payload: dict[str, Any] = {
-        "schema_version": GCP_V2_MUTATION_CAPABILITY_SCHEMA_VERSION,
-        "capability_kind": "one_exact_future_create",
-        "activation_contract_digest": gcp_v2_activation_deadline_digest(contract),
-        "approval_digest": approval_digest,
-        "controller_id": contract.controller_id,
-        "request_digest": contract.request_digest,
-        "startup_projection_digest": contract.startup_projection_digest,
-        "execution_payload_digest": contract.execution_payload_digest,
-        "project_id": contract.project_id,
-        "region": contract.region,
-        "zone": contract.zone,
-        "instance_name": contract.instance_name,
-        "labels": _model_value(contract.labels)
-        if isinstance(contract.labels, GcpExecutionModel)
-        else contract.labels,
-        "activated_at": activated_at,
-        "provider_runtime_deadline_at": _timestamp(provider_deadline),
-        "watchdog_cleanup_deadline_at": _timestamp(cleanup_deadline),
-    }
-    provisional = GcpV2MutationCapability.model_construct(
-        **{**payload, "capability_id": "sha256:" + "0" * 64}
+    payload = GcpV2MutationCapabilityPayload(
+        schema_version=GCP_V2_MUTATION_CAPABILITY_SCHEMA_VERSION,
+        capability_kind="one_exact_future_create",
+        activation_contract_digest=gcp_v2_activation_deadline_digest(contract),
+        approval_digest=approval_digest,
+        controller_id=contract.controller_id,
+        request_digest=contract.request_digest,
+        startup_projection_digest=contract.startup_projection_digest,
+        execution_payload_digest=contract.execution_payload_digest,
+        project_id=contract.project_id,
+        region=contract.region,
+        zone=contract.zone,
+        instance_name=contract.instance_name,
+        labels=contract.labels,
+        activated_at=activated_at,
+        provider_runtime_deadline_at=_timestamp(provider_deadline),
+        watchdog_cleanup_deadline_at=_timestamp(cleanup_deadline),
     )
-    payload["capability_id"] = gcp_v2_mutation_capability_id(provisional)
-    return GcpV2MutationCapability.model_validate_json(canonical_json_bytes(payload))
+    return GcpV2MutationCapability.model_validate_json(
+        canonical_json_bytes(
+            {
+                **_model_value(payload),
+                "capability_id": gcp_v2_mutation_capability_id(payload),
+            }
+        )
+    )
 
 
 GcpCleanupAction = Literal[
@@ -623,8 +671,116 @@ _CLEANUP_ACTIONS: Final[tuple[GcpCleanupAction, ...]] = (
 )
 
 
+def _strict_gcp_v2_activation_deadline(
+    contract: GcpV2ActivationDeadline,
+) -> GcpV2ActivationDeadline:
+    """Re-parse an activation contract before it informs cleanup authority."""
+
+    try:
+        return GcpV2ActivationDeadline.model_validate_json(
+            canonical_gcp_v2_activation_deadline_bytes(contract)
+        )
+    except (AttributeError, ValidationError, ValueError, TypeError):
+        raise GcpV2ContractError("CLEANUP_RECOVERY_ACTIVATION_INVALID") from None
+
+
+def _strict_gcp_v2_mutation_capability(
+    capability: GcpV2MutationCapability,
+) -> GcpV2MutationCapability:
+    """Re-parse a complete capability before it informs cleanup authority."""
+
+    try:
+        return GcpV2MutationCapability.model_validate_json(
+            canonical_gcp_v2_mutation_capability_bytes(capability)
+        )
+    except (AttributeError, ValidationError, ValueError, TypeError):
+        raise GcpV2ContractError("CLEANUP_RECOVERY_CAPABILITY_INVALID") from None
+
+
+def _validate_cleanup_recovery_activation_binding(
+    *,
+    record: GcpLeaseRecord,
+    approval_digest: Sha256Digest,
+    startup_projection_digest: Sha256Digest,
+    execution_payload_digest: Sha256Digest,
+    activation_deadline: GcpV2ActivationDeadline,
+    mutation_capability: GcpV2MutationCapability,
+) -> tuple[GcpV2ActivationDeadline, GcpV2MutationCapability]:
+    """Bind recovery timing to the actual activated capability, never a ceiling.
+
+    The activation contract supplies an absolute outer watchdog horizon.  The
+    one-shot mutation capability supplies the narrower horizon that actually
+    began at activation.  Cleanup recovery is bounded by the latter, which
+    prevents a caller from stretching cleanup authority to an unused setup
+    margin or a later synthetic deadline.
+    """
+
+    contract = _strict_gcp_v2_activation_deadline(activation_deadline)
+    capability = _strict_gcp_v2_mutation_capability(mutation_capability)
+    contract_digest = gcp_v2_activation_deadline_digest(contract)
+    expected_capability = {
+        "activation_contract_digest": contract_digest,
+        "approval_digest": approval_digest,
+        "controller_id": record.controller_id,
+        "request_digest": record.request_digest,
+        "startup_projection_digest": startup_projection_digest,
+        "execution_payload_digest": execution_payload_digest,
+        "project_id": record.project_id,
+        "region": record.region,
+        "zone": record.zone,
+        "instance_name": record.instance_name,
+        "labels": record.labels,
+    }
+    if any(
+        getattr(capability, key) != value
+        for key, value in expected_capability.items()
+    ):
+        raise GcpV2ContractError("CLEANUP_RECOVERY_CAPABILITY_MISMATCH")
+    if (
+        contract.plan_id != record.plan_id
+        or contract.arm_id != record.arm_id
+        or contract.request_digest != record.request_digest
+        or contract.startup_projection_digest != startup_projection_digest
+        or contract.execution_payload_digest != execution_payload_digest
+        or contract.controller_id != record.controller_id
+        or contract.project_id != record.project_id
+        or contract.region != record.region
+        or contract.zone != record.zone
+        or contract.instance_name != record.instance_name
+        or contract.labels != record.labels
+    ):
+        raise GcpV2ContractError("CLEANUP_RECOVERY_ACTIVATION_MISMATCH")
+    activated = _parse_timestamp(capability.activated_at)
+    provider_runtime_deadline = _parse_timestamp(
+        capability.provider_runtime_deadline_at
+    )
+    cleanup_deadline = _parse_timestamp(capability.watchdog_cleanup_deadline_at)
+    setup_deadline = _parse_timestamp(contract.setup_deadline_at)
+    authorization_deadline = _parse_timestamp(contract.authorization_expires_at)
+    activation_watchdog_deadline = _parse_timestamp(contract.watchdog_deadline_at)
+    if (
+        not (
+            activated < setup_deadline <= authorization_deadline
+            and activated < provider_runtime_deadline < cleanup_deadline
+            and cleanup_deadline <= activation_watchdog_deadline
+        )
+        or provider_runtime_deadline
+        != activated + timedelta(seconds=contract.provider_runtime_seconds)
+        or cleanup_deadline
+        != provider_runtime_deadline
+        + timedelta(seconds=contract.watchdog_cleanup_horizon_seconds)
+    ):
+        raise GcpV2ContractError("CLEANUP_RECOVERY_CAPABILITY_HORIZON_INVALID")
+    return contract, capability
+
+
 class GcpCleanupRecoveryAuthorizationPayload(GcpExecutionModel):
-    """Exact cleanup-only authority that cannot authorize a future create."""
+    """Exact cleanup-only authority bound to the activated v2 horizon.
+
+    It cannot authorize a future create.  Its recovery expiry is constrained
+    by the exact persisted mutation-capability deadline, rather than merely
+    by the activation contract's unused setup allowance.
+    """
 
     schema_version: Literal["inferdrome.gcp-cleanup-recovery-authorization.v2"]
     authorization_kind: Literal["exact_cleanup_only_recovery"]
@@ -639,6 +795,27 @@ class GcpCleanupRecoveryAuthorizationPayload(GcpExecutionModel):
     request_digest: Sha256Digest
     startup_projection_digest: Sha256Digest
     execution_payload_digest: Sha256Digest
+    activation_deadline_digest: Sha256Digest = Field(
+        description="Content digest of the v2 activation contract."
+    )
+    activation_authorization_expires_at: GcpTimestamp = Field(
+        description=(
+            "Original v2 create-authorization expiry. Cleanup may outlive this "
+            "timestamp but never gains create authority."
+        )
+    )
+    activation_watchdog_deadline_at: GcpTimestamp = Field(
+        description="Absolute outer watchdog ceiling from the activation contract."
+    )
+    mutation_capability_id: Sha256Digest = Field(
+        description="Content identity of the exact persisted activated capability."
+    )
+    capability_activated_at: GcpTimestamp = Field(
+        description="Actual activation edge from which provider runtime begins."
+    )
+    provider_runtime_deadline_at: GcpTimestamp = Field(
+        description="Exact provider-runtime deadline carried by the capability."
+    )
     controller_id: str = Field(pattern=r"^ctl-[a-z0-9]{8,24}$")
     project_id: str = Field(pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
     region: str = Field(pattern=r"^[a-z]+-[a-z]+[0-9]$")
@@ -651,7 +828,12 @@ class GcpCleanupRecoveryAuthorizationPayload(GcpExecutionModel):
     max_cleanup_attempts: int = Field(strict=True, ge=1, le=3)
     cleanup_timeout_seconds: int = Field(strict=True, ge=1, le=3_600)
     lease_created_at: GcpTimestamp
-    watchdog_cleanup_deadline_at: GcpTimestamp
+    watchdog_cleanup_deadline_at: GcpTimestamp = Field(
+        description=(
+            "Exact activated watchdog-cleanup deadline; recovery expiration "
+            "cannot exceed it."
+        )
+    )
     recovery_deadline_at: GcpTimestamp
     issued_at: GcpTimestamp
     expires_at: GcpTimestamp
@@ -674,13 +856,34 @@ class GcpCleanupRecoveryAuthorizationPayload(GcpExecutionModel):
         issued = _parse_timestamp(self.issued_at)
         expires = _parse_timestamp(self.expires_at)
         lease_created = _parse_timestamp(self.lease_created_at)
+        activation_authorization = _parse_timestamp(
+            self.activation_authorization_expires_at
+        )
+        activation_watchdog = _parse_timestamp(self.activation_watchdog_deadline_at)
+        capability_activated = _parse_timestamp(self.capability_activated_at)
+        provider_runtime_deadline = _parse_timestamp(
+            self.provider_runtime_deadline_at
+        )
         watchdog_cleanup_deadline = _parse_timestamp(
             self.watchdog_cleanup_deadline_at
         )
         recovery_deadline = _parse_timestamp(self.recovery_deadline_at)
         if (
             watchdog_cleanup_deadline != recovery_deadline
-            or not (lease_created <= issued < expires <= watchdog_cleanup_deadline)
+            or not (
+                lease_created
+                <= capability_activated
+                <= issued
+                < expires
+                <= watchdog_cleanup_deadline
+                <= activation_watchdog
+            )
+            or not (
+                capability_activated
+                < provider_runtime_deadline
+                < watchdog_cleanup_deadline
+            )
+            or capability_activated >= activation_authorization
         ):
             raise ValueError("cleanup authorization expiry is invalid")
         return self
@@ -729,11 +932,12 @@ def issue_gcp_cleanup_recovery_authorization(
     approval_digest: Sha256Digest,
     startup_projection_digest: Sha256Digest,
     execution_payload_digest: Sha256Digest,
+    activation_deadline: GcpV2ActivationDeadline,
+    mutation_capability: GcpV2MutationCapability,
     disk_cleanup_binding: GcpV2DiskCleanupBinding,
     operator_identity: str,
     issued_at: datetime,
     expires_at: datetime,
-    watchdog_cleanup_deadline_at: datetime,
     confirmation: str,
 ) -> GcpCleanupRecoveryAuthorization:
     """Issue an exact recovery-only authorization; it never grants create."""
@@ -745,15 +949,25 @@ def issue_gcp_cleanup_recovery_authorization(
             canonical_json_bytes(_model_value(disk_cleanup_binding))
         )
         lease_created_at = _parse_timestamp(record.created_at)
-        watchdog_cleanup_deadline = _parse_timestamp(
-            _timestamp(watchdog_cleanup_deadline_at)
-        )
         issued_value = _parse_timestamp(_timestamp(issued_at))
         expires_value = _parse_timestamp(_timestamp(expires_at))
     except (ValidationError, ValueError):
         raise GcpV2ContractError("CLEANUP_RECOVERY_AUTHORIZATION_INVALID") from None
+    contract, capability = _validate_cleanup_recovery_activation_binding(
+        record=record,
+        approval_digest=approval_digest,
+        startup_projection_digest=startup_projection_digest,
+        execution_payload_digest=execution_payload_digest,
+        activation_deadline=activation_deadline,
+        mutation_capability=mutation_capability,
+    )
+    watchdog_cleanup_deadline = _parse_timestamp(
+        capability.watchdog_cleanup_deadline_at
+    )
+    capability_activated_at = _parse_timestamp(capability.activated_at)
     if not (
         lease_created_at
+        <= capability_activated_at
         <= issued_value
         < expires_value
         <= watchdog_cleanup_deadline
@@ -782,6 +996,12 @@ def issue_gcp_cleanup_recovery_authorization(
         request_digest=record.request_digest,
         startup_projection_digest=startup_projection_digest,
         execution_payload_digest=execution_payload_digest,
+        activation_deadline_digest=gcp_v2_activation_deadline_digest(contract),
+        activation_authorization_expires_at=contract.authorization_expires_at,
+        activation_watchdog_deadline_at=contract.watchdog_deadline_at,
+        mutation_capability_id=capability.capability_id,
+        capability_activated_at=capability.activated_at,
+        provider_runtime_deadline_at=capability.provider_runtime_deadline_at,
         controller_id=record.controller_id,
         project_id=record.project_id,
         region=record.region,
@@ -826,8 +1046,9 @@ def validate_gcp_cleanup_recovery_authorization(
     approval_digest: Sha256Digest,
     startup_projection_digest: Sha256Digest,
     execution_payload_digest: Sha256Digest,
+    activation_deadline: GcpV2ActivationDeadline,
+    mutation_capability: GcpV2MutationCapability,
     now: datetime,
-    watchdog_cleanup_deadline_at: datetime,
 ) -> GcpCleanupRecoveryAuthorization:
     """Fail closed unless recovery authority exactly matches one original lease."""
 
@@ -838,12 +1059,14 @@ def validate_gcp_cleanup_recovery_authorization(
         now_value = _parse_timestamp(_timestamp(now))
     except (ValidationError, ValueError):
         raise GcpV2ContractError("CLEANUP_RECOVERY_AUTHORIZATION_INVALID") from None
-    try:
-        watchdog_cleanup_deadline = _parse_timestamp(
-            _timestamp(watchdog_cleanup_deadline_at)
-        )
-    except ValueError:
-        raise GcpV2ContractError("CLEANUP_RECOVERY_AUTHORIZATION_INVALID") from None
+    contract, capability = _validate_cleanup_recovery_activation_binding(
+        record=record,
+        approval_digest=approval_digest,
+        startup_projection_digest=startup_projection_digest,
+        execution_payload_digest=execution_payload_digest,
+        activation_deadline=activation_deadline,
+        mutation_capability=mutation_capability,
+    )
     disk_binding = parsed.disk_cleanup_binding
     expected = {
         "approval_digest": approval_digest,
@@ -853,6 +1076,12 @@ def validate_gcp_cleanup_recovery_authorization(
         "request_digest": record.request_digest,
         "startup_projection_digest": startup_projection_digest,
         "execution_payload_digest": execution_payload_digest,
+        "activation_deadline_digest": gcp_v2_activation_deadline_digest(contract),
+        "activation_authorization_expires_at": contract.authorization_expires_at,
+        "activation_watchdog_deadline_at": contract.watchdog_deadline_at,
+        "mutation_capability_id": capability.capability_id,
+        "capability_activated_at": capability.activated_at,
+        "provider_runtime_deadline_at": capability.provider_runtime_deadline_at,
         "controller_id": record.controller_id,
         "project_id": record.project_id,
         "region": record.region,
@@ -864,8 +1093,8 @@ def validate_gcp_cleanup_recovery_authorization(
         "create_authority": False,
         "allowed_actions": _CLEANUP_ACTIONS,
         "lease_created_at": record.created_at,
-        "watchdog_cleanup_deadline_at": _timestamp(watchdog_cleanup_deadline),
-        "recovery_deadline_at": _timestamp(watchdog_cleanup_deadline),
+        "watchdog_cleanup_deadline_at": capability.watchdog_cleanup_deadline_at,
+        "recovery_deadline_at": capability.watchdog_cleanup_deadline_at,
     }
     if any(getattr(parsed, key) != value for key, value in expected.items()):
         raise GcpV2ContractError("CLEANUP_RECOVERY_AUTHORIZATION_MISMATCH")

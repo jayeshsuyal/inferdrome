@@ -538,6 +538,22 @@ class GcpBootDiskObservation(GcpExecutionModel):
         return self
 
 
+@dataclass(frozen=True)
+class _GcpV2BootDiskBindingObservation:
+    """Private compatibility projection of a canonical v2 disk observation.
+
+    The frozen v1 ``GcpBootDiskObservation`` deliberately requires the boot
+    disk name to equal the instance name.  That is not a valid invariant for
+    the additive v2 exact-ownership boundary: the provider-returned attached
+    boot disk is the authority.  Keep the public v1 model unchanged and carry
+    only the facts the shared binding path needs in this private projection.
+    """
+
+    instance_name: str
+    disk_name: str
+    source_image_id: int
+
+
 class GcpExecutionEnvironment(GcpExecutionModel):
     """Exact provider-side environment, with references but no secret values."""
 
@@ -1428,6 +1444,15 @@ class GcpLifecycleSafetySupervisor(Protocol):
         now: datetime,
     ) -> object: ...
 
+    def issue_future_mutation_activation_guard(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        preflight: GcpExecutionPreflight,
+        capability: object,
+        now: datetime,
+    ) -> object: ...
+
     def create_intent(
         self,
         record: GcpLeaseRecord,
@@ -1470,6 +1495,14 @@ class GcpLifecycleSafetySupervisor(Protocol):
     def resume_cleanup(self, record: GcpLeaseRecord, *, now: datetime) -> None: ...
 
     def validate_cleanup_recovery_authorization(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        authorization: object,
+        now: datetime,
+    ) -> object: ...
+
+    def issue_cleanup_recovery_handle(
         self,
         record: GcpLeaseRecord,
         *,
@@ -3635,6 +3668,7 @@ class GcpGuardedLifecycleController:
             try:
                 from inferdrome.deployment.gcp_compute_transport import (
                     GcpV2LocalTransportFactory,
+                    GcpV2SealedComputeTransportFactory,
                 )
                 from inferdrome.deployment.gcp_v2_disk_cleanup import (
                     GcpV2LocalDiskCleanupFactory,
@@ -3643,7 +3677,11 @@ class GcpGuardedLifecycleController:
                 raise GcpExecutionError("GCP_V2_FACTORY_UNAVAILABLE") from None
             if any(
                 factory is not None
-                and type(cast(object, factory)) is not GcpV2LocalTransportFactory
+                and type(cast(object, factory))
+                not in {
+                    GcpV2LocalTransportFactory,
+                    GcpV2SealedComputeTransportFactory,
+                }
                 for factory in (
                     activation_transport_factory,
                     cleanup_transport_factory,
@@ -3769,6 +3807,7 @@ class GcpGuardedLifecycleController:
         self,
         *,
         record: GcpLeaseRecord | None = None,
+        preflight: GcpExecutionPreflight | None = None,
         mutation_capability: object | None = None,
         cleanup_authorization: object | None = None,
     ) -> GcpComputeTransport:
@@ -3780,11 +3819,33 @@ class GcpGuardedLifecycleController:
             if record is None:
                 raise GcpExecutionError("MUTATION_CAPABILITY_RECORD_REQUIRED")
             try:
-                activation_proof = supervisor.consume_mutation_capability(
-                    record,
-                    capability=mutation_capability,
-                    now=self.clock.now(),
-                )
+                if self._uses_v2_authority_factories:
+                    if preflight is None:
+                        raise GcpExecutionError(
+                            "MUTATION_ACTIVATION_PREFLIGHT_REQUIRED"
+                        )
+                    # The only future-capable construction edge is minted by
+                    # the concrete supervisor.  It repeats approval/cost
+                    # validation, checks the kill switch, activates the
+                    # durable watchdog, and returns an opaque guard rather
+                    # than a standalone self-addressed capability/proof.
+                    activation_proof = (
+                        supervisor.issue_future_mutation_activation_guard(
+                            record,
+                            preflight=preflight,
+                            capability=mutation_capability,
+                            now=self.clock.now(),
+                        )
+                    )
+                else:
+                    # Legacy fake-only supervisors retain their frozen
+                    # offline regression seam.  They cannot be paired with a
+                    # nominal v2 authority factory.
+                    activation_proof = supervisor.consume_mutation_capability(
+                        record,
+                        capability=mutation_capability,
+                        now=self.clock.now(),
+                    )
             except AttributeError:
                 # Legacy fake-only supervisors cannot unlock the explicit
                 # activation-factory route; they remain usable with a fully
@@ -3820,6 +3881,7 @@ class GcpGuardedLifecycleController:
                         try:
                             from inferdrome.deployment.gcp_compute_transport import (
                                 GcpV2LocalTransportFactory,
+                                GcpV2SealedComputeTransportFactory,
                             )
                         except ImportError:
                             raise GcpExecutionError(
@@ -3827,13 +3889,18 @@ class GcpGuardedLifecycleController:
                             ) from None
                         if (
                             type(cast(object, capability_factory))
-                            is not GcpV2LocalTransportFactory
+                            not in {
+                                GcpV2LocalTransportFactory,
+                                GcpV2SealedComputeTransportFactory,
+                            }
                         ):
                             raise GcpExecutionError(
                                 "MUTATION_CAPABILITY_TRANSPORT_REQUIRED"
                             )
                         candidate = cast(
-                            GcpV2LocalTransportFactory, capability_factory
+                            GcpV2LocalTransportFactory
+                            | GcpV2SealedComputeTransportFactory,
+                            capability_factory,
                         ).bind_mutation(activation_proof)
                     else:
                         candidate = capability_factory(activation_proof)
@@ -3850,9 +3917,9 @@ class GcpGuardedLifecycleController:
                             raise GcpExecutionError(
                                 "MUTATION_CAPABILITY_TRANSPORT_REQUIRED"
                             )
-                        expected_capability = getattr(
-                            activation_proof, "capability", None
-                        )
+                        # Compare with the exact issued capability rather
+                        # than unwrapping the opaque supervisor guard.
+                        expected_capability = mutation_capability
                         if (
                             expected_capability is None
                             or getattr(candidate, "capability", None)
@@ -3863,7 +3930,7 @@ class GcpGuardedLifecycleController:
                             )
                     self._transport = candidate
                     if self._uses_v2_authority_factories:
-                        # Retain the sealed proof only until the post-create
+                        # Retain the sealed supervisor guard only until the post-create
                         # disk-binding factory consumes its distinct one-shot
                         # purpose.  It is never serialized or accepted from a
                         # caller, and cannot become later create authority.
@@ -3875,9 +3942,7 @@ class GcpGuardedLifecycleController:
                         try:
                             from inferdrome.deployment.gcp_compute_transport import (
                                 GcpV2LocalTransportFactory,
-                            )
-                            from inferdrome.deployment.gcp_v2_contracts import (
-                                GcpCleanupRecoveryAuthorization,
+                                GcpV2SealedComputeTransportFactory,
                             )
                         except ImportError:
                             raise GcpExecutionError(
@@ -3885,15 +3950,18 @@ class GcpGuardedLifecycleController:
                             ) from None
                         if (
                             type(cast(object, cleanup_factory))
-                            is not GcpV2LocalTransportFactory
-                            or type(cleanup_authorization)
-                            is not GcpCleanupRecoveryAuthorization
+                            not in {
+                                GcpV2LocalTransportFactory,
+                                GcpV2SealedComputeTransportFactory,
+                            }
                         ):
                             raise GcpExecutionError(
                                 "CLEANUP_AUTHORIZATION_TRANSPORT_REQUIRED"
                             )
                         candidate = cast(
-                            GcpV2LocalTransportFactory, cleanup_factory
+                            GcpV2LocalTransportFactory
+                            | GcpV2SealedComputeTransportFactory,
+                            cleanup_factory,
                         ).bind_cleanup(cleanup_authorization)
                     else:
                         candidate = cleanup_factory(cleanup_authorization)
@@ -3911,13 +3979,6 @@ class GcpGuardedLifecycleController:
                         ):
                             raise GcpExecutionError(
                                 "CLEANUP_AUTHORIZATION_TRANSPORT_REQUIRED"
-                            )
-                        if (
-                            getattr(candidate, "authorization", None)
-                            != cleanup_authorization
-                        ):
-                            raise GcpExecutionError(
-                                "CLEANUP_AUTHORIZATION_TRANSPORT_MISMATCH"
                             )
                     self._transport = candidate
                 elif self._requires_v2_capability_factories:
@@ -4266,17 +4327,15 @@ class GcpGuardedLifecycleController:
             return False, "CLEANUP_UNCONFIRMED"
         return True, None
 
-    def _validate_recovery_disk_authorization(self, authorization: object) -> None:
-        """Bind recovery transport activation to one injected exact disk target."""
+    def _validate_recovery_disk_binding(self, binding: object) -> None:
+        """Bind recovery activation to one exact already-validated disk target."""
 
         handler = self._exact_disk_cleanup
-        authorization_binding = getattr(authorization, "disk_cleanup_binding", None)
         handler_binding = getattr(handler, "binding", None)
         if (
             handler is None
-            or authorization_binding is None
             or handler_binding is None
-            or handler_binding != authorization_binding
+            or handler_binding != binding
         ):
             raise GcpExecutionError("CLEANUP_RECOVERY_DISK_BINDING_MISMATCH")
 
@@ -4284,15 +4343,16 @@ class GcpGuardedLifecycleController:
         self,
         record: GcpLeaseRecord,
         *,
-        authorization: object,
+        authority: object,
+        expected_binding: object,
     ) -> None:
         """Reconstruct only a nominal exact-disk sidecar after auth validation."""
 
         if not self._uses_v2_authority_factories:
-            self._validate_recovery_disk_authorization(authorization)
+            self._validate_recovery_disk_binding(expected_binding)
             return
         if self._exact_disk_cleanup is not None:
-            self._validate_recovery_disk_authorization(authorization)
+            self._validate_recovery_disk_binding(expected_binding)
             return
         factory = self._exact_disk_cleanup_factory
         try:
@@ -4307,7 +4367,7 @@ class GcpGuardedLifecycleController:
         try:
             candidate = factory.bind_recovery(
                 record=record,
-                authorization=authorization,
+                authority=authority,
                 now=self.clock.now(),
             )
         except GcpExecutionError:
@@ -4317,20 +4377,81 @@ class GcpGuardedLifecycleController:
         if (
             type(candidate) is not GcpV2ExactDiskCleanupCoordinator
             or getattr(candidate, "binding", None)
-            != getattr(authorization, "disk_cleanup_binding", None)
+            != expected_binding
         ):
             raise GcpExecutionError("CLEANUP_RECOVERY_DISK_BINDING_MISMATCH")
         # Validate candidate topology before retaining it.  Failure cannot
         # leave an in-memory cleanup callable attached to a later recovery.
         self._assert_v2_journal_roots(candidate=candidate)
         self._exact_disk_cleanup = candidate
-        self._validate_recovery_disk_authorization(authorization)
+        self._validate_recovery_disk_binding(expected_binding)
+
+    def _read_v2_exact_boot_disk_binding_observation(
+        self,
+        record: GcpLeaseRecord,
+        *,
+        timeout_seconds: int,
+    ) -> _GcpV2BootDiskBindingObservation:
+        """Project one canonical provider-observed v2 boot disk for binding.
+
+        The public v1 observation is intentionally unsuitable here because
+        it encodes the historical instance-name-equals-disk-name assumption.
+        A v2 authority factory instead requires the exact attached-disk
+        observation, validates every immutable ownership and provenance fact,
+        and passes only its explicit provider disk name into the later
+        complete-inventory binding.  No hostname-derived disk lookup occurs.
+        """
+
+        try:
+            from inferdrome.deployment.gcp_v2_disk_cleanup import (
+                GcpV2ExactOwnedBootDisk,
+            )
+
+            raw_disk = self.transport.get_exact_owned_boot_disk_v2(
+                record.request, timeout_seconds=timeout_seconds
+            )
+            disk = GcpV2ExactOwnedBootDisk.model_validate(raw_disk)
+            canonical_disk = canonical_json_bytes(disk.model_dump(mode="json"))
+            if GcpV2ExactOwnedBootDisk.model_validate_json(canonical_disk) != disk:
+                raise ValueError("noncanonical exact boot-disk observation")
+        except (AttributeError, ValidationError, ValueError, TypeError):
+            raise GcpExecutionError("GCP_V2_EXACT_BOOT_DISK_INVALID") from None
+
+        request = record.request
+        expected_instance_link = (
+            f"projects/{record.project_id}/zones/{record.zone}/instances/"
+            f"{record.instance_name}"
+        )
+        if (
+            disk.request_digest != record.request_digest
+            or disk.project_id != record.project_id
+            or disk.zone != record.zone
+            or disk.instance_name != record.instance_name
+            or disk.labels != record.labels
+            or disk.source_image_name != request.boot_image.image_name
+            or disk.source_image_provider_id != request.boot_image.provider_image_id
+            or disk.source_image_digest != request.boot_image.digest
+            or disk.disk_type != request.boot_disk_type
+            or disk.size_gib != request.boot_disk_size_gib
+            or disk.boot_attachment is not True
+            or disk.attachment_state != "ATTACHED"
+            or disk.attached_instance_provider_id is None
+            or disk.attached_instance_self_link != expected_instance_link
+        ):
+            raise GcpExecutionError("GCP_V2_EXACT_BOOT_DISK_MISMATCH")
+        return _GcpV2BootDiskBindingObservation(
+            instance_name=disk.instance_name,
+            disk_name=disk.disk_name,
+            source_image_id=disk.source_image_provider_id,
+        )
 
     def _read_exact_v2_owned_cleanup_inventory(
         self,
         record: GcpLeaseRecord,
         *,
-        boot_disk_observation: GcpBootDiskObservation,
+        boot_disk_observation: (
+            GcpBootDiskObservation | _GcpV2BootDiskBindingObservation
+        ),
     ) -> tuple[object, object]:
         """Read a complete v2 inventory and exact attached instance.
 
@@ -4401,7 +4522,9 @@ class GcpGuardedLifecycleController:
         self,
         record: GcpLeaseRecord,
         *,
-        boot_disk_observation: GcpBootDiskObservation,
+        boot_disk_observation: (
+            GcpBootDiskObservation | _GcpV2BootDiskBindingObservation
+        ),
         activation_proof: object | None = None,
     ) -> None:
         """Attach a post-create observed disk binding before workload starts.
@@ -4450,7 +4573,11 @@ class GcpGuardedLifecycleController:
                                 object,
                             ],
                             factory,
-                        )(record, boot_disk_observation, self.clock.now()),
+                        )(
+                            record,
+                            cast(GcpBootDiskObservation, boot_disk_observation),
+                            self.clock.now(),
+                        ),
                     )
                 if self._uses_v2_authority_factories:
                     from inferdrome.deployment.gcp_v2_disk_cleanup import (
@@ -4544,11 +4671,6 @@ class GcpGuardedLifecycleController:
                 # state rather than silently treating it as confirmed.
                 return "GCP_V2_EXACT_DISK_BINDING_UNRESOLVED"
             return None
-        if cleanup_authorization is not None:
-            try:
-                self._validate_recovery_disk_authorization(cleanup_authorization)
-            except GcpExecutionError as error:
-                return str(error)
         try:
             result = handler(record, self.clock.now())
             state = getattr(result, "state", None)
@@ -5016,7 +5138,9 @@ class GcpGuardedLifecycleController:
                 )
         try:
             self._activate_transport(
-                record=record, mutation_capability=mutation_capability
+                record=record,
+                preflight=preflight,
+                mutation_capability=mutation_capability,
             )
         except BaseException:
             activation_error = "TRANSPORT_ACTIVATION_FAILED"
@@ -5206,24 +5330,35 @@ class GcpGuardedLifecycleController:
             self._verify_instance_safety(
                 request, timeout_seconds=controller_timeout()
             )
-            disk_observation = GcpBootDiskObservation.model_validate_json(
-                canonical_json_bytes(
-                    _json_value(
-                        self.transport.get_boot_disk(
-                            request, timeout_seconds=controller_timeout()
+            disk_observation: (
+                GcpBootDiskObservation | _GcpV2BootDiskBindingObservation
+            )
+            if self._uses_v2_authority_factories:
+                disk_observation = (
+                    self._read_v2_exact_boot_disk_binding_observation(
+                        record,
+                        timeout_seconds=controller_timeout(),
+                    )
+                )
+            else:
+                disk_observation = GcpBootDiskObservation.model_validate_json(
+                    canonical_json_bytes(
+                        _json_value(
+                            self.transport.get_boot_disk(
+                                request, timeout_seconds=controller_timeout()
+                            )
                         )
                     )
                 )
-            )
-            if (
-                disk_observation.instance_name != request.instance_name
-                or disk_observation.disk_name != request.instance_name
-                or disk_observation.source_image_id
-                != request.boot_image.provider_image_id
-            ):
-                primary_error = "BOOT_DISK_IMAGE_MISMATCH"
-                self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", primary_error)
-                raise GcpExecutionError(primary_error)
+                if (
+                    disk_observation.instance_name != request.instance_name
+                    or disk_observation.disk_name != request.instance_name
+                    or disk_observation.source_image_id
+                    != request.boot_image.provider_image_id
+                ):
+                    primary_error = "BOOT_DISK_IMAGE_MISMATCH"
+                    self._trace(trace, "OWNERSHIP_VERIFY", "FAILED", primary_error)
+                    raise GcpExecutionError(primary_error)
             self._register_exact_disk_cleanup_before_work(
                 record,
                 boot_disk_observation=disk_observation,
@@ -5516,15 +5651,24 @@ class GcpGuardedLifecycleController:
                     now=self.clock.now(),
                 )
             )
+            cleanup_handle = supervisor.issue_cleanup_recovery_handle(
+                record,
+                authorization=validated_authorization,
+                now=self.clock.now(),
+            )
         except BaseException as error:
             raise GcpExecutionError(self._supervisor_error_code(error)) from None
         try:
             self._bind_recovery_disk_cleanup(
-                record, authorization=validated_authorization
+                record,
+                authority=cleanup_handle,
+                expected_binding=getattr(
+                    validated_authorization, "disk_cleanup_binding", None
+                ),
             )
             supervisor.resume_cleanup(record, now=self.clock.now())
             self._activate_transport(
-                record=record, cleanup_authorization=validated_authorization
+                record=record, cleanup_authorization=cleanup_handle
             )
         except BaseException:
             raise GcpExecutionError("GCP cleanup transport activation failed") from None
@@ -5534,7 +5678,6 @@ class GcpGuardedLifecycleController:
             trace,
             max_attempts=record.max_cleanup_attempts,
             timeout_seconds=record.cleanup_timeout_seconds,
-            cleanup_authorization=validated_authorization,
         )
         return _outcome(
             record,

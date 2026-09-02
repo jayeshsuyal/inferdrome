@@ -12,9 +12,11 @@ post-tag.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import tomllib
@@ -71,6 +73,190 @@ FROZEN_V0_1_CLOSURE_FILE_SHA256: tuple[tuple[str, str], ...] = (
         "docs/reviews/V0_1_PROVIDER_GPU_SSH_COST_CLOSURE.md",
         "f01dc7a64772dcf1078371cfe714ab8d9aadc532d32ad8367239674dc6f509ba",
     ),
+)
+# This manifest protects every historical path that the v0.2 documentation
+# describes as frozen.  It is deliberately derived from the exact v0.1.0 base
+# commit above, rather than from the active release-series inputs.  Nothing in
+# this manifest can satisfy a v0.2 approval or release check.
+FROZEN_PROTECTED_PATH_SHA256: tuple[tuple[str, str], ...] = (
+    (
+        "docs/reviews/V0_1_A10_RAW_ARCHIVE_PRIVACY_LICENSING_REVIEW.md",
+        "ea94c67f6fb32dc1ae1f3dacab0178b094c2b9ce1b8ffcb27a7d3856bcbe3eaa",
+    ),
+    (
+        "docs/reviews/V0_1_HUMAN_SECURITY_REVIEW_APPROVAL.md",
+        "60f8985db58f0c5ae5e96bba66039859534feef7b2aa371ac0607e9c2071ecc4",
+    ),
+    (
+        "docs/reviews/V0_1_MODEL_ASSISTED_SECURITY_AUDIT.md",
+        "8d9cd6615516b99b3d806e2e89c39b77ab4bdbbaeb6d44b3adb3414a6009dd82",
+    ),
+    (
+        "docs/reviews/V0_1_OWNER_RELEASE_POLICY_EXCEPTION.md",
+        "f27ac66d0ddbaf610f050cec109cc4aa05a70da59c5cc5d3d377dfebe82e254d",
+    ),
+    (
+        "docs/reviews/V0_1_PROVIDER_GPU_SSH_COST_CLOSURE.md",
+        "f01dc7a64772dcf1078371cfe714ab8d9aadc532d32ad8367239674dc6f509ba",
+    ),
+    (
+        "evidence/gpu/2026-08-20-a10/README.md",
+        "6850849fcb836c591bf2b0b5fc583c135d007d28632f0d760cc57ac2ae6101d2",
+    ),
+    (
+        "evidence/gpu/2026-08-20-a10/handoff-manifest.json",
+        "a6d91f202d805523e5a52a44174fd547ab6f460ea20113a7cabf4deaebd61fe0",
+    ),
+    (
+        "evidence/gpu/2026-08-20-a10/publication-review.json",
+        "700e374b22e91ef459b5e8a978f9cad94aececa694ff25bdf8b9bde25b51e22d",
+    ),
+    (
+        "evidence/gpu/2026-08-21-qwen3-8b-a10/README.md",
+        "6ecb507eb078ce8fb93dfeec282aa01fa8029ca7ea190b4952fc8ab07daf21ac",
+    ),
+    (
+        "evidence/gpu/2026-08-21-qwen3-8b-a10/handoff-manifest.json",
+        "a7f5bb59e7a1e0a005e6dea1eaae55961e4ea16592d359e5f43e7d4fcf414d83",
+    ),
+    (
+        "evidence/gpu/2026-08-21-qwen3-8b-a10/operational-summary.json",
+        "17f53bb504d01c645c2d164ba44abf0315e22aa0ee95a1a5c255b61709879f36",
+    ),
+    (
+        "evidence/gpu/2026-08-21-qwen3-8b-a10/publication-review.json",
+        "7cbef512195d31df0920e5b0379b22f5cd1675a8f7561b109487d049f32d69a5",
+    ),
+    (
+        "evidence/gpu/2026-08-23-qwen3-8b-a100-sxm4/README.md",
+        "3fa6bb1a183febf2ca8d7fd7cdd6ad2d124643e39a6e584a7582ea2c96e1fc1a",
+    ),
+    (
+        "evidence/gpu/2026-08-23-qwen3-8b-a100-sxm4/handoff-manifest.json",
+        "885518aa4f560e3bdc36ddc2b50df55215dd274736f7892ab7c958b1bae9702d",
+    ),
+    (
+        "evidence/gpu/2026-08-23-qwen3-8b-a100-sxm4/operational-summary.json",
+        "b2f6f78299d98983e6a87a937c45983a31336516dc6259170854453d9279b50d",
+    ),
+    (
+        "evidence/gpu/2026-08-23-qwen3-8b-a100-sxm4/publication-review.json",
+        "498e163c016fcdc87a88260a227de35df38643054721e51737953aff31c11a19",
+    ),
+    (
+        "schemas/deployment/v1/deployment-qualification.schema.json",
+        "f086155f4d5dffdc12b44adbb1bab7809039a9f4409981968c12c36124380c73",
+    ),
+    (
+        "schemas/deployment/v1/deployment-receipt.schema.json",
+        "bb75ad3162073560faf45a9486aa34c85b68b41bd32b8858f8ab3c1ddb753645",
+    ),
+    (
+        "schemas/deployment/v1/deployment-spec.schema.json",
+        "5551941f72137864e0a394bbcc4448d693a4a396b368977a6cbd76a592398e3e",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-arm.schema.json",
+        "8897af5b69c74c130631769e941cda0c36791769bbcd42641aa1b04bf6c280e9",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-boot-disk-observation.schema.json",
+        "497a9edda170bef7c98e1f4b1d19bf0b3794d7f608c333aad76bda1fd5946a7c",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-capacity.schema.json",
+        "a159fffe5a2d17f9d50ac75d365190330dd56e4dd6a71286e94b7c81a38dcdbb",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-environment.schema.json",
+        "2e12367bedb286e8dc8d691dbb00c89f9b67f297418cddc27f957447222b4423",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-image-observation.schema.json",
+        "cd541d90c9782ed1c2316a5b0927ce040a7ed4c550d33e79792bd30c75a992d0",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-intent-anchor.schema.json",
+        "4373750141b0e2d2b84c17bcc1910c137db717a2021c3ea7fb4091060492f779",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-journal-event.schema.json",
+        "55e537d80fe754b9b7763b52bf8c062ac2bc576f84820562e0c9b0272aa05c74",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-lease.schema.json",
+        "802fb2fc5bc26dc8c1d4df8efa65e68ea640c2ca7ac75b711711f21baae47edc",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-quote.schema.json",
+        "03419702b26b8c4f83f8083856e9c82b4429f154eb187b7bd3f41bcf84ce57ae",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-request.schema.json",
+        "400b039a4d63bd22dd18a3f2b009d4e00a48f043b07ed0d981d5788d36d9882d",
+    ),
+    (
+        "schemas/deployment/v1/gcp-execution-result.schema.json",
+        "ff62c56f53982650ece1b71b114b91253be10b499ad9b9b57832c5b5b2135587",
+    ),
+    (
+        "schemas/deployment/v1/gcp-inventory.schema.json",
+        "d11494f870c70daaf84224da7c8ac1e4886871fe6f8dbdbf1e7f17cdaec0305a",
+    ),
+    (
+        "schemas/deployment/v1/gcp-plan.schema.json",
+        "4e3e33bea09ebb47ee4ecb8b19588f6f7f1403c0a32ccdebce123eb7b227a9a0",
+    ),
+    (
+        "schemas/public/v1/controlled-comparison-plan.schema.json",
+        "e071b9a5a066b438a24f435365b950cd6b31bd084b5afc377adbe270e7e4fadf",
+    ),
+    (
+        "schemas/public/v1/controlled-comparison-result.schema.json",
+        "b823a4cbce71a4cb1a6c1ba3a7401b220a44fa5705ada1a7412621fd1982c3dc",
+    ),
+    (
+        "schemas/public/v1/environment.schema.json",
+        "0a0c43552f86d45579786f30f71da62cf6c02ea7c5c2cfcf76dc1427dc9df777",
+    ),
+    (
+        "schemas/public/v1/evidence-bundle.schema.json",
+        "276a8e2c3d14fd18f45f428bdda31964af879adbad0341ae5959c599dd5c3437",
+    ),
+    (
+        "schemas/public/v1/execution.schema.json",
+        "f4615a340bea6566c6924e02777927c9491cd351a43f8aafa01ef9f34002dfe5",
+    ),
+    (
+        "schemas/public/v1/experiment.schema.json",
+        "525fc7b9880cff262368ab729484c9bb2346e3421f1b8a2638c1ea451b46793e",
+    ),
+    (
+        "schemas/public/v1/measurements.schema.json",
+        "39b86747910842a9f726ac8bcdd035cad6c2bdd9454cd090fde8eb3739438ecb",
+    ),
+    (
+        "schemas/public/v1/metric-definitions.schema.json",
+        "d501d11c030e7b9fee71dfafd5f9c5462e48f237bac918139cb2cfaff34bc204",
+    ),
+    (
+        "schemas/public/v1/request-plan.schema.json",
+        "c866742180909e982a6466553d296a8412734c49c2b5f5bbb549a6c63fb2417d",
+    ),
+    (
+        "schemas/public/v1/request-record.schema.json",
+        "a65f763947207f0a312770d743a623363ae4eec36336e0126e87df350ec07ee4",
+    ),
+    (
+        "schemas/public/v1/trial-set.schema.json",
+        "8b9c13fe8cecf1ca08ae1da316d548ffbb5e8965e25486681b9fb21b4f92c167",
+    ),
+)
+FROZEN_PROTECTED_ROOTS: tuple[str, ...] = (
+    "schemas/public/v1",
+    "schemas/deployment/v1",
+    "evidence",
+    "docs/reviews",
 )
 UV_LOCK_VERSION = 1
 UV_LOCK_REVISION = 3
@@ -282,19 +468,171 @@ MANUAL_RELEASE_ITEMS = ACTIVE_RELEASE_SERIES.manual_items
 # This is historical v0.1 lineage integrity only. It is not a v0.2 release
 # input, and no v0.1 checklist or approval can satisfy a v0.2 manual check.
 V0_1_CAPTURE_PRODUCER_COMMIT = "c08b46d9fbd87477f45d130aa3c63615937c4dc3"
+_MAX_REPOSITORY_RELEASE_FILE_BYTES = 2 * 1024 * 1024
+
+
+class _RepositoryFileError(ValueError):
+    """A repository-owned preflight file could not be read safely."""
+
+
+def _relative_file_parts(relative_path: str) -> tuple[str, ...]:
+    """Return a bounded repository-relative path without traversal components."""
+
+    path = Path(relative_path)
+    if path.is_absolute() or not path.parts or any(
+        part in {"", ".", ".."} for part in path.parts
+    ):
+        raise _RepositoryFileError("path must be a non-traversing repository file")
+    return path.parts
+
+
+def _release_open_flags(*, directory: bool) -> int:
+    """Return fail-closed POSIX flags for one repository path component."""
+
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if no_follow == 0 or (directory and directory_flag == 0):
+        raise _RepositoryFileError(
+            "platform cannot enforce no-symlink repository file reads"
+        )
+    flags = os.O_RDONLY | os.O_NONBLOCK | no_follow | getattr(os, "O_CLOEXEC", 0)
+    if directory:
+        flags |= directory_flag
+    return flags
+
+
+def _read_repository_regular_bytes(repository_root: Path, relative_path: str) -> bytes:
+    """Read a bounded regular repository file without following any symlink.
+
+    Active release inputs are a local trust boundary.  Open every path component
+    from a no-follow root descriptor so a final-file check cannot be raced by an
+    intermediate symlink.  The function deliberately accepts only fixed,
+    repository-relative regular files; it is not a general filesystem reader.
+    """
+
+    parts = _relative_file_parts(relative_path)
+    directory_fds: list[int] = []
+    file_fd: int | None = None
+    try:
+        try:
+            root_fd = os.open(
+                repository_root,
+                _release_open_flags(directory=True),
+            )
+        except OSError as error:
+            raise _RepositoryFileError(
+                f"unsafe repository root for {relative_path}: {error.strerror}"
+            ) from error
+        directory_fds.append(root_fd)
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            raise _RepositoryFileError("repository root is not a directory")
+
+        for component in parts[:-1]:
+            try:
+                child_fd = os.open(
+                    component,
+                    _release_open_flags(directory=True),
+                    dir_fd=directory_fds[-1],
+                )
+            except OSError as error:
+                raise _RepositoryFileError(
+                    f"unsafe repository path {relative_path}: {error.strerror}"
+                ) from error
+            directory_fds.append(child_fd)
+            if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                raise _RepositoryFileError(
+                    f"repository path {relative_path} has a non-directory component"
+                )
+
+        try:
+            file_fd = os.open(
+                parts[-1],
+                _release_open_flags(directory=False),
+                dir_fd=directory_fds[-1],
+            )
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                detail = "symlink is not permitted"
+            else:
+                detail = error.strerror or "could not open file"
+            raise _RepositoryFileError(
+                f"unsafe repository file {relative_path}: {detail}"
+            ) from error
+        initial = os.fstat(file_fd)
+        if not stat.S_ISREG(initial.st_mode):
+            raise _RepositoryFileError(
+                f"unsafe repository file {relative_path}: not a regular file"
+            )
+        if initial.st_size > _MAX_REPOSITORY_RELEASE_FILE_BYTES:
+            raise _RepositoryFileError(
+                f"unsafe repository file {relative_path}: exceeds "
+                f"{_MAX_REPOSITORY_RELEASE_FILE_BYTES} byte bound"
+            )
+
+        data = bytearray()
+        while True:
+            chunk = os.read(file_fd, min(64 * 1024, _MAX_REPOSITORY_RELEASE_FILE_BYTES))
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > _MAX_REPOSITORY_RELEASE_FILE_BYTES:
+                raise _RepositoryFileError(
+                    f"unsafe repository file {relative_path}: exceeds "
+                    f"{_MAX_REPOSITORY_RELEASE_FILE_BYTES} byte bound"
+                )
+        final = os.fstat(file_fd)
+        if (
+            initial.st_dev,
+            initial.st_ino,
+            initial.st_size,
+            initial.st_mtime_ns,
+            initial.st_ctime_ns,
+        ) != (
+            final.st_dev,
+            final.st_ino,
+            final.st_size,
+            final.st_mtime_ns,
+            final.st_ctime_ns,
+        ):
+            raise _RepositoryFileError(
+                f"unsafe repository file {relative_path}: changed while reading"
+            )
+        if len(data) != initial.st_size:
+            raise _RepositoryFileError(
+                f"unsafe repository file {relative_path}: size changed while reading"
+            )
+        return bytes(data)
+    except OSError as error:
+        raise _RepositoryFileError(
+            f"unsafe repository file {relative_path}: {error.strerror}"
+        ) from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for directory_fd in reversed(directory_fds):
+            os.close(directory_fd)
+
+
+def _read_repository_regular_text(repository_root: Path, relative_path: str) -> str:
+    """Decode one no-symlink repository file as UTF-8."""
+
+    return _read_repository_regular_bytes(repository_root, relative_path).decode(
+        "utf-8"
+    )
 
 
 def _check_required_files(repository_root: Path) -> Check:
-    missing = tuple(
-        relative_path
-        for relative_path in REQUIRED_FILES
-        if not (repository_root / relative_path).is_file()
-    )
-    if missing:
+    invalid: list[str] = []
+    for relative_path in REQUIRED_FILES:
+        try:
+            _read_repository_regular_bytes(repository_root, relative_path)
+        except _RepositoryFileError as error:
+            invalid.append(f"{relative_path} ({error})")
+    if invalid:
         return Check(
             "required-files",
             "FAIL",
-            "missing: " + ", ".join(missing),
+            "missing or unsafe: " + "; ".join(invalid),
         )
     return Check(
         "required-files",
@@ -309,13 +647,11 @@ def _check_frozen_v0_1_closure_records(repository_root: Path) -> Check:
 
     invalid: list[str] = []
     for relative_path, expected_digest in FROZEN_V0_1_CLOSURE_FILE_SHA256:
-        path = repository_root / relative_path
         try:
-            if path.is_symlink() or not path.is_file():
-                invalid.append(f"{relative_path} (not a regular file)")
-                continue
-            actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as error:
+            actual_digest = hashlib.sha256(
+                _read_repository_regular_bytes(repository_root, relative_path)
+            ).hexdigest()
+        except _RepositoryFileError as error:
             invalid.append(f"{relative_path} ({error})")
             continue
         if actual_digest != expected_digest:
@@ -334,12 +670,108 @@ def _check_frozen_v0_1_closure_records(repository_root: Path) -> Check:
     )
 
 
+def _protected_file_paths(repository_root: Path) -> tuple[set[str], tuple[str, ...]]:
+    """Enumerate only regular files below the frozen path roots.
+
+    The static manifest is the authority.  Enumeration exists solely to reject
+    unexpected files, symlinks, and non-regular filesystem entries under a path
+    that the release documents claim is frozen.
+    """
+
+    actual: set[str] = set()
+    invalid: list[str] = []
+    for protected_root in FROZEN_PROTECTED_ROOTS:
+        root = repository_root / protected_root
+        try:
+            root_status = root.lstat()
+        except OSError as error:
+            invalid.append(f"{protected_root} ({error.strerror or 'unavailable'})")
+            continue
+        if stat.S_ISLNK(root_status.st_mode) or not stat.S_ISDIR(root_status.st_mode):
+            invalid.append(f"{protected_root} (not a regular directory)")
+            continue
+        for directory, names, filenames in os.walk(root, followlinks=False):
+            directory_path = Path(directory)
+            for name in tuple(names):
+                path = directory_path / name
+                relative_path = path.relative_to(repository_root).as_posix()
+                try:
+                    path_status = path.lstat()
+                except OSError as error:
+                    invalid.append(
+                        f"{relative_path} ({error.strerror or 'unavailable'})"
+                    )
+                    continue
+                if stat.S_ISLNK(path_status.st_mode):
+                    invalid.append(f"{relative_path} (symlink is not permitted)")
+                elif not stat.S_ISDIR(path_status.st_mode):
+                    invalid.append(f"{relative_path} (not a regular directory)")
+            for name in filenames:
+                path = directory_path / name
+                relative_path = path.relative_to(repository_root).as_posix()
+                try:
+                    path_status = path.lstat()
+                except OSError as error:
+                    invalid.append(
+                        f"{relative_path} ({error.strerror or 'unavailable'})"
+                    )
+                    continue
+                if not stat.S_ISREG(path_status.st_mode):
+                    invalid.append(f"{relative_path} (not a regular file)")
+                else:
+                    actual.add(relative_path)
+    return actual, tuple(invalid)
+
+
+def _check_frozen_protected_path_baseline(repository_root: Path) -> Check:
+    """Enforce the full v0.1 protected-path manifest, not just named records."""
+
+    expected = dict(FROZEN_PROTECTED_PATH_SHA256)
+    actual, invalid = _protected_file_paths(repository_root)
+    problems = list(invalid)
+    missing = sorted(set(expected) - actual)
+    unexpected = sorted(actual - set(expected))
+    problems.extend(
+        f"{relative_path} (missing from protected baseline)"
+        for relative_path in missing
+    )
+    problems.extend(
+        f"{relative_path} (not present in v0.1.0 protected baseline)"
+        for relative_path in unexpected
+    )
+    for relative_path, expected_digest in FROZEN_PROTECTED_PATH_SHA256:
+        try:
+            actual_digest = hashlib.sha256(
+                _read_repository_regular_bytes(repository_root, relative_path)
+            ).hexdigest()
+        except _RepositoryFileError as error:
+            problems.append(f"{relative_path} ({error})")
+            continue
+        if actual_digest != expected_digest:
+            problems.append(f"{relative_path} (SHA-256 differs from v0.1.0)")
+    if problems:
+        return Check(
+            "frozen-protected-path-baseline",
+            "FAIL",
+            "; ".join(problems),
+        )
+    return Check(
+        "frozen-protected-path-baseline",
+        "PASS",
+        f"{len(FROZEN_PROTECTED_PATH_SHA256)} files under "
+        "schemas/public/v1, schemas/deployment/v1, evidence, and docs/reviews "
+        "match their v0.1.0 baseline",
+    )
+
+
 def _read_package_versions(repository_root: Path) -> tuple[str | None, str | None]:
-    with (repository_root / "pyproject.toml").open("rb") as source:
-        project = tomllib.load(source).get("project", {})
+    project = tomllib.loads(
+        _read_repository_regular_text(repository_root, "pyproject.toml")
+    ).get("project", {})
     project_version = project.get("version")
-    package_text = (repository_root / "src/inferdrome/__init__.py").read_text(
-        encoding="utf-8"
+    package_text = _read_repository_regular_text(
+        repository_root,
+        "src/inferdrome/__init__.py",
     )
     package_match = re.search(
         r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$',
@@ -358,6 +790,7 @@ def _check_version(repository_root: Path, *, phase: Phase) -> Check:
     try:
         versions = _read_package_versions(repository_root)
     except (
+        _RepositoryFileError,
         OSError,
         UnicodeError,
         tomllib.TOMLDecodeError,
@@ -446,6 +879,7 @@ def _resolve_phase(
     try:
         versions = _read_package_versions(repository_root)
     except (
+        _RepositoryFileError,
         OSError,
         UnicodeError,
         tomllib.TOMLDecodeError,
@@ -506,12 +940,8 @@ def _resolve_phase(
 
 
 def _check_license_artifact(repository_root: Path) -> Check:
-    license_path = repository_root / "LICENSE"
-    pyproject_path = repository_root / "pyproject.toml"
     try:
-        if license_path.is_symlink() or not license_path.is_file():
-            raise ValueError("LICENSE must be a regular repository file")
-        license_bytes = license_path.read_bytes()
+        license_bytes = _read_repository_regular_bytes(repository_root, "LICENSE")
         if hashlib.sha256(license_bytes).hexdigest() != APACHE_LICENSE_SHA256:
             raise ValueError("LICENSE is not the canonical Apache License 2.0 file")
         license_text = license_bytes.decode("utf-8")
@@ -524,8 +954,9 @@ def _check_license_artifact(repository_root: Path) -> Check:
             not in license_text
         ):
             raise ValueError("LICENSE is not the canonical Apache License 2.0 text")
-        with pyproject_path.open("rb") as pyproject_source:
-            pyproject = tomllib.load(pyproject_source)
+        pyproject = tomllib.loads(
+            _read_repository_regular_text(repository_root, "pyproject.toml")
+        )
         project = pyproject.get("project")
         if not isinstance(project, dict):
             raise ValueError("pyproject project metadata is unavailable")
@@ -540,6 +971,7 @@ def _check_license_artifact(repository_root: Path) -> Check:
         if project_urls.get("Repository") != REPOSITORY_URL:
             raise ValueError("project Repository URL is not canonical")
     except (
+        _RepositoryFileError,
         OSError,
         UnicodeError,
         ValueError,
@@ -625,15 +1057,11 @@ def _requirement_name(requirement: str) -> str:
 
 
 def _check_python_dependency_lock(repository_root: Path) -> Check:
-    pyproject_path = repository_root / "pyproject.toml"
-    lock_path = repository_root / "uv.lock"
     try:
-        if lock_path.is_symlink() or not lock_path.is_file():
-            raise ValueError("uv.lock must be a committed regular file")
-        with pyproject_path.open("rb") as pyproject_source:
-            pyproject = tomllib.load(pyproject_source)
-        with lock_path.open("rb") as lock_source:
-            lock = tomllib.load(lock_source)
+        pyproject = tomllib.loads(
+            _read_repository_regular_text(repository_root, "pyproject.toml")
+        )
+        lock = tomllib.loads(_read_repository_regular_text(repository_root, "uv.lock"))
         if lock.get("version") != UV_LOCK_VERSION:
             raise ValueError("uv.lock version is unsupported")
         if lock.get("revision") != UV_LOCK_REVISION:
@@ -868,8 +1296,8 @@ def _check_document_markers(repository_root: Path) -> Check:
     missing: list[str] = []
     for relative_path, markers in DOCUMENT_MARKERS:
         try:
-            text = (repository_root / relative_path).read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as error:
+            text = _read_repository_regular_text(repository_root, relative_path)
+        except (_RepositoryFileError, UnicodeError) as error:
             missing.append(f"{relative_path} ({error})")
             continue
         for marker in markers:
@@ -893,13 +1321,15 @@ def _check_release_series_inputs(repository_root: Path) -> Check:
     """Require the active series' distinct release-input and checklist contract."""
 
     try:
-        inputs = (repository_root / ACTIVE_RELEASE_SERIES.inputs_path).read_text(
-            encoding="utf-8"
+        inputs = _read_repository_regular_text(
+            repository_root,
+            ACTIVE_RELEASE_SERIES.inputs_path,
         )
-        checklist_lines = (
-            repository_root / ACTIVE_RELEASE_SERIES.checklist_path
-        ).read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as error:
+        checklist_lines = _read_repository_regular_text(
+            repository_root,
+            ACTIVE_RELEASE_SERIES.checklist_path,
+        ).splitlines()
+    except (_RepositoryFileError, UnicodeError) as error:
         return Check(
             "release-series-inputs",
             "FAIL",
@@ -939,10 +1369,11 @@ def _check_release_series_inputs(repository_root: Path) -> Check:
 
 def _check_ci_gate_inventory(repository_root: Path) -> Check:
     try:
-        workflow = (repository_root / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
+        workflow = _read_repository_regular_text(
+            repository_root,
+            ".github/workflows/ci.yml",
         )
-    except (OSError, UnicodeError) as error:
+    except (_RepositoryFileError, UnicodeError) as error:
         return Check("ci-gate-inventory", "FAIL", f"could not read workflow: {error}")
 
     required_jobs = ("engineering", "deployment-qualification", "dashboard")
@@ -1051,10 +1482,11 @@ def _check_ci_gate_inventory(repository_root: Path) -> Check:
                 f"{job} job does not sync before using the locked environment",
             )
     try:
-        bootstrap = (repository_root / "scripts/bootstrap_ci_uv.sh").read_text(
-            encoding="utf-8"
+        bootstrap = _read_repository_regular_text(
+            repository_root,
+            "scripts/bootstrap_ci_uv.sh",
         )
-    except (OSError, UnicodeError) as error:
+    except (_RepositoryFileError, UnicodeError) as error:
         return Check(
             "ci-gate-inventory", "FAIL", f"could not read uv bootstrap: {error}"
         )
@@ -1116,13 +1548,15 @@ def _check_ci_gate_inventory(repository_root: Path) -> Check:
             )
 
     try:
-        dashboard_gate = (repository_root / "scripts/dashboard_gate.sh").read_text(
-            encoding="utf-8"
+        dashboard_gate = _read_repository_regular_text(
+            repository_root,
+            "scripts/dashboard_gate.sh",
         )
-        package_gate = (
-            repository_root / "scripts/dashboard_package_gate.sh"
-        ).read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
+        package_gate = _read_repository_regular_text(
+            repository_root,
+            "scripts/dashboard_package_gate.sh",
+        )
+    except (_RepositoryFileError, UnicodeError) as error:
         return Check(
             "ci-gate-inventory",
             "FAIL",
@@ -1225,10 +1659,12 @@ def _check_working_tree(repository_root: Path, *, require_clean: bool) -> Check:
 
 
 def _manual_check(repository_root: Path, item: ManualItem) -> Check:
-    checklist_path = repository_root / ACTIVE_RELEASE_SERIES.checklist_path
     try:
-        lines = checklist_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as error:
+        lines = _read_repository_regular_text(
+            repository_root,
+            ACTIVE_RELEASE_SERIES.checklist_path,
+        ).splitlines()
+    except (_RepositoryFileError, UnicodeError) as error:
         return Check(
             f"manual-{item.name}",
             "FAIL",
@@ -1310,6 +1746,7 @@ def _run_preflight_for_phase(
         _check_required_files(repository_root),
         _check_release_series_inputs(repository_root),
         _check_frozen_v0_1_closure_records(repository_root),
+        _check_frozen_protected_path_baseline(repository_root),
     ]
     if phase_selection is not None:
         checks.append(phase_selection)

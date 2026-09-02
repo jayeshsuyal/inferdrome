@@ -36,6 +36,12 @@ def _minimal_repository(root: Path) -> None:
         path = root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((REPOSITORY_ROOT / relative_path).read_bytes())
+    for relative_path, _expected_digest in (
+        release_preflight.FROZEN_PROTECTED_PATH_SHA256
+    ):
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((REPOSITORY_ROOT / relative_path).read_bytes())
     (root / "src/inferdrome/__init__.py").write_text(
         f'__version__ = "{release_preflight.DEVELOPMENT_VERSION}"\n',
         encoding="utf-8",
@@ -183,6 +189,90 @@ def test_v0_2_release_inputs_fail_closed_when_a_required_input_is_missing(
     assert missing_marker in input_check.detail
 
 
+@pytest.mark.parametrize("relative_path", release_preflight.REQUIRED_FILES)
+def test_active_release_files_reject_symlink_indirection(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    path = tmp_path / relative_path
+    outside_target = tmp_path / "outside-release-input"
+    outside_target.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(outside_target)
+
+    with pytest.raises(release_preflight._RepositoryFileError, match="unsafe"):
+        release_preflight._read_repository_regular_bytes(tmp_path, relative_path)
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    required = _named_check(checks, "required-files")
+    assert required.status == "FAIL"
+    assert relative_path in required.detail
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    release_preflight.ACTIVE_RELEASE_SERIES.required_files,
+)
+def test_active_v0_2_input_and_checklist_symlinks_fail_their_own_checks(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    path = tmp_path / relative_path
+    outside_target = tmp_path / "outside-v0-2-input"
+    outside_target.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(outside_target)
+
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    assert _named_check(checks, "release-series-inputs").status == "FAIL"
+    assert relative_path in _named_check(checks, "release-series-inputs").detail
+    if relative_path == release_preflight.ACTIVE_RELEASE_SERIES.checklist_path:
+        assert all(
+            _named_check(checks, f"manual-{item.name}").status == "FAIL"
+            for item in release_preflight.MANUAL_RELEASE_ITEMS
+        )
+
+
+def test_active_v0_2_inputs_reject_an_intermediate_directory_symlink(
+    tmp_path: Path,
+) -> None:
+    _minimal_repository(tmp_path)
+    docs = tmp_path / "docs"
+    relocated_docs = tmp_path / "relocated-docs"
+    docs.rename(relocated_docs)
+    docs.symlink_to(relocated_docs, target_is_directory=True)
+
+    with pytest.raises(release_preflight._RepositoryFileError, match="unsafe"):
+        release_preflight._read_repository_regular_text(
+            tmp_path,
+            release_preflight.ACTIVE_RELEASE_SERIES.inputs_path,
+        )
+    checks = release_preflight.run_preflight(
+        tmp_path,
+        phase="candidate",
+        repository_only=True,
+        require_clean=False,
+        run_gates=False,
+    )
+
+    assert _named_check(checks, "release-series-inputs").status == "FAIL"
+
+
 def test_frozen_v0_1_closure_records_match_the_v0_1_0_baseline() -> None:
     check = release_preflight._check_frozen_v0_1_closure_records(REPOSITORY_ROOT)
 
@@ -192,6 +282,46 @@ def test_frozen_v0_1_closure_records_match_the_v0_1_0_baseline() -> None:
     )
     assert check.status == "PASS"
     assert "frozen SHA-256" in check.detail
+
+
+def test_frozen_protected_path_baseline_matches_the_v0_1_0_manifest() -> None:
+    check = release_preflight._check_frozen_protected_path_baseline(
+        REPOSITORY_ROOT
+    )
+
+    assert len(release_preflight.FROZEN_PROTECTED_PATH_SHA256) == 43
+    assert check.status == "PASS"
+    assert "match their v0.1.0 baseline" in check.detail
+
+
+@pytest.mark.parametrize("mode", ("drift", "extra", "symlink"))
+def test_frozen_protected_path_baseline_fails_closed(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    _minimal_repository(tmp_path)
+    relative_path = release_preflight.FROZEN_PROTECTED_PATH_SHA256[-1][0]
+    path = tmp_path / relative_path
+    if mode == "drift":
+        path.write_bytes(path.read_bytes() + b"\nlocal mutation\n")
+    elif mode == "extra":
+        extra = tmp_path / "evidence/gpu/2026-08-23-qwen3-8b-a100-sxm4/extra.json"
+        extra.write_text("{}\n", encoding="utf-8")
+    else:
+        outside_target = tmp_path / "outside-frozen-record"
+        outside_target.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(outside_target)
+
+    check = release_preflight._check_frozen_protected_path_baseline(tmp_path)
+
+    assert check.status == "FAIL"
+    if mode == "drift":
+        assert "SHA-256 differs" in check.detail
+    elif mode == "extra":
+        assert "not present in v0.1.0 protected baseline" in check.detail
+    else:
+        assert "symlink" in check.detail
 
 
 def test_v0_1_closure_record_hash_drift_fails_closed(tmp_path: Path) -> None:

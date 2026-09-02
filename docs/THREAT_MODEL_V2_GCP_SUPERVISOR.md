@@ -1,8 +1,8 @@
 # GCP supervisor threat supplement v0.2
 
 This is an additive development-cycle supplement to the frozen v0.1 threat
-model. It neither rewrites historical claims nor enables a live Compute Engine
-path.
+model. It neither rewrites historical claims nor enables a generic/default
+Compute Engine path.
 
 ## Assets and trust boundaries
 
@@ -10,7 +10,9 @@ The protected local artifacts are the immutable v1 plan/arm/request/lease, the
 v2 approval, rate basis, cost/cleanup guard, supervisor event chain, watchdog
 receipt, and optional exact local kill marker. Provider SDK construction,
 credential discovery, network calls, resource mutation, SSH, GPU access, and
-billing access remain outside this implementation and disabled by default.
+billing access remain outside this task and disabled by default. The sole
+sealed component-injection seam requires a supervisor-issued activation guard
+and is exercised with local fakes only.
 
 ## Principal threats and fail-closed responses
 
@@ -31,8 +33,9 @@ billing access remain outside this implementation and disabled by default.
   controller-death and hung-work coverage prevents `CREATE_INTENT`. The
   receipt must remain valid through the v2 cleanup and exact-absence tail, not
   merely through provider runtime. The sidecar persists `ARM_CONSUMED` and
-  `WATCHDOG_READY` before the future create boundary; no live watchdog is
-  armed by this local-only implementation.
+  `WATCHDOG_READY` before the sealed create boundary. The runner reopens its
+  descriptor-scoped fsync journal in a fresh interpreter before readiness;
+  malformed state produces no readiness receipt.
 - Delayed setup cannot silently consume runtime: v2 setup and authorization
   horizons are checked only at activation, then the actual activation time
   starts the explicit provider-runtime clock and independently durable
@@ -57,8 +60,9 @@ billing access remain outside this implementation and disabled by default.
   replays an unknown create, substitutes a resource identity, or converts an
   unconfirmed cleanup state into absence.
 - The file watchdog persists the full exact disk binding before cleanup intent,
-  uses a lease before retrying a dead worker, kills a bounded worker process
-  group on timeout, and stores authoritative instance-inventory plus named-disk
+  uses a lease before retrying a dead worker, launches an exec-isolated bounded
+  worker process group on timeout, and stores authoritative instance-inventory
+  plus named-disk
   absence facts before terminal confirmation. A terminal core journal durably
   fences a still-active watchdog intent, prevents a restart from initializing a
   cleanup supplier, and settles it locally after its bounded lease.
@@ -76,7 +80,8 @@ unchanged historical evidence. The additive v2 contract supplies a separate
 setup margin, authorization horizon, provider-runtime horizon, and watchdog
 cleanup horizon; it does not reinterpret the frozen arm or keep a full future
 runtime under that historical deadline. The default provider gate remains
-disabled pending separate review and explicit operator approval.
+disabled; any later operator use requires the sealed proof path and explicit
+operator approval.
 
 The rate basis and hard ceiling are exact local arithmetic over a supplied
 estimate. They are not provider/account billing enforcement and do not prove

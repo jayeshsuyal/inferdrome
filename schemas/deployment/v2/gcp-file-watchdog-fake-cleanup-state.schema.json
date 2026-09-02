@@ -45,6 +45,215 @@
       "title": "GcpExecutionLabels",
       "type": "object"
     },
+    "GcpSupervisorBinding": {
+      "additionalProperties": false,
+      "description": "Immutable exact resource/approval binding repeated in every event.",
+      "properties": {
+        "activation_deadline_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Activation Deadline Digest",
+          "type": "string"
+        },
+        "approval_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Approval Digest",
+          "type": "string"
+        },
+        "approval_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Approval Id",
+          "type": "string"
+        },
+        "arm_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Arm Id",
+          "type": "string"
+        },
+        "cleanup_timeout_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Cleanup Timeout Seconds",
+          "type": "integer"
+        },
+        "controller_deadline_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Controller Deadline At",
+          "type": "string"
+        },
+        "controller_id": {
+          "pattern": "^ctl-[a-z0-9]{8,24}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "execution_payload_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Execution Payload Digest",
+          "type": "string"
+        },
+        "instance_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Instance Name",
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/$defs/GcpExecutionLabels"
+        },
+        "max_cleanup_attempts": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Max Cleanup Attempts",
+          "type": "integer"
+        },
+        "plan_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "provider_runtime_seconds": {
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Provider Runtime Seconds",
+          "type": "integer"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+          "title": "Region",
+          "type": "string"
+        },
+        "request_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Request Digest",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-supervisor-binding.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "setup_deadline_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Setup Deadline At",
+          "type": "string"
+        },
+        "startup_projection_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Startup Projection Digest",
+          "type": "string"
+        },
+        "watchdog_cleanup_horizon_seconds": {
+          "maximum": 7200,
+          "minimum": 1,
+          "title": "Watchdog Cleanup Horizon Seconds",
+          "type": "integer"
+        },
+        "watchdog_deadline_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Watchdog Deadline At",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "approval_id",
+        "approval_digest",
+        "activation_deadline_digest",
+        "controller_id",
+        "arm_id",
+        "plan_id",
+        "request_digest",
+        "startup_projection_digest",
+        "execution_payload_digest",
+        "project_id",
+        "region",
+        "zone",
+        "instance_name",
+        "labels",
+        "setup_deadline_at",
+        "provider_runtime_seconds",
+        "watchdog_cleanup_horizon_seconds",
+        "max_cleanup_attempts",
+        "cleanup_timeout_seconds",
+        "controller_deadline_at",
+        "watchdog_deadline_at"
+      ],
+      "title": "GcpSupervisorBinding",
+      "type": "object"
+    },
+    "GcpV2DiskAbsenceObservation": {
+      "additionalProperties": false,
+      "description": "Authoritative absence confirmation for the one bound disk identity.",
+      "properties": {
+        "disk_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Disk Name",
+          "type": "string"
+        },
+        "instance_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Instance Name",
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/$defs/GcpExecutionLabels"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "request_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Request Digest",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-disk-absence-observation.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state": {
+          "const": "NOT_FOUND",
+          "title": "State",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_digest",
+        "project_id",
+        "zone",
+        "instance_name",
+        "disk_name",
+        "labels",
+        "state"
+      ],
+      "title": "GcpV2DiskAbsenceObservation",
+      "type": "object"
+    },
     "GcpV2DiskCleanupBinding": {
       "additionalProperties": false,
       "description": "Exact cleanup authority input for one observed owned boot disk.",
@@ -132,6 +341,76 @@
         "binding_id"
       ],
       "title": "GcpV2DiskCleanupBinding",
+      "type": "object"
+    },
+    "GcpV2DiskDeleteOperation": {
+      "additionalProperties": false,
+      "description": "An exact delete operation returned by an injected local transport.",
+      "properties": {
+        "disk_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Disk Name",
+          "type": "string"
+        },
+        "instance_name": {
+          "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
+          "title": "Instance Name",
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/$defs/GcpExecutionLabels"
+        },
+        "operation_id": {
+          "pattern": "^disk-op-[a-z0-9]{8,64}$",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "operation_name": {
+          "pattern": "^[a-zA-Z0-9_./-]{1,256}$",
+          "title": "Operation Name",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "request_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Request Digest",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-disk-delete-operation.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation_id",
+        "operation_name",
+        "request_id",
+        "request_digest",
+        "project_id",
+        "zone",
+        "instance_name",
+        "disk_name",
+        "labels"
+      ],
+      "title": "GcpV2DiskDeleteOperation",
       "type": "object"
     },
     "GcpV2ExactOwnedBootDisk": {
@@ -450,255 +729,93 @@
       "type": "object"
     }
   },
-  "$id": "urn:inferdrome:gcp-cleanup-recovery-authorization:v2",
+  "$id": "urn:inferdrome:gcp-file-watchdog-fake-cleanup-state:v2",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Content-addressed local cleanup binding, not an operator signature.",
+  "description": "Fsync-backed local fake instance/disk cleanup state.\n\nThis records actual test-fake mutations, not a precomputed result.  The\nexact operation and absence fields make a lost parent/process restart\nobservable and reconstructible without any provider client.",
   "properties": {
-    "activation_authorization_expires_at": {
-      "description": "Original v2 create-authorization expiry. Cleanup may outlive this timestamp but never gains create authority.",
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Activation Authorization Expires At",
-      "type": "string"
+    "binding": {
+      "$ref": "#/$defs/GcpSupervisorBinding"
     },
-    "activation_deadline_digest": {
-      "description": "Content digest of the v2 activation contract.",
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Activation Deadline Digest",
-      "type": "string"
-    },
-    "activation_watchdog_deadline_at": {
-      "description": "Absolute outer watchdog ceiling from the activation contract.",
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Activation Watchdog Deadline At",
-      "type": "string"
-    },
-    "allowed_actions": {
-      "items": {
-        "enum": [
-          "reconcile_operation",
-          "get_exact_instance",
-          "list_exact_label_inventory",
-          "delete_exact_instance",
-          "get_exact_disk",
-          "delete_exact_disk",
-          "confirm_absence"
-        ],
-        "type": "string"
-      },
-      "title": "Allowed Actions",
-      "type": "array"
-    },
-    "approval_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Approval Digest",
-      "type": "string"
-    },
-    "arm_id": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Arm Id",
-      "type": "string"
-    },
-    "authorization_id": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Authorization Id",
-      "type": "string"
-    },
-    "authorization_kind": {
-      "const": "exact_cleanup_only_recovery",
-      "title": "Authorization Kind",
-      "type": "string"
-    },
-    "boot_disk_name": {
-      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
-      "title": "Boot Disk Name",
-      "type": "string"
-    },
-    "capability_activated_at": {
-      "description": "Actual activation edge from which provider runtime begins.",
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Capability Activated At",
-      "type": "string"
-    },
-    "cleanup_timeout_seconds": {
-      "maximum": 3600,
-      "minimum": 1,
-      "title": "Cleanup Timeout Seconds",
-      "type": "integer"
-    },
-    "controller_id": {
-      "pattern": "^ctl-[a-z0-9]{8,24}$",
-      "title": "Controller Id",
-      "type": "string"
-    },
-    "create_authority": {
-      "const": false,
-      "title": "Create Authority",
-      "type": "boolean"
+    "disk_absence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GcpV2DiskAbsenceObservation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "disk_cleanup_binding": {
-      "$ref": "#/$defs/GcpV2DiskCleanupBinding"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GcpV2DiskCleanupBinding"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
-    "execution_payload_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Execution Payload Digest",
-      "type": "string"
+    "disk_delete_attempts": {
+      "maximum": 3,
+      "minimum": 0,
+      "title": "Disk Delete Attempts",
+      "type": "integer"
     },
-    "expires_at": {
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Expires At",
-      "type": "string"
+    "disk_delete_operation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GcpV2DiskDeleteOperation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
-    "instance_name": {
-      "pattern": "^inferdrome-ctl-[a-z0-9]{8,24}$",
-      "title": "Instance Name",
-      "type": "string"
+    "disk_present": {
+      "title": "Disk Present",
+      "type": "boolean"
     },
-    "issued_at": {
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Issued At",
-      "type": "string"
+    "instance_delete_attempts": {
+      "maximum": 3,
+      "minimum": 0,
+      "title": "Instance Delete Attempts",
+      "type": "integer"
     },
-    "labels": {
-      "$ref": "#/$defs/GcpExecutionLabels"
-    },
-    "lease_created_at": {
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Lease Created At",
-      "type": "string"
+    "instance_present": {
+      "title": "Instance Present",
+      "type": "boolean"
     },
     "lease_intent_anchor_digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Lease Intent Anchor Digest",
       "type": "string"
     },
-    "max_cleanup_attempts": {
-      "maximum": 3,
-      "minimum": 1,
-      "title": "Max Cleanup Attempts",
-      "type": "integer"
-    },
-    "mutation_capability_id": {
-      "description": "Content identity of the exact persisted activated capability.",
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Mutation Capability Id",
-      "type": "string"
-    },
-    "operator_confirmation": {
-      "const": "AUTHORIZE_GCP_V2_EXACT_CLEANUP",
-      "title": "Operator Confirmation",
-      "type": "string"
-    },
-    "operator_identity": {
-      "pattern": "^operator-[a-z0-9][a-z0-9_-]{2,61}$",
-      "title": "Operator Identity",
-      "type": "string"
-    },
-    "plan_id": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Plan Id",
-      "type": "string"
-    },
-    "project_id": {
-      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
-      "title": "Project Id",
-      "type": "string"
-    },
-    "provider": {
-      "const": "gcp-compute-engine",
-      "title": "Provider",
-      "type": "string"
-    },
-    "provider_runtime_deadline_at": {
-      "description": "Exact provider-runtime deadline carried by the capability.",
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Provider Runtime Deadline At",
-      "type": "string"
-    },
-    "recovery_deadline_at": {
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Recovery Deadline At",
-      "type": "string"
-    },
-    "region": {
-      "pattern": "^[a-z]+-[a-z]+[0-9]$",
-      "title": "Region",
-      "type": "string"
-    },
-    "request_digest": {
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Request Digest",
-      "type": "string"
-    },
     "schema_version": {
-      "const": "inferdrome.gcp-cleanup-recovery-authorization.v2",
+      "const": "inferdrome.gcp-file-watchdog-fake-cleanup-state.v2",
       "title": "Schema Version",
       "type": "string"
     },
-    "startup_projection_digest": {
+    "spec_digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "title": "Startup Projection Digest",
-      "type": "string"
-    },
-    "watchdog_cleanup_deadline_at": {
-      "description": "Exact activated watchdog-cleanup deadline; recovery expiration cannot exceed it.",
-      "maxLength": 32,
-      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "title": "Watchdog Cleanup Deadline At",
-      "type": "string"
-    },
-    "zone": {
-      "pattern": "^[a-z]+-[a-z]+[0-9]-[a-z]$",
-      "title": "Zone",
+      "title": "Spec Digest",
       "type": "string"
     }
   },
   "required": [
     "schema_version",
-    "authorization_kind",
-    "operator_identity",
-    "operator_confirmation",
-    "create_authority",
-    "provider",
-    "approval_digest",
+    "spec_digest",
     "lease_intent_anchor_digest",
-    "arm_id",
-    "plan_id",
-    "request_digest",
-    "startup_projection_digest",
-    "execution_payload_digest",
-    "activation_deadline_digest",
-    "activation_authorization_expires_at",
-    "activation_watchdog_deadline_at",
-    "mutation_capability_id",
-    "capability_activated_at",
-    "provider_runtime_deadline_at",
-    "controller_id",
-    "project_id",
-    "region",
-    "zone",
-    "instance_name",
-    "boot_disk_name",
-    "labels",
-    "disk_cleanup_binding",
-    "allowed_actions",
-    "max_cleanup_attempts",
-    "cleanup_timeout_seconds",
-    "lease_created_at",
-    "watchdog_cleanup_deadline_at",
-    "recovery_deadline_at",
-    "issued_at",
-    "expires_at",
-    "authorization_id"
+    "binding",
+    "instance_present",
+    "disk_present",
+    "instance_delete_attempts",
+    "disk_delete_attempts"
   ],
-  "title": "GcpCleanupRecoveryAuthorization",
+  "title": "GcpFileBackedFakeCleanupState",
   "type": "object"
 }
