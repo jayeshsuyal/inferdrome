@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from inferdrome.routing_execution.canonical import sha256_digest
 from inferdrome.routing_execution.contracts import (
@@ -17,9 +17,10 @@ from inferdrome.routing_execution.contracts import (
 )
 from inferdrome.routing_execution.transport import EndpointTransport, TransportError
 
-_METRIC_LINE = re.compile(
-    r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{[^{}]*\})?[ \t]+"
-    r"([+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)(?:[ \t].*)?$"
+_METRIC_NAME = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)")
+_LABEL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
 )
 
 
@@ -39,47 +40,138 @@ class TelemetrySample:
     payload_sha256: str | None
 
 
-def _strict_json(content: bytes) -> object:
-    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in items:
-            if key in result:
-                raise TelemetryError("telemetry response is malformed")
-            result[key] = value
-        return result
+def _labels(text: str) -> dict[str, str]:
+    """Parse one target sample's Prometheus labels without accepting aliases."""
 
+    labels: dict[str, str] = {}
+    index = 0
+    while index < len(text):
+        name_match = _LABEL_NAME.match(text, index)
+        if name_match is None:
+            raise TelemetryError("target metrics syntax is malformed")
+        name = name_match.group(0)
+        index = name_match.end()
+        if index >= len(text) or text[index] != "=":
+            raise TelemetryError("target metrics syntax is malformed")
+        index += 1
+        if index >= len(text) or text[index] != '"':
+            raise TelemetryError("target metrics syntax is malformed")
+        index += 1
+        characters: list[str] = []
+        while index < len(text):
+            character = text[index]
+            if character == '"':
+                index += 1
+                break
+            if character == "\\":
+                index += 1
+                if index >= len(text):
+                    raise TelemetryError("target metrics syntax is malformed")
+                escaped = text[index]
+                if escaped == "n":
+                    characters.append("\n")
+                elif escaped in {'"', "\\"}:
+                    characters.append(escaped)
+                else:
+                    raise TelemetryError("target metrics syntax is malformed")
+                index += 1
+                continue
+            if ord(character) < 0x20:
+                raise TelemetryError("target metrics syntax is malformed")
+            characters.append(character)
+            index += 1
+        else:
+            raise TelemetryError("target metrics syntax is malformed")
+        if name in labels:
+            raise TelemetryError("target metrics labels are ambiguous")
+        labels[name] = "".join(characters)
+        if index == len(text):
+            break
+        if text[index] != ",":
+            raise TelemetryError("target metrics syntax is malformed")
+        index += 1
+        if index == len(text):
+            raise TelemetryError("target metrics syntax is malformed")
+    return labels
+
+
+def _target_metric_value(
+    line: str, *, metric_name: str, expected_model_id: str
+) -> int:
+    """Parse the one declared vLLM gauge and no other metric family."""
+
+    remainder = line[len(metric_name) :]
+    labels: dict[str, str] = {}
+    if remainder.startswith("{"):
+        index = 1
+        quoted = False
+        escaped = False
+        while index < len(remainder):
+            character = remainder[index]
+            if escaped:
+                escaped = False
+            elif character == "\\" and quoted:
+                escaped = True
+            elif character == '"':
+                quoted = not quoted
+            elif character == "}" and not quoted:
+                labels = _labels(remainder[1:index])
+                remainder = remainder[index + 1 :]
+                break
+            index += 1
+        else:
+            raise TelemetryError("target metrics syntax is malformed")
+    if not remainder or remainder[0] not in " \t":
+        raise TelemetryError("target metrics syntax is malformed")
+    remainder = remainder.lstrip(" \t")
+    value_match = _NUMBER.match(remainder)
+    if value_match is None:
+        raise TelemetryError("target metric value is malformed")
+    raw_value = value_match.group(0)
+    trailing = remainder[value_match.end() :]
+    if trailing and (trailing[0] not in " \t" or trailing.strip(" \t")):
+        raise TelemetryError("target metrics syntax is malformed")
+    if labels.get("model_name") != expected_model_id:
+        raise TelemetryError("target metric model label is inadmissible")
     try:
-        return json.loads(content.decode("utf-8"), object_pairs_hook=pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
-        raise TelemetryError("telemetry response is malformed") from None
+        number = Decimal(raw_value)
+    except InvalidOperation:
+        raise TelemetryError("target metric value is malformed") from None
+    if not number.is_finite() or number < 0 or number != number.to_integral_value():
+        raise TelemetryError("target metric value is inadmissible")
+    try:
+        return int(number)
+    except (OverflowError, ValueError):
+        raise TelemetryError("target metric value is inadmissible") from None
 
 
-def _metric_values(content: bytes) -> dict[str, int]:
-    """Parse a deliberately tiny, unambiguous Prometheus metric subset."""
+def _metric_values(
+    content: bytes, *, metric_name: str, expected_model_id: str
+) -> dict[str, int]:
+    """Extract exactly one declared model-bound vLLM gauge, never aggregate it."""
 
     try:
         lines = content.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         raise TelemetryError("metrics are malformed") from None
-    values: dict[str, int] = {}
+    target_values: list[int] = []
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        matched = _METRIC_LINE.fullmatch(line)
-        if matched is None:
-            raise TelemetryError("metrics are malformed")
-        name, raw_value = matched.groups()
-        try:
-            number = float(raw_value)
-        except ValueError:
-            raise TelemetryError("metrics are malformed") from None
-        if not math.isfinite(number) or number < 0 or not number.is_integer():
-            raise TelemetryError("metrics are inadmissible")
-        if name in values:
-            raise TelemetryError("metrics are ambiguous")
-        values[name] = int(number)
-    return values
+        name_match = _METRIC_NAME.match(line)
+        if name_match is None or name_match.group(0) != metric_name:
+            # Other families may contain repeated histogram buckets. They are
+            # intentionally outside the declared load-telemetry contract.
+            continue
+        target_values.append(
+            _target_metric_value(
+                line, metric_name=metric_name, expected_model_id=expected_model_id
+            )
+        )
+    if len(target_values) != 1:
+        raise TelemetryError("required target metric is missing or ambiguous")
+    return {metric_name: target_values[0]}
 
 
 def unavailable_sample(*, now_ns: int) -> TelemetrySample:
@@ -102,23 +194,27 @@ def sample_health(
     now_ns: int,
     epoch: int,
     timeout_ms: int,
+    observed_at_ns: Callable[[], int] | None = None,
 ) -> TelemetrySample:
-    """Sample health independently from load; malformed/non-2xx is unavailable."""
+    """Sample vLLM health independently; exact HTTP 200 is healthy."""
 
+    sampled_at = now_ns
     try:
         response = transport.get(origin, "/health", timeout_ms=timeout_ms)
+        if observed_at_ns is not None:
+            sampled_at = observed_at_ns()
         body_hash = sha256_digest(response.body)
-        value = _strict_json(response.body)
-        healthy = (
-            response.status == 200
-            and isinstance(value, dict)
-            and value.get("status") == "ok"
-        )
-    except (TelemetryError, TransportError):
+        # Pinned vLLM responds with HTTP 200 and an empty body. The body stays
+        # bounded by transport and is digested if present, but is not a health
+        # protocol dependency.
+        healthy = response.status == 200
+    except TransportError:
+        if observed_at_ns is not None:
+            sampled_at = observed_at_ns()
         healthy = False
         body_hash = None
     return TelemetrySample(
-        sampled_at_monotonic_ns=now_ns,
+        sampled_at_monotonic_ns=sampled_at,
         epoch=epoch,
         state="AVAILABLE" if healthy else "UNAVAILABLE",
         value="HEALTHY" if healthy else "UNAVAILABLE",
@@ -135,18 +231,27 @@ def sample_metrics(
     epoch: int,
     timeout_ms: int,
     metric_name: str,
+    expected_model_id: str,
+    observed_at_ns: Callable[[], int] | None = None,
 ) -> tuple[TelemetrySample, dict[str, int]]:
     """Sample one vLLM metrics response, keeping only its digest and values."""
 
+    sampled_at = now_ns
     try:
         response = transport.get(origin, "/metrics", timeout_ms=timeout_ms)
+        if observed_at_ns is not None:
+            sampled_at = observed_at_ns()
         body_hash = sha256_digest(response.body)
-        values = _metric_values(response.body)
-        if response.status != 200 or metric_name not in values:
+        if response.status != 200:
             raise TelemetryError("required load metric is unavailable")
+        values = _metric_values(
+            response.body,
+            metric_name=metric_name,
+            expected_model_id=expected_model_id,
+        )
         return (
             TelemetrySample(
-                sampled_at_monotonic_ns=now_ns,
+                sampled_at_monotonic_ns=sampled_at,
                 epoch=epoch,
                 state="AVAILABLE",
                 value=values[metric_name],
@@ -156,9 +261,11 @@ def sample_metrics(
             values,
         )
     except (TelemetryError, TransportError):
+        if observed_at_ns is not None:
+            sampled_at = observed_at_ns()
         return (
             TelemetrySample(
-                sampled_at_monotonic_ns=now_ns,
+                sampled_at_monotonic_ns=sampled_at,
                 epoch=epoch,
                 state="UNAVAILABLE",
                 value="UNAVAILABLE",

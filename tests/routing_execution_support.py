@@ -11,6 +11,7 @@ from inferdrome.routing_execution.canonical import (
 )
 from inferdrome.routing_execution.cli import _demo_config
 from inferdrome.routing_execution.contracts import fixed_selected_workload_bytes
+from inferdrome.routing_execution.loopback import vllm_0_26_metrics
 from inferdrome.routing_execution.transport import (
     TransportCancelled,
     TransportResponse,
@@ -66,14 +67,31 @@ class StaticEndpointTransport:
         if path == "/v1/models":
             return TransportResponse(200, b'{"data":[{"id":"Qwen/Qwen3-8B"}]}')
         if path == "/health":
-            return TransportResponse(200, b'{"status":"ok"}')
+            return TransportResponse(200, b"")
         if path == "/metrics":
             if self.mode == "malformed_metrics":
-                return TransportResponse(200, b"vllm:num_requests_running NaN\n")
+                return TransportResponse(
+                    200,
+                    b'vllm:num_requests_running{model_name="Qwen/Qwen3-8B"} NaN\n',
+                )
+            if self.mode == "ambiguous_metrics":
+                return TransportResponse(
+                    200,
+                    b"\n".join(
+                        (
+                            b'vllm:num_requests_running{model_name="Qwen/Qwen3-8B"} 1',
+                            b'vllm:num_requests_running{model_name="Qwen/Qwen3-8B"} 2',
+                        )
+                    )
+                    + b"\n",
+                )
+            if self.mode == "wrong_model_metrics":
+                return TransportResponse(
+                    200,
+                    vllm_0_26_metrics(running=1, model_name="Qwen/Qwen3-4B"),
+                )
             load = 4 if origin.endswith(":18081") else 1
-            return TransportResponse(
-                200, f"vllm:num_requests_running {load}\n".encode()
-            )
+            return TransportResponse(200, vllm_0_26_metrics(running=load))
         raise AssertionError(path)
 
     def post_json(
@@ -89,7 +107,17 @@ class StaticEndpointTransport:
             raise TransportCancelled("test cancellation")
         if self.mode == "malformed_completion":
             return TransportResponse(200, b"not-json")
-        return TransportResponse(200, b'{"choices":[]}')
+        if self.mode == "empty_choices":
+            return TransportResponse(200, b'{"choices":[]}')
+        if self.mode == "empty_choice_content":
+            return TransportResponse(
+                200,
+                b'{"choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}',
+            )
+        return TransportResponse(
+            200,
+            b'{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}',
+        )
 
     def close(self) -> None:
         self.closed = True

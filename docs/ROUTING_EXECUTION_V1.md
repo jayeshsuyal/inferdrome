@@ -106,6 +106,16 @@ that case. PR B does not claim a separately bound GPU/DCGM collector, so its
 GPU/DCGM capability is explicitly and only `UNAVAILABLE`. KV/cache is also
 explicitly `UNAVAILABLE` and is never invented.
 
+The pinned vLLM wire boundary is deliberately small: `/health` is healthy on
+an exact HTTP 200, including vLLM's empty response body; the bounded body is
+still digested when present. `/metrics` supplies exactly one finite,
+non-negative integral `vllm:num_requests_running` sample labelled
+`model_name="Qwen/Qwen3-8B"`. Unrelated repeated histogram buckets are outside
+that load contract, while a missing, malformed, wrong-model, or duplicate
+target gauge is `UNAVAILABLE` without aggregation. A successful completion
+also requires a non-empty assistant chat-completion choice with non-empty text;
+raw response content is never retained.
+
 Every planned request has one decision and one terminal outcome. A selected
 request has exactly one transport attempt unless cancellation is observed
 before dispatch, in which case it records zero attempts and no request digest.

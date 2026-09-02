@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from inferdrome.routing_execution.executor import (
     ManualMonotonicClock,
     run_execution,
@@ -125,11 +127,30 @@ def test_fixed_clock_and_transport_produce_byte_stable_packages(tmp_path: Path) 
     ).read_bytes()
 
 
-def test_malformed_openai_completion_is_a_failed_single_attempt(tmp_path: Path) -> None:
-    sealed, transports = _run_static(tmp_path, mode="malformed_completion")
+@pytest.mark.parametrize(
+    "mode", ("malformed_completion", "empty_choices", "empty_choice_content")
+)
+def test_malformed_openai_completion_is_a_failed_single_attempt(
+    tmp_path: Path, mode: str
+) -> None:
+    sealed, transports = _run_static(tmp_path, mode=mode)
     receipt = verify_execution_package(sealed.path).producer_receipt
     attempted = [row for row in receipt.terminal_outcomes if row.attempt_count == 1]
     assert attempted
     assert all(row.status == "FAILED" for row in attempted)
     assert all(row.reason == "MALFORMED_RESPONSE" for row in attempted)
     assert sum(len(row.request_bodies) for row in transports) == len(attempted)
+
+
+@pytest.mark.parametrize(
+    "mode", ("malformed_metrics", "ambiguous_metrics", "wrong_model_metrics")
+)
+def test_inadmissible_target_metric_fails_closed_without_aggregation(
+    tmp_path: Path, mode: str
+) -> None:
+    sealed, _ = _run_static(tmp_path, mode=mode)
+    receipt = verify_execution_package(sealed.path).producer_receipt
+    load = [row for row in receipt.telemetry_observations if row.signal == "LOAD"]
+    assert load and all(row.value == "UNAVAILABLE" for row in load)
+    assert all(row.selected_endpoint_id is None for row in receipt.route_decisions)
+    assert all(row.status == "NO_SAFE_ROUTE" for row in receipt.terminal_outcomes)

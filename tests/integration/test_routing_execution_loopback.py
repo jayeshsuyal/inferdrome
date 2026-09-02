@@ -6,7 +6,11 @@ from pathlib import Path
 
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
 from inferdrome.routing_execution.cli import _demo_config
-from inferdrome.routing_execution.executor import ManualMonotonicClock, run_execution
+from inferdrome.routing_execution.executor import (
+    ManualMonotonicClock,
+    SystemMonotonicClock,
+    run_execution,
+)
 from inferdrome.routing_execution.loopback import LoopbackPair
 from inferdrome.routing_execution.verifier import verify_execution_package
 from tests.routing_execution_support import workload_bytes
@@ -53,3 +57,41 @@ def test_two_real_loopback_endpoints_execute_full_fault_campaign(
     terminal_ids = {row.terminal_outcome_id for row in receipt.terminal_outcomes}
     assert {row.terminal_outcome_id for row in receipt.route_decisions} == terminal_ids
     assert all(summary.request_denominator == 6 for summary in receipt.trial_summaries)
+
+
+def test_system_monotonic_clock_real_http_vllm_fixture_stays_within_declared_freshness(
+    tmp_path: Path,
+) -> None:
+    workload = workload_bytes()
+    with LoopbackPair() as endpoints:
+        config = _demo_config(
+            origin_a=endpoints.endpoint_a.origin,
+            origin_b=endpoints.endpoint_b.origin,
+            selected_sha256=sha256_digest(workload),
+            source_commit="0" * 40,
+        )
+        config_path = tmp_path / "deployment-config.json"
+        workload_path = tmp_path / "workload.jsonl"
+        config_path.write_bytes(canonical_json_bytes(config))
+        workload_path.write_bytes(workload)
+        sealed = run_execution(
+            config_path,
+            workload_path,
+            tmp_path / "package",
+            clock=SystemMonotonicClock(),
+        )
+
+    receipt = verify_execution_package(sealed.path).producer_receipt
+    fresh_rows = [
+        row
+        for row in receipt.telemetry_observations
+        if row.signal == "HEALTH"
+        or (row.signal == "LOAD" and row.sequence_index <= 1)
+    ]
+    assert fresh_rows
+    assert all(
+        row.state == "AVAILABLE"
+        and row.admissibility == "ADMISSIBLE"
+        and row.age_ns <= row.freshness_bound_ns == 5_000_000
+        for row in fresh_rows
+    )

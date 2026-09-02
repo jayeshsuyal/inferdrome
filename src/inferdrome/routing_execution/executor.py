@@ -299,13 +299,31 @@ def _request_body(config: RoutingExecutionConfig, request: WorkloadRequest) -> b
 
 
 def _valid_completion_response(content: bytes) -> bool:
-    """Accept only the tiny OpenAI-compatible completion shape this bridge needs."""
+    """Accept a non-empty assistant chat completion without retaining output."""
 
     try:
         value = _strict_json(content, label="endpoint completion response")
     except ExecutionError:
         return False
-    return isinstance(value, dict) and isinstance(value.get("choices"), list)
+    if not isinstance(value, dict):
+        return False
+    choices = value.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    for choice in choices:
+        if not isinstance(choice, dict) or type(choice.get("index")) is not int:
+            return False
+        message = choice.get("message")
+        if (
+            not isinstance(message, dict)
+            or message.get("role") != "assistant"
+            or not isinstance(message.get("content"), str)
+            or not message["content"].strip()
+            or not isinstance(choice.get("finish_reason"), str)
+            or not choice["finish_reason"].strip()
+        ):
+            return False
+    return True
 
 
 def _terminal(
@@ -449,6 +467,7 @@ def _candidate_states(
             now_ns=clock.now_ns(),
             epoch=health_epochs[declaration.endpoint_id],
             timeout_ms=config.request_timeout_ms,
+            observed_at_ns=clock.now_ns,
         )
         if not model_ready[declaration.endpoint_id]:
             sampled_health = TelemetrySample(
@@ -469,6 +488,8 @@ def _candidate_states(
                 epoch=load_epochs[declaration.endpoint_id],
                 timeout_ms=config.request_timeout_ms,
                 metric_name=config.telemetry.load_metric_name,
+                expected_model_id=config.model.model_id,
+                observed_at_ns=clock.now_ns,
             )
             latest_load[declaration.endpoint_id] = sampled_load
         raw_load[declaration.endpoint_id] = latest_load.get(
