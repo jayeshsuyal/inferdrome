@@ -1,0 +1,15 @@
+"""R1-only generated schema snapshot checks."""
+
+from __future__ import annotations
+
+from inferdrome.routing_campaign.schema import check_schemas, schema_bytes, schema_root
+
+
+def test_routing_schema_snapshots_are_current_and_closed() -> None:
+    check_schemas()
+    root = schema_root()
+    assert {path.name for path in root.glob("*.json")} == set(schema_bytes())
+    assert all(
+        (root / filename).read_bytes() == content
+        for filename, content in schema_bytes().items()
+    )

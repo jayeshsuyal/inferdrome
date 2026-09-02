@@ -1,0 +1,1 @@
+{"campaign_id":"routing-campaign-v1","schema_version":"inferdrome.routing-trial-plan.v1","trials":[{"policy_id":"fail_closed_required_load_v1","trial_id":"trial-fail-closed-v1"},{"policy_id":"explicit_fail_open_stale_load_v1","trial_id":"trial-fail-open-v1"},{"policy_id":"typed_admissible_state_only_v1","trial_id":"trial-typed-v1"}]}
