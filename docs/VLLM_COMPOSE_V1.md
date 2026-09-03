@@ -184,8 +184,9 @@ The development artifact boundary is explicit:
 ```bash
 python scripts/build_runner_image.py \
   --image-kind vllm-benchmark-runner \
+  --runtime-role cpu-runner-observer \
   --flavor development \
-  --tag inferdrome/vllm-benchmark-runner:development
+  --tag inferdrome/vllm-cpu-runner-observer:development
 ```
 
 The wrapper passes `--platform linux/amd64`. Development uses the ambient
@@ -195,8 +196,9 @@ uses the clean relevant-input check and an exact tracked-HEAD archive context:
 ```bash
 python scripts/build_runner_image.py \
   --image-kind vllm-benchmark-runner \
+  --runtime-role cpu-runner-observer \
   --flavor proof \
-  --tag inferdrome/vllm-benchmark-runner:proof
+  --tag inferdrome/vllm-cpu-runner-observer:proof
 ```
 
 The wrapper derives the source commit and packaged Inferdrome version, checks

@@ -222,10 +222,70 @@ def _proposal() -> tuple[GcpPrivateCampaignProposal, object]:
 def test_startup_rejects_an_image_identity_shared_by_runner_and_engines() -> None:
     image = ImageIdentity(reference="example/inferdrome@sha256:" + ("1" * 64))
 
-    with pytest.raises(ValueError, match="runner and serving images"):
+    with pytest.raises(ValueError, match="runner and serving image content digests"):
         issue_gcp_private_campaign_startup_payload(
             source_commit="1" * 40, runner_image=image, serving_image=image
         )
+
+
+def _same_content_images() -> tuple[ImageIdentity, ImageIdentity]:
+    digest = "sha256:" + ("d" * 64)
+    return (
+        ImageIdentity(reference=f"registry.example/runner@{digest}"),
+        ImageIdentity(reference=f"registry.example/serving@{digest}"),
+    )
+
+
+def test_preloaded_artifacts_reject_same_content_digest_across_repositories() -> None:
+    _, startup = _proposal()
+    runner, serving = _same_content_images()
+    payload = startup.preloaded_artifacts.model_dump(mode="python")
+    payload.update(runner_image=runner, serving_image=serving)
+
+    with pytest.raises(ValueError, match="runner and serving image content digests"):
+        campaign_v2.GcpPrivateCampaignPreloadedArtifacts(**payload)
+
+
+def test_startup_rejects_same_content_digest_across_role_repositories() -> None:
+    _, startup = _proposal()
+    runner, serving = _same_content_images()
+    preloaded = startup.preloaded_artifacts.model_copy(
+        update={"runner_image": runner, "serving_image": serving}
+    )
+    engines = tuple(
+        engine.model_copy(update={"serving_image": serving})
+        for engine in startup.engines
+    )
+    observer = startup.runner.model_copy(update={"runner_image": runner})
+    payload = startup.model_dump(mode="python")
+    payload.pop("startup_payload_id")
+    payload.update(
+        runner_image=runner,
+        preloaded_artifacts=preloaded,
+        engines=engines,
+        runner=observer,
+    )
+
+    with pytest.raises(ValueError, match="runner and serving image content digests"):
+        campaign_v2.GcpPrivateCampaignStartupPayloadPayload(**payload)
+
+
+def test_proposal_rejects_same_content_digest_across_role_repositories() -> None:
+    proposal, startup = _proposal()
+    runner, serving = _same_content_images()
+    preloaded = startup.preloaded_artifacts.model_copy(
+        update={"runner_image": runner, "serving_image": serving}
+    )
+    payload = proposal.model_dump(mode="python")
+    payload.pop("proposal_id")
+    payload.update(
+        runner_image=runner,
+        serving_image=serving,
+        preloaded_artifacts=preloaded,
+    )
+
+    with pytest.raises(ValueError, match="runner and serving image content digests"):
+        GcpPrivateCampaignProposalPayload(**payload)
 
 
 def _self_consistent_unvalidated_proposal(

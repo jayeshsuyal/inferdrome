@@ -15,8 +15,10 @@ import importlib
 import io
 import ipaddress
 import json
+import os
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import tarfile
@@ -61,7 +63,12 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
 )
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.domain.digests import canonical_json_bytes
-from inferdrome.errors import VerificationError
+from inferdrome.errors import AdapterError, VerificationError
+from inferdrome.execution.subprocess_runner import (
+    ExecutableIdentity,
+    resolve_executable_identity,
+    validate_executable_identity,
+)
 from inferdrome.routing_execution.canonical import sha256_digest
 from inferdrome.routing_execution.contracts import (
     ExecutedManifest,
@@ -108,6 +115,7 @@ _STARTUP_SCRIPT_METADATA_KEY: Final = "startup-script"
 _STARTUP_SCRIPT_DIGEST_METADATA_KEY: Final = "inferdrome-startup-script-sha256"
 _STARTUP_PAYLOAD_METADATA_KEY: Final = "inferdrome-startup-payload-digest"
 _PROPOSAL_METADATA_KEY: Final = "inferdrome-proposal-digest"
+_IAP_PROCESS_TERMINATION_TIMEOUT_SECONDS: Final = 5
 
 
 class GcpPrivateCampaignOptionalDependencyUnavailable(GcpPrivateCampaignError):
@@ -1030,22 +1038,74 @@ class _IapTunnelEndpoints:
 
 
 class _IapInvocation(Protocol):
-    def start(self, argv: tuple[str, ...]) -> subprocess.Popen[bytes]: ...
+    def start(
+        self,
+        *,
+        identity: ExecutableIdentity,
+        argv: tuple[str, ...],
+    ) -> subprocess.Popen[bytes]: ...
 
 
 class _SubprocessIapInvocation:
-    """Lazy gcloud invocation with identity supplied in every tunnel argv."""
+    """Start an already-validated absolute IAP executable without a shell."""
 
-    def start(self, argv: tuple[str, ...]) -> subprocess.Popen[bytes]:
+    def start(
+        self,
+        *,
+        identity: ExecutableIdentity,
+        argv: tuple[str, ...],
+    ) -> subprocess.Popen[bytes]:
+        if not argv or not identity.path.is_absolute() or argv[0] != str(identity.path):
+            raise GcpPrivateCampaignTransportError("IAP_EXECUTABLE_IDENTITY_MISMATCH")
+        try:
+            validate_executable_identity(identity)
+        except AdapterError:
+            raise GcpPrivateCampaignTransportError("IAP_EXECUTABLE_CHANGED") from None
         try:
             return subprocess.Popen(
                 argv,
+                executable=str(identity.path),
+                shell=False,
+                close_fds=True,
+                start_new_session=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except OSError:
             raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE") from None
+
+
+def _terminate_iap_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Boundedly terminate the isolated tunnel process group, not just its parent.
+
+    ``start_new_session=True`` makes the child PID its process-group ID.  We
+    intentionally signal that group even when the parent has already exited:
+    an inherited child tunnel can otherwise retain the listener after the
+    controller believes the parent is gone.
+    """
+
+    process_group_id = process.pid
+    if not isinstance(process_group_id, int) or process_group_id <= 0:
+        return
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        # Still make the bounded hard-kill attempt below.  The caller is
+        # closing a best-effort local tunnel during cleanup, never issuing a
+        # provider mutation here.
+        pass
+    try:
+        process.wait(timeout=_IAP_PROCESS_TERMINATION_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    finally:
+        with suppress(ProcessLookupError, OSError):
+            os.killpg(process_group_id, signal.SIGKILL)
+        with suppress(OSError, subprocess.SubprocessError):
+            process.wait(timeout=_IAP_PROCESS_TERMINATION_TIMEOUT_SECONDS)
 
 
 class GcpPrivateCampaignIapTunnelSupervisor:
@@ -1058,11 +1118,23 @@ class GcpPrivateCampaignIapTunnelSupervisor:
         connector: Callable[..., Any] | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
+        executable_resolver: Callable[[str], ExecutableIdentity] | None = None,
+        executable_validator: Callable[[ExecutableIdentity], None] | None = None,
+        process_group_terminator: Callable[[subprocess.Popen[bytes]], None]
+        | None = None,
     ) -> None:
         self._invocation = invocation or _SubprocessIapInvocation()
         self._connector = connector or socket.create_connection
         self._monotonic = monotonic or time.monotonic
         self._sleeper = sleeper or time.sleep
+        self._executable_resolver = executable_resolver or resolve_executable_identity
+        self._executable_validator = (
+            executable_validator or validate_executable_identity
+        )
+        self._process_group_terminator = (
+            process_group_terminator or _terminate_iap_process_group
+        )
+        self._tunnel_executable: ExecutableIdentity | None = None
         self._processes: list[subprocess.Popen[bytes]] = []
 
     @staticmethod
@@ -1071,10 +1143,13 @@ class GcpPrivateCampaignIapTunnelSupervisor:
         *,
         private_port: int,
         local_port: int,
+        executable: str | None = None,
     ) -> tuple[str, ...]:
         proposal = request.proposal
         return (
-            proposal.iap_connectivity.tunnel_binary,
+            proposal.iap_connectivity.tunnel_binary
+            if executable is None
+            else executable,
             "compute",
             "start-iap-tunnel",
             proposal.instance_name,
@@ -1105,8 +1180,28 @@ class GcpPrivateCampaignIapTunnelSupervisor:
                 self._sleeper(0.1)
         raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
 
+    def _validated_tunnel_executable(
+        self, request: GcpPrivateCampaignCreateRequest
+    ) -> ExecutableIdentity:
+        """Resolve once after approval and revalidate before each exec."""
+
+        if self._tunnel_executable is None:
+            try:
+                self._tunnel_executable = self._executable_resolver(
+                    request.proposal.iap_connectivity.tunnel_binary
+                )
+            except AdapterError:
+                raise GcpPrivateCampaignTransportError(
+                    "IAP_EXECUTABLE_UNAVAILABLE"
+                ) from None
+        try:
+            self._executable_validator(self._tunnel_executable)
+        except AdapterError:
+            raise GcpPrivateCampaignTransportError("IAP_EXECUTABLE_CHANGED") from None
+        return self._tunnel_executable
+
     def preflight_principal(self, request: GcpPrivateCampaignCreateRequest) -> None:
-        """Validate explicit IAP impersonation without ambient-account probing."""
+        """Preflight explicit IAP identity after local approval, before create."""
 
         proposal = request.proposal
         if proposal.iap_connectivity.ssh_transport_forbidden is not True:
@@ -1131,6 +1226,7 @@ class GcpPrivateCampaignIapTunnelSupervisor:
                 proposal.iap_connectivity.controller_principal,
             ):
                 raise GcpPrivateCampaignTransportError("IAP_PRINCIPAL_MISMATCH")
+        self._validated_tunnel_executable(request)
 
     def open(
         self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
@@ -1151,12 +1247,15 @@ class GcpPrivateCampaignIapTunnelSupervisor:
             for private_port, local_port in zip(
                 private_ports, proposal.iap_connectivity.local_tunnel_ports, strict=True
             ):
+                executable = self._validated_tunnel_executable(request)
                 process = self._invocation.start(
-                    self._argv(
+                    identity=executable,
+                    argv=self._argv(
                         request,
                         private_port=private_port,
                         local_port=local_port,
-                    )
+                        executable=str(executable.path),
+                    ),
                 )
                 self._processes.append(process)
                 self._wait_listening(process, port=local_port, deadline=deadline)
@@ -1178,16 +1277,10 @@ class GcpPrivateCampaignIapTunnelSupervisor:
     def close(self) -> None:
         while self._processes:
             process = self._processes.pop()
-            if process.poll() is not None:
-                continue
-            try:
-                process.terminate()
-                process.wait(timeout=5)
-            except (OSError, subprocess.SubprocessError):
-                with suppress(OSError):
-                    process.kill()
-                with suppress(OSError, subprocess.SubprocessError):
-                    process.wait(timeout=5)
+            # Never skip a process merely because its parent exited: the
+            # isolated process group may still contain a live descendant.
+            with suppress(OSError, subprocess.SubprocessError):
+                self._process_group_terminator(process)
 
 
 class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):

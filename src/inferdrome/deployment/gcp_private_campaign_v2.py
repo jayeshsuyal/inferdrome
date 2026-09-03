@@ -81,6 +81,7 @@ from inferdrome.routing_execution.contracts import (
     fixed_policy_ids,
     fixed_r1_input_digests,
     fixed_selected_workload_sha256,
+    oci_content_digest,
 )
 from inferdrome.routing_execution.verifier import verify_execution_package
 
@@ -615,8 +616,10 @@ class GcpPrivateCampaignPreloadedArtifacts(PrecampaignModel):
             or self.model_snapshot_sha256 != qwen3_expected_snapshot_sha256()
         ):
             raise ValueError("preloaded artifacts are not the fixed Qwen3 snapshot")
-        if self.runner_image == self.serving_image:
-            raise ValueError("runner and serving images must be separately pinned")
+        if oci_content_digest(self.runner_image) == oci_content_digest(
+            self.serving_image
+        ):
+            raise ValueError("runner and serving image content digests must differ")
         return self
 
 
@@ -823,8 +826,10 @@ class GcpPrivateCampaignStartupPayloadPayload(PrecampaignModel):
             raise ValueError("startup must contain ordered endpoint-a and endpoint-b")
         if self.engines[0].serving_image != self.engines[1].serving_image:
             raise ValueError("two engines must use the same immutable serving image")
-        if self.engines[0].serving_image == self.runner_image:
-            raise ValueError("runner and serving image identities must differ")
+        if oci_content_digest(self.engines[0].serving_image) == oci_content_digest(
+            self.runner_image
+        ):
+            raise ValueError("runner and serving image content digests must differ")
         if self.runner.runner_image != self.runner_image:
             raise ValueError("startup runner image disagrees with runner contract")
         if (
@@ -1122,8 +1127,10 @@ class GcpPrivateCampaignProposalPayload(PrecampaignModel):
             raise ValueError("boot disk name must be the deterministic exact identity")
         if self.source_commit != self.routing.source_commit:
             raise ValueError("routing source commit disagrees with proposal")
-        if self.runner_image == self.serving_image:
-            raise ValueError("runner and serving images must be separately pinned")
+        if oci_content_digest(self.runner_image) == oci_content_digest(
+            self.serving_image
+        ):
+            raise ValueError("runner and serving image content digests must differ")
         if (
             self.preloaded_artifacts.runner_image != self.runner_image
             or self.preloaded_artifacts.serving_image != self.serving_image

@@ -629,6 +629,9 @@ def test_runner_image_uid_home_and_startup_tmpfs_contract_are_coherent() -> None
         "install -d --owner=2000 --group=0 --mode=0700 /home/vllm /workspace"
         in dockerfile
     )
+    assert "ARG INFERDROME_RUNTIME_ROLE" in dockerfile
+    assert "private-engine|cpu-runner-observer" in dockerfile
+    assert 'com.inferdrome.runtime-role="${INFERDROME_RUNTIME_ROLE}"' in dockerfile
 
 
 def test_controller_handoffs_and_retrieves_only_through_the_bound_runner() -> None:

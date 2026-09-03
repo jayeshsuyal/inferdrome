@@ -162,7 +162,9 @@ def resolve_executable_identity(
     return ExecutableIdentity(path, *metadata)
 
 
-def _validate_executable_identity(identity: ExecutableIdentity) -> None:
+def validate_executable_identity(identity: ExecutableIdentity) -> None:
+    """Fail closed if a previously resolved executable identity changed."""
+
     if not isinstance(identity, ExecutableIdentity):
         raise AdapterError("subprocess executable identity is invalid")
     if _executable_metadata(identity.path) != (
@@ -175,6 +177,12 @@ def _validate_executable_identity(identity: ExecutableIdentity) -> None:
         identity.changed_ns,
     ):
         raise AdapterError("subprocess executable identity changed")
+
+
+def _validate_executable_identity(identity: ExecutableIdentity) -> None:
+    """Compatibility alias for the internal call sites in this module."""
+
+    validate_executable_identity(identity)
 
 
 def _minimal_process_environment(

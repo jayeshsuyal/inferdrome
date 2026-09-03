@@ -25,6 +25,7 @@ FROM vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54b
 ARG SOURCE_REPOSITORY_COMMIT=development-unpinned
 ARG INFERDROME_VERSION=0.2.0.dev0
 ARG BUILD_FLAVOR=development
+ARG INFERDROME_RUNTIME_ROLE
 
 RUN case "${BUILD_FLAVOR}" in \
       development) ;; \
@@ -35,13 +36,22 @@ RUN case "${BUILD_FLAVOR}" in \
       *) exit 1 ;; \
     esac
 
+# The same pinned source may produce the engine and CPU-only observer images,
+# but the GCP private campaign never permits them to share an OCI content
+# digest.  This required role input is persisted as a final image-config label,
+# so the two reproducible role builds cannot collapse to one digest.
+RUN case "${INFERDROME_RUNTIME_ROLE}" in \
+      private-engine|cpu-runner-observer) ;; \
+      *) exit 1 ;; \
+    esac
+
 WORKDIR /opt/inferdrome-source
 
 # This Dockerfile supplies the shared reviewed runtime code for two separately
-# pinned role images: the CPU-only observer and the private engine. Their GCP
-# contract rejects an equal image digest. The guarded startup script overrides
-# the engine entrypoint to the checked-in adapter; only that adapter launches
-# `vllm serve`, exactly once.
+# built role images: the CPU-only observer and the private engine. The required
+# runtime-role config label gives them distinct OCI content digests. The guarded
+# startup script overrides the engine entrypoint to the checked-in adapter;
+# only that adapter launches `vllm serve`, exactly once.
 USER root
 COPY --from=inferdrome-dependencies --chown=2000:0 /opt/inferdrome-runtime /opt/inferdrome-runtime
 COPY --from=inferdrome-dependencies /build/LICENSE /build/THIRD_PARTY_NOTICES.md /usr/share/licenses/inferdrome/
@@ -56,7 +66,8 @@ RUN test "$(/opt/inferdrome-runtime/bin/python -c 'from inferdrome import __vers
 LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome" \
       org.opencontainers.image.revision="${SOURCE_REPOSITORY_COMMIT}" \
       org.opencontainers.image.version="${INFERDROME_VERSION}" \
-      com.inferdrome.image-purpose="private-engine-or-cpu-observer-runtime" \
+      com.inferdrome.image-purpose="${INFERDROME_RUNTIME_ROLE}" \
+      com.inferdrome.runtime-role="${INFERDROME_RUNTIME_ROLE}" \
       com.inferdrome.engine-service-boundary="separate-vllm-engine-service" \
       com.inferdrome.vllm-version="0.26.0" \
       com.inferdrome.engine-entrypoint="inferdrome.deployment.gcp_private_engine_adapter"

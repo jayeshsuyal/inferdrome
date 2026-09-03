@@ -13,9 +13,14 @@ two digest-pinned Qwen3-8B vLLM-compatible engines on GPU 0/port 8000 and GPU
 1/port 8001. They are independently addressable engines on one host, not
 independent hosts.
 
-The approved boot image must already contain distinct, separately digest-pinned
-runner and serving OCI images and the revision-pinned Qwen3-8B snapshot at
-`/opt/inferdrome/qwen3-8b`, matching the reviewed manifest and snapshot digests.
+The approved boot image must already contain distinct, separately built,
+digest-pinned runner and serving OCI images and the revision-pinned Qwen3-8B
+snapshot at `/opt/inferdrome/qwen3-8b`, matching the reviewed manifest and
+snapshot digests. Different repository names are not enough: the two images
+must have different OCI content digests. Build them reproducibly from the
+canonical runtime Dockerfile with the explicit `private-engine` and
+`cpu-runner-observer` role inputs; that role is persisted in the final image
+config while both images retain the reviewed `2000:0`/`/home/vllm` contract.
 Startup uses offline loading and `--pull never`; it may not fetch an image or
 model from a registry or Hugging Face. The repository supplies the source-owned
 engine adapter that exposes the private
@@ -41,8 +46,11 @@ directly calls the VM's RFC1918 address, never opens SSH, and never exposes
 public inference. The approved IAP firewall permits only the IAP CIDR to the
 approval-bound tag and ports 8000, 8001, and 8002; the controller principal is
 explicitly selected for Compute and every IAP tunnel by service-account
-impersonation, not inferred from an ambient active account. Because Docker also
-publishes those ports on the VM's private interfaces, the operator must verify
+impersonation, not inferred from an ambient active account. After local approval
+and before insert, the controller resolves one trusted absolute `gcloud`
+executable identity, revalidates it before each tunnel launch, and starts each
+tunnel in an isolated process group so local cleanup also reaches descendants.
+Because Docker also publishes those ports on the VM's private interfaces, the operator must verify
 before live execution that no other effective VPC firewall rule allows a
 non-IAP source to reach the approval-bound tag/ports. Inferdrome validates the
 named IAP rule only; it does not claim account-wide firewall enumeration. The VM uses one non-default,

@@ -31,14 +31,19 @@ counts, public origins, duplicate endpoint identities, missing health/metrics
 capabilities, or observed topology drift are rejected before campaign
 admission.
 
-The runner and serving images are distinct, separately digest-pinned OCI
-identities; the contract rejects an equal image digest. The two engines use the
-serving image while the runner uses the observer image. The approved boot image
-must already contain both exact OCI images and the exact revision-pinned
-Qwen3-8B snapshot at `/opt/inferdrome/qwen3-8b`, with the declared model
-manifest and snapshot digests. Startup uses `--pull never`, verifies those
-bytes, and sets offline model loading; it never fetches from a registry or
-Hugging Face at boot.
+The runner and serving images are distinct, separately built, digest-pinned OCI
+artifacts; the contract rejects equal **OCI content digests**, even if the two
+references use different repository names. The canonical
+`Dockerfile.vllm-benchmark-runner` requires one reproducible runtime-role build
+input—`private-engine` or `cpu-runner-observer`—and persists it in the final
+image config, so the two role builds cannot share a digest while retaining the
+same `2000:0`, `/home/vllm`, and `/workspace` compatibility contract. The two
+engines use the `private-engine` image while the runner uses the
+`cpu-runner-observer` image. The approved boot image must already contain both
+exact OCI images and the exact revision-pinned Qwen3-8B snapshot at
+`/opt/inferdrome/qwen3-8b`, with the declared model manifest and snapshot
+digests. Startup uses `--pull never`, verifies those bytes, and sets offline
+model loading; it never fetches from a registry or Hugging Face at boot.
 
 The repository ships the source-owned private engine adapter. For each engine,
 the reviewed Docker shape is
@@ -117,8 +122,12 @@ a transport. The executable path is intentionally separate:
    It resolves the approved controller service account as the effective Compute
    API identity and constructs every Compute client with that explicit
    credential; every IAP tunnel argv explicitly selects the same identity via
-   service-account impersonation. It never relies on `gcloud auth list` as an
-   authorization signal. Preflight provider boot-image and IAP-firewall facts, and
+   service-account impersonation. After local approval and before insert, the
+   controller resolves the one trusted absolute `gcloud` executable identity,
+   revalidates it immediately before every launch, and starts each tunnel in an
+   isolated process group so local cleanup can terminate descendants too. It
+   never relies on `gcloud auth list` as an authorization signal. Preflight
+   provider boot-image and IAP-firewall facts, and
    revalidate approval, quote, and execution deadline after every potentially
    slow read and immediately before the GCE insert. The runner image and exact
    command are bound in the startup projection; the controller never starts a
