@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from inferdrome.deployment.gcp_securefs import SafeDirFD
 from inferdrome.errors import VerificationError
 from inferdrome.qwen3_campaign import qwen3_workload_prompts
 from inferdrome.routing_execution.canonical import (
@@ -214,6 +215,51 @@ def test_source_parent_symlink_and_input_transfer_tamper_stop_before_transport(
             transport_factory=factory,
         )
     assert factory_calls == 0
+
+
+def test_held_evidence_root_cannot_publish_into_same_user_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root rename after reservation cannot yield a returned replacement receipt."""
+
+    tmp_path.chmod(0o700)
+    config_path, workload_path, _, _ = write_inputs(tmp_path)
+    displaced = tmp_path.parent / f"{tmp_path.name}-displaced"
+    import inferdrome.routing_execution.package as package_module
+
+    original_publish = package_module.EvidenceReservation.publish
+    swapped = False
+
+    def replace_root_before_publish(
+        self: object, *args: object, **kwargs: object
+    ) -> object:
+        nonlocal swapped
+        assert not swapped
+        swapped = True
+        tmp_path.rename(displaced)
+        tmp_path.mkdir(mode=0o700)
+        return original_publish(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        package_module.EvidenceReservation, "publish", replace_root_before_publish
+    )
+    held_root = SafeDirFD.open(tmp_path)
+    try:
+        with pytest.raises(ExecutionError, match="evidence sealing failed"):
+            run_execution(
+                config_path,
+                workload_path,
+                tmp_path / "package",
+                transport_factory=StaticEndpointTransport,
+                clock=ManualMonotonicClock(),
+                evidence_parent=held_root,
+            )
+    finally:
+        held_root.close()
+
+    assert swapped
+    assert not (tmp_path / "package").exists()
+    assert (displaced / "package").is_dir()
 
 
 def test_fixed_workload_and_published_identifier_are_not_config_injection_paths(

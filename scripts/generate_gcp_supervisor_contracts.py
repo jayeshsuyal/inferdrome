@@ -20,6 +20,9 @@ from inferdrome.deployment.gcp_cost_guard import gcp_cost_guard_contract_schemas
 from inferdrome.deployment.gcp_lifecycle import (
     gcp_execution_v2_safety_contract_schemas,
 )
+from inferdrome.deployment.gcp_private_campaign_v2 import (
+    gcp_private_campaign_contract_schemas,
+)
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.deployment.gcp_supervisor import (
     gcp_execution_supervisor_contract_schemas,
@@ -43,6 +46,7 @@ _SCHEMA_PRODUCERS: tuple[SchemaProducer, ...] = (
     gcp_v2_activation_contract_schemas,
     gcp_v2_disk_cleanup_contract_schemas,
     gcp_file_watchdog_backend_contract_schemas,
+    gcp_private_campaign_contract_schemas,
 )
 
 

@@ -757,6 +757,7 @@ def run_execution(
     transport_factory: Callable[[], EndpointTransport] = UrllibEndpointTransport,
     clock: MonotonicClock | None = None,
     cancel_requested: Callable[[], bool] | None = None,
+    evidence_parent: SafeDirFD | None = None,
 ) -> SealedRoutingExecution:
     """Execute and seal one admitted two-endpoint campaign with no retry path."""
 
@@ -785,7 +786,15 @@ def run_execution(
     )
     # Reserve the create/no-replace output before a transport factory can run.
     try:
-        reservation = EvidenceReservation.reserve(output_path)
+        if evidence_parent is None:
+            reservation = EvidenceReservation.reserve(output_path)
+        else:
+            expected_output = evidence_parent.path / output_path.name
+            if output_path.absolute() != expected_output.absolute():
+                raise ExecutionError("held evidence parent disagrees with output")
+            reservation = EvidenceReservation.reserve_in_parent(
+                evidence_parent, output_path.name
+            )
     except ExecutionPackageError as error:
         raise ExecutionError("evidence destination was rejected") from error
     try:

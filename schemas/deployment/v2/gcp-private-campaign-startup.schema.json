@@ -1,0 +1,257 @@
+{
+  "$defs": {
+    "GcpPrivateCampaignEngine": {
+      "additionalProperties": false,
+      "description": "Semantic engine declaration from which the fixed startup script is made.",
+      "properties": {
+        "attestation_path": {
+          "const": "/inferdrome/v2/engine-attestation",
+          "title": "Attestation Path",
+          "type": "string"
+        },
+        "container_name": {
+          "enum": [
+            "inferdrome-engine-a",
+            "inferdrome-engine-b"
+          ],
+          "title": "Container Name",
+          "type": "string"
+        },
+        "endpoint_id": {
+          "enum": [
+            "endpoint-a",
+            "endpoint-b"
+          ],
+          "title": "Endpoint Id",
+          "type": "string"
+        },
+        "generation_path": {
+          "const": "/v1/chat/completions",
+          "title": "Generation Path",
+          "type": "string"
+        },
+        "gpu_ordinal": {
+          "enum": [
+            0,
+            1
+          ],
+          "title": "Gpu Ordinal",
+          "type": "integer"
+        },
+        "health_path": {
+          "const": "/health",
+          "title": "Health Path",
+          "type": "string"
+        },
+        "listener_scope": {
+          "const": "PRIVATE_VPC_ONLY",
+          "title": "Listener Scope",
+          "type": "string"
+        },
+        "metrics_path": {
+          "const": "/metrics",
+          "title": "Metrics Path",
+          "type": "string"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelIdentity"
+        },
+        "private_port": {
+          "enum": [
+            8000,
+            8001
+          ],
+          "title": "Private Port",
+          "type": "integer"
+        },
+        "request_logging": {
+          "const": "DISABLED",
+          "title": "Request Logging",
+          "type": "string"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeIdentity"
+        },
+        "serving_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        }
+      },
+      "required": [
+        "endpoint_id",
+        "container_name",
+        "gpu_ordinal",
+        "private_port",
+        "serving_image",
+        "model",
+        "runtime",
+        "health_path",
+        "generation_path",
+        "metrics_path",
+        "attestation_path",
+        "listener_scope",
+        "request_logging"
+      ],
+      "title": "GcpPrivateCampaignEngine",
+      "type": "object"
+    },
+    "ImageIdentity": {
+      "additionalProperties": false,
+      "description": "An immutable OCI repository digest, never a mutable tag.",
+      "properties": {
+        "reference": {
+          "maxLength": 300,
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,220}@sha256:[0-9a-f]{64}$",
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "title": "ImageIdentity",
+      "type": "object"
+    },
+    "ModelIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "const": "Qwen/Qwen3-8B",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "model_revision",
+        "tokenizer_revision"
+      ],
+      "title": "ModelIdentity",
+      "type": "object"
+    },
+    "RuntimeIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "const": "openai-compatible-routing-execution-v1",
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "adapter_version": {
+          "const": "1.0.0",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "runtime_name": {
+          "const": "vllm",
+          "title": "Runtime Name",
+          "type": "string"
+        },
+        "runtime_version": {
+          "const": "0.26.0",
+          "title": "Runtime Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtime_name",
+        "runtime_version",
+        "adapter_id",
+        "adapter_version"
+      ],
+      "title": "RuntimeIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-private-campaign-startup:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "boot_disk_auto_delete": {
+      "const": true,
+      "title": "Boot Disk Auto Delete",
+      "type": "boolean"
+    },
+    "engines": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/GcpPrivateCampaignEngine"
+        },
+        {
+          "$ref": "#/$defs/GcpPrivateCampaignEngine"
+        }
+      ],
+      "title": "Engines",
+      "type": "array"
+    },
+    "no_public_inference": {
+      "const": true,
+      "title": "No Public Inference",
+      "type": "boolean"
+    },
+    "provider_max_runtime_delete": {
+      "const": true,
+      "title": "Provider Max Runtime Delete",
+      "type": "boolean"
+    },
+    "runner_image": {
+      "$ref": "#/$defs/ImageIdentity"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-private-campaign-startup.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Source Commit",
+      "type": "string"
+    },
+    "startup_adapter_id": {
+      "const": "inferdrome.gcp-private-vllm-startup-v2",
+      "title": "Startup Adapter Id",
+      "type": "string"
+    },
+    "startup_adapter_version": {
+      "const": "1.0.0",
+      "title": "Startup Adapter Version",
+      "type": "string"
+    },
+    "startup_kind": {
+      "const": "two_private_vllm_engines",
+      "title": "Startup Kind",
+      "type": "string"
+    },
+    "startup_payload_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Startup Payload Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "startup_kind",
+    "source_commit",
+    "runner_image",
+    "engines",
+    "startup_adapter_id",
+    "startup_adapter_version",
+    "no_public_inference",
+    "boot_disk_auto_delete",
+    "provider_max_runtime_delete",
+    "startup_payload_id"
+  ],
+  "title": "GcpPrivateCampaignStartupPayload",
+  "type": "object"
+}

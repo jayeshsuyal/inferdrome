@@ -1,0 +1,601 @@
+{
+  "$defs": {
+    "GcpPrivateCampaignBootImage": {
+      "additionalProperties": false,
+      "description": "One immutable boot-image identity, not a family or tag.",
+      "properties": {
+        "boot_image_identity": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Boot Image Identity",
+          "type": "string"
+        },
+        "image_ref": {
+          "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/images/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "title": "Image Ref",
+          "type": "string"
+        },
+        "provider_image_id": {
+          "maximum": 10000000000000000000,
+          "minimum": 1,
+          "title": "Provider Image Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "image_ref",
+        "provider_image_id",
+        "boot_image_identity"
+      ],
+      "title": "GcpPrivateCampaignBootImage",
+      "type": "object"
+    },
+    "GcpPrivateCampaignOwnershipLabels": {
+      "additionalProperties": false,
+      "description": "Immutable labels used for exact ownership, never hostname inference.",
+      "properties": {
+        "controller_id": {
+          "pattern": "^pcctl-[a-z0-9]{8,24}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_private_campaign_v2",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "ownership_nonce": {
+          "pattern": "^[a-z0-9]{16,32}$",
+          "title": "Ownership Nonce",
+          "type": "string"
+        },
+        "role": {
+          "const": "two-engine-precampaign",
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "managed_by",
+        "role",
+        "controller_id",
+        "ownership_nonce"
+      ],
+      "title": "GcpPrivateCampaignOwnershipLabels",
+      "type": "object"
+    },
+    "GcpPrivateCampaignProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "boot_disk_name": {
+          "pattern": "^inferdrome-pc-[a-z0-9]{8,24}-boot$",
+          "title": "Boot Disk Name",
+          "type": "string"
+        },
+        "boot_image": {
+          "$ref": "#/$defs/GcpPrivateCampaignBootImage"
+        },
+        "cleanup_horizon_seconds": {
+          "maximum": 86400,
+          "minimum": 60,
+          "title": "Cleanup Horizon Seconds",
+          "type": "integer"
+        },
+        "instance_name": {
+          "pattern": "^inferdrome-pc-[a-z0-9]{8,24}$",
+          "title": "Instance Name",
+          "type": "string"
+        },
+        "max_runtime_seconds": {
+          "maximum": 86400,
+          "minimum": 60,
+          "title": "Max Runtime Seconds",
+          "type": "integer"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelIdentity"
+        },
+        "ownership_labels": {
+          "$ref": "#/$defs/GcpPrivateCampaignOwnershipLabels"
+        },
+        "proposal_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Proposal Id",
+          "type": "string"
+        },
+        "proposal_kind": {
+          "const": "gcp_private_two_a100_precampaign",
+          "title": "Proposal Kind",
+          "type": "string"
+        },
+        "quote": {
+          "$ref": "#/$defs/GcpPrivateCampaignQuote"
+        },
+        "request_ids": {
+          "$ref": "#/$defs/GcpPrivateCampaignRequestIds"
+        },
+        "routing": {
+          "$ref": "#/$defs/GcpPrivateCampaignRoutingBinding"
+        },
+        "runner_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeIdentity"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-private-campaign-proposal.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "serving_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        },
+        "source_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Source Commit",
+          "type": "string"
+        },
+        "startup_payload_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Startup Payload Digest",
+          "type": "string"
+        },
+        "topology": {
+          "$ref": "#/$defs/GcpPrivateCampaignTopology"
+        }
+      },
+      "required": [
+        "schema_version",
+        "proposal_kind",
+        "source_commit",
+        "topology",
+        "ownership_labels",
+        "instance_name",
+        "boot_disk_name",
+        "boot_image",
+        "runner_image",
+        "serving_image",
+        "model",
+        "runtime",
+        "startup_payload_digest",
+        "routing",
+        "quote",
+        "max_runtime_seconds",
+        "cleanup_horizon_seconds",
+        "request_ids",
+        "proposal_id"
+      ],
+      "title": "GcpPrivateCampaignProposal",
+      "type": "object"
+    },
+    "GcpPrivateCampaignQuote": {
+      "additionalProperties": false,
+      "description": "Human-reviewed controller estimate, explicitly not an invoice guarantee.",
+      "properties": {
+        "currency": {
+          "const": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "estimate_only": {
+          "const": true,
+          "title": "Estimate Only",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "quote_id": {
+          "pattern": "^quote-[a-z0-9]{8,32}$",
+          "title": "Quote Id",
+          "type": "string"
+        },
+        "quoted_at": {
+          "maxLength": 32,
+          "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "title": "Quoted At",
+          "type": "string"
+        },
+        "rate_microusd_per_hour": {
+          "maximum": 1000000000000,
+          "minimum": 1,
+          "title": "Rate Microusd Per Hour",
+          "type": "integer"
+        },
+        "usd_cap_microusd": {
+          "maximum": 1000000000000,
+          "minimum": 1,
+          "title": "Usd Cap Microusd",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "quote_id",
+        "quoted_at",
+        "expires_at",
+        "currency",
+        "rate_microusd_per_hour",
+        "usd_cap_microusd",
+        "estimate_only"
+      ],
+      "title": "GcpPrivateCampaignQuote",
+      "type": "object"
+    },
+    "GcpPrivateCampaignRequestIds": {
+      "additionalProperties": false,
+      "description": "Caller-supplied idempotency keys for the exact resource operations.",
+      "properties": {
+        "boot_disk_delete_request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Boot Disk Delete Request Id",
+          "type": "string"
+        },
+        "create_request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Create Request Id",
+          "type": "string"
+        },
+        "delete_request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Delete Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "create_request_id",
+        "delete_request_id",
+        "boot_disk_delete_request_id"
+      ],
+      "title": "GcpPrivateCampaignRequestIds",
+      "type": "object"
+    },
+    "GcpPrivateCampaignRoutingBinding": {
+      "additionalProperties": false,
+      "description": "The fixed R1 workload/fault inputs consumed by the existing PR-B runner.",
+      "properties": {
+        "campaign_id": {
+          "const": "routing-campaign-v1",
+          "title": "Campaign Id",
+          "type": "string"
+        },
+        "evidence_destination_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Evidence Destination Sha256",
+          "type": "string"
+        },
+        "execution_id": {
+          "const": "routing-execution-v1",
+          "title": "Execution Id",
+          "type": "string"
+        },
+        "fault_schedule_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Fault Schedule Sha256",
+          "type": "string"
+        },
+        "plan_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Plan Sha256",
+          "type": "string"
+        },
+        "policy_set_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Policy Set Sha256",
+          "type": "string"
+        },
+        "request_denominator": {
+          "const": 6,
+          "title": "Request Denominator",
+          "type": "integer"
+        },
+        "selected_workload_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Selected Workload Sha256",
+          "type": "string"
+        },
+        "source_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Source Commit",
+          "type": "string"
+        },
+        "trace_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Trace Sha256",
+          "type": "string"
+        },
+        "trial_plan_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Trial Plan Sha256",
+          "type": "string"
+        },
+        "workload_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Workload Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution_id",
+        "source_commit",
+        "campaign_id",
+        "plan_sha256",
+        "trace_sha256",
+        "fault_schedule_sha256",
+        "trial_plan_sha256",
+        "policy_set_sha256",
+        "workload_sha256",
+        "selected_workload_sha256",
+        "request_denominator",
+        "evidence_destination_sha256"
+      ],
+      "title": "GcpPrivateCampaignRoutingBinding",
+      "type": "object"
+    },
+    "GcpPrivateCampaignTopology": {
+      "additionalProperties": false,
+      "description": "The one supported same-host two-engine provider profile.",
+      "properties": {
+        "accelerator_count": {
+          "const": 2,
+          "title": "Accelerator Count",
+          "type": "integer"
+        },
+        "accelerator_model": {
+          "const": "NVIDIA A100-SXM4-40GB",
+          "title": "Accelerator Model",
+          "type": "string"
+        },
+        "accelerator_provider_type": {
+          "const": "nvidia-tesla-a100",
+          "title": "Accelerator Provider Type",
+          "type": "string"
+        },
+        "machine_fixed_local_ssd_count": {
+          "const": 2,
+          "default": 2,
+          "title": "Machine Fixed Local Ssd Count",
+          "type": "integer"
+        },
+        "machine_fixed_local_ssd_kind": {
+          "const": "EPHEMERAL_SCRATCH_NVME",
+          "default": "EPHEMERAL_SCRATCH_NVME",
+          "title": "Machine Fixed Local Ssd Kind",
+          "type": "string"
+        },
+        "machine_type": {
+          "const": "a2-highgpu-2g",
+          "title": "Machine Type",
+          "type": "string"
+        },
+        "one_engine_per_endpoint": {
+          "const": true,
+          "title": "One Engine Per Endpoint",
+          "type": "boolean"
+        },
+        "persistent_disk_count": {
+          "const": 0,
+          "title": "Persistent Disk Count",
+          "type": "integer"
+        },
+        "private_network": {
+          "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "title": "Private Network",
+          "type": "string"
+        },
+        "private_subnetwork": {
+          "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "title": "Private Subnetwork",
+          "type": "string"
+        },
+        "project_id": {
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "provider": {
+          "const": "gcp-compute-engine",
+          "title": "Provider",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 5,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+          "title": "Region",
+          "type": "string"
+        },
+        "runner_separate_from_serving": {
+          "const": true,
+          "title": "Runner Separate From Serving",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-private-campaign-topology.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "serving_engine_count": {
+          "const": 2,
+          "title": "Serving Engine Count",
+          "type": "integer"
+        },
+        "topology_kind": {
+          "const": "same_host_two_independent_engines",
+          "title": "Topology Kind",
+          "type": "string"
+        },
+        "zone": {
+          "maxLength": 64,
+          "minLength": 7,
+          "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+          "title": "Zone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "provider",
+        "project_id",
+        "region",
+        "zone",
+        "machine_type",
+        "accelerator_model",
+        "accelerator_provider_type",
+        "accelerator_count",
+        "topology_kind",
+        "runner_separate_from_serving",
+        "serving_engine_count",
+        "one_engine_per_endpoint",
+        "persistent_disk_count",
+        "private_network",
+        "private_subnetwork"
+      ],
+      "title": "GcpPrivateCampaignTopology",
+      "type": "object"
+    },
+    "ImageIdentity": {
+      "additionalProperties": false,
+      "description": "An immutable OCI repository digest, never a mutable tag.",
+      "properties": {
+        "reference": {
+          "maxLength": 300,
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,220}@sha256:[0-9a-f]{64}$",
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "title": "ImageIdentity",
+      "type": "object"
+    },
+    "ModelIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "const": "Qwen/Qwen3-8B",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "model_revision",
+        "tokenizer_revision"
+      ],
+      "title": "ModelIdentity",
+      "type": "object"
+    },
+    "RuntimeIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "const": "openai-compatible-routing-execution-v1",
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "adapter_version": {
+          "const": "1.0.0",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "runtime_name": {
+          "const": "vllm",
+          "title": "Runtime Name",
+          "type": "string"
+        },
+        "runtime_version": {
+          "const": "0.26.0",
+          "title": "Runtime Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtime_name",
+        "runtime_version",
+        "adapter_id",
+        "adapter_version"
+      ],
+      "title": "RuntimeIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-private-campaign-approval:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "External human-record binding; it is verified locally before SDK setup.",
+  "properties": {
+    "approval_kind": {
+      "const": "exact_human_campaign_approval",
+      "title": "Approval Kind",
+      "type": "string"
+    },
+    "approved_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Approved At",
+      "type": "string"
+    },
+    "confirmation": {
+      "const": "AUTHORIZE_GCP_PRIVATE_TWO_A100_PRECAMPAIGN_V2",
+      "title": "Confirmation",
+      "type": "string"
+    },
+    "expires_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "human_approval_record_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$",
+      "title": "Human Approval Record Id",
+      "type": "string"
+    },
+    "proposal": {
+      "$ref": "#/$defs/GcpPrivateCampaignProposal"
+    },
+    "proposal_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Proposal Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-private-campaign-approval.v2",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "approval_kind",
+    "confirmation",
+    "human_approval_record_id",
+    "approved_at",
+    "expires_at",
+    "proposal",
+    "proposal_digest"
+  ],
+  "title": "GcpPrivateCampaignApproval",
+  "type": "object"
+}

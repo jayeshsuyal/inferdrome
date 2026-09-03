@@ -36,6 +36,12 @@ class DigestDomain(StrEnum):
     GCP_COST_CLEANUP_GUARD = "gcp-cost-cleanup-guard-v2"
     GCP_EXECUTION_KILL_SWITCH = "gcp-execution-kill-switch-v2"
     GCP_EXACT_ORPHAN_REPORT = "gcp-exact-orphan-report-v2"
+    # The pre-campaign controller is deliberately a separate contract family
+    # from the frozen one-GPU lifecycle and its v2 supervisory additions.  A
+    # dedicated domain prevents a proposal, approval, startup projection, or
+    # journal event from being replayed as one of those older records.
+    GCP_PRIVATE_CAMPAIGN = "gcp-private-campaign-v2"
+    GCP_PRIVATE_CAMPAIGN_JOURNAL = "gcp-private-campaign-journal-v2"
     DEPLOYMENT_QUALIFICATION = "deployment-qualification-v1"
 
 

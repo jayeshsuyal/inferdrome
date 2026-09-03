@@ -204,12 +204,51 @@ class EvidenceReservation:
             raise ExecutionPackageError(
                 "evidence parent is unavailable or unsafe"
             ) from None
+        return cls._reserve_in_held_parent(
+            destination=selected, parent=parent, destination_name=selected.name
+        )
+
+    @classmethod
+    def reserve_in_parent(
+        cls, parent: SafeDirFD, destination_name: str
+    ) -> EvidenceReservation:
+        """Reserve under an already-held root without reopening its pathname.
+
+        The reservation owns a duplicate descriptor, so its caller can retain
+        the original descriptor for an independent visible-path race check.
+        All staging and publication operations remain relative to the held
+        directory rather than a same-UID-replaceable pathname.
+        """
+
+        if not _SAFE_NAME.fullmatch(destination_name):
+            raise ExecutionPackageError("evidence destination name is invalid")
+        try:
+            parent.assert_open()
+            duplicate = SafeDirFD.from_inherited_fd(parent.fd)
+        except (OSError, SafeDirFSError):
+            raise ExecutionPackageError(
+                "evidence parent is unavailable or unsafe"
+            ) from None
+        return cls._reserve_in_held_parent(
+            destination=parent.path / destination_name,
+            parent=duplicate,
+            destination_name=destination_name,
+        )
+
+    @classmethod
+    def _reserve_in_held_parent(
+        cls,
+        *,
+        destination: Path,
+        parent: SafeDirFD,
+        destination_name: str,
+    ) -> EvidenceReservation:
         stage_name = f".routing-execution-stage-{secrets.token_hex(16)}"
         stage_descriptor: int | None = None
         stage: SafeDirFD | None = None
         try:
             try:
-                os.stat(selected.name, dir_fd=parent.fd, follow_symlinks=False)
+                os.stat(destination_name, dir_fd=parent.fd, follow_symlinks=False)
             except FileNotFoundError:
                 pass
             else:
@@ -227,9 +266,9 @@ class EvidenceReservation:
             os.close(stage_descriptor)
             stage_descriptor = None
             try:
-                os.stat(selected.name, dir_fd=parent.fd, follow_symlinks=False)
+                os.stat(destination_name, dir_fd=parent.fd, follow_symlinks=False)
             except FileNotFoundError:
-                return cls(selected, parent, stage, stage_name)
+                return cls(destination, parent, stage, stage_name)
             raise ExecutionPackageError("evidence destination already exists")
         except BaseException:
             if stage_descriptor is not None:
