@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from inferdrome.qwen3_campaign import qwen3_workload_prompts, qwen3_workload_sha256
@@ -23,10 +24,26 @@ from inferdrome.routing_execution.contracts import (
 from inferdrome.routing_execution.executor import (
     ExecutionError,
     ManualMonotonicClock,
+    SealedRoutingExecution,
     declared_input_transfer_digest,
+    load_config,
+    load_config_bytes,
     run_execution,
+    run_execution_from_bytes,
 )
 from inferdrome.routing_execution.loopback import LoopbackPair
+from inferdrome.routing_execution.stdin_bundle import (
+    MAX_RUNTIME_INPUT_BUNDLE_BYTES,
+    RuntimeInputBundle,
+)
+from inferdrome.routing_execution.transport import (
+    EndpointTransport,
+    UrllibEndpointTransport,
+)
+from inferdrome.routing_execution.tunnel import (
+    IapTunnelMappedTransport,
+    IapTunnelTransportMap,
+)
 from inferdrome.routing_execution.verifier import verify_execution_package
 
 
@@ -34,9 +51,22 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m inferdrome.routing_execution")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="run one admitted two-endpoint execution")
-    run.add_argument("--deployment-config", type=Path, required=True)
-    run.add_argument("--workload", type=Path, required=True)
+    run.add_argument("--deployment-config", type=Path)
+    run.add_argument("--workload", type=Path)
     run.add_argument("--output", type=Path, required=True)
+    run.add_argument(
+        "--iap-transport-map",
+        type=Path,
+        help="ephemeral exact IAP tunnel map; admitted GCP_PRIVATE origins stay sealed",
+    )
+    run.add_argument(
+        "--input-bundle-stdin",
+        action="store_true",
+        help=(
+            "accept the bounded canonical GCP_PRIVATE config, workload, and IAP "
+            "map only through standard input"
+        ),
+    )
     verify = commands.add_parser(
         "verify", help="offline verify a sealed execution package"
     )
@@ -217,6 +247,73 @@ def _demo(output: Path, source_commit: str | None) -> None:
     _emit({"package_path": str(sealed.path), "retained_digest": sealed.retained_digest})
 
 
+def _tunnel_transport_factory(
+    config: RoutingExecutionConfig, transport_map: IapTunnelTransportMap
+) -> Callable[[], EndpointTransport]:
+    origins = transport_map.logical_to_tunnel(config)
+
+    def tunnel_transport_factory() -> EndpointTransport:
+        return IapTunnelMappedTransport(
+            inner=UrllibEndpointTransport(), origins=origins
+        )
+
+    return tunnel_transport_factory
+
+
+def _read_runtime_input_bundle() -> bytes:
+    """Read at most one canonical stdin envelope without echoing its values."""
+
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is None:
+        raise ExecutionError("runtime input bundle is unavailable")
+    try:
+        content = stream.read(MAX_RUNTIME_INPUT_BUNDLE_BYTES + 1)
+    except (OSError, ValueError):
+        raise ExecutionError("runtime input bundle is unavailable") from None
+    if type(content) is not bytes or len(content) > MAX_RUNTIME_INPUT_BUNDLE_BYTES:
+        raise ExecutionError("runtime input bundle is unavailable")
+    return content
+
+
+def _run_from_stdin(arguments: argparse.Namespace) -> SealedRoutingExecution:
+    """Execute the GCP runner-only bounded envelope after local validation."""
+
+    if (
+        arguments.deployment_config is not None
+        or arguments.workload is not None
+        or arguments.iap_transport_map is not None
+    ):
+        raise ExecutionError("runtime input bundle arguments are exclusive")
+    bundle = RuntimeInputBundle.decode(_read_runtime_input_bundle())
+    config = load_config_bytes(bundle.config_bytes)
+    if config.mode != "GCP_PRIVATE" or bundle.iap_transport_map_bytes is None:
+        raise ExecutionError("runtime input bundle is not an admitted GCP input")
+    transport_map = IapTunnelTransportMap.load_bytes(
+        bundle.iap_transport_map_bytes, config=config
+    )
+    return run_execution_from_bytes(
+        bundle.config_bytes,
+        bundle.workload_bytes,
+        arguments.output,
+        transport_factory=_tunnel_transport_factory(config, transport_map),
+    )
+
+
+def _run_from_files(arguments: argparse.Namespace) -> SealedRoutingExecution:
+    """Keep explicit file inputs limited to the existing local loopback path."""
+
+    if arguments.deployment_config is None or arguments.workload is None:
+        raise ExecutionError("execution config and workload are required")
+    config, _ = load_config(arguments.deployment_config)
+    if config.mode != "LOCAL_LOOPBACK" or arguments.iap_transport_map is not None:
+        raise ExecutionError("GCP_PRIVATE execution requires the runner stdin input")
+    return run_execution(
+        arguments.deployment_config,
+        arguments.workload,
+        arguments.output,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Dispatch namespaced bridge commands without printing sensitive inputs."""
 
@@ -224,8 +321,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "run":
-            sealed = run_execution(
-                arguments.deployment_config, arguments.workload, arguments.output
+            sealed = (
+                _run_from_stdin(arguments)
+                if arguments.input_bundle_stdin
+                else _run_from_files(arguments)
             )
             _emit(
                 {

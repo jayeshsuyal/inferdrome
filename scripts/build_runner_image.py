@@ -72,6 +72,7 @@ _VERSION_PATTERN = re.compile(
     r"(?:[.-][0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
 )
 _TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,126}[A-Za-z0-9]$")
+_VLLM_RUNTIME_ROLES = ("private-engine", "cpu-runner-observer")
 
 
 class RunnerImageBuildError(RuntimeError):
@@ -298,21 +299,26 @@ def build_image(
     platform: str = CANONICAL_PLATFORM,
     tag: str | None = None,
     image_kind: str = "runner",
+    runtime_role: str | None = None,
 ) -> tuple[str, ...]:
     if flavor not in {"development", "proof", "release"}:
         raise RunnerImageBuildError("unsupported build flavor")
     if platform != CANONICAL_PLATFORM:
         raise RunnerImageBuildError("runner image target platform must be linux/amd64")
     if image_kind == "runner":
+        if runtime_role is not None:
+            raise RunnerImageBuildError("runner image kind has no runtime role")
         dockerfile = "Dockerfile"
         relevant_inputs = RELEVANT_BUILD_INPUTS
         archive_inputs = ARCHIVE_BUILD_INPUTS
         default_tag = "inferdrome-runner:development"
     elif image_kind == "vllm-benchmark-runner":
+        if runtime_role not in _VLLM_RUNTIME_ROLES:
+            raise RunnerImageBuildError("vLLM runtime role must be explicit")
         dockerfile = "Dockerfile.vllm-benchmark-runner"
         relevant_inputs = VLLM_RELEVANT_BUILD_INPUTS
         archive_inputs = VLLM_ARCHIVE_BUILD_INPUTS
-        default_tag = "inferdrome-vllm-benchmark-runner:development"
+        default_tag = f"inferdrome-vllm-{runtime_role}:development"
     else:
         raise RunnerImageBuildError("unsupported runner image kind")
     selected_tag = default_tag if tag is None else tag
@@ -342,6 +348,8 @@ def build_image(
         "--file",
         dockerfile,
     ]
+    if runtime_role is not None:
+        command.extend(["--build-arg", f"INFERDROME_RUNTIME_ROLE={runtime_role}"])
     if source_commit is not None and package_version is not None:
         command.extend(
             [
@@ -413,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("runner", "vllm-benchmark-runner"),
         default="runner",
     )
+    parser.add_argument("--runtime-role", choices=_VLLM_RUNTIME_ROLES)
     parser.add_argument(
         "--check",
         action="store_true",
@@ -432,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
             platform=arguments.platform,
             tag=arguments.tag,
             image_kind=arguments.image_kind,
+            runtime_role=arguments.runtime_role,
         )
     except RunnerImageBuildError as error:
         print(f"runner image build failed: {error}", file=sys.stderr)

@@ -1,0 +1,154 @@
+{
+  "$id": "urn:inferdrome:gcp-private-campaign-topology:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The one supported same-host two-engine provider profile.",
+  "properties": {
+    "accelerator_count": {
+      "const": 2,
+      "title": "Accelerator Count",
+      "type": "integer"
+    },
+    "accelerator_model": {
+      "const": "NVIDIA A100-SXM4-40GB",
+      "title": "Accelerator Model",
+      "type": "string"
+    },
+    "accelerator_provider_type": {
+      "const": "nvidia-tesla-a100",
+      "title": "Accelerator Provider Type",
+      "type": "string"
+    },
+    "machine_fixed_local_ssd_count": {
+      "const": 2,
+      "default": 2,
+      "title": "Machine Fixed Local Ssd Count",
+      "type": "integer"
+    },
+    "machine_fixed_local_ssd_kind": {
+      "const": "EPHEMERAL_SCRATCH_NVME",
+      "default": "EPHEMERAL_SCRATCH_NVME",
+      "title": "Machine Fixed Local Ssd Kind",
+      "type": "string"
+    },
+    "machine_type": {
+      "const": "a2-highgpu-2g",
+      "title": "Machine Type",
+      "type": "string"
+    },
+    "one_engine_per_endpoint": {
+      "const": true,
+      "title": "One Engine Per Endpoint",
+      "type": "boolean"
+    },
+    "persistent_disk_count": {
+      "const": 0,
+      "title": "Persistent Disk Count",
+      "type": "integer"
+    },
+    "private_network": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/networks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Private Network",
+      "type": "string"
+    },
+    "private_subnetwork": {
+      "pattern": "^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+      "title": "Private Subnetwork",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "provider": {
+      "const": "gcp-compute-engine",
+      "title": "Provider",
+      "type": "string"
+    },
+    "region": {
+      "maxLength": 32,
+      "minLength": 5,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}$",
+      "title": "Region",
+      "type": "string"
+    },
+    "runner_cloud_credentials": {
+      "const": "NONE",
+      "title": "Runner Cloud Credentials",
+      "type": "string"
+    },
+    "runner_colocation": {
+      "const": "SAME_VM_SEPARATE_CPU_CONTAINER",
+      "title": "Runner Colocation",
+      "type": "string"
+    },
+    "runner_docker_socket": {
+      "const": "ABSENT",
+      "title": "Runner Docker Socket",
+      "type": "string"
+    },
+    "runner_gpu_access": {
+      "const": "NONE",
+      "title": "Runner Gpu Access",
+      "type": "string"
+    },
+    "runner_provider_mutation_authority": {
+      "const": "NONE",
+      "title": "Runner Provider Mutation Authority",
+      "type": "string"
+    },
+    "runner_separate_from_serving": {
+      "const": true,
+      "title": "Runner Separate From Serving",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-private-campaign-topology.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "serving_engine_count": {
+      "const": 2,
+      "title": "Serving Engine Count",
+      "type": "integer"
+    },
+    "topology_kind": {
+      "const": "same_host_two_independent_engines",
+      "title": "Topology Kind",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider",
+    "project_id",
+    "region",
+    "zone",
+    "machine_type",
+    "accelerator_model",
+    "accelerator_provider_type",
+    "accelerator_count",
+    "topology_kind",
+    "runner_separate_from_serving",
+    "runner_colocation",
+    "runner_gpu_access",
+    "runner_cloud_credentials",
+    "runner_docker_socket",
+    "runner_provider_mutation_authority",
+    "serving_engine_count",
+    "one_engine_per_endpoint",
+    "persistent_disk_count",
+    "private_network",
+    "private_subnetwork"
+  ],
+  "title": "GcpPrivateCampaignTopology",
+  "type": "object"
+}

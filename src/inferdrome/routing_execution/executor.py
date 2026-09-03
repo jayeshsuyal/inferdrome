@@ -194,12 +194,11 @@ def _strict_json(content: bytes, *, label: str) -> object:
         raise ExecutionError(f"{label} is not valid JSON") from None
 
 
-def load_config(path: Path) -> tuple[RoutingExecutionConfig, bytes]:
-    """Load canonical, source-only execution configuration without a transport."""
+def load_config_bytes(content: bytes) -> RoutingExecutionConfig:
+    """Validate canonical execution configuration already held in memory."""
 
-    content = _read_source(
-        path, label="execution configuration", maximum=_MAX_CONFIG_BYTES
-    )
+    if not 1 <= len(content) <= _MAX_CONFIG_BYTES:
+        raise ExecutionError("execution configuration is unsafe")
     _strict_json(content, label="execution configuration")
     try:
         config = RoutingExecutionConfig.model_validate_json(content)
@@ -207,17 +206,25 @@ def load_config(path: Path) -> tuple[RoutingExecutionConfig, bytes]:
         raise ExecutionError("execution configuration violates its contract") from None
     if canonical_json_bytes(config.model_dump(mode="json")) != content:
         raise ExecutionError("execution configuration is not canonical JSON")
-    return config, content
+    return config
 
 
-def load_workload(
-    path: Path, *, expected_sha256: str
-) -> tuple[tuple[WorkloadRequest, ...], bytes]:
-    """Read six canonical prompt rows, retain them in memory, and bind their hash."""
+def load_config(path: Path) -> tuple[RoutingExecutionConfig, bytes]:
+    """Load canonical, source-only execution configuration without a transport."""
 
     content = _read_source(
-        path, label="execution workload", maximum=_MAX_WORKLOAD_BYTES
+        path, label="execution configuration", maximum=_MAX_CONFIG_BYTES
     )
+    return load_config_bytes(content), content
+
+
+def load_workload_bytes(
+    content: bytes, *, expected_sha256: str
+) -> tuple[WorkloadRequest, ...]:
+    """Validate six canonical prompt rows already held in memory."""
+
+    if not 1 <= len(content) <= _MAX_WORKLOAD_BYTES:
+        raise ExecutionError("execution workload is unsafe")
     if sha256_digest(content) != expected_sha256:
         raise ExecutionError("execution workload digest disagrees")
     if not content.endswith(b"\n"):
@@ -244,7 +251,18 @@ def load_workload(
                 prompt=value["prompt"],
             )
         )
-    return tuple(requests), content
+    return tuple(requests)
+
+
+def load_workload(
+    path: Path, *, expected_sha256: str
+) -> tuple[tuple[WorkloadRequest, ...], bytes]:
+    """Read six canonical prompt rows, retain them in memory, and bind their hash."""
+
+    content = _read_source(
+        path, label="execution workload", maximum=_MAX_WORKLOAD_BYTES
+    )
+    return load_workload_bytes(content, expected_sha256=expected_sha256), content
 
 
 def declared_input_transfer_digest(config: RoutingExecutionConfig) -> str:
@@ -757,16 +775,52 @@ def run_execution(
     transport_factory: Callable[[], EndpointTransport] = UrllibEndpointTransport,
     clock: MonotonicClock | None = None,
     cancel_requested: Callable[[], bool] | None = None,
+    evidence_parent: SafeDirFD | None = None,
 ) -> SealedRoutingExecution:
     """Execute and seal one admitted two-endpoint campaign with no retry path."""
 
-    config, config_bytes = load_config(config_path)
+    config_bytes = _read_source(
+        config_path, label="execution configuration", maximum=_MAX_CONFIG_BYTES
+    )
+    workload_bytes = _read_source(
+        workload_path, label="execution workload", maximum=_MAX_WORKLOAD_BYTES
+    )
+    return run_execution_from_bytes(
+        config_bytes,
+        workload_bytes,
+        output_path,
+        transport_factory=transport_factory,
+        clock=clock,
+        cancel_requested=cancel_requested,
+        evidence_parent=evidence_parent,
+    )
+
+
+def run_execution_from_bytes(
+    config_bytes: bytes,
+    workload_bytes: bytes,
+    output_path: Path,
+    *,
+    transport_factory: Callable[[], EndpointTransport] = UrllibEndpointTransport,
+    clock: MonotonicClock | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+    evidence_parent: SafeDirFD | None = None,
+) -> SealedRoutingExecution:
+    """Execute bounded in-memory inputs without a host prompt-file path.
+
+    This is used by bounded GCP-private runner handoffs. It retains the same
+    canonical/admission, input-transfer, and sealed-package checks as
+    ``run_execution`` while avoiding a mutable controller-host prompt-file
+    surface.
+    """
+
+    config = load_config_bytes(config_bytes)
     try:
         topology = admit_topology(config)
     except TopologyAdmissionError as error:
         raise ExecutionError("execution topology was rejected") from error
-    workload, workload_bytes = load_workload(
-        workload_path, expected_sha256=config.workload.selected_workload_sha256
+    workload = load_workload_bytes(
+        workload_bytes, expected_sha256=config.workload.selected_workload_sha256
     )
     if (
         config.evidence_destination.declared_input_transfer_sha256
@@ -785,7 +839,15 @@ def run_execution(
     )
     # Reserve the create/no-replace output before a transport factory can run.
     try:
-        reservation = EvidenceReservation.reserve(output_path)
+        if evidence_parent is None:
+            reservation = EvidenceReservation.reserve(output_path)
+        else:
+            expected_output = evidence_parent.path / output_path.name
+            if output_path.absolute() != expected_output.absolute():
+                raise ExecutionError("held evidence parent disagrees with output")
+            reservation = EvidenceReservation.reserve_in_parent(
+                evidence_parent, output_path.name
+            )
     except ExecutionPackageError as error:
         raise ExecutionError("evidence destination was rejected") from error
     try:

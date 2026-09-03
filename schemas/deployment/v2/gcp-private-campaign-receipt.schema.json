@@ -1,0 +1,35 @@
+{
+  "$id": "urn:inferdrome:gcp-private-campaign-receipt:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "collection_mode": {
+      "const": "CREATE_NO_REPLACE_RETRIEVAL",
+      "title": "Collection Mode",
+      "type": "string"
+    },
+    "proposal_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Proposal Id",
+      "type": "string"
+    },
+    "raw_prompt_or_output_retained": {
+      "const": false,
+      "title": "Raw Prompt Or Output Retained",
+      "type": "boolean"
+    },
+    "retained_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Retained Digest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "proposal_id",
+    "retained_digest",
+    "collection_mode",
+    "raw_prompt_or_output_retained"
+  ],
+  "title": "GcpPrivateCampaignEvidenceReceipt",
+  "type": "object"
+}

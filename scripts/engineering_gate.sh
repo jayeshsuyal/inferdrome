@@ -68,6 +68,7 @@ bash -n scripts/run_kubernetes_mock_e2e.sh
 "$inferdrome_python" -m py_compile scripts/generate_gcp_execution_contracts.py
 "$inferdrome_python" -m py_compile scripts/generate_gcp_supervisor_contracts.py
 "$inferdrome_python" -m py_compile scripts/gcp_guarded_lifecycle.py
+"$inferdrome_python" -m py_compile scripts/gcp_private_campaign_v2.py
 "$inferdrome_python" -m py_compile scripts/runner_smoke.py
 "$inferdrome_python" -m py_compile scripts/build_runner_image.py
 "$inferdrome_python" -m py_compile scripts/qwen3_gpu_capture.py

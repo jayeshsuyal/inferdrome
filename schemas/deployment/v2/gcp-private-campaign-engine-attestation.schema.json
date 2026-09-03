@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "ImageIdentity": {
+      "additionalProperties": false,
+      "description": "An immutable OCI repository digest, never a mutable tag.",
+      "properties": {
+        "reference": {
+          "maxLength": 300,
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,220}@sha256:[0-9a-f]{64}$",
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "title": "ImageIdentity",
+      "type": "object"
+    },
+    "ModelIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "const": "Qwen/Qwen3-8B",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "const": "b968826d9c46dd6066d109eabc6255188de91218",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "model_revision",
+        "tokenizer_revision"
+      ],
+      "title": "ModelIdentity",
+      "type": "object"
+    },
+    "RuntimeIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "const": "openai-compatible-routing-execution-v1",
+          "title": "Adapter Id",
+          "type": "string"
+        },
+        "adapter_version": {
+          "const": "1.0.0",
+          "title": "Adapter Version",
+          "type": "string"
+        },
+        "runtime_name": {
+          "const": "vllm",
+          "title": "Runtime Name",
+          "type": "string"
+        },
+        "runtime_version": {
+          "const": "0.26.0",
+          "title": "Runtime Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtime_name",
+        "runtime_version",
+        "adapter_id",
+        "adapter_version"
+      ],
+      "title": "RuntimeIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-private-engine-attestation:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One private engine's bounded, independently observable runtime identity.\n\nStock OpenAI-compatible health and metrics responses do not identify a\ncontainer image or GPU ordinal.  The pinned vLLM-compatible adapter must\ntherefore expose this small private attestation contract before Inferdrome\ncan claim the endpoint-to-engine mapping needed for campaign admission.",
+  "properties": {
+    "adapter_source_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Adapter Source Sha256",
+      "type": "string"
+    },
+    "container_name": {
+      "enum": [
+        "inferdrome-engine-a",
+        "inferdrome-engine-b"
+      ],
+      "title": "Container Name",
+      "type": "string"
+    },
+    "endpoint_id": {
+      "enum": [
+        "endpoint-a",
+        "endpoint-b"
+      ],
+      "title": "Endpoint Id",
+      "type": "string"
+    },
+    "gpu_ordinal": {
+      "enum": [
+        0,
+        1
+      ],
+      "title": "Gpu Ordinal",
+      "type": "integer"
+    },
+    "listener_scope": {
+      "const": "PRIVATE_VPC_ONLY",
+      "title": "Listener Scope",
+      "type": "string"
+    },
+    "model": {
+      "$ref": "#/$defs/ModelIdentity"
+    },
+    "model_snapshot_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Model Snapshot Sha256",
+      "type": "string"
+    },
+    "private_port": {
+      "enum": [
+        8000,
+        8001
+      ],
+      "title": "Private Port",
+      "type": "integer"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeIdentity"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-private-engine-attestation.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "serving_image": {
+      "$ref": "#/$defs/ImageIdentity"
+    },
+    "startup_payload_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Startup Payload Digest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "endpoint_id",
+    "container_name",
+    "gpu_ordinal",
+    "private_port",
+    "serving_image",
+    "model",
+    "runtime",
+    "startup_payload_digest",
+    "adapter_source_sha256",
+    "model_snapshot_sha256",
+    "listener_scope"
+  ],
+  "title": "GcpPrivateCampaignEngineAttestation",
+  "type": "object"
+}

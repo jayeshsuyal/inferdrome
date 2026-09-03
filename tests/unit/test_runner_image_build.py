@@ -297,6 +297,7 @@ def test_vllm_runner_proof_build_uses_specialized_archive_and_dockerfile(
     command = builder.build_image(
         flavor="proof",
         image_kind="vllm-benchmark-runner",
+        runtime_role="cpu-runner-observer",
         tag="inferdrome-vllm-runner:test",
     )
 
@@ -306,8 +307,40 @@ def test_vllm_runner_proof_build_uses_specialized_archive_and_dockerfile(
     assert dockerfile_path.parent == Path(command[-1])
     assert dockerfile_bytes_during_build == [b"archived Dockerfile"]
     assert f"SOURCE_REPOSITORY_COMMIT={source_commit}" in command
+    assert "INFERDROME_RUNTIME_ROLE=cpu-runner-observer" in command
     assert docker_commands == [list(command)]
     assert captures[0][0:2] == ("git", "status")
+
+
+def test_vllm_role_build_requires_one_explicit_role_without_docker() -> None:
+    with pytest.raises(builder.RunnerImageBuildError, match="runtime role"):
+        builder.build_image(image_kind="vllm-benchmark-runner")
+
+
+def test_vllm_role_builds_bind_distinct_reproducible_config_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(builder.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        builder,
+        "_run_docker_build",
+        lambda command: commands.append(command),
+    )
+
+    engine = builder.build_image(
+        image_kind="vllm-benchmark-runner",
+        runtime_role="private-engine",
+    )
+    runner = builder.build_image(
+        image_kind="vllm-benchmark-runner",
+        runtime_role="cpu-runner-observer",
+    )
+
+    assert "INFERDROME_RUNTIME_ROLE=private-engine" in engine
+    assert "INFERDROME_RUNTIME_ROLE=cpu-runner-observer" in runner
+    assert engine != runner
+    assert len(commands) == 2
 
 
 def test_specialized_proof_context_is_exact_allowlist() -> None:

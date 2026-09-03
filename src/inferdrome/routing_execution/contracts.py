@@ -96,6 +96,18 @@ class ImageIdentity(ExecutionModel):
     ]
 
 
+def oci_content_digest(image: ImageIdentity) -> str:
+    """Return the immutable SHA-256 content digest from a pinned OCI reference.
+
+    Repository names are transport locations, not a role-separation boundary:
+    two different repositories can point at the same manifest/content digest.
+    Callers that need distinct OCI roles must compare this value rather than the
+    complete ``repository@sha256:...`` reference.
+    """
+
+    return image.reference.rsplit("@", maxsplit=1)[1]
+
+
 class ModelIdentity(ExecutionModel):
     model_id: Literal["Qwen/Qwen3-8B"]
     model_revision: Literal["b968826d9c46dd6066d109eabc6255188de91218"]

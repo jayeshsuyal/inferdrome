@@ -1,0 +1,364 @@
+{
+  "$defs": {
+    "GcpPrivateCampaignEndpointReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_id": {
+          "enum": [
+            "endpoint-a",
+            "endpoint-b"
+          ],
+          "title": "Endpoint Id",
+          "type": "string"
+        },
+        "engine_attestation_capability": {
+          "const": "INFERDROME_ENGINE_ATTESTATION_V2",
+          "title": "Engine Attestation Capability",
+          "type": "string"
+        },
+        "engine_attestation_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Engine Attestation Sha256",
+          "type": "string"
+        },
+        "generation_http_status": {
+          "const": 200,
+          "title": "Generation Http Status",
+          "type": "integer"
+        },
+        "gpu_ordinal": {
+          "enum": [
+            0,
+            1
+          ],
+          "title": "Gpu Ordinal",
+          "type": "integer"
+        },
+        "health_capability": {
+          "const": "HTTP_HEALTH_V1",
+          "title": "Health Capability",
+          "type": "string"
+        },
+        "health_http_status": {
+          "const": 200,
+          "title": "Health Http Status",
+          "type": "integer"
+        },
+        "metrics_capability": {
+          "const": "VLLM_PROMETHEUS_V1",
+          "title": "Metrics Capability",
+          "type": "string"
+        },
+        "metrics_metric_name": {
+          "const": "vllm:num_requests_running",
+          "title": "Metrics Metric Name",
+          "type": "string"
+        },
+        "observation_epoch": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Observation Epoch",
+          "type": "integer"
+        },
+        "observed_monotonic_ns": {
+          "minimum": 0,
+          "title": "Observed Monotonic Ns",
+          "type": "integer"
+        },
+        "private_port": {
+          "enum": [
+            8000,
+            8001
+          ],
+          "title": "Private Port",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "endpoint_id",
+        "gpu_ordinal",
+        "private_port",
+        "health_http_status",
+        "generation_http_status",
+        "metrics_metric_name",
+        "health_capability",
+        "metrics_capability",
+        "engine_attestation_capability",
+        "engine_attestation_sha256",
+        "observation_epoch",
+        "observed_monotonic_ns"
+      ],
+      "title": "GcpPrivateCampaignEndpointReadiness",
+      "type": "object"
+    },
+    "GcpPrivateCampaignOwnershipLabels": {
+      "additionalProperties": false,
+      "description": "Immutable labels used for exact ownership, never hostname inference.",
+      "properties": {
+        "controller_id": {
+          "pattern": "^pcctl-[a-z0-9]{8,24}$",
+          "title": "Controller Id",
+          "type": "string"
+        },
+        "inferdrome": {
+          "const": "inferdrome",
+          "title": "Inferdrome",
+          "type": "string"
+        },
+        "managed_by": {
+          "const": "inferdrome_gcp_private_campaign_v2",
+          "title": "Managed By",
+          "type": "string"
+        },
+        "ownership_nonce": {
+          "pattern": "^[a-z0-9]{16,32}$",
+          "title": "Ownership Nonce",
+          "type": "string"
+        },
+        "role": {
+          "const": "two-engine-precampaign",
+          "title": "Role",
+          "type": "string"
+        },
+        "run_lease_id": {
+          "pattern": "^lease-[a-z0-9]{12,24}$",
+          "title": "Run Lease Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inferdrome",
+        "managed_by",
+        "role",
+        "controller_id",
+        "ownership_nonce",
+        "run_lease_id"
+      ],
+      "title": "GcpPrivateCampaignOwnershipLabels",
+      "type": "object"
+    },
+    "GcpPrivateCampaignRunnerAttestation": {
+      "additionalProperties": false,
+      "description": "Bounded self-report from the dedicated local runner adapter.",
+      "properties": {
+        "adapter_source_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Adapter Source Sha256",
+          "type": "string"
+        },
+        "cloud_credentials": {
+          "const": "NONE",
+          "title": "Cloud Credentials",
+          "type": "string"
+        },
+        "container_command_module": {
+          "const": "inferdrome.deployment.gcp_private_runner_adapter",
+          "title": "Container Command Module",
+          "type": "string"
+        },
+        "container_name": {
+          "const": "inferdrome-runner-observer",
+          "title": "Container Name",
+          "type": "string"
+        },
+        "docker_network": {
+          "const": "inferdrome-private-campaign",
+          "title": "Docker Network",
+          "type": "string"
+        },
+        "docker_socket": {
+          "const": "ABSENT",
+          "title": "Docker Socket",
+          "type": "string"
+        },
+        "gpu_access": {
+          "const": "NONE",
+          "title": "Gpu Access",
+          "type": "string"
+        },
+        "private_port": {
+          "const": 8002,
+          "title": "Private Port",
+          "type": "integer"
+        },
+        "provider_mutation_authority": {
+          "const": "NONE",
+          "title": "Provider Mutation Authority",
+          "type": "string"
+        },
+        "runner_command_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runner Command Sha256",
+          "type": "string"
+        },
+        "runner_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        },
+        "schema_version": {
+          "const": "inferdrome.gcp-private-runner-attestation.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "serving_role": {
+          "const": "OBSERVER_ONLY",
+          "title": "Serving Role",
+          "type": "string"
+        },
+        "startup_payload_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Startup Payload Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "container_name",
+        "private_port",
+        "runner_image",
+        "container_command_module",
+        "adapter_source_sha256",
+        "runner_command_sha256",
+        "startup_payload_digest",
+        "docker_network",
+        "gpu_access",
+        "cloud_credentials",
+        "docker_socket",
+        "serving_role",
+        "provider_mutation_authority"
+      ],
+      "title": "GcpPrivateCampaignRunnerAttestation",
+      "type": "object"
+    },
+    "ImageIdentity": {
+      "additionalProperties": false,
+      "description": "An immutable OCI repository digest, never a mutable tag.",
+      "properties": {
+        "reference": {
+          "maxLength": 300,
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,220}@sha256:[0-9a-f]{64}$",
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "title": "ImageIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-private-campaign-readiness:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Observed topology and two capability probes, not a provider payload dump.",
+  "properties": {
+    "accelerator_count": {
+      "const": 2,
+      "title": "Accelerator Count",
+      "type": "integer"
+    },
+    "accelerator_model": {
+      "const": "NVIDIA A100-SXM4-40GB",
+      "title": "Accelerator Model",
+      "type": "string"
+    },
+    "endpoints": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/GcpPrivateCampaignEndpointReadiness"
+        },
+        {
+          "$ref": "#/$defs/GcpPrivateCampaignEndpointReadiness"
+        }
+      ],
+      "title": "Endpoints",
+      "type": "array"
+    },
+    "instance_name": {
+      "pattern": "^inferdrome-pc-[a-z0-9]{8,24}$",
+      "title": "Instance Name",
+      "type": "string"
+    },
+    "machine_type": {
+      "const": "a2-highgpu-2g",
+      "title": "Machine Type",
+      "type": "string"
+    },
+    "observed_at": {
+      "maxLength": 32,
+      "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "ownership_labels": {
+      "$ref": "#/$defs/GcpPrivateCampaignOwnershipLabels"
+    },
+    "private_ipv4": {
+      "maxLength": 15,
+      "title": "Private Ipv4",
+      "type": "string"
+    },
+    "project_id": {
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "proposal_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Proposal Id",
+      "type": "string"
+    },
+    "provider_instance_id": {
+      "pattern": "^[1-9][0-9]{0,18}$",
+      "title": "Provider Instance Id",
+      "type": "string"
+    },
+    "runner": {
+      "$ref": "#/$defs/GcpPrivateCampaignRunnerAttestation"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-private-campaign-readiness.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "startup_payload_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Startup Payload Digest",
+      "type": "string"
+    },
+    "startup_script_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Startup Script Sha256",
+      "type": "string"
+    },
+    "zone": {
+      "maxLength": 64,
+      "minLength": 7,
+      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
+      "title": "Zone",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "proposal_id",
+    "project_id",
+    "zone",
+    "instance_name",
+    "provider_instance_id",
+    "ownership_labels",
+    "private_ipv4",
+    "machine_type",
+    "accelerator_model",
+    "accelerator_count",
+    "startup_payload_digest",
+    "startup_script_sha256",
+    "runner",
+    "endpoints",
+    "observed_at"
+  ],
+  "title": "GcpPrivateCampaignReadiness",
+  "type": "object"
+}

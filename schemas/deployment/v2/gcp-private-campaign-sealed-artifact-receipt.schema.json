@@ -1,0 +1,53 @@
+{
+  "$id": "urn:inferdrome:gcp-private-campaign-sealed-artifact-receipt:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "collection_mode": {
+      "const": "CREATE_NO_REPLACE_RETRIEVAL",
+      "title": "Collection Mode",
+      "type": "string"
+    },
+    "package_name": {
+      "pattern": "^routing-execution-[a-f0-9]{32}$",
+      "title": "Package Name",
+      "type": "string"
+    },
+    "proposal_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Proposal Id",
+      "type": "string"
+    },
+    "readiness_receipt_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Readiness Receipt Sha256",
+      "type": "string"
+    },
+    "retained_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Retained Digest",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-private-campaign-sealed-artifact-receipt.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sealed_artifact_receipt_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Sealed Artifact Receipt Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "proposal_id",
+    "readiness_receipt_sha256",
+    "package_name",
+    "retained_digest",
+    "collection_mode",
+    "sealed_artifact_receipt_sha256"
+  ],
+  "title": "GcpPrivateCampaignSealedArtifactReceipt",
+  "type": "object"
+}
