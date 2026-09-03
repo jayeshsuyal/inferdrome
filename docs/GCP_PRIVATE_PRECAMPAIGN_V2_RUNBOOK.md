@@ -39,8 +39,13 @@ The controller path is exactly three supervised IAP TCP tunnels: one per private
 engine readiness port and one bounded runner control/retrieval port. It never
 directly calls the VM's RFC1918 address, never opens SSH, and never exposes
 public inference. The approved IAP firewall permits only the IAP CIDR to the
-approval-bound tag and ports 8000, 8001, and 8002; the controller principal must
-match the approved IAP principal. The VM uses one non-default,
+approval-bound tag and ports 8000, 8001, and 8002; the controller principal is
+explicitly selected for Compute and every IAP tunnel by service-account
+impersonation, not inferred from an ambient active account. Because Docker also
+publishes those ports on the VM's private interfaces, the operator must verify
+before live execution that no other effective VPC firewall rule allows a
+non-IAP source to reach the approval-bound tag/ports. Inferdrome validates the
+named IAP rule only; it does not claim account-wide firewall enumeration. The VM uses one non-default,
 least-privilege guest service account with no OAuth scopes, blocks inherited
 project SSH keys, and disables OS Login. Each fact is read back before campaign
 admission.
@@ -107,7 +112,8 @@ stale-load/fresh-health fault, routing decisions, and terminal closure.
 The runner seals canonical request-level evidence and immutable package manifest
 under its VM-local evidence directory. The controller retrieves only the fixed
 artifact inventory through the third IAP tunnel, rejects redirects, oversized or
-unsafe archives, re-verifies the package under its held evidence root, and then
+unsafe archives, first binds transfer/config/workload and both endpoint-origin
+hashes to the exact admitted handoff, re-verifies the package under its held evidence root, and then
 publishes the redacted receipts. A runner crash after sealing is recovered by
 re-verifying the existing package, never by silently re-running the workload.
 
@@ -133,6 +139,9 @@ complete label-scoped residual inventory as absent. The two machine-fixed
 scratch disks are expected only while the instance exists; they are not separate
 persistent cleanup targets. A failure, partial inventory, lost journal,
 ambiguous provider response, or mismatch remains `CLEANUP_UNCONFIRMED`.
+Evidence-root faults are retained alongside a recovery result but never prevent
+exact-owned deletion/absence verification; a confirmed cleanup does not turn a
+missing or tampered evidence artifact into a valid receipt.
 
 If launch approval or the normal execution deadline expires after a create
 boundary, use only the separately bound `recover-cleanup` authorization.

@@ -2519,6 +2519,7 @@ class GcpPrivateCampaignTransport(Protocol):
         self,
         request: GcpPrivateCampaignCreateRequest,
         *,
+        admitted_handoff: GcpPrivateCampaignHandoffReceipt,
         timeout_seconds: int,
     ) -> GcpPrivateCampaignEvidenceReceipt: ...
 
@@ -2658,6 +2659,17 @@ class _CleanupTransportFacade:
     def __init__(self, inner: GcpPrivateCampaignTransport) -> None:
         self._inner = inner
 
+    def bind_controller_principal(
+        self, controller_principal: PrecampaignServiceAccount
+    ) -> None:
+        """Keep recovery on the same explicitly approved controller identity."""
+
+        if not isinstance(
+            self._inner, GcpPrivateCampaignControllerPrincipalBindingTransport
+        ):
+            raise GcpPrivateCampaignError("CONTROLLER_PRINCIPAL_BINDING_UNAVAILABLE")
+        self._inner.bind_controller_principal(controller_principal)
+
     def wait_operation(
         self, operation: GcpPrivateCampaignOperation, *, timeout_seconds: int
     ) -> GcpPrivateCampaignOperationResult:
@@ -2770,6 +2782,15 @@ class GcpPrivateCampaignEvidenceRootBindingTransport(Protocol):
     def bind_evidence_root(self, root: SafeDirFD) -> None: ...
 
 
+@runtime_checkable
+class GcpPrivateCampaignControllerPrincipalBindingTransport(Protocol):
+    """A transport that explicitly binds every provider edge to one identity."""
+
+    def bind_controller_principal(
+        self, controller_principal: PrecampaignServiceAccount
+    ) -> None: ...
+
+
 class GcpPrivateCampaignClock(Protocol):
     def now(self) -> datetime: ...
 
@@ -2793,6 +2814,13 @@ class SystemGcpPrivateCampaignClock:
 class GcpPrivateCampaignCleanupOutcome:
     confirmed: bool
     journal_state: GcpPrivateCampaignJournalState
+    # Cleanup confirmation remains the strongest lifecycle result.  A retained
+    # artifact fault is reported separately so recovery never leaves an exact
+    # owned resource running merely because its evidence directory is missing
+    # or has been tampered with.
+    retained_artifact_error: str | None = None
+    cleanup_error: str | None = None
+    journal_error: str | None = None
 
 
 class GcpPrivateCampaignLifecycleController:
@@ -2882,6 +2910,34 @@ class GcpPrivateCampaignLifecycleController:
             raise
         except Exception:
             raise GcpPrivateCampaignError("PREINSERT_GUARD_UNAVAILABLE") from None
+
+    @staticmethod
+    def _bind_controller_principal(
+        transport: object, *, proposal: GcpPrivateCampaignProposal
+    ) -> None:
+        """Resolve the explicit provider identity only after local authority.
+
+        Factories are intentionally lazy, but a factory alone is not a
+        credential boundary: every Compute and IAP edge must be bound to the
+        approval's controller principal before it can observe or mutate a
+        provider resource.  Recovery invokes the same binding under its
+        separate cleanup-only authorization.
+        """
+
+        if not isinstance(
+            transport, GcpPrivateCampaignControllerPrincipalBindingTransport
+        ):
+            raise GcpPrivateCampaignError("CONTROLLER_PRINCIPAL_BINDING_UNAVAILABLE")
+        try:
+            transport.bind_controller_principal(
+                proposal.iap_connectivity.controller_principal
+            )
+        except GcpPrivateCampaignError:
+            raise
+        except Exception:
+            raise GcpPrivateCampaignError(
+                "CONTROLLER_PRINCIPAL_BINDING_UNAVAILABLE"
+            ) from None
 
     @staticmethod
     def _close_transport(transport: object) -> None:
@@ -3070,6 +3126,31 @@ class GcpPrivateCampaignLifecycleController:
             handoff.routing_config_sha256,
         )
 
+    @staticmethod
+    def _assert_handoff_endpoint_identities(
+        routing_config: bytes, handoff: GcpPrivateCampaignHandoffReceipt
+    ) -> None:
+        """Bind runner-reported endpoint hashes to the admitted config bytes."""
+
+        try:
+            from inferdrome.routing_execution.contracts import RoutingExecutionConfig
+            from inferdrome.routing_execution.topology import admit_topology
+
+            topology = admit_topology(
+                RoutingExecutionConfig.model_validate_json(routing_config)
+            )
+        except (ValueError, TypeError):
+            raise GcpPrivateCampaignError("CAMPAIGN_HANDOFF_MISMATCH") from None
+        endpoints = {
+            endpoint.endpoint_id: endpoint.published_identity.origin_sha256
+            for endpoint in topology.endpoints
+        }
+        if endpoints != {
+            "endpoint-a": handoff.endpoint_a_origin_sha256,
+            "endpoint-b": handoff.endpoint_b_origin_sha256,
+        }:
+            raise GcpPrivateCampaignError("CAMPAIGN_HANDOFF_MISMATCH")
+
     def execute(
         self,
         *,
@@ -3165,6 +3246,7 @@ class GcpPrivateCampaignLifecycleController:
         # boundary before the first provider mutation; a factory is not a
         # create authority.
         try:
+            self._bind_controller_principal(transport, proposal=proposal)
             if preflight_root is not None:
                 self._bind_evidence_root(transport, preflight_root)
             self._bind_pre_insert_guard(transport, proposal=proposal, approval=approval)
@@ -3173,10 +3255,18 @@ class GcpPrivateCampaignLifecycleController:
             )
             self._assert_execution_deadline(proposal)
         except GcpPrivateCampaignError:
-            if self._journal.load(proposal)[-1].state != "BLOCKED":
-                self._journal.append(
-                    proposal, state="BLOCKED", occurred_at=self._clock.now()
-                )
+            # A failed principal/guard bind occurs before any provider
+            # mutation, but it may already have started local IAP supervision
+            # while preparing the transport.  Recording ``BLOCKED`` must not
+            # make that teardown conditional: preserve the original boundary
+            # failure and always close the transport.
+            try:
+                if self._journal.load(proposal)[-1].state != "BLOCKED":
+                    self._journal.append(
+                        proposal, state="BLOCKED", occurred_at=self._clock.now()
+                    )
+            finally:
+                self._close_transport(transport)
             raise
         created_or_ambiguous = False
         primary_error: GcpPrivateCampaignError | None = None
@@ -3312,6 +3402,7 @@ class GcpPrivateCampaignLifecycleController:
                 != startup_payload.runner.runner_command_sha256
             ):
                 raise GcpPrivateCampaignError("CAMPAIGN_HANDOFF_MISMATCH")
+            self._assert_handoff_endpoint_identities(config, handoff)
             self._journal.append(
                 proposal,
                 state="CAMPAIGN_HANDED_OFF",
@@ -3320,7 +3411,9 @@ class GcpPrivateCampaignLifecycleController:
             )
             self._assert_execution_deadline(proposal)
             evidence = transport.retrieve_evidence(
-                request, timeout_seconds=self._operation_timeout_seconds
+                request,
+                admitted_handoff=handoff,
+                timeout_seconds=self._operation_timeout_seconds,
             )
             if (
                 evidence.proposal_id != proposal.proposal_id
@@ -3350,16 +3443,38 @@ class GcpPrivateCampaignLifecycleController:
         except Exception:
             primary_error = GcpPrivateCampaignError("CAMPAIGN_OPERATION_FAILED")
         finally:
-            cleanup = self._cleanup_after_transport(
-                proposal=proposal,
-                request=request,
-                transport=transport,
-                may_exist=created_or_ambiguous,
-                exact_resource_binding=exact_resource_binding,
-            )
-            self._close_transport(transport)
+            cleanup: GcpPrivateCampaignCleanupOutcome | None = None
+            cleanup_failure: GcpPrivateCampaignError | None = None
+            try:
+                try:
+                    cleanup = self._cleanup_after_transport(
+                        proposal=proposal,
+                        request=request,
+                        transport=transport,
+                        may_exist=created_or_ambiguous,
+                        exact_resource_binding=exact_resource_binding,
+                    )
+                except GcpPrivateCampaignError as error:
+                    cleanup_failure = error
+                except Exception:
+                    cleanup_failure = GcpPrivateCampaignError(
+                        "CLEANUP_OPERATION_FAILED"
+                    )
+            finally:
+                # This is deliberately nested: a journal failure while
+                # recording cleanup cannot strand locally supervised IAP
+                # processes.  The normal operation error wins over cleanup;
+                # otherwise a direct cleanup failure wins over an unconfirmed
+                # result below.
+                self._close_transport(transport)
         if primary_error is not None:
             raise primary_error
+        if cleanup_failure is not None:
+            raise cleanup_failure
+        if cleanup is None:
+            raise GcpPrivateCampaignError("CLEANUP_OPERATION_FAILED")
+        if cleanup.journal_error is not None:
+            raise GcpPrivateCampaignError("CLEANUP_JOURNAL_RECORD_FAILED")
         if not cleanup.confirmed:
             raise GcpPrivateCampaignError("CLEANUP_UNCONFIRMED")
         if evidence is None:
@@ -3507,12 +3622,22 @@ class GcpPrivateCampaignLifecycleController:
                 proposal, state="CLEANUP_CONFIRMED", occurred_at=self._clock.now()
             )
             return GcpPrivateCampaignCleanupOutcome(True, "CLEANUP_CONFIRMED")
-        except GcpPrivateCampaignError:
-            self._mark_cleanup_unconfirmed(proposal)
-            return GcpPrivateCampaignCleanupOutcome(False, "CLEANUP_UNCONFIRMED")
+        except GcpPrivateCampaignError as error:
+            journal_error = self._record_cleanup_unconfirmed(proposal)
+            return GcpPrivateCampaignCleanupOutcome(
+                False,
+                "CLEANUP_UNCONFIRMED",
+                cleanup_error=error.code,
+                journal_error=journal_error,
+            )
         except Exception:
-            self._mark_cleanup_unconfirmed(proposal)
-            return GcpPrivateCampaignCleanupOutcome(False, "CLEANUP_UNCONFIRMED")
+            journal_error = self._record_cleanup_unconfirmed(proposal)
+            return GcpPrivateCampaignCleanupOutcome(
+                False,
+                "CLEANUP_UNCONFIRMED",
+                cleanup_error="CLEANUP_OPERATION_FAILED",
+                journal_error=journal_error,
+            )
 
     def _ensure_cleanup_intent(self, proposal: GcpPrivateCampaignProposal) -> None:
         state = self._journal.load(proposal)[-1].state
@@ -3588,6 +3713,25 @@ class GcpPrivateCampaignLifecycleController:
                 occurred_at=self._clock.now(),
             )
 
+    def _record_cleanup_unconfirmed(
+        self, proposal: GcpPrivateCampaignProposal
+    ) -> str | None:
+        """Best-effort record of a cleanup failure without masking deletion.
+
+        A local journal is essential evidence, but it cannot be a reason to
+        skip process teardown or exact provider cleanup.  Its separately
+        retained error is deterministic and takes precedence only when the
+        caller did not already have a normal campaign failure to report.
+        """
+
+        try:
+            self._mark_cleanup_unconfirmed(proposal)
+        except GcpPrivateCampaignError as error:
+            return error.code
+        except Exception:
+            return "CLEANUP_JOURNAL_RECORD_FAILED"
+        return None
+
     @staticmethod
     def _assert_inventory(
         inventory: GcpPrivateCampaignOwnedResidualInventory,
@@ -3649,6 +3793,45 @@ class GcpPrivateCampaignLifecycleController:
         ):
             raise GcpPrivateCampaignError("CLEANUP_ABSENCE_UNCONFIRMED")
 
+    @staticmethod
+    def _sealed_artifact_published(
+        receipt_store: GcpPrivateCampaignReceiptStore,
+        proposal: GcpPrivateCampaignProposal,
+    ) -> tuple[bool, str | None]:
+        """Probe retained evidence without letting it gate resource cleanup."""
+
+        try:
+            return receipt_store.has_artifact(proposal), None
+        except GcpPrivateCampaignError as error:
+            return False, error.code
+        except Exception:
+            return False, "SEALED_ARTIFACT_REVERIFY_FAILED"
+
+    @staticmethod
+    def _reverify_sealed_artifact(
+        receipt_store: GcpPrivateCampaignReceiptStore,
+        proposal: GcpPrivateCampaignProposal,
+    ) -> str | None:
+        try:
+            receipt_store.reverify_artifact(proposal)
+        except GcpPrivateCampaignError as error:
+            return error.code
+        except Exception:
+            return "SEALED_ARTIFACT_REVERIFY_FAILED"
+        return None
+
+    @staticmethod
+    def _with_retained_artifact_error(
+        outcome: GcpPrivateCampaignCleanupOutcome, error: str | None
+    ) -> GcpPrivateCampaignCleanupOutcome:
+        return GcpPrivateCampaignCleanupOutcome(
+            confirmed=outcome.confirmed,
+            journal_state=outcome.journal_state,
+            retained_artifact_error=error,
+            cleanup_error=outcome.cleanup_error,
+            journal_error=outcome.journal_error,
+        )
+
     def recover_exact_cleanup(
         self,
         *,
@@ -3669,11 +3852,22 @@ class GcpPrivateCampaignLifecycleController:
             event.state == "SEALED_ARTIFACT_RECEIPT_RECORDED" for event in events
         )
         receipt_store = self._receipt_store()
-        sealed_artifact_published = receipt_store.has_artifact(proposal)
+        # Evidence-root state is intentionally observed but never used as a
+        # precondition for exact-owned cleanup.  A missing, swapped, or
+        # tampered root must not leave a known instance/disk billable.
+        sealed_artifact_published, retained_artifact_error = (
+            self._sealed_artifact_published(receipt_store, proposal)
+        )
         if events[-1].state == "CLEANUP_CONFIRMED":
             if sealed_artifact_recorded or sealed_artifact_published:
-                receipt_store.reverify_artifact(proposal)
-            return GcpPrivateCampaignCleanupOutcome(True, "CLEANUP_CONFIRMED")
+                retained_artifact_error = retained_artifact_error or (
+                    self._reverify_sealed_artifact(receipt_store, proposal)
+                )
+            return GcpPrivateCampaignCleanupOutcome(
+                True,
+                "CLEANUP_CONFIRMED",
+                retained_artifact_error=retained_artifact_error,
+            )
         exact_resource_binding = self._journal.exact_resource_binding(proposal)
         if exact_resource_binding is None:
             # A post-create crash before both immutable provider identities are
@@ -3682,6 +3876,7 @@ class GcpPrivateCampaignLifecycleController:
             # a name/label match without both durable provider-ID bindings.
             transport = self._cleanup_transport_after_authority()
             try:
+                self._bind_controller_principal(transport, proposal=proposal)
                 absence = transport.confirm_exact_absence(
                     request, timeout_seconds=self._operation_timeout_seconds
                 )
@@ -3692,17 +3887,29 @@ class GcpPrivateCampaignLifecycleController:
                     state="CLEANUP_CONFIRMED",
                     occurred_at=self._clock.now(),
                 )
-                return GcpPrivateCampaignCleanupOutcome(True, "CLEANUP_CONFIRMED")
+                return GcpPrivateCampaignCleanupOutcome(
+                    True,
+                    "CLEANUP_CONFIRMED",
+                    retained_artifact_error=retained_artifact_error,
+                )
             except Exception:
-                self._ensure_cleanup_intent(proposal)
-                self._mark_cleanup_unconfirmed(proposal)
-                return GcpPrivateCampaignCleanupOutcome(False, "CLEANUP_UNCONFIRMED")
+                with suppress(Exception):
+                    self._ensure_cleanup_intent(proposal)
+                journal_error = self._record_cleanup_unconfirmed(proposal)
+                return GcpPrivateCampaignCleanupOutcome(
+                    False,
+                    "CLEANUP_UNCONFIRMED",
+                    retained_artifact_error=retained_artifact_error,
+                    cleanup_error="CLEANUP_OPERATION_FAILED",
+                    journal_error=journal_error,
+                )
             finally:
                 self._close_transport(transport)
         # Factory comes after the cleanup-only authority and trusted history;
         # this method has no create/handoff code path.
         transport = self._cleanup_transport_after_authority()
         try:
+            self._bind_controller_principal(transport, proposal=proposal)
             outcome = self._cleanup_after_transport(
                 proposal=proposal,
                 request=request,
@@ -3719,8 +3926,10 @@ class GcpPrivateCampaignLifecycleController:
         if outcome.confirmed and (
             sealed_artifact_recorded or sealed_artifact_published
         ):
-            receipt_store.reverify_artifact(proposal)
-        return outcome
+            retained_artifact_error = retained_artifact_error or (
+                self._reverify_sealed_artifact(receipt_store, proposal)
+            )
+        return self._with_retained_artifact_error(outcome, retained_artifact_error)
 
     def discover_exact_orphans(
         self,
@@ -3735,6 +3944,7 @@ class GcpPrivateCampaignLifecycleController:
         )
         transport = self._cleanup_transport_after_authority()
         try:
+            self._bind_controller_principal(transport, proposal=proposal)
             inventory = transport.discover_exact_owned(
                 proposal, timeout_seconds=self._operation_timeout_seconds
             )
@@ -3771,6 +3981,8 @@ class FakeGcpPrivateCampaignTransport:
     handoff_calls: int = 0
     bound_evidence_root_identity: tuple[int, int] | None = None
     pre_insert_guard: Callable[[], None] | None = None
+    expected_controller_principal: str | None = None
+    bound_controller_principals: list[str] = field(default_factory=list)
     _deleted_instance_request_ids: set[str] = field(default_factory=set)
     _deleted_boot_disk_request_ids: set[str] = field(default_factory=set)
 
@@ -3790,6 +4002,20 @@ class FakeGcpPrivateCampaignTransport:
     def bind_evidence_root(self, root: SafeDirFD) -> None:
         root.assert_open()
         self.bound_evidence_root_identity = (root.device, root.inode)
+
+    def bind_controller_principal(
+        self, controller_principal: PrecampaignServiceAccount
+    ) -> None:
+        if (
+            self.expected_controller_principal is not None
+            and controller_principal != self.expected_controller_principal
+        ):
+            raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_MISMATCH")
+        if self.bound_controller_principals and (
+            self.bound_controller_principals[-1] != controller_principal
+        ):
+            raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_MISMATCH")
+        self.bound_controller_principals.append(controller_principal)
 
     def bind_pre_insert_guard(self, guard: Callable[[], None]) -> None:
         if self.pre_insert_guard is not None:
@@ -3987,9 +4213,19 @@ class FakeGcpPrivateCampaignTransport:
         )
 
     def retrieve_evidence(
-        self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        admitted_handoff: GcpPrivateCampaignHandoffReceipt,
+        timeout_seconds: int,
     ) -> GcpPrivateCampaignEvidenceReceipt:
         del timeout_seconds
+        if (
+            admitted_handoff.proposal_id != request.proposal.proposal_id
+            or admitted_handoff.selected_workload_sha256
+            != request.proposal.routing.selected_workload_sha256
+        ):
+            raise GcpPrivateCampaignTransportError("CAMPAIGN_HANDOFF_MISMATCH")
         return GcpPrivateCampaignEvidenceReceipt(
             proposal_id=request.proposal.proposal_id,
             retained_digest=sha256_digest(b"local-fake-precampaign-evidence-v2"),

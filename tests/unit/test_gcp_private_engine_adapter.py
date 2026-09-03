@@ -119,7 +119,7 @@ def test_private_adapter_builds_bound_attestation_and_has_an_allowlisted_surface
     None
 ):
     arguments = _arguments()
-    value = json.loads(adapter._attestation(arguments))
+    value = json.loads(adapter._attestation(arguments, runtime_version="0.26.0"))
     observed = GcpPrivateCampaignEngineAttestation.model_validate(value)
 
     assert observed.endpoint_id == "endpoint-a"
@@ -128,3 +128,27 @@ def test_private_adapter_builds_bound_attestation_and_has_an_allowlisted_surface
     assert adapter._ATTESTATION_PATH not in adapter._PROXIED_GET_PATHS
     assert {"/health", "/metrics", "/v1/models"} == adapter._PROXIED_GET_PATHS
     assert {"/v1/chat/completions"} == adapter._PROXIED_POST_PATHS
+
+
+def test_adapter_observes_only_the_exact_pinned_vllm_distribution_version() -> None:
+    assert adapter.observed_vllm_version(lambda _: "0.26.0") == "0.26.0"
+
+    with pytest.raises(
+        adapter.EngineAdapterError, match="ENGINE_ADAPTER_RUNTIME_VERSION_MISMATCH"
+    ):
+        adapter.observed_vllm_version(lambda _: "0.26.1")
+
+    def unavailable(_: str) -> str:
+        raise RuntimeError("distribution unavailable")
+
+    with pytest.raises(
+        adapter.EngineAdapterError, match="ENGINE_ADAPTER_RUNTIME_VERSION_UNAVAILABLE"
+    ):
+        adapter.observed_vllm_version(unavailable)
+
+
+def test_adapter_attestation_uses_the_observed_runtime_value() -> None:
+    arguments = _arguments()
+    value = json.loads(adapter._attestation(arguments, runtime_version="0.26.0"))
+
+    assert value["runtime"]["runtime_version"] == "0.26.0"

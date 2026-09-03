@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,9 +20,13 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignTransportError,
     build_gcp_private_campaign_create_request,
 )
+from inferdrome.deployment.gcp_securefs import SafeDirFD
 from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.routing_execution.canonical import sha256_digest
+from inferdrome.routing_execution.executor import ManualMonotonicClock, run_execution
 from inferdrome.routing_execution.stdin_bundle import RuntimeInputBundle
+from inferdrome.routing_execution.verifier import verify_execution_package
+from tests.routing_execution_support import StaticEndpointTransport, write_inputs
 from tests.unit.test_gcp_private_campaign_v2 import _proposal
 
 
@@ -79,6 +85,19 @@ def _attestation(request) -> GcpPrivateCampaignRunnerAttestation:
         docker_socket="ABSENT",
         serving_role="OBSERVER_ONLY",
         provider_mutation_authority="NONE",
+    )
+
+
+def _handoff(request) -> GcpPrivateCampaignHandoffReceipt:
+    return GcpPrivateCampaignHandoffReceipt(
+        proposal_id=request.proposal.proposal_id,
+        routing_config_sha256="sha256:" + ("a" * 64),
+        selected_workload_sha256=request.proposal.routing.selected_workload_sha256,
+        endpoint_a_origin_sha256="sha256:" + ("b" * 64),
+        endpoint_b_origin_sha256="sha256:" + ("c" * 64),
+        routed_after_verified_readiness=True,
+        co_located_freshness_admitted=True,
+        runner_command_sha256=request.startup_payload.runner.runner_command_sha256,
     )
 
 
@@ -186,4 +205,75 @@ def test_runner_retrieval_rejects_redirect_oversize_and_tamper(
     runner.bind_iap_runner_origin("http://127.0.0.1:18002")
 
     with pytest.raises(GcpPrivateCampaignTransportError, match=code):
-        runner.retrieve(request, timeout_seconds=5)
+        runner.retrieve(request, admitted_handoff=_handoff(request), timeout_seconds=5)
+
+
+def test_runner_retrieval_rejects_a_valid_package_from_a_different_handoff(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+    package_root = tmp_path / "source"
+    package_root.mkdir(mode=0o700)
+    config_path, workload_path, _, _ = write_inputs(package_root)
+    sealed = run_execution(
+        config_path,
+        workload_path,
+        package_root / "package",
+        transport_factory=StaticEndpointTransport,
+        clock=ManualMonotonicClock(),
+    )
+    verified = verify_execution_package(sealed.path)
+    archive = io.BytesIO()
+    names = (
+        "executed-manifest.json",
+        "input-transfer-receipt.json",
+        "integrity-manifest.json",
+        "producer-receipt.json",
+    )
+    with tarfile.open(fileobj=archive, mode="w:") as bundle:
+        for name in names:
+            payload = (sealed.path / name).read_bytes()
+            member = tarfile.TarInfo(name)
+            member.mode = 0o400
+            member.uid = 0
+            member.gid = 0
+            member.mtime = 0
+            member.size = len(payload)
+            bundle.addfile(member, io.BytesIO(payload))
+
+    origins = {
+        endpoint.endpoint_id: endpoint.origin_sha256
+        for endpoint in verified.executed_manifest.endpoints
+    }
+    admitted_handoff = GcpPrivateCampaignHandoffReceipt(
+        proposal_id=request.proposal.proposal_id,
+        routing_config_sha256=verified.executed_manifest.config_sha256,
+        selected_workload_sha256=(
+            verified.executed_manifest.workload.selected_workload_sha256
+        ),
+        endpoint_a_origin_sha256="sha256:" + ("f" * 64),
+        endpoint_b_origin_sha256=origins["endpoint-b"],
+        routed_after_verified_readiness=True,
+        co_located_freshness_admitted=True,
+        runner_command_sha256=request.startup_payload.runner.runner_command_sha256,
+    )
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    runner = IapGcpPrivateCampaignRunner(evidence_root, http=_Http([]))
+    root = SafeDirFD.open(evidence_root)
+    try:
+        runner.bind_evidence_root(root)
+    finally:
+        root.close()
+
+    with pytest.raises(
+        GcpPrivateCampaignTransportError, match="EVIDENCE_HANDOFF_BINDING_MISMATCH"
+    ):
+        runner._import_archive(
+            request,
+            archive=archive.getvalue(),
+            retained_digest=verified.report.retained_digest,
+            admitted_handoff=admitted_handoff,
+        )
+
+    assert not list(evidence_root.iterdir())

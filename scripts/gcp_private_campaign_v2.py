@@ -218,6 +218,7 @@ def _recover_cleanup(arguments: argparse.Namespace) -> int:
             "cleanup_confirmed": outcome.confirmed,
             "journal_state": outcome.journal_state,
             "proposal_id": proposal.proposal_id,
+            "retained_artifact_error": outcome.retained_artifact_error,
         }
     )
     return 0 if outcome.confirmed else 2

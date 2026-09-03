@@ -47,9 +47,27 @@ The entrypoint is therefore the adapter Python executable and the CMD begins
 with its module—not `vllm serve`. That adapter is the only component that
 invokes `vllm serve`, exactly once, and it exposes the bounded
 `/inferdrome/v2/engine-attestation` route alongside the allowed private
-vLLM-compatible routes. This PR does not build, publish, or claim the
+vLLM-compatible routes. Before spawning or attesting, it reads the installed
+`vllm` distribution and fails closed unless the observed value is exactly
+`0.26.0`; the attestation emits that observed value rather than a source
+literal. This PR does not build, publish, or claim the
 availability of the required boot image or OCI artifact; a future campaign must
 supply and separately approve those immutable preloaded inputs.
+
+The runner image and startup projection share one numeric execution identity:
+the image creates `/home/vllm` and `/workspace` owned by `2000:0`, declares
+`HOME=/home/vllm`, and startup runs the CPU-only runner as `2000:0` with a
+matching `/home/vllm` tmpfs. This is a local build/startup compatibility
+contract, covered by a static test; it is not a claim that the image has been
+built or run on a GPU host in this PR.
+
+`--publish` makes ports 8000–8002 reachable on the VM's private interfaces.
+The controller verifies one exact IAP ingress rule, but it deliberately does
+not enumerate every effective VPC firewall rule. Before a live campaign, the
+operator must establish that **no other effective ingress rule** admits those
+ports for the approval-bound tag/VM from a non-IAP source. “IAP-only” below
+means the controller transport under that explicit VPC-firewall precondition;
+it is not an account-wide firewall proof supplied by Inferdrome.
 
 The model and tokenizer revisions, serving runtime/adapter identity, startup
 payload, fixed workload/trace/fault/policy inputs, source commit, and evidence
@@ -96,7 +114,11 @@ a transport. The executable path is intentionally separate:
    `maxRunDuration` plus `DELETE`, read back after create and journaled as
    `PROVIDER_BACKSTOP_VERIFIED`. It is not invoice enforcement.
 4. Construct the lazy provider transport only after local approval validation.
-   Preflight provider boot-image, IAP-principal, and IAP-firewall facts, and
+   It resolves the approved controller service account as the effective Compute
+   API identity and constructs every Compute client with that explicit
+   credential; every IAP tunnel argv explicitly selects the same identity via
+   service-account impersonation. It never relies on `gcloud auth list` as an
+   authorization signal. Preflight provider boot-image and IAP-firewall facts, and
    revalidate approval, quote, and execution deadline after every potentially
    slow read and immediately before the GCE insert. The runner image and exact
    command are bound in the startup projection; the controller never starts a
@@ -136,7 +158,8 @@ a transport. The executable path is intentionally separate:
    in its VM-local evidence directory with create-no-replace semantics. The
    controller retrieves only a bounded fixed-inventory tar over IAP, rejects
    redirects, oversize members, links, duplicates, and malformed content, then
-   independently verifies and re-seals it under the held controller evidence
+   independently verifies that its transfer/config/workload/endpoint identities
+   equal the exact admitted handoff before re-sealing it under the held controller evidence
    root. It durably publishes redacted readiness and sealed-artifact receipts;
    recovery reopens and verifies those deterministic artifacts rather than
    trusting process memory.
@@ -164,7 +187,7 @@ IAP/firewall/service-account policy drift, crash windows, idempotency,
   readiness polling and timeout, startup/adapter/model integrity, three-
   container GPU isolation, runner command/attestation binding, 5 ms freshness
   admission, bounded IAP input/retrieval rejection, receipt recovery, residual-disk
-  cleanup, name-replacement refusal, journal-loss recovery, and unconfirmed
+   cleanup, name-replacement refusal, journal-loss recovery, and unconfirmed
   cleanup outcomes. The two-endpoint routing handoff is proved through local
 loopback fixtures using the existing PR-B transport contract.
 

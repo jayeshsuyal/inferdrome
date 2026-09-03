@@ -577,6 +577,70 @@ def test_residual_boot_disk_is_deleted_exactly_or_marked_unconfirmed(
     assert failed_controller._journal.load(proposal)[-1].state == "CLEANUP_UNCONFIRMED"
 
 
+def test_journal_failure_after_cleanup_still_closes_supervised_transport(
+    tmp_path: Path,
+) -> None:
+    proposal, startup = _proposal()
+
+    class ClosingTransport(FakeGcpPrivateCampaignTransport):
+        closed: bool = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    def crash_after_cleanup_confirmation(point: str) -> None:
+        if point == "after-cleanup_confirmed":
+            raise RuntimeError("journal callback failed")
+
+    fake = ClosingTransport()
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=GcpPrivateCampaignJournal(
+            _journal_root(tmp_path), crash_hook=crash_after_cleanup_confirmation
+        ),
+        transport_factory=lambda: fake,
+        clock=_Clock(),
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="CLEANUP_JOURNAL_RECORD_FAILED"):
+        controller.execute(
+            proposal=proposal, approval=_approval(proposal), startup_payload=startup
+        )
+
+    assert fake.closed is True
+
+
+def test_principal_bind_journal_failure_still_closes_supervised_transport(
+    tmp_path: Path,
+) -> None:
+    proposal, startup = _proposal()
+
+    class ClosingTransport(FakeGcpPrivateCampaignTransport):
+        closed: bool = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    def crash_after_blocked(point: str) -> None:
+        if point == "after-blocked":
+            raise RuntimeError("journal callback failed")
+
+    fake = ClosingTransport(expected_controller_principal="different@example.test")
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=GcpPrivateCampaignJournal(
+            _journal_root(tmp_path), crash_hook=crash_after_blocked
+        ),
+        transport_factory=lambda: fake,
+        clock=_Clock(),
+    )
+
+    with pytest.raises(RuntimeError, match="journal callback failed"):
+        controller.execute(
+            proposal=proposal, approval=_approval(proposal), startup_payload=startup
+        )
+
+    assert fake.closed is True
+
+
 def test_cleanup_recovery_is_valid_after_launch_approval_expiry(tmp_path: Path) -> None:
     proposal, startup = _proposal()
     root = _journal_root(tmp_path)
@@ -613,6 +677,71 @@ def test_cleanup_recovery_is_valid_after_launch_approval_expiry(tmp_path: Path) 
     assert outcome.confirmed
     assert fake.create_calls == 0
     assert fake.delete_calls == 1
+
+
+@pytest.mark.parametrize("artifact_state", ("broken", "missing", "tampered"))
+def test_recovery_defers_evidence_root_faults_until_after_exact_cleanup(
+    tmp_path: Path, artifact_state: str
+) -> None:
+    proposal, startup = _proposal()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(mode=0o700)
+    rebound = _reissued_proposal(
+        proposal,
+        routing_overrides={
+            "evidence_destination_sha256": sha256_digest(
+                str(evidence.absolute()).encode("utf-8")
+            )
+        },
+    )
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
+    for state in (
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_SUBMITTED",
+        "CREATED",
+    ):
+        journal.append(rebound, state=state, occurred_at=_Clock().now())
+    journal.append(
+        rebound,
+        state="INSTANCE_IDENTITY_BOUND",
+        occurred_at=_Clock().now(),
+        detail_digest=sha256_digest(b"123456789"),
+    )
+    journal.append(
+        rebound,
+        state="BOOT_DISK_IDENTITY_BOUND",
+        occurred_at=_Clock().now(),
+        detail_digest=sha256_digest(b"246813579"),
+    )
+    if artifact_state in {"broken", "missing"}:
+        evidence.rmdir()
+    if artifact_state == "broken":
+        evidence.write_bytes(b"not-a-directory")
+    elif artifact_state == "tampered":
+        artifact_name = campaign_v2.GcpPrivateCampaignReceiptStore._artifact_name(
+            rebound
+        )
+        (evidence / artifact_name).write_bytes(b"{}")
+
+    fake = FakeGcpPrivateCampaignTransport(created=True, boot_disk_present=True)
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: fake,
+        receipt_root=evidence,
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
+    )
+
+    outcome = controller.recover_exact_cleanup(
+        proposal=rebound,
+        authorization=_cleanup_authorization(rebound),
+        startup_payload=startup,
+    )
+
+    assert outcome.confirmed is True
+    assert outcome.retained_artifact_error is not None
+    assert fake.delete_calls == 1
+    assert fake.created is False
 
 
 def test_journal_rejects_symlinked_history_without_provider_factory(
@@ -679,6 +808,97 @@ def test_startup_or_approval_tamper_never_reaches_factory(tmp_path: Path) -> Non
     assert calls == 0
 
 
+def test_controller_principal_binding_follows_local_approval_and_blocks_mismatch(
+    tmp_path: Path,
+) -> None:
+    proposal, startup = _proposal()
+    transport = FakeGcpPrivateCampaignTransport(
+        expected_controller_principal=(
+            "other-controller@inferdrome-lab.iam.gserviceaccount.com"
+        )
+    )
+    factory_calls = 0
+
+    def factory() -> FakeGcpPrivateCampaignTransport:
+        nonlocal factory_calls
+        factory_calls += 1
+        return transport
+
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=GcpPrivateCampaignJournal(_journal_root(tmp_path)),
+        transport_factory=factory,
+        clock=_Clock(),
+    )
+    invalid_approval = _approval(proposal).model_copy(
+        update={"proposal_digest": "sha256:" + ("f" * 64)}
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="LOCAL_CONTRACT_INVALID"):
+        controller.execute(
+            proposal=proposal,
+            approval=invalid_approval,
+            startup_payload=startup,
+        )
+    assert factory_calls == 0
+    assert transport.bound_controller_principals == []
+
+    with pytest.raises(GcpPrivateCampaignError, match="CONTROLLER_PRINCIPAL_MISMATCH"):
+        controller.execute(
+            proposal=proposal, approval=_approval(proposal), startup_payload=startup
+        )
+    assert factory_calls == 1
+    assert transport.create_calls == 0
+
+
+def test_cleanup_recovery_binds_the_same_approved_controller_principal(
+    tmp_path: Path,
+) -> None:
+    proposal, startup = _proposal()
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
+    for state in (
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_SUBMITTED",
+        "CREATED",
+    ):
+        journal.append(proposal, state=state, occurred_at=_Clock().now())
+    journal.append(
+        proposal,
+        state="INSTANCE_IDENTITY_BOUND",
+        occurred_at=_Clock().now(),
+        detail_digest=sha256_digest(b"123456789"),
+    )
+    journal.append(
+        proposal,
+        state="BOOT_DISK_IDENTITY_BOUND",
+        occurred_at=_Clock().now(),
+        detail_digest=sha256_digest(b"246813579"),
+    )
+    cleanup = FakeGcpPrivateCampaignTransport(
+        created=True,
+        boot_disk_present=True,
+        expected_controller_principal=proposal.iap_connectivity.controller_principal,
+    )
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("recovery must use cleanup transport only")
+        ),
+        cleanup_transport_factory=lambda: _CleanupTransportFacade(cleanup),
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
+    )
+
+    outcome = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=_cleanup_authorization(proposal),
+        startup_payload=startup,
+    )
+
+    assert outcome.confirmed is True
+    assert cleanup.bound_controller_principals == [
+        proposal.iap_connectivity.controller_principal
+    ]
+
+
 def test_durable_backstop_survives_crash_before_factory(tmp_path: Path) -> None:
     proposal, startup = _proposal()
     root = _journal_root(tmp_path)
@@ -729,6 +949,33 @@ def test_topology_drift_blocks_handoff_then_attempts_exact_cleanup(
     assert fake.handoff_calls == 0
     assert fake.delete_calls == 1
     assert controller._journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
+
+
+def test_handoff_endpoint_hashes_must_match_the_admitted_config_before_retrieval(
+    tmp_path: Path,
+) -> None:
+    proposal, startup = _proposal()
+
+    class WrongEndpointHandoff(FakeGcpPrivateCampaignTransport):
+        def handoff_campaign(self, *args: object, **kwargs: object) -> object:
+            receipt = super().handoff_campaign(*args, **kwargs)  # type: ignore[arg-type]
+            return receipt.model_copy(
+                update={"endpoint_a_origin_sha256": "sha256:" + ("f" * 64)}
+            )
+
+    fake = WrongEndpointHandoff()
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=GcpPrivateCampaignJournal(_journal_root(tmp_path)),
+        transport_factory=lambda: fake,
+        clock=_Clock(),
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="CAMPAIGN_HANDOFF_MISMATCH"):
+        controller.execute(
+            proposal=proposal, approval=_approval(proposal), startup_payload=startup
+        )
+
+    assert fake.delete_calls == 1
 
 
 def test_cleanup_refuses_same_name_replacement_with_a_new_provider_identity(
@@ -1194,14 +1441,13 @@ def test_crash_after_artifact_receipt_recovery_reverifies_durable_receipt(
     # cleanup-only recovery must reopen and reject a same-user tamper even
     # after the original run recorded confirmed absence.
     artifact.write_bytes(b"{}")
-    with pytest.raises(
-        GcpPrivateCampaignError, match="SEALED_ARTIFACT_REVERIFY_FAILED"
-    ):
-        recovery.recover_exact_cleanup(
-            proposal=rebound,
-            authorization=_cleanup_authorization(rebound),
-            startup_payload=startup,
-        )
+    tampered_outcome = recovery.recover_exact_cleanup(
+        proposal=rebound,
+        authorization=_cleanup_authorization(rebound),
+        startup_payload=startup,
+    )
+    assert tampered_outcome.confirmed is True
+    assert tampered_outcome.retained_artifact_error is not None
 
 
 def test_recovery_uses_a_no_create_transport_surface(tmp_path: Path) -> None:

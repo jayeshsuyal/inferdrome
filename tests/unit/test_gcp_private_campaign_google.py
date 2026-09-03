@@ -13,6 +13,7 @@ import pytest
 import inferdrome.deployment.gcp_private_campaign_google as campaign_google
 from inferdrome.deployment.gcp_private_campaign_google import (
     GoogleGcpPrivateCampaignTransport,
+    _ComputeCredentialBinding,
     _IapTunnelEndpoints,
     _metric_is_present,
     render_gcp_private_campaign_engine_argv,
@@ -157,7 +158,7 @@ class _RecordingRunner(_Runner):
     def __init__(self) -> None:
         super().__init__()
         self.handoff_calls: list[tuple[bytes, bytes, int]] = []
-        self.retrieve_calls: list[int] = []
+        self.retrieve_calls: list[tuple[GcpPrivateCampaignHandoffReceipt, int]] = []
 
     def handoff(
         self,
@@ -180,9 +181,13 @@ class _RecordingRunner(_Runner):
         )
 
     def retrieve(
-        self, request: Any, *, timeout_seconds: int
+        self,
+        request: Any,
+        *,
+        admitted_handoff: GcpPrivateCampaignHandoffReceipt,
+        timeout_seconds: int,
     ) -> GcpPrivateCampaignEvidenceReceipt:
-        self.retrieve_calls.append(timeout_seconds)
+        self.retrieve_calls.append((admitted_handoff, timeout_seconds))
         return GcpPrivateCampaignEvidenceReceipt(
             proposal_id=request.proposal.proposal_id,
             retained_digest="sha256:" + ("c" * 64),
@@ -214,6 +219,20 @@ class _IapTunnels:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _CredentialResolver:
+    def __init__(self, *, effective_principal: str) -> None:
+        self.effective_principal = effective_principal
+        self.calls: list[str] = []
+        self.credential = object()
+
+    def resolve(self, controller_principal: str) -> _ComputeCredentialBinding:
+        self.calls.append(controller_principal)
+        return _ComputeCredentialBinding(
+            credentials=self.credential,
+            effective_principal=self.effective_principal,
+        )
 
 
 class _InsertCounter:
@@ -417,7 +436,91 @@ def _adapter(
     adapter.bind_pre_insert_guard(
         pre_insert_guard if callable(pre_insert_guard) else lambda: None
     )
+    proposal, _ = _proposal()
+    adapter.bind_controller_principal(proposal.iap_connectivity.controller_principal)
     return adapter
+
+
+def test_compute_clients_are_constructed_only_with_the_approved_identity() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    constructors: list[tuple[str, object]] = []
+
+    class _LazySdk:
+        @staticmethod
+        def InstancesClient(*, credentials: object) -> _InsertCounter:
+            constructors.append(("instances", credentials))
+            return _InsertCounter()
+
+        @staticmethod
+        def DisksClient(*, credentials: object) -> _DiskRows:
+            constructors.append(("disks", credentials))
+            return _DiskRows(_Rows())
+
+        @staticmethod
+        def ImagesClient(*, credentials: object) -> _NoImages:
+            constructors.append(("images", credentials))
+            return _NoImages()
+
+        @staticmethod
+        def FirewallsClient(*, credentials: object) -> _NoFirewalls:
+            constructors.append(("firewalls", credentials))
+            return _NoFirewalls()
+
+    resolver = _CredentialResolver(
+        effective_principal=proposal.iap_connectivity.controller_principal
+    )
+    adapter = GoogleGcpPrivateCampaignTransport(
+        sdk=_LazySdk,
+        credential_resolver=resolver,
+        runner=_Runner(),
+        iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
+    )
+    adapter.bind_pre_insert_guard(lambda: None)
+
+    with pytest.raises(GcpPrivateCampaignError, match="CONTROLLER_PRINCIPAL_UNBOUND"):
+        adapter.create_instance(
+            request,
+            request_id=proposal.request_ids.create_request_id,
+            timeout_seconds=1,
+        )
+    assert resolver.calls == []
+    assert constructors == []
+
+    adapter.bind_controller_principal(proposal.iap_connectivity.controller_principal)
+
+    assert resolver.calls == [proposal.iap_connectivity.controller_principal]
+    assert [name for name, _ in constructors] == [
+        "instances",
+        "disks",
+        "images",
+        "firewalls",
+    ]
+    assert all(credential is resolver.credential for _, credential in constructors)
+
+
+def test_controller_principal_mismatch_never_constructs_or_calls_compute_clients() -> (
+    None
+):
+    proposal, _ = _proposal()
+    resolver = _CredentialResolver(
+        effective_principal="other-controller@inferdrome-lab.iam.gserviceaccount.com"
+    )
+    adapter = GoogleGcpPrivateCampaignTransport(
+        sdk=object(),
+        credential_resolver=resolver,
+        runner=_Runner(),
+        iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="CONTROLLER_PRINCIPAL_MISMATCH"):
+        adapter.bind_controller_principal(
+            proposal.iap_connectivity.controller_principal
+        )
+
+    assert resolver.calls == [proposal.iap_connectivity.controller_principal]
 
 
 def test_projection_contains_exact_two_gpu_private_profile_and_semantic_startup() -> (
@@ -506,12 +609,25 @@ def test_runner_argv_is_cpu_only_and_has_no_engine_or_host_authority() -> None:
     assert "docker.sock" not in "\0".join(argv)
     assert startup.preloaded_artifacts.model_snapshot_path not in "\0".join(argv)
     assert argv[argv.index("--network") + 1] == "inferdrome-private-campaign"
+    assert argv[argv.index("--user") + 1] == "2000:0"
+    assert "/home/vllm:rw,nosuid,nodev,size=1g" in argv
     assert argv[argv.index("--entrypoint") + 1] == "/opt/inferdrome-runtime/bin/python"
     image_index = argv.index(proposal.runner_image.reference)
     assert argv[image_index + 1 : image_index + 4] == (
         "-m",
         "inferdrome.deployment.gcp_private_runner_adapter",
         "--container-name",
+    )
+
+
+def test_runner_image_uid_home_and_startup_tmpfs_contract_are_coherent() -> None:
+    dockerfile = Path("Dockerfile.vllm-benchmark-runner").read_text(encoding="utf-8")
+
+    assert "USER 2000:0" in dockerfile
+    assert 'ENV HOME="/home/vllm"' in dockerfile
+    assert (
+        "install -d --owner=2000 --group=0 --mode=0700 /home/vllm /workspace"
+        in dockerfile
     )
 
 
@@ -534,7 +650,9 @@ def test_controller_handoffs_and_retrieves_only_through_the_bound_runner() -> No
         workload=b'{"prompt":"redacted"}\n',
         timeout_seconds=7,
     )
-    evidence = adapter.retrieve_evidence(request, timeout_seconds=11)
+    evidence = adapter.retrieve_evidence(
+        request, admitted_handoff=handoff, timeout_seconds=11
+    )
     adapter.close()
 
     assert handoff.co_located_freshness_admitted is True
@@ -542,7 +660,7 @@ def test_controller_handoffs_and_retrieves_only_through_the_bound_runner() -> No
     assert runner.handoff_calls == [
         (b'{"config":"bounded"}', b'{"prompt":"redacted"}\n', 7)
     ]
-    assert runner.retrieve_calls == [11]
+    assert runner.retrieve_calls == [(handoff, 11)]
     assert runner.runner_origin == "http://127.0.0.1:18002"
     assert runner.closed is True
 

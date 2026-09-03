@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 from inferdrome.deployment.gcp_private_campaign_google import (
     GcpPrivateCampaignIapTunnelSupervisor,
 )
 from inferdrome.deployment.gcp_private_campaign_v2 import (
-    GcpPrivateCampaignError,
     build_gcp_private_campaign_create_request,
 )
 from tests.unit.test_gcp_private_campaign_v2 import _proposal
@@ -38,13 +35,9 @@ class _Process:
 
 
 class _Invocation:
-    def __init__(self, principal: str) -> None:
-        self.principal = principal
+    def __init__(self) -> None:
         self.argv: list[tuple[str, ...]] = []
         self.processes: list[_Process] = []
-
-    def active_principal(self) -> str:
-        return self.principal
 
     def start(self, argv: tuple[str, ...]) -> _Process:
         self.argv.append(argv)
@@ -60,7 +53,7 @@ def test_iap_supervisor_starts_exact_engine_and_runner_tunnels_and_closes_them()
     request = build_gcp_private_campaign_create_request(
         proposal=proposal, startup_payload=startup
     )
-    invocation = _Invocation(proposal.iap_connectivity.controller_principal)
+    invocation = _Invocation()
     supervisor = GcpPrivateCampaignIapTunnelSupervisor(
         invocation=invocation,
         connector=lambda *args, **kwargs: _Socket(),
@@ -86,16 +79,21 @@ def test_iap_supervisor_starts_exact_engine_and_runner_tunnels_and_closes_them()
     )
     assert invocation.argv[1][4] == "8001"
     assert invocation.argv[2][4] == "8002"
+    assert all(
+        argv[argv.index("--impersonate-service-account") + 1]
+        == proposal.iap_connectivity.controller_principal
+        for argv in invocation.argv
+    )
     supervisor.close()
     assert all(process.terminated for process in invocation.processes)
 
 
-def test_iap_supervisor_rejects_a_principal_that_the_approval_did_not_bind() -> None:
+def test_iap_supervisor_never_uses_an_ambient_active_account_probe() -> None:
     proposal, startup = _proposal()
     request = build_gcp_private_campaign_create_request(
         proposal=proposal, startup_payload=startup
     )
-    invocation = _Invocation("other@inferdrome-lab.iam.gserviceaccount.com")
+    invocation = _Invocation()
     supervisor = GcpPrivateCampaignIapTunnelSupervisor(
         invocation=invocation,
         connector=lambda *args, **kwargs: _Socket(),
@@ -103,6 +101,5 @@ def test_iap_supervisor_rejects_a_principal_that_the_approval_did_not_bind() -> 
         sleeper=lambda _: None,
     )
 
-    with pytest.raises(GcpPrivateCampaignError, match="IAP_PRINCIPAL_MISMATCH"):
-        supervisor.open(request, timeout_seconds=10)
+    supervisor.preflight_principal(request)
     assert not invocation.argv

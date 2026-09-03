@@ -50,6 +50,7 @@ RUN test "$(/opt/inferdrome-runtime/bin/python -c 'from inferdrome import __vers
     && /opt/inferdrome-runtime/bin/python -c 'import jsonschema, pydantic, yaml, rfc8785' \
     && test "$(python -c 'import vllm; print(vllm.__version__.split("+")[0])')" = "0.26.0" \
     && test "$(/opt/inferdrome-runtime/bin/inferdrome --version)" = "${INFERDROME_VERSION}" \
+    && install -d --owner=2000 --group=0 --mode=0700 /home/vllm /workspace \
     && rm -rf /root/.cache/pip /opt/inferdrome-source /build
 
 LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome" \

@@ -12,10 +12,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.client
+import importlib.metadata
 import os
 import stat
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +44,7 @@ _MAX_PROXY_BODY_BYTES: Final = 1_048_576
 _PROXIED_GET_PATHS: Final = frozenset({"/health", "/metrics", "/v1/models"})
 _PROXIED_POST_PATHS: Final = frozenset({"/v1/chat/completions"})
 _ATTESTATION_PATH: Final = "/inferdrome/v2/engine-attestation"
+_EXPECTED_VLLM_VERSION: Final = "0.26.0"
 
 
 class EngineAdapterError(ValueError):
@@ -214,7 +216,21 @@ def vllm_child_argv(arguments: EngineAdapterArguments) -> tuple[str, ...]:
     )
 
 
-def _attestation(arguments: EngineAdapterArguments) -> bytes:
+def observed_vllm_version(
+    version_lookup: Callable[[str], str] = importlib.metadata.version,
+) -> str:
+    """Read the installed vLLM distribution before it can begin serving."""
+
+    try:
+        observed = version_lookup("vllm")
+    except Exception:
+        raise EngineAdapterError("ENGINE_ADAPTER_RUNTIME_VERSION_UNAVAILABLE") from None
+    if observed != _EXPECTED_VLLM_VERSION:
+        raise EngineAdapterError("ENGINE_ADAPTER_RUNTIME_VERSION_MISMATCH")
+    return observed
+
+
+def _attestation(arguments: EngineAdapterArguments, *, runtime_version: str) -> bytes:
     value = GcpPrivateCampaignEngineAttestation(
         schema_version="inferdrome.gcp-private-engine-attestation.v2",
         endpoint_id=cast(Literal["endpoint-a", "endpoint-b"], arguments.endpoint_id),
@@ -238,7 +254,7 @@ def _attestation(arguments: EngineAdapterArguments) -> bytes:
         ),
         runtime=RuntimeIdentity(
             runtime_name="vllm",
-            runtime_version="0.26.0",
+            runtime_version=cast(Literal["0.26.0"], runtime_version),
             adapter_id="openai-compatible-routing-execution-v1",
             adapter_version="1.0.0",
         ),
@@ -344,12 +360,13 @@ def serve(arguments: EngineAdapterArguments) -> None:
         or os.environ.get("TRANSFORMERS_OFFLINE") != "1"
     ):
         raise EngineAdapterError("ENGINE_ADAPTER_OFFLINE_MODE_REQUIRED")
+    runtime_version = observed_vllm_version()
     child = subprocess.Popen(vllm_child_argv(arguments))
     server = _PrivateServer(
         ("0.0.0.0", arguments.private_port),
         child=child,
         upstream_port=arguments.upstream_port,
-        attestation=_attestation(arguments),
+        attestation=_attestation(arguments, runtime_version=runtime_version),
     )
     try:
         server.serve_forever(poll_interval=0.25)

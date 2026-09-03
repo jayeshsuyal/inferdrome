@@ -56,13 +56,18 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignRunnerAttestation,
     GcpPrivateCampaignTransport,
     GcpPrivateCampaignTransportError,
+    PrecampaignServiceAccount,
     gcp_private_campaign_boot_image_identity,
 )
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.errors import VerificationError
 from inferdrome.routing_execution.canonical import sha256_digest
-from inferdrome.routing_execution.contracts import IntegrityManifest
+from inferdrome.routing_execution.contracts import (
+    ExecutedManifest,
+    InputTransferReceipt,
+    IntegrityManifest,
+)
 from inferdrome.routing_execution.package import EvidenceReservation
 from inferdrome.routing_execution.stdin_bundle import RuntimeInputBundle
 from inferdrome.routing_execution.verifier import verify_execution_package
@@ -138,6 +143,52 @@ class _ImagesClient(Protocol):
 
 class _FirewallsClient(Protocol):
     def get(self, *, project: str, firewall: str, timeout: int) -> object: ...
+
+
+@dataclass(frozen=True)
+class _ComputeCredentialBinding:
+    """One explicitly approved effective Compute identity and credential."""
+
+    credentials: object
+    effective_principal: str
+
+
+class _ComputeCredentialResolver(Protocol):
+    def resolve(
+        self, controller_principal: PrecampaignServiceAccount
+    ) -> _ComputeCredentialBinding: ...
+
+
+class _GoogleImpersonatedComputeCredentialResolver:
+    """Lazy live edge that makes the approved SA the Compute API identity."""
+
+    def resolve(
+        self, controller_principal: PrecampaignServiceAccount
+    ) -> _ComputeCredentialBinding:
+        try:
+            google_auth = importlib.import_module("google.auth")
+            impersonated_credentials = importlib.import_module(
+                "google.auth.impersonated_credentials"
+            )
+            source_credentials, _ = google_auth.default(
+                scopes=("https://www.googleapis.com/auth/cloud-platform",)
+            )
+            credentials = impersonated_credentials.Credentials(
+                source_credentials=source_credentials,
+                target_principal=controller_principal,
+                target_scopes=("https://www.googleapis.com/auth/cloud-platform",),
+                lifetime=300,
+            )
+        except Exception:
+            raise GcpPrivateCampaignTransportError(
+                "COMPUTE_CREDENTIAL_RESOLUTION_FAILED"
+            ) from None
+        if getattr(credentials, "target_principal", None) != controller_principal:
+            raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_MISMATCH")
+        return _ComputeCredentialBinding(
+            credentials=credentials,
+            effective_principal=controller_principal,
+        )
 
 
 @dataclass(frozen=True)
@@ -830,12 +881,63 @@ class IapGcpPrivateCampaignRunner:
             raise GcpPrivateCampaignTransportError("RUNNER_RETRIEVAL_INVALID")
         return payloads
 
+    @staticmethod
+    def _assert_admitted_handoff(
+        payloads: Mapping[str, bytes],
+        admitted_handoff: GcpPrivateCampaignHandoffReceipt,
+    ) -> None:
+        """Reject a valid package that belongs to any other admitted run.
+
+        The package verifier proves internal consistency.  This additional
+        check proves the three artifacts received over IAP are the exact
+        routing/workload/endpoints that the controller admitted before the
+        runner began execution.  It runs before reservation/publication.
+        """
+
+        try:
+            transfer = InputTransferReceipt.model_validate_json(
+                payloads["input-transfer-receipt.json"]
+            )
+            manifest = ExecutedManifest.model_validate_json(
+                payloads["executed-manifest.json"]
+            )
+            if (
+                canonical_json_bytes(transfer.model_dump(mode="json"))
+                != payloads["input-transfer-receipt.json"]
+                or canonical_json_bytes(manifest.model_dump(mode="json"))
+                != payloads["executed-manifest.json"]
+            ):
+                raise ValueError
+        except (KeyError, ValidationError, ValueError):
+            raise GcpPrivateCampaignTransportError(
+                "EVIDENCE_HANDOFF_BINDING_MISMATCH"
+            ) from None
+        origins = {
+            endpoint.endpoint_id: endpoint.origin_sha256
+            for endpoint in manifest.endpoints
+        }
+        if (
+            transfer.config_sha256 != admitted_handoff.routing_config_sha256
+            or manifest.config_sha256 != admitted_handoff.routing_config_sha256
+            or transfer.selected_workload_sha256
+            != admitted_handoff.selected_workload_sha256
+            or manifest.workload.selected_workload_sha256
+            != admitted_handoff.selected_workload_sha256
+            or origins
+            != {
+                "endpoint-a": admitted_handoff.endpoint_a_origin_sha256,
+                "endpoint-b": admitted_handoff.endpoint_b_origin_sha256,
+            }
+        ):
+            raise GcpPrivateCampaignTransportError("EVIDENCE_HANDOFF_BINDING_MISMATCH")
+
     def _import_archive(
         self,
         request: GcpPrivateCampaignCreateRequest,
         *,
         archive: bytes,
         retained_digest: str,
+        admitted_handoff: GcpPrivateCampaignHandoffReceipt,
     ) -> GcpPrivateCampaignEvidenceReceipt:
         payloads = self._archive_payloads(archive)
         try:
@@ -849,6 +951,7 @@ class IapGcpPrivateCampaignRunner:
                 raise ValueError
         except (ValidationError, ValueError):
             raise GcpPrivateCampaignTransportError("RUNNER_RETRIEVAL_INVALID") from None
+        self._assert_admitted_handoff(payloads, admitted_handoff)
         root: SafeDirFD | None = None
         try:
             root = self._root()
@@ -891,6 +994,7 @@ class IapGcpPrivateCampaignRunner:
         self,
         request: GcpPrivateCampaignCreateRequest,
         *,
+        admitted_handoff: GcpPrivateCampaignHandoffReceipt,
         timeout_seconds: int,
     ) -> GcpPrivateCampaignEvidenceReceipt:
         try:
@@ -910,7 +1014,10 @@ class IapGcpPrivateCampaignRunner:
             ):
                 raise GcpPrivateCampaignTransportError("EVIDENCE_RETRIEVAL_FAILED")
             return self._import_archive(
-                request, archive=response.content, retained_digest=retained_digest
+                request,
+                archive=response.content,
+                retained_digest=retained_digest,
+                admitted_handoff=admitted_handoff,
             )
         finally:
             self.close()
@@ -923,40 +1030,11 @@ class _IapTunnelEndpoints:
 
 
 class _IapInvocation(Protocol):
-    def active_principal(self) -> str: ...
-
     def start(self, argv: tuple[str, ...]) -> subprocess.Popen[bytes]: ...
 
 
 class _SubprocessIapInvocation:
-    """Lazy gcloud invocation; no auth is initialized until this live edge."""
-
-    def active_principal(self) -> str:
-        try:
-            completed = subprocess.run(
-                (
-                    "gcloud",
-                    "auth",
-                    "list",
-                    "--filter=status:ACTIVE",
-                    "--format=value(account)",
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError):
-            raise GcpPrivateCampaignTransportError(
-                "IAP_PRINCIPAL_UNAVAILABLE"
-            ) from None
-        values = tuple(
-            line.strip() for line in completed.stdout.splitlines() if line.strip()
-        )
-        if completed.returncode != 0 or len(values) != 1:
-            raise GcpPrivateCampaignTransportError("IAP_PRINCIPAL_UNAVAILABLE")
-        return values[0]
+    """Lazy gcloud invocation with identity supplied in every tunnel argv."""
 
     def start(self, argv: tuple[str, ...]) -> subprocess.Popen[bytes]:
         try:
@@ -1007,6 +1085,8 @@ class GcpPrivateCampaignIapTunnelSupervisor:
             proposal.topology.zone,
             "--local-host-port",
             f"127.0.0.1:{local_port}",
+            "--impersonate-service-account",
+            proposal.iap_connectivity.controller_principal,
             "--quiet",
         )
 
@@ -1026,21 +1106,31 @@ class GcpPrivateCampaignIapTunnelSupervisor:
         raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
 
     def preflight_principal(self, request: GcpPrivateCampaignCreateRequest) -> None:
-        """Reject a known-wrong local IAP principal before any VM insert."""
+        """Validate explicit IAP impersonation without ambient-account probing."""
 
         proposal = request.proposal
         if proposal.iap_connectivity.ssh_transport_forbidden is not True:
             raise GcpPrivateCampaignTransportError("IAP_TUNNEL_POLICY_MISMATCH")
-        try:
-            principal = self._invocation.active_principal()
-        except GcpPrivateCampaignError:
-            raise
-        except Exception:
-            raise GcpPrivateCampaignTransportError(
-                "IAP_PRINCIPAL_UNAVAILABLE"
-            ) from None
-        if principal != proposal.iap_connectivity.controller_principal:
-            raise GcpPrivateCampaignTransportError("IAP_PRINCIPAL_MISMATCH")
+        for private_port, local_port in zip(
+            (
+                request.startup_payload.engines[0].private_port,
+                request.startup_payload.engines[1].private_port,
+                request.startup_payload.runner.private_port,
+            ),
+            proposal.iap_connectivity.local_tunnel_ports,
+            strict=True,
+        ):
+            argv = self._argv(request, private_port=private_port, local_port=local_port)
+            try:
+                position = argv.index("--impersonate-service-account")
+            except ValueError:
+                raise GcpPrivateCampaignTransportError(
+                    "IAP_PRINCIPAL_MISMATCH"
+                ) from None
+            if argv[position + 1 : position + 2] != (
+                proposal.iap_connectivity.controller_principal,
+            ):
+                raise GcpPrivateCampaignTransportError("IAP_PRINCIPAL_MISMATCH")
 
     def open(
         self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
@@ -1101,26 +1191,40 @@ class GcpPrivateCampaignIapTunnelSupervisor:
 
 
 class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
-    """Exact projection over already-initialized official Compute SDK clients."""
+    """Exact projection over explicitly bound official Compute SDK clients."""
 
     def __init__(
         self,
         *,
         sdk: Any,
-        instances_client: _InstancesClient,
-        disks_client: _DisksClient,
-        images_client: _ImagesClient,
+        instances_client: _InstancesClient | None = None,
+        disks_client: _DisksClient | None = None,
+        images_client: _ImagesClient | None = None,
         runner: Any,
         firewalls_client: _FirewallsClient | None = None,
         iap_tunnels: GcpPrivateCampaignIapTunnelSupervisor | None = None,
+        credential_resolver: _ComputeCredentialResolver | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> None:
+        clients = (
+            instances_client,
+            disks_client,
+            images_client,
+        )
+        if credential_resolver is None and any(value is None for value in clients):
+            raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_UNAVAILABLE")
+        if credential_resolver is not None and any(
+            value is not None for value in clients
+        ):
+            raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_INVALID")
         self._sdk = sdk
         self._instances = instances_client
         self._disks = disks_client
         self._images = images_client
         self._firewalls = firewalls_client
+        self._credential_resolver = credential_resolver
+        self._controller_principal: str | None = None
         self._runner = runner
         self._iap_tunnels = iap_tunnels
         self._iap_endpoints: _IapTunnelEndpoints | None = None
@@ -1129,6 +1233,67 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         self._sleeper = sleeper or time.sleep
         self._operations: dict[str, object] = {}
         self._lock = threading.Lock()
+
+    def bind_controller_principal(
+        self, controller_principal: PrecampaignServiceAccount
+    ) -> None:
+        """Construct all Compute clients with the exact approved SA credential."""
+
+        if self._controller_principal is not None:
+            if self._controller_principal != controller_principal:
+                raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_MISMATCH")
+            return
+        if self._credential_resolver is None:
+            if self._instances is None or self._disks is None or self._images is None:
+                raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_UNAVAILABLE")
+            # Test-only injected clients have no ambient credential source;
+            # still bind them to the caller-approved identity before use.
+            self._controller_principal = controller_principal
+            return
+        binding = self._credential_resolver.resolve(controller_principal)
+        if binding.effective_principal != controller_principal:
+            raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_MISMATCH")
+        try:
+            self._instances = self._sdk.InstancesClient(credentials=binding.credentials)
+            self._disks = self._sdk.DisksClient(credentials=binding.credentials)
+            self._images = self._sdk.ImagesClient(credentials=binding.credentials)
+            self._firewalls = self._sdk.FirewallsClient(credentials=binding.credentials)
+        except Exception:
+            raise GcpPrivateCampaignTransportError(
+                "COMPUTE_CLIENT_CONSTRUCTION_FAILED"
+            ) from None
+        self._controller_principal = controller_principal
+
+    def _require_bound_controller_principal(self) -> None:
+        if self._controller_principal is None:
+            raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_UNBOUND")
+        if self._instances is None or self._disks is None or self._images is None:
+            raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_UNAVAILABLE")
+
+    @property
+    def _bound_instances(self) -> _InstancesClient:
+        self._require_bound_controller_principal()
+        assert self._instances is not None
+        return self._instances
+
+    @property
+    def _bound_disks(self) -> _DisksClient:
+        self._require_bound_controller_principal()
+        assert self._disks is not None
+        return self._disks
+
+    @property
+    def _bound_images(self) -> _ImagesClient:
+        self._require_bound_controller_principal()
+        assert self._images is not None
+        return self._images
+
+    @property
+    def _bound_firewalls(self) -> _FirewallsClient:
+        self._require_bound_controller_principal()
+        if self._firewalls is None:
+            raise GcpPrivateCampaignTransportError("IAP_FIREWALL_UNAVAILABLE")
+        return self._firewalls
 
     def bind_evidence_root(self, root: SafeDirFD) -> None:
         """Bind the controller-held preflight root before any create request."""
@@ -1267,7 +1432,9 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         projected = self.project_create_request(request, request_id=request_id)
         self._revalidate_before_insert()
         try:
-            result = self._instances.insert(request=projected, timeout=timeout_seconds)
+            result = self._bound_instances.insert(
+                request=projected, timeout=timeout_seconds
+            )
             operation = _operation(result, kind="create", request_id=request_id)
             with self._lock:
                 self._operations[operation.operation_id] = result
@@ -1300,7 +1467,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         ):
             raise GcpPrivateCampaignTransportError("BOOT_IMAGE_REFERENCE_INVALID")
         try:
-            image = self._images.get(
+            image = self._bound_images.get(
                 project=parts[1], image=parts[4], timeout=timeout_seconds
             )
             if (
@@ -1346,8 +1513,6 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         CPU-only runner control/retrieval port.
         """
 
-        if self._firewalls is None:
-            raise GcpPrivateCampaignTransportError("IAP_FIREWALL_UNAVAILABLE")
         proposal = request.proposal
         reference = proposal.iap_connectivity.firewall_rule_ref
         parts = reference.split("/")
@@ -1358,7 +1523,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         ):
             raise GcpPrivateCampaignTransportError("IAP_FIREWALL_REFERENCE_INVALID")
         try:
-            firewall = self._firewalls.get(
+            firewall = self._bound_firewalls.get(
                 project=proposal.topology.project_id,
                 firewall=parts[4],
                 timeout=timeout_seconds,
@@ -1475,7 +1640,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
     ) -> Any | None:
         proposal = request.proposal
         try:
-            return self._instances.get(
+            return self._bound_instances.get(
                 project=proposal.topology.project_id,
                 zone=proposal.topology.zone,
                 instance=proposal.instance_name,
@@ -1602,7 +1767,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 filter=self._owned_filter(proposal),
                 max_results=16,
             )
-            values = self._disks.list(request=query, timeout=timeout_seconds)
+            values = self._bound_disks.list(request=query, timeout=timeout_seconds)
             if getattr(values, "next_page_token", None) not in (None, ""):
                 raise GcpPrivateCampaignTransportError("OWNED_INVENTORY_INCOMPLETE")
             return tuple(values)
@@ -1623,7 +1788,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 zone=proposal.topology.zone,
                 disk=proposal.boot_disk_name,
             )
-            return self._disks.get(request=query, timeout=timeout_seconds)
+            return self._bound_disks.get(request=query, timeout=timeout_seconds)
         except Exception as error:
             if self._not_found(error):
                 return None
@@ -2186,9 +2351,17 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         return handoff
 
     def retrieve_evidence(
-        self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        admitted_handoff: GcpPrivateCampaignHandoffReceipt,
+        timeout_seconds: int,
     ) -> GcpPrivateCampaignEvidenceReceipt:
-        evidence = self._runner.retrieve(request, timeout_seconds=timeout_seconds)
+        evidence = self._runner.retrieve(
+            request,
+            admitted_handoff=admitted_handoff,
+            timeout_seconds=timeout_seconds,
+        )
         if not isinstance(evidence, GcpPrivateCampaignEvidenceReceipt):
             raise GcpPrivateCampaignTransportError("EVIDENCE_RETRIEVAL_FAILED")
         return evidence
@@ -2313,7 +2486,9 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 request.proposal,
                 provider_instance_id=current_provider_id,
             )
-            value = self._instances.delete(request=projected, timeout=timeout_seconds)
+            value = self._bound_instances.delete(
+                request=projected, timeout=timeout_seconds
+            )
             operation = _operation(value, kind="delete_instance", request_id=request_id)
             with self._lock:
                 self._operations[operation.operation_id] = value
@@ -2392,7 +2567,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 filter=self._owned_filter(proposal),
                 max_results=16,
             )
-            values = self._instances.list(request=query, timeout=timeout_seconds)
+            values = self._bound_instances.list(request=query, timeout=timeout_seconds)
             if getattr(values, "next_page_token", None) not in (None, ""):
                 raise GcpPrivateCampaignTransportError("OWNED_INVENTORY_INCOMPLETE")
             rows = list(values)
@@ -2505,7 +2680,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 disk=proposal.boot_disk_name,
                 request_id=request_id,
             )
-            value = self._disks.delete(request=projected, timeout=timeout_seconds)
+            value = self._bound_disks.delete(request=projected, timeout=timeout_seconds)
             operation = _operation(
                 value, kind="delete_boot_disk", request_id=request_id
             )
@@ -2588,7 +2763,9 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 filter=self._owned_filter(proposal),
                 max_results=16,
             )
-            instances = self._instances.list(request=query, timeout=timeout_seconds)
+            instances = self._bound_instances.list(
+                request=query, timeout=timeout_seconds
+            )
             if getattr(instances, "next_page_token", None) not in (None, ""):
                 raise GcpPrivateCampaignTransportError("OWNED_INVENTORY_INCOMPLETE")
             rows = list(instances)
@@ -2643,6 +2820,14 @@ class GoogleGcpPrivateCampaignCleanupTransport:
     def __init__(self, inner: GoogleGcpPrivateCampaignTransport) -> None:
         self._inner = inner
 
+    def bind_controller_principal(
+        self, controller_principal: PrecampaignServiceAccount
+    ) -> None:
+        self._inner.bind_controller_principal(controller_principal)
+
+    def close(self) -> None:
+        self._inner.close()
+
     def wait_operation(
         self, operation: GcpPrivateCampaignOperation, *, timeout_seconds: int
     ) -> GcpPrivateCampaignOperationResult:
@@ -2687,17 +2872,15 @@ class GoogleGcpPrivateCampaignCleanupTransport:
 class _NoCreateRunner:
     """Marker used by the cleanup facade; it has no runner or create surface."""
 
+    def close(self) -> None:
+        return None
 
-def _google_clients() -> tuple[Any, Any, Any, Any, Any]:
+
+def _google_sdk() -> Any:
+    """Import only the SDK namespace; do not resolve credentials or clients."""
+
     try:
-        sdk = importlib.import_module("google.cloud.compute_v1")
-        return (
-            sdk,
-            sdk.InstancesClient(),
-            sdk.DisksClient(),
-            sdk.ImagesClient(),
-            sdk.FirewallsClient(),
-        )
+        return importlib.import_module("google.cloud.compute_v1")
     except Exception:
         raise GcpPrivateCampaignOptionalDependencyUnavailable() from None
 
@@ -2705,15 +2888,11 @@ def _google_clients() -> tuple[Any, Any, Any, Any, Any]:
 def create_google_private_campaign_transport(
     *, evidence_root: Path
 ) -> GoogleGcpPrivateCampaignTransport:
-    """Construct the only live adapter, at the controller's gated factory edge."""
+    """Construct a lazy adapter; approval binds credentials before any call."""
 
-    sdk, instances, disks, images, firewalls = _google_clients()
     return GoogleGcpPrivateCampaignTransport(
-        sdk=sdk,
-        instances_client=instances,
-        disks_client=disks,
-        images_client=images,
-        firewalls_client=firewalls,
+        sdk=_google_sdk(),
+        credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
         iap_tunnels=GcpPrivateCampaignIapTunnelSupervisor(),
         runner=IapGcpPrivateCampaignRunner(evidence_root),
     )
@@ -2724,14 +2903,10 @@ def create_google_private_campaign_cleanup_transport() -> (
 ):
     """Construct an exact cleanup-only adapter after cleanup authorization."""
 
-    sdk, instances, disks, images, firewalls = _google_clients()
     return GoogleGcpPrivateCampaignCleanupTransport(
         GoogleGcpPrivateCampaignTransport(
-            sdk=sdk,
-            instances_client=instances,
-            disks_client=disks,
-            images_client=images,
-            firewalls_client=firewalls,
+            sdk=_google_sdk(),
+            credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
             runner=_NoCreateRunner(),
         )
     )
