@@ -6,8 +6,9 @@ It models one narrow, human-approved topology only: an ephemeral
 addressable, private vLLM-compatible engines.  It has no Google SDK, socket,
 credential, or provider dependency at import time.  A caller supplies a
 transport factory; the controller invokes that factory only after it has
-validated the exact local approval and durably recorded a provider-native
-DELETE/max-runtime backstop.
+validated the exact local approval and durably recorded a local create intent.
+The provider-native ``DELETE``/maximum-runtime backstop is read back only after
+the corresponding instance has been created.
 
 The built-in fake is local test infrastructure.  It exists to make the
 approval ordering, hash-chained journal, crash windows, exact reconciliation,
@@ -24,7 +25,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
@@ -64,7 +65,13 @@ from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.domain.base import FrozenModel
 from inferdrome.domain.digests import DigestDomain, canonical_json_bytes, digest_bytes
 from inferdrome.domain.ids import Sha256Digest
-from inferdrome.qwen3_campaign import qwen3_workload_sha256
+from inferdrome.qwen3_campaign import (
+    QWEN3_8B_MODEL_ID,
+    QWEN3_8B_REVISION,
+    qwen3_expected_snapshot_sha256,
+    qwen3_model_manifest_sha256,
+    qwen3_workload_sha256,
+)
 from inferdrome.routing_execution.canonical import sha256_digest
 from inferdrome.routing_execution.contracts import (
     Commit,
@@ -75,6 +82,7 @@ from inferdrome.routing_execution.contracts import (
     fixed_r1_input_digests,
     fixed_selected_workload_sha256,
 )
+from inferdrome.routing_execution.verifier import verify_execution_package
 
 GCP_PRIVATE_CAMPAIGN_TOPOLOGY_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-private-campaign-topology.v2"
@@ -100,11 +108,20 @@ GCP_PRIVATE_CAMPAIGN_READINESS_SCHEMA_VERSION: Final = (
 GCP_PRIVATE_CAMPAIGN_ENGINE_ATTESTATION_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-private-engine-attestation.v2"
 )
+GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_VERSION: Final = (
+    "inferdrome.gcp-private-runner-attestation.v2"
+)
 GCP_PRIVATE_CAMPAIGN_EVENT_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-private-campaign-journal-event.v2"
 )
 GCP_PRIVATE_CAMPAIGN_RECEIPT_SCHEMA_VERSION: Final = (
     "inferdrome.gcp-private-campaign-receipt.v2"
+)
+GCP_PRIVATE_CAMPAIGN_READINESS_RECEIPT_SCHEMA_VERSION: Final = (
+    "inferdrome.gcp-private-campaign-readiness-receipt.v2"
+)
+GCP_PRIVATE_CAMPAIGN_SEALED_ARTIFACT_RECEIPT_SCHEMA_VERSION: Final = (
+    "inferdrome.gcp-private-campaign-sealed-artifact-receipt.v2"
 )
 GCP_PRIVATE_CAMPAIGN_TOPOLOGY_SCHEMA_ID: Final = (
     "urn:inferdrome:gcp-private-campaign-topology:v2"
@@ -130,11 +147,20 @@ GCP_PRIVATE_CAMPAIGN_READINESS_SCHEMA_ID: Final = (
 GCP_PRIVATE_CAMPAIGN_ENGINE_ATTESTATION_SCHEMA_ID: Final = (
     "urn:inferdrome:gcp-private-engine-attestation:v2"
 )
+GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_ID: Final = (
+    "urn:inferdrome:gcp-private-runner-attestation:v2"
+)
 GCP_PRIVATE_CAMPAIGN_EVENT_SCHEMA_ID: Final = (
     "urn:inferdrome:gcp-private-campaign-journal-event:v2"
 )
 GCP_PRIVATE_CAMPAIGN_RECEIPT_SCHEMA_ID: Final = (
     "urn:inferdrome:gcp-private-campaign-receipt:v2"
+)
+GCP_PRIVATE_CAMPAIGN_READINESS_RECEIPT_SCHEMA_ID: Final = (
+    "urn:inferdrome:gcp-private-campaign-readiness-receipt:v2"
+)
+GCP_PRIVATE_CAMPAIGN_SEALED_ARTIFACT_RECEIPT_SCHEMA_ID: Final = (
+    "urn:inferdrome:gcp-private-campaign-sealed-artifact-receipt:v2"
 )
 
 GCP_PRIVATE_CAMPAIGN_APPROVAL_CONFIRMATION: Final = (
@@ -169,6 +195,14 @@ _NETWORK_RE: Final = re.compile(
 _SUBNETWORK_RE: Final = re.compile(
     r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/regions/"
     r"[a-z]+-[a-z]+[0-9]{1,2}/subnetworks/[a-z][a-z0-9-]{0,61}[a-z0-9]$"
+)
+_SERVICE_ACCOUNT_RE: Final = re.compile(
+    r"^[a-z][a-z0-9-]{4,28}[a-z0-9]@"
+    r"[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$"
+)
+_FIREWALL_RE: Final = re.compile(
+    r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/global/firewalls/"
+    r"[a-z][a-z0-9-]{0,61}[a-z0-9]$"
 )
 _SENSITIVE_KEYS: Final = frozenset(
     {
@@ -210,7 +244,10 @@ _IDENTITY_KEYS: Final = frozenset(
         "selectedworkloadsha256",
         "evidencedestinationsha256",
         "retaineddigest",
+        "packagename",
         "bootimageidentity",
+        "readinessreceiptsha256",
+        "sealedartifactreceiptsha256",
         # Fixed confirmation literals are intentionally long and all-caps.
         # They are local authority phrases, not credential values.
         "confirmation",
@@ -223,6 +260,15 @@ _CREDENTIAL_SHAPES: Final = (
     re.compile(r"^AKIA[0-9A-Z]{16}$"),
     re.compile(r"^-----BEGIN [A-Z0-9 ]+ PRIVATE KEY-----$"),
     re.compile(r"^[A-Za-z0-9_-]{40,}$"),
+)
+_COLOCATED_RUNNER_INTERNAL_ORIGINS: Final = frozenset(
+    {
+        "http://inferdrome-engine-a:8000",
+        "http://inferdrome-engine-b:8001",
+    }
+)
+_COLOCATED_RUNNER_INTERNAL_ORIGIN_FIELDS: Final = frozenset(
+    {"endpointalocalorigin", "endpointblocalorigin"}
 )
 
 PrecampaignControllerId = Annotated[
@@ -238,6 +284,12 @@ PrecampaignOperationId = Annotated[
 ]
 PrecampaignLabelValue = Annotated[str, StringConstraints(pattern=_LABEL_RE.pattern)]
 PrecampaignRecordId = Annotated[str, StringConstraints(pattern=_RECORD_RE.pattern)]
+PrecampaignServiceAccount = Annotated[
+    str, StringConstraints(pattern=_SERVICE_ACCOUNT_RE.pattern)
+]
+PrecampaignFirewallReference = Annotated[
+    str, StringConstraints(pattern=_FIREWALL_RE.pattern)
+]
 
 
 class GcpPrivateCampaignError(GcpExecutionError):
@@ -286,7 +338,11 @@ def _reject_precampaign_values(value: object, *, path: tuple[str, ...] = ()) -> 
         for child in value:
             _reject_precampaign_values(child, path=path)
     elif isinstance(value, str):
-        if re.fullmatch(r"(?:https?|ssh|ftp)://.*", value, flags=re.IGNORECASE):
+        if re.fullmatch(r"(?:https?|ssh|ftp)://.*", value, flags=re.IGNORECASE) and (
+            not path
+            or path[-1] not in _COLOCATED_RUNNER_INTERNAL_ORIGIN_FIELDS
+            or value not in _COLOCATED_RUNNER_INTERNAL_ORIGINS
+        ):
             raise ValueError("pre-campaign JSON contains a public endpoint value")
         if _looks_credential(value) and (not path or path[-1] not in _IDENTITY_KEYS):
             raise ValueError("pre-campaign JSON contains a credential-shaped value")
@@ -411,6 +467,7 @@ class GcpPrivateCampaignOwnershipLabels(PrecampaignModel):
     role: Literal["two-engine-precampaign"]
     controller_id: PrecampaignControllerId
     ownership_nonce: Annotated[str, StringConstraints(pattern=r"^[a-z0-9]{16,32}$")]
+    run_lease_id: Annotated[str, StringConstraints(pattern=r"^lease-[a-z0-9]{12,24}$")]
 
 
 class GcpPrivateCampaignTopology(PrecampaignModel):
@@ -427,6 +484,11 @@ class GcpPrivateCampaignTopology(PrecampaignModel):
     accelerator_count: Literal[2]
     topology_kind: Literal["same_host_two_independent_engines"]
     runner_separate_from_serving: Literal[True]
+    runner_colocation: Literal["SAME_VM_SEPARATE_CPU_CONTAINER"]
+    runner_gpu_access: Literal["NONE"]
+    runner_cloud_credentials: Literal["NONE"]
+    runner_docker_socket: Literal["ABSENT"]
+    runner_provider_mutation_authority: Literal["NONE"]
     serving_engine_count: Literal[2]
     one_engine_per_endpoint: Literal[True]
     machine_fixed_local_ssd_count: Literal[2] = 2
@@ -461,6 +523,128 @@ class GcpPrivateCampaignBootImage(PrecampaignModel):
     provider_image_id: Annotated[int, Field(ge=1, le=10**19)]
     boot_image_identity: Sha256Digest
 
+    @model_validator(mode="after")
+    def _provider_identity_is_derived(self) -> Self:
+        if self.boot_image_identity != gcp_private_campaign_boot_image_identity(
+            image_ref=self.image_ref,
+            provider_image_id=self.provider_image_id,
+        ):
+            raise ValueError("boot image identity must derive from provider identity")
+        return self
+
+
+def gcp_private_campaign_boot_image_identity(
+    *, image_ref: str, provider_image_id: int
+) -> Sha256Digest:
+    """Hash the immutable provider self-link and numeric image identity.
+
+    This is deliberately derived from Compute's image reference and numeric ID,
+    rather than accepting an opaque digest copied from a proposal into an
+    observation.  The live adapter recalculates it from readback facts.
+    """
+
+    return sha256_digest(
+        canonical_json_bytes(
+            {
+                "provider_image_id": str(provider_image_id),
+                "provider_image_ref": image_ref,
+            }
+        )
+    )
+
+
+class GcpPrivateCampaignGuestServiceAccount(PrecampaignModel):
+    """One explicit no-scope guest principal for the offline-only VM role."""
+
+    service_account_email: PrecampaignServiceAccount
+    service_account_mode: Literal["USER_MANAGED_LEAST_PRIVILEGE_V1"]
+    oauth_scopes: tuple[str, ...] = ()
+    inherited_project_ssh_keys_blocked: Literal[True]
+    os_login_disabled: Literal[True]
+
+    @model_validator(mode="after")
+    def _no_default_or_broad_scope(self) -> Self:
+        if self.oauth_scopes:
+            raise ValueError("pre-campaign guest service account must have no scopes")
+        if self.service_account_email.endswith(
+            "-compute@developer.gserviceaccount.com"
+        ):
+            raise ValueError("default Compute service accounts are not admitted")
+        return self
+
+
+class GcpPrivateCampaignIapConnectivity(PrecampaignModel):
+    """One approval-bound, supervised private controller path.
+
+    The controller opens exactly three local IAP TCP tunnels after instance
+    readback: two engine readiness paths and one runner control/retrieval path.
+    It never connects directly from a Mac/controller to RFC1918 addresses and
+    it never opens SSH.
+    """
+
+    connectivity_kind: Literal["IAP_TCP_FORWARDING_V1"]
+    controller_principal: PrecampaignServiceAccount
+    firewall_rule_ref: PrecampaignFirewallReference
+    firewall_provider_id: Annotated[int, Field(ge=1, le=10**19)]
+    iap_source_cidr: Literal["35.235.240.0/20"]
+    instance_network_tag: PrecampaignLabelValue
+    local_tunnel_ports: tuple[Literal[18000], Literal[18001], Literal[18002]]
+    tunnel_binary: Literal["gcloud"]
+    ssh_transport_forbidden: Literal[True]
+
+
+class GcpPrivateCampaignPreloadedArtifacts(PrecampaignModel):
+    """Exact model and OCI cache required before a spend-capable create.
+
+    This is a declaration of a separately prepared immutable boot image, not
+    a claim that this repository or this PR has built or published one.
+    """
+
+    availability_kind: Literal["BOOT_IMAGE_PRELOADED_V1"]
+    model_snapshot_path: Literal["/opt/inferdrome/qwen3-8b"]
+    model_manifest_sha256: Sha256Digest
+    model_snapshot_sha256: Sha256Digest
+    offline_model_loading: Literal[True]
+    runner_image: ImageIdentity
+    serving_image: ImageIdentity
+
+    @model_validator(mode="after")
+    def _fixed_qwen_snapshot(self) -> Self:
+        if (
+            self.model_manifest_sha256 != qwen3_model_manifest_sha256()
+            or self.model_snapshot_sha256 != qwen3_expected_snapshot_sha256()
+        ):
+            raise ValueError("preloaded artifacts are not the fixed Qwen3 snapshot")
+        if self.runner_image == self.serving_image:
+            raise ValueError("runner and serving images must be separately pinned")
+        return self
+
+
+def gcp_private_campaign_engine_adapter_source_sha256() -> Sha256Digest:
+    """Return the source identity which the runtime adapter verifies on boot.
+
+    The engine container is the separately pinned Inferdrome runtime image. It
+    receives this digest as an argument and compares it with its installed
+    adapter bytes before exposing any endpoint.  This keeps the adapter a
+    concrete repository artifact rather than an assumed stock-vLLM feature.
+    """
+
+    try:
+        source = Path(__file__).with_name("gcp_private_engine_adapter.py").read_bytes()
+    except OSError:
+        raise RuntimeError("engine adapter source is unavailable") from None
+    return sha256_digest(source)
+
+
+def gcp_private_campaign_runner_adapter_source_sha256() -> Sha256Digest:
+    """Return the checked-in source identity for the CPU-only runner adapter."""
+
+    try:
+        source = Path(__file__).with_name("gcp_private_runner_adapter.py").read_bytes()
+    except OSError:
+        raise RuntimeError("runner adapter source is unavailable") from None
+    return sha256_digest(source)
+
 
 class GcpPrivateCampaignEngine(PrecampaignModel):
     """Semantic engine declaration from which the fixed startup script is made."""
@@ -476,6 +660,12 @@ class GcpPrivateCampaignEngine(PrecampaignModel):
     generation_path: Literal["/v1/chat/completions"]
     metrics_path: Literal["/metrics"]
     attestation_path: Literal["/inferdrome/v2/engine-attestation"]
+    container_entrypoint: Literal["/opt/inferdrome-runtime/bin/python"]
+    container_command_module: Literal[
+        "inferdrome.deployment.gcp_private_engine_adapter"
+    ]
+    adapter_source_sha256: Sha256Digest
+    model_snapshot_path: Literal["/opt/inferdrome/qwen3-8b"]
     listener_scope: Literal["PRIVATE_VPC_ONLY"]
     request_logging: Literal["DISABLED"]
 
@@ -508,6 +698,8 @@ class GcpPrivateCampaignEngineAttestation(PrecampaignModel):
     model: ModelIdentity
     runtime: RuntimeIdentity
     startup_payload_digest: Sha256Digest
+    adapter_source_sha256: Sha256Digest
+    model_snapshot_sha256: Sha256Digest
     listener_scope: Literal["PRIVATE_VPC_ONLY"]
 
     @model_validator(mode="after")
@@ -521,14 +713,101 @@ class GcpPrivateCampaignEngineAttestation(PrecampaignModel):
         return self
 
 
+class GcpPrivateCampaignRunner(PrecampaignModel):
+    """The one separately pinned, CPU-only observer on the approved VM.
+
+    It is intentionally a control/evidence service, never a serving engine or
+    provider client.  It runs on the same internal Docker network as the two
+    engines so the frozen 5 ms freshness condition is observed at the runner
+    rather than inferred across the controller's IAP path.
+    """
+
+    container_name: Literal["inferdrome-runner-observer"]
+    private_port: Literal[8002]
+    runner_image: ImageIdentity
+    container_entrypoint: Literal["/opt/inferdrome-runtime/bin/python"]
+    container_command_module: Literal[
+        "inferdrome.deployment.gcp_private_runner_adapter"
+    ]
+    adapter_source_sha256: Sha256Digest
+    runner_command_sha256: Sha256Digest
+    docker_network: Literal["inferdrome-private-campaign"]
+    evidence_root: Literal["/var/lib/inferdrome-private-runner/evidence"]
+    container_evidence_root: Literal["/evidence"]
+    endpoint_a_local_origin: Literal["http://inferdrome-engine-a:8000"]
+    endpoint_b_local_origin: Literal["http://inferdrome-engine-b:8001"]
+    gpu_access: Literal["NONE"]
+    cloud_credentials: Literal["NONE"]
+    docker_socket: Literal["ABSENT"]
+    serving_role: Literal["OBSERVER_ONLY"]
+    provider_mutation_authority: Literal["NONE"]
+    request_logging: Literal["DISABLED"]
+
+    @model_validator(mode="after")
+    def _exact_cpu_observer(self) -> Self:
+        if (
+            self.adapter_source_sha256
+            != gcp_private_campaign_runner_adapter_source_sha256()
+        ):
+            raise ValueError("runner adapter source is not pinned")
+        if self.runner_command_sha256 != gcp_private_campaign_runner_command_sha256(
+            self
+        ):
+            raise ValueError("runner command identity does not match its semantics")
+        return self
+
+
+def gcp_private_campaign_runner_command_sha256(
+    runner: GcpPrivateCampaignRunner,
+) -> Sha256Digest:
+    """Content-address the full reviewed runner command contract.
+
+    The digest deliberately excludes itself, but binds every argument-bearing
+    semantic field that the startup projection and runner attestation use.
+    """
+
+    value = _model_value(runner)
+    value.pop("runner_command_sha256", None)
+    return sha256_digest(canonical_json_bytes(value))
+
+
+class GcpPrivateCampaignRunnerAttestation(PrecampaignModel):
+    """Bounded self-report from the dedicated local runner adapter."""
+
+    schema_version: Literal["inferdrome.gcp-private-runner-attestation.v2"]
+    container_name: Literal["inferdrome-runner-observer"]
+    private_port: Literal[8002]
+    runner_image: ImageIdentity
+    container_command_module: Literal[
+        "inferdrome.deployment.gcp_private_runner_adapter"
+    ]
+    adapter_source_sha256: Sha256Digest
+    runner_command_sha256: Sha256Digest
+    startup_payload_digest: Sha256Digest
+    docker_network: Literal["inferdrome-private-campaign"]
+    gpu_access: Literal["NONE"]
+    cloud_credentials: Literal["NONE"]
+    docker_socket: Literal["ABSENT"]
+    serving_role: Literal["OBSERVER_ONLY"]
+    provider_mutation_authority: Literal["NONE"]
+
+
+def gcp_private_campaign_runner_attestation_digest(
+    attestation: GcpPrivateCampaignRunnerAttestation,
+) -> Sha256Digest:
+    return sha256_digest(canonical_json_bytes(_model_value(attestation)))
+
+
 class GcpPrivateCampaignStartupPayloadPayload(PrecampaignModel):
     """Interpretable immutable startup semantics, never opaque shell bytes."""
 
     schema_version: Literal["inferdrome.gcp-private-campaign-startup.v2"]
-    startup_kind: Literal["two_private_vllm_engines"]
+    startup_kind: Literal["two_private_vllm_engines_and_cpu_runner"]
     source_commit: Commit
     runner_image: ImageIdentity
+    preloaded_artifacts: GcpPrivateCampaignPreloadedArtifacts
     engines: tuple[GcpPrivateCampaignEngine, GcpPrivateCampaignEngine]
+    runner: GcpPrivateCampaignRunner
     startup_adapter_id: Literal["inferdrome.gcp-private-vllm-startup-v2"]
     startup_adapter_version: Literal["1.0.0"]
     no_public_inference: Literal[True]
@@ -544,11 +823,28 @@ class GcpPrivateCampaignStartupPayloadPayload(PrecampaignModel):
             raise ValueError("startup must contain ordered endpoint-a and endpoint-b")
         if self.engines[0].serving_image != self.engines[1].serving_image:
             raise ValueError("two engines must use the same immutable serving image")
+        if self.engines[0].serving_image == self.runner_image:
+            raise ValueError("runner and serving image identities must differ")
+        if self.runner.runner_image != self.runner_image:
+            raise ValueError("startup runner image disagrees with runner contract")
+        if (
+            self.preloaded_artifacts.runner_image != self.runner_image
+            or self.preloaded_artifacts.serving_image != self.engines[0].serving_image
+        ):
+            raise ValueError("preloaded image identities disagree with startup roles")
         if (
             self.engines[0].model != self.engines[1].model
             or self.engines[0].runtime != self.engines[1].runtime
         ):
             raise ValueError("two engines must use the same model and runtime identity")
+        if any(
+            engine.adapter_source_sha256
+            != gcp_private_campaign_engine_adapter_source_sha256()
+            or engine.model_snapshot_path
+            != self.preloaded_artifacts.model_snapshot_path
+            for engine in self.engines
+        ):
+            raise ValueError("startup engine adapter or model path is not pinned")
         return self
 
 
@@ -593,9 +889,9 @@ def issue_gcp_private_campaign_startup_payload(
     """Create the only semantic startup payload accepted by this profile."""
 
     model = ModelIdentity(
-        model_id="Qwen/Qwen3-8B",
-        model_revision="b968826d9c46dd6066d109eabc6255188de91218",
-        tokenizer_revision="b968826d9c46dd6066d109eabc6255188de91218",
+        model_id=QWEN3_8B_MODEL_ID,
+        model_revision=QWEN3_8B_REVISION,
+        tokenizer_revision=QWEN3_8B_REVISION,
     )
     runtime = RuntimeIdentity(
         runtime_name="vllm",
@@ -603,11 +899,48 @@ def issue_gcp_private_campaign_startup_payload(
         adapter_id="openai-compatible-routing-execution-v1",
         adapter_version="1.0.0",
     )
+    runner_seed = GcpPrivateCampaignRunner.model_construct(
+        container_name="inferdrome-runner-observer",
+        private_port=8002,
+        runner_image=runner_image,
+        container_entrypoint="/opt/inferdrome-runtime/bin/python",
+        container_command_module="inferdrome.deployment.gcp_private_runner_adapter",
+        adapter_source_sha256=gcp_private_campaign_runner_adapter_source_sha256(),
+        runner_command_sha256="sha256:" + ("0" * 64),
+        docker_network="inferdrome-private-campaign",
+        evidence_root="/var/lib/inferdrome-private-runner/evidence",
+        container_evidence_root="/evidence",
+        endpoint_a_local_origin="http://inferdrome-engine-a:8000",
+        endpoint_b_local_origin="http://inferdrome-engine-b:8001",
+        gpu_access="NONE",
+        cloud_credentials="NONE",
+        docker_socket="ABSENT",
+        serving_role="OBSERVER_ONLY",
+        provider_mutation_authority="NONE",
+        request_logging="DISABLED",
+    )
+    runner = GcpPrivateCampaignRunner(
+        **{
+            **_model_python_value(runner_seed),
+            "runner_command_sha256": gcp_private_campaign_runner_command_sha256(
+                runner_seed
+            ),
+        }
+    )
     payload = GcpPrivateCampaignStartupPayloadPayload(
         schema_version=GCP_PRIVATE_CAMPAIGN_STARTUP_SCHEMA_VERSION,
-        startup_kind="two_private_vllm_engines",
+        startup_kind="two_private_vllm_engines_and_cpu_runner",
         source_commit=source_commit,
         runner_image=runner_image,
+        preloaded_artifacts=GcpPrivateCampaignPreloadedArtifacts(
+            availability_kind="BOOT_IMAGE_PRELOADED_V1",
+            model_snapshot_path="/opt/inferdrome/qwen3-8b",
+            model_manifest_sha256=qwen3_model_manifest_sha256(),
+            model_snapshot_sha256=qwen3_expected_snapshot_sha256(),
+            offline_model_loading=True,
+            runner_image=runner_image,
+            serving_image=serving_image,
+        ),
         engines=(
             GcpPrivateCampaignEngine(
                 endpoint_id="endpoint-a",
@@ -621,6 +954,12 @@ def issue_gcp_private_campaign_startup_payload(
                 generation_path="/v1/chat/completions",
                 metrics_path="/metrics",
                 attestation_path="/inferdrome/v2/engine-attestation",
+                container_entrypoint="/opt/inferdrome-runtime/bin/python",
+                container_command_module="inferdrome.deployment.gcp_private_engine_adapter",
+                adapter_source_sha256=(
+                    gcp_private_campaign_engine_adapter_source_sha256()
+                ),
+                model_snapshot_path="/opt/inferdrome/qwen3-8b",
                 listener_scope="PRIVATE_VPC_ONLY",
                 request_logging="DISABLED",
             ),
@@ -636,10 +975,17 @@ def issue_gcp_private_campaign_startup_payload(
                 generation_path="/v1/chat/completions",
                 metrics_path="/metrics",
                 attestation_path="/inferdrome/v2/engine-attestation",
+                container_entrypoint="/opt/inferdrome-runtime/bin/python",
+                container_command_module="inferdrome.deployment.gcp_private_engine_adapter",
+                adapter_source_sha256=(
+                    gcp_private_campaign_engine_adapter_source_sha256()
+                ),
+                model_snapshot_path="/opt/inferdrome/qwen3-8b",
                 listener_scope="PRIVATE_VPC_ONLY",
                 request_logging="DISABLED",
             ),
         ),
+        runner=runner,
         startup_adapter_id="inferdrome.gcp-private-vllm-startup-v2",
         startup_adapter_version="1.0.0",
         no_public_inference=True,
@@ -756,6 +1102,9 @@ class GcpPrivateCampaignProposalPayload(PrecampaignModel):
     instance_name: PrecampaignInstanceName
     boot_disk_name: PrecampaignBootDiskName
     boot_image: GcpPrivateCampaignBootImage
+    guest_service_account: GcpPrivateCampaignGuestServiceAccount
+    iap_connectivity: GcpPrivateCampaignIapConnectivity
+    preloaded_artifacts: GcpPrivateCampaignPreloadedArtifacts
     runner_image: ImageIdentity
     serving_image: ImageIdentity
     model: ModelIdentity
@@ -773,6 +1122,29 @@ class GcpPrivateCampaignProposalPayload(PrecampaignModel):
             raise ValueError("boot disk name must be the deterministic exact identity")
         if self.source_commit != self.routing.source_commit:
             raise ValueError("routing source commit disagrees with proposal")
+        if self.runner_image == self.serving_image:
+            raise ValueError("runner and serving images must be separately pinned")
+        if (
+            self.preloaded_artifacts.runner_image != self.runner_image
+            or self.preloaded_artifacts.serving_image != self.serving_image
+        ):
+            raise ValueError("preloaded artifacts disagree with image identities")
+        if self.iap_connectivity.controller_principal == (
+            self.guest_service_account.service_account_email
+        ):
+            raise ValueError("controller and guest principals must be distinct")
+        if (
+            self.iap_connectivity.instance_network_tag
+            != f"inferdrome-pc-{self.ownership_labels.ownership_nonce}"
+        ):
+            raise ValueError("IAP network tag must bind the exact ownership nonce")
+        if (
+            f"projects/{self.topology.project_id}/"
+            not in self.iap_connectivity.firewall_rule_ref
+        ):
+            raise ValueError(
+                "IAP firewall identity must belong to the declared project"
+            )
         if self.max_runtime_seconds + self.cleanup_horizon_seconds > 86_400:
             raise ValueError("runtime and cleanup horizon must remain bounded")
         if (
@@ -935,6 +1307,13 @@ def verify_gcp_private_campaign_evidence_destination(
     try:
         root = SafeDirFD.open(selected)
         root.assert_open()
+        # The generic secure-directory helper deliberately permits a read-only
+        # private root for consumers that only read journals.  This v2 runner
+        # must create an evidence package from the controller's validated
+        # non-root UID:GID before any provider mutation, so require exactly the
+        # owner-private, writable/executable directory contract here.
+        if os.fstat(root.fd).st_mode & 0o777 != 0o700:
+            raise SafeDirFSError("evidence root must be private and writable")
     except (OSError, SafeDirFSError):
         if root is not None:
             root.close()
@@ -996,6 +1375,8 @@ class GcpPrivateCampaignCreateRequest(PrecampaignModel):
             raise ValueError("startup payload source commit disagrees with proposal")
         if self.startup_payload.runner_image != self.proposal.runner_image:
             raise ValueError("startup runner image disagrees with proposal")
+        if self.startup_payload.runner.runner_image != self.proposal.runner_image:
+            raise ValueError("startup runner contract disagrees with proposal")
         if any(
             engine.serving_image != self.proposal.serving_image
             for engine in self.startup_payload.engines
@@ -1007,6 +1388,11 @@ class GcpPrivateCampaignCreateRequest(PrecampaignModel):
             for engine in self.startup_payload.engines
         ):
             raise ValueError("startup model or runtime disagrees with proposal")
+        if (
+            self.startup_payload.preloaded_artifacts
+            != self.proposal.preloaded_artifacts
+        ):
+            raise ValueError("startup preloaded artifacts disagree with proposal")
         expected_backstop = GcpPrivateCampaignProviderBackstop(
             max_runtime_seconds=self.proposal.max_runtime_seconds,
             instance_termination_action="DELETE",
@@ -1186,6 +1572,7 @@ class GcpPrivateCampaignReadiness(PrecampaignModel):
     accelerator_count: Literal[2]
     startup_payload_digest: Sha256Digest
     startup_script_sha256: Sha256Digest
+    runner: GcpPrivateCampaignRunnerAttestation
     endpoints: tuple[
         GcpPrivateCampaignEndpointReadiness, GcpPrivateCampaignEndpointReadiness
     ]
@@ -1245,6 +1632,8 @@ class GcpPrivateCampaignHandoffReceipt(PrecampaignModel):
     endpoint_a_origin_sha256: Sha256Digest
     endpoint_b_origin_sha256: Sha256Digest
     routed_after_verified_readiness: Literal[True]
+    co_located_freshness_admitted: Literal[True]
+    runner_command_sha256: Sha256Digest
 
 
 class GcpPrivateCampaignEvidenceReceipt(PrecampaignModel):
@@ -1254,17 +1643,160 @@ class GcpPrivateCampaignEvidenceReceipt(PrecampaignModel):
     raw_prompt_or_output_retained: Literal[False]
 
 
+class GcpPrivateCampaignReadinessReceiptPayload(PrecampaignModel):
+    """Redacted durable record of the observations that admitted routing.
+
+    It retains hashes and fixed endpoint capabilities, never the private IP,
+    provider instance ID, prompt, completion, raw metric exposition, or IAP
+    tunnel origin.
+    """
+
+    schema_version: Literal["inferdrome.gcp-private-campaign-readiness-receipt.v2"]
+    proposal_id: Sha256Digest
+    provider_instance_id_sha256: Sha256Digest
+    startup_payload_digest: Sha256Digest
+    startup_script_sha256: Sha256Digest
+    runner: GcpPrivateCampaignRunnerAttestation
+    endpoints: tuple[
+        GcpPrivateCampaignEndpointReadiness, GcpPrivateCampaignEndpointReadiness
+    ]
+    observed_at: GcpTimestamp
+
+
+class GcpPrivateCampaignReadinessReceipt(GcpPrivateCampaignReadinessReceiptPayload):
+    readiness_receipt_sha256: Sha256Digest
+
+    @model_validator(mode="after")
+    def _receipt_identity(self) -> Self:
+        if self.readiness_receipt_sha256 != gcp_private_campaign_readiness_receipt_id(
+            self
+        ):
+            raise ValueError("readiness receipt identity does not match payload")
+        return self
+
+
+def canonical_gcp_private_campaign_readiness_receipt_bytes(
+    receipt: GcpPrivateCampaignReadinessReceipt
+    | GcpPrivateCampaignReadinessReceiptPayload,
+) -> bytes:
+    value = _model_value(receipt)
+    value.pop("readiness_receipt_sha256", None)
+    return canonical_json_bytes(value)
+
+
+def gcp_private_campaign_readiness_receipt_id(
+    receipt: GcpPrivateCampaignReadinessReceipt
+    | GcpPrivateCampaignReadinessReceiptPayload,
+) -> Sha256Digest:
+    return _digest(canonical_gcp_private_campaign_readiness_receipt_bytes(receipt))
+
+
+def issue_gcp_private_campaign_readiness_receipt(
+    readiness: GcpPrivateCampaignReadiness,
+) -> GcpPrivateCampaignReadinessReceipt:
+    payload = GcpPrivateCampaignReadinessReceiptPayload(
+        schema_version=GCP_PRIVATE_CAMPAIGN_READINESS_RECEIPT_SCHEMA_VERSION,
+        proposal_id=readiness.proposal_id,
+        provider_instance_id_sha256=sha256_digest(
+            readiness.provider_instance_id.encode("ascii")
+        ),
+        startup_payload_digest=readiness.startup_payload_digest,
+        startup_script_sha256=readiness.startup_script_sha256,
+        runner=readiness.runner,
+        endpoints=readiness.endpoints,
+        observed_at=readiness.observed_at,
+    )
+    return GcpPrivateCampaignReadinessReceipt(
+        **_model_python_value(payload),
+        readiness_receipt_sha256=gcp_private_campaign_readiness_receipt_id(payload),
+    )
+
+
+class GcpPrivateCampaignSealedArtifactReceiptPayload(PrecampaignModel):
+    """Create-no-replace package receipt bound to its readiness receipt."""
+
+    schema_version: Literal[
+        "inferdrome.gcp-private-campaign-sealed-artifact-receipt.v2"
+    ]
+    proposal_id: Sha256Digest
+    readiness_receipt_sha256: Sha256Digest
+    package_name: Annotated[
+        str, StringConstraints(pattern=r"^routing-execution-[a-f0-9]{32}$")
+    ]
+    retained_digest: Sha256Digest
+    collection_mode: Literal["CREATE_NO_REPLACE_RETRIEVAL"]
+
+
+class GcpPrivateCampaignSealedArtifactReceipt(
+    GcpPrivateCampaignSealedArtifactReceiptPayload
+):
+    sealed_artifact_receipt_sha256: Sha256Digest
+
+    @model_validator(mode="after")
+    def _receipt_identity(self) -> Self:
+        if (
+            self.sealed_artifact_receipt_sha256
+            != gcp_private_campaign_sealed_artifact_receipt_id(self)
+        ):
+            raise ValueError("sealed artifact receipt identity does not match payload")
+        return self
+
+
+def canonical_gcp_private_campaign_sealed_artifact_receipt_bytes(
+    receipt: GcpPrivateCampaignSealedArtifactReceipt
+    | GcpPrivateCampaignSealedArtifactReceiptPayload,
+) -> bytes:
+    value = _model_value(receipt)
+    value.pop("sealed_artifact_receipt_sha256", None)
+    return canonical_json_bytes(value)
+
+
+def gcp_private_campaign_sealed_artifact_receipt_id(
+    receipt: GcpPrivateCampaignSealedArtifactReceipt
+    | GcpPrivateCampaignSealedArtifactReceiptPayload,
+) -> Sha256Digest:
+    return _digest(
+        canonical_gcp_private_campaign_sealed_artifact_receipt_bytes(receipt)
+    )
+
+
+def issue_gcp_private_campaign_sealed_artifact_receipt(
+    *,
+    proposal: GcpPrivateCampaignProposal,
+    readiness_receipt: GcpPrivateCampaignReadinessReceipt,
+    evidence: GcpPrivateCampaignEvidenceReceipt,
+) -> GcpPrivateCampaignSealedArtifactReceipt:
+    package_name = f"routing-execution-{proposal.proposal_id[7:39]}"
+    payload = GcpPrivateCampaignSealedArtifactReceiptPayload(
+        schema_version=GCP_PRIVATE_CAMPAIGN_SEALED_ARTIFACT_RECEIPT_SCHEMA_VERSION,
+        proposal_id=proposal.proposal_id,
+        readiness_receipt_sha256=readiness_receipt.readiness_receipt_sha256,
+        package_name=package_name,
+        retained_digest=evidence.retained_digest,
+        collection_mode=evidence.collection_mode,
+    )
+    return GcpPrivateCampaignSealedArtifactReceipt(
+        **_model_python_value(payload),
+        sealed_artifact_receipt_sha256=(
+            gcp_private_campaign_sealed_artifact_receipt_id(payload)
+        ),
+    )
+
+
 GcpPrivateCampaignJournalState = Literal[
-    "BACKSTOP_READY",
+    "CREATE_INTENT_DURABLE",
     "CREATE_INTENT",
     "CREATE_SUBMITTED",
     "CREATE_RECONCILING",
     "CREATED",
     "INSTANCE_IDENTITY_BOUND",
     "BOOT_DISK_IDENTITY_BOUND",
+    "PROVIDER_BACKSTOP_VERIFIED",
     "READINESS_VERIFIED",
+    "READINESS_RECEIPT_RECORDED",
     "CAMPAIGN_HANDED_OFF",
     "EVIDENCE_RETRIEVED",
+    "SEALED_ARTIFACT_RECEIPT_RECORDED",
     "CLEANUP_INTENT",
     "INSTANCE_DELETE_SUBMITTED",
     "INSTANCE_DELETE_RECONCILING",
@@ -1272,7 +1804,7 @@ GcpPrivateCampaignJournalState = Literal[
     "BOOT_DISK_DELETE_SUBMITTED",
     "CLEANUP_CONFIRMED",
     "CLEANUP_UNCONFIRMED",
-    "CLEANUP_DEADLINE_EXCEEDED",
+    "EXECUTION_DEADLINE_EXCEEDED",
     "BLOCKED",
 ]
 
@@ -1318,12 +1850,12 @@ def gcp_private_campaign_journal_event_digest(
 _TRANSITIONS: Final[
     dict[GcpPrivateCampaignJournalState, set[GcpPrivateCampaignJournalState]]
 ] = {
-    "BACKSTOP_READY": {"CREATE_INTENT", "CLEANUP_INTENT", "BLOCKED"},
+    "CREATE_INTENT_DURABLE": {"CREATE_INTENT", "CLEANUP_INTENT", "BLOCKED"},
     "CREATE_INTENT": {
         "CREATE_SUBMITTED",
         "CREATE_RECONCILING",
         "CLEANUP_INTENT",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "BLOCKED",
     },
     "CREATE_SUBMITTED": {"CREATE_RECONCILING", "CREATED", "CLEANUP_INTENT", "BLOCKED"},
@@ -1335,25 +1867,45 @@ _TRANSITIONS: Final[
         "BLOCKED",
     },
     "BOOT_DISK_IDENTITY_BOUND": {
+        "PROVIDER_BACKSTOP_VERIFIED",
+        "CLEANUP_INTENT",
+        "BLOCKED",
+    },
+    "PROVIDER_BACKSTOP_VERIFIED": {
         "READINESS_VERIFIED",
         "CLEANUP_INTENT",
         "BLOCKED",
     },
     "READINESS_VERIFIED": {
+        "READINESS_RECEIPT_RECORDED",
+        # Deterministic in-process fake transport tests may deliberately omit
+        # an evidence root.  The live CLI always records the receipt path.
         "CAMPAIGN_HANDED_OFF",
         "CLEANUP_INTENT",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
+        "BLOCKED",
+    },
+    "READINESS_RECEIPT_RECORDED": {
+        "CAMPAIGN_HANDED_OFF",
+        "CLEANUP_INTENT",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "BLOCKED",
     },
     "CAMPAIGN_HANDED_OFF": {
         "EVIDENCE_RETRIEVED",
         "CLEANUP_INTENT",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "BLOCKED",
     },
     "EVIDENCE_RETRIEVED": {
+        "SEALED_ARTIFACT_RECEIPT_RECORDED",
         "CLEANUP_INTENT",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
+        "BLOCKED",
+    },
+    "SEALED_ARTIFACT_RECEIPT_RECORDED": {
+        "CLEANUP_INTENT",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "BLOCKED",
     },
     "CLEANUP_INTENT": {
@@ -1361,44 +1913,43 @@ _TRANSITIONS: Final[
         "INSTANCE_DELETE_RECONCILING",
         "BOOT_DISK_DELETE_INTENT",
         "CLEANUP_CONFIRMED",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
     },
     "INSTANCE_DELETE_SUBMITTED": {
         "INSTANCE_DELETE_RECONCILING",
         "BOOT_DISK_DELETE_INTENT",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "CLEANUP_CONFIRMED",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
     },
     "INSTANCE_DELETE_RECONCILING": {
         "BOOT_DISK_DELETE_INTENT",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "CLEANUP_CONFIRMED",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
     },
     "BOOT_DISK_DELETE_INTENT": {
         "BOOT_DISK_DELETE_SUBMITTED",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
     },
     "BOOT_DISK_DELETE_SUBMITTED": {
         "CLEANUP_CONFIRMED",
-        "CLEANUP_DEADLINE_EXCEEDED",
+        "EXECUTION_DEADLINE_EXCEEDED",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
     },
     "CLEANUP_UNCONFIRMED": {
         "CLEANUP_INTENT",
         "CLEANUP_UNCONFIRMED",
-        "CLEANUP_DEADLINE_EXCEEDED",
         "BLOCKED",
     },
-    "CLEANUP_DEADLINE_EXCEEDED": {
+    "EXECUTION_DEADLINE_EXCEEDED": {
         "CLEANUP_INTENT",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
@@ -1534,7 +2085,7 @@ class GcpPrivateCampaignJournal:
 
     @staticmethod
     def _validate_transitions(events: Sequence[GcpPrivateCampaignJournalEvent]) -> None:
-        if not events or events[0].state != "BACKSTOP_READY":
+        if not events or events[0].state != "CREATE_INTENT_DURABLE":
             raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
         for previous, current in pairwise(events):
             if current.state not in _TRANSITIONS[previous.state]:
@@ -1557,7 +2108,7 @@ class GcpPrivateCampaignJournal:
 
         with self._exclusive(proposal) as root:
             events = self._read_locked(root, proposal, missing_ok=True)
-            if not events and state != "BACKSTOP_READY":
+            if not events and state != "CREATE_INTENT_DURABLE":
                 raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
             if events and state not in _TRANSITIONS[events[-1].state]:
                 raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
@@ -1638,21 +2189,281 @@ class GcpPrivateCampaignJournal:
             boot_disk_provider_id_sha256=boot_disk_id_sha256,
         )
 
-    def cleanup_deadline(self, proposal: GcpPrivateCampaignProposal) -> datetime:
-        """Derive the durable cleanup deadline from the create-intent record.
+    def execution_deadline(self, proposal: GcpPrivateCampaignProposal) -> datetime:
+        """Bound launch/readiness/handoff, never exact cleanup recovery.
 
-        Starting the horizon at the fsynced create intent is conservative: an
-        adapter delay cannot extend the approved time available for launch,
-        handoff, or destructive cleanup.  The provider-native max-runtime
-        DELETE backstop remains independent of this local controller deadline.
+        This local execution deadline starts at the durable create intent and
+        is intentionally distinct from Compute's independently enforced
+        ``maxRunDuration`` + ``DELETE`` backstop.  It cannot authorize or
+        prevent exact cleanup after the normal execution window expires.
         """
 
         for event in self.load(proposal):
             if event.state == "CREATE_INTENT":
                 return _parse_timestamp(event.occurred_at) + timedelta(
-                    seconds=proposal.cleanup_horizon_seconds
+                    seconds=proposal.max_runtime_seconds
                 )
         raise GcpPrivateCampaignError("JOURNAL_DEADLINE_MISSING")
+
+
+class GcpPrivateCampaignReceiptStore:
+    """No-replace durable redacted receipts beside the sealed evidence package.
+
+    A live execution passes the controller-held evidence descriptor, not a
+    mutable path.  Every receipt write is relative to a duplicate of that
+    descriptor and the visible path is checked before and after publication.
+    This prevents a same-user pathname replacement from redirecting evidence
+    into another directory while an execution is in progress.
+    """
+
+    _MAX_BYTES: Final = 65_536
+
+    def __init__(self, root: Path | SafeDirFD) -> None:
+        self._bound_root: SafeDirFD | None = None
+        if isinstance(root, SafeDirFD):
+            try:
+                root.assert_open()
+                self._root = root.path.absolute()
+                # The lifecycle controller owns this descriptor through the
+                # entire execution.  Retaining it avoids a duplicated fd that
+                # would otherwise require a separate close path on every
+                # receipt-error branch.
+                self._bound_root = root
+            except (OSError, SafeDirFSError):
+                raise GcpPrivateCampaignError("RECEIPT_ROOT_UNSAFE") from None
+        else:
+            if not root.is_absolute():
+                raise GcpPrivateCampaignError("RECEIPT_ROOT_UNSAFE")
+            self._root = root
+
+    @staticmethod
+    def _suffix(proposal: GcpPrivateCampaignProposal) -> str:
+        return proposal.proposal_id[7:39]
+
+    @classmethod
+    def _readiness_name(cls, proposal: GcpPrivateCampaignProposal) -> str:
+        return f"gcp-private-readiness-{cls._suffix(proposal)}.json"
+
+    @classmethod
+    def _artifact_name(cls, proposal: GcpPrivateCampaignProposal) -> str:
+        return f"gcp-private-artifact-{cls._suffix(proposal)}.json"
+
+    @staticmethod
+    def _write_all(descriptor: int, content: bytes) -> None:
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short receipt write")
+            view = view[written:]
+
+    def _open_root(self) -> SafeDirFD:
+        try:
+            if self._bound_root is not None:
+                self._bound_root.assert_open()
+                duplicate = SafeDirFD.from_inherited_fd(self._bound_root.fd)
+                duplicate.path = self._root
+                return duplicate
+            return SafeDirFD.open(self._root)
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignError("RECEIPT_ROOT_UNSAFE") from None
+
+    def _assert_visible_root(self, held: SafeDirFD) -> None:
+        """Reject a path replacement around any path-addressed verifier call."""
+
+        visible: SafeDirFD | None = None
+        try:
+            held.assert_open()
+            visible = SafeDirFD.open(self._root)
+            if (visible.device, visible.inode) != (held.device, held.inode):
+                raise GcpPrivateCampaignError("RECEIPT_ROOT_CHANGED")
+        except GcpPrivateCampaignError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignError("RECEIPT_ROOT_CHANGED") from None
+        finally:
+            if visible is not None:
+                visible.close()
+
+    def _write_no_replace(self, name: str, content: bytes) -> None:
+        if not 1 <= len(content) <= self._MAX_BYTES:
+            raise GcpPrivateCampaignError("RECEIPT_CONTENT_INVALID")
+        root: SafeDirFD | None = None
+        descriptor: int | None = None
+        temporary = f".{name}.{uuid.uuid4().hex}.pending"
+        linked = False
+        try:
+            root = self._open_root()
+            self._assert_visible_root(root)
+            descriptor = root.open_child(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            self._write_all(descriptor, content)
+            os.fsync(descriptor)
+            root.validated_regular_child(temporary, descriptor=descriptor)
+            os.close(descriptor)
+            descriptor = None
+            try:
+                os.link(
+                    temporary,
+                    name,
+                    src_dir_fd=root.fd,
+                    dst_dir_fd=root.fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                raise GcpPrivateCampaignError("RECEIPT_CREATE_NO_REPLACE") from None
+            linked = True
+            # The final name is made visible only after the complete temporary
+            # file is fsynced.  Unlinking the source returns the receipt to the
+            # SafeDirFD one-link invariant before its final validation.
+            os.unlink(temporary, dir_fd=root.fd)
+            root.validated_regular_child(name)
+            root.fsync()
+            self._assert_visible_root(root)
+        except GcpPrivateCampaignError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignError("RECEIPT_WRITE_FAILED") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if root is not None:
+                if not linked:
+                    with suppress(OSError):
+                        os.unlink(temporary, dir_fd=root.fd)
+                root.close()
+
+    def _read(self, name: str, model: type[PrecampaignModel]) -> PrecampaignModel:
+        root: SafeDirFD | None = None
+        descriptor: int | None = None
+        try:
+            root = self._open_root()
+            self._assert_visible_root(root)
+            descriptor = root.open_child(name, os.O_RDONLY)
+            before = root.validated_regular_child(name, descriptor=descriptor)
+            content = os.read(descriptor, self._MAX_BYTES + 1)
+            after = root.validated_regular_child(name, descriptor=descriptor)
+            if len(content) > self._MAX_BYTES or before.st_size != after.st_size:
+                raise GcpPrivateCampaignError("RECEIPT_CHANGED")
+            value = model.model_validate_json(content)
+            if canonical_json_bytes(_model_value(value)) != content:
+                raise GcpPrivateCampaignError("RECEIPT_NONCANONICAL")
+            self._assert_visible_root(root)
+            return value
+        except GcpPrivateCampaignError:
+            raise
+        except (OSError, SafeDirFSError, ValidationError, ValueError):
+            raise GcpPrivateCampaignError("RECEIPT_INVALID") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if root is not None:
+                root.close()
+
+    def write_readiness(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        readiness: GcpPrivateCampaignReadiness,
+    ) -> GcpPrivateCampaignReadinessReceipt:
+        receipt = issue_gcp_private_campaign_readiness_receipt(readiness)
+        if receipt.proposal_id != proposal.proposal_id:
+            raise GcpPrivateCampaignError("READINESS_RECEIPT_MISMATCH")
+        self._write_no_replace(
+            self._readiness_name(proposal), canonical_json_bytes(_model_value(receipt))
+        )
+        return receipt
+
+    def read_readiness(
+        self, proposal: GcpPrivateCampaignProposal
+    ) -> GcpPrivateCampaignReadinessReceipt:
+        value = self._read(
+            self._readiness_name(proposal), GcpPrivateCampaignReadinessReceipt
+        )
+        if not isinstance(value, GcpPrivateCampaignReadinessReceipt) or (
+            value.proposal_id != proposal.proposal_id
+        ):
+            raise GcpPrivateCampaignError("READINESS_RECEIPT_MISMATCH")
+        return value
+
+    def write_artifact(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        readiness: GcpPrivateCampaignReadinessReceipt,
+        evidence: GcpPrivateCampaignEvidenceReceipt,
+    ) -> GcpPrivateCampaignSealedArtifactReceipt:
+        receipt = issue_gcp_private_campaign_sealed_artifact_receipt(
+            proposal=proposal, readiness_receipt=readiness, evidence=evidence
+        )
+        self._write_no_replace(
+            self._artifact_name(proposal), canonical_json_bytes(_model_value(receipt))
+        )
+        return receipt
+
+    def read_artifact(
+        self, proposal: GcpPrivateCampaignProposal
+    ) -> GcpPrivateCampaignSealedArtifactReceipt:
+        value = self._read(
+            self._artifact_name(proposal), GcpPrivateCampaignSealedArtifactReceipt
+        )
+        if not isinstance(value, GcpPrivateCampaignSealedArtifactReceipt) or (
+            value.proposal_id != proposal.proposal_id
+        ):
+            raise GcpPrivateCampaignError("SEALED_ARTIFACT_RECEIPT_MISMATCH")
+        readiness = self.read_readiness(proposal)
+        if value.readiness_receipt_sha256 != readiness.readiness_receipt_sha256:
+            raise GcpPrivateCampaignError("SEALED_ARTIFACT_RECEIPT_MISMATCH")
+        return value
+
+    def has_artifact(self, proposal: GcpPrivateCampaignProposal) -> bool:
+        """Return whether a durable artifact receipt exists without trusting it.
+
+        Recovery uses this to distinguish a crash before receipt publication
+        from a crash after publication but before its journal event.  A
+        present receipt is still parsed and verified by ``reverify_artifact``;
+        malformed content is never treated as absence.
+        """
+
+        root: SafeDirFD | None = None
+        try:
+            root = self._open_root()
+            self._assert_visible_root(root)
+            try:
+                root.validated_regular_child(self._artifact_name(proposal))
+            except FileNotFoundError:
+                return False
+            self._assert_visible_root(root)
+            return True
+        except GcpPrivateCampaignError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignError("RECEIPT_INVALID") from None
+        finally:
+            if root is not None:
+                root.close()
+
+    def reverify_artifact(
+        self, proposal: GcpPrivateCampaignProposal
+    ) -> GcpPrivateCampaignSealedArtifactReceipt:
+        root: SafeDirFD | None = None
+        try:
+            root = self._open_root()
+            self._assert_visible_root(root)
+            receipt = self.read_artifact(proposal)
+            self._assert_visible_root(root)
+            verified = verify_execution_package(
+                self._root / receipt.package_name,
+                expected_digest=receipt.retained_digest,
+            )
+            self._assert_visible_root(root)
+        except (OSError, ValueError):
+            raise GcpPrivateCampaignError("SEALED_ARTIFACT_REVERIFY_FAILED") from None
+        finally:
+            if root is not None:
+                root.close()
+        if verified.report.retained_digest != receipt.retained_digest:
+            raise GcpPrivateCampaignError("SEALED_ARTIFACT_REVERIFY_FAILED")
+        return receipt
 
 
 class GcpPrivateCampaignTransport(Protocol):
@@ -1771,6 +2582,187 @@ class GcpPrivateCampaignTransport(Protocol):
     ) -> GcpPrivateCampaignOwnedResidualInventory: ...
 
 
+class GcpPrivateCampaignCleanupTransport(Protocol):
+    """The recovery-only surface: intentionally no create or runner methods."""
+
+    def wait_operation(
+        self,
+        operation: GcpPrivateCampaignOperation,
+        *,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperationResult: ...
+
+    def delete_exact_instance(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperation: ...
+
+    def reconcile_delete_instance(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperationResult: ...
+
+    def list_exact_owned_residuals(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOwnedResidualInventory: ...
+
+    def delete_exact_owned_boot_disk(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        disk: GcpPrivateCampaignDiskObservation,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperation: ...
+
+    def reconcile_delete_exact_owned_boot_disk(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        disk: GcpPrivateCampaignDiskObservation,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperationResult: ...
+
+    def confirm_exact_absence(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignAbsenceObservation: ...
+
+    def discover_exact_owned(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOwnedResidualInventory: ...
+
+
+class _CleanupTransportFacade:
+    """Hide create/readiness/handoff from legacy local fake test transports."""
+
+    def __init__(self, inner: GcpPrivateCampaignTransport) -> None:
+        self._inner = inner
+
+    def wait_operation(
+        self, operation: GcpPrivateCampaignOperation, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignOperationResult:
+        return self._inner.wait_operation(operation, timeout_seconds=timeout_seconds)
+
+    def delete_exact_instance(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperation:
+        return self._inner.delete_exact_instance(
+            request,
+            exact_resource_binding=exact_resource_binding,
+            request_id=request_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def reconcile_delete_instance(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperationResult:
+        return self._inner.reconcile_delete_instance(
+            request,
+            exact_resource_binding=exact_resource_binding,
+            request_id=request_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def list_exact_owned_residuals(
+        self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignOwnedResidualInventory:
+        return self._inner.list_exact_owned_residuals(
+            request, timeout_seconds=timeout_seconds
+        )
+
+    def delete_exact_owned_boot_disk(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        disk: GcpPrivateCampaignDiskObservation,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperation:
+        return self._inner.delete_exact_owned_boot_disk(
+            request,
+            disk,
+            exact_resource_binding=exact_resource_binding,
+            request_id=request_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def reconcile_delete_exact_owned_boot_disk(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        disk: GcpPrivateCampaignDiskObservation,
+        *,
+        exact_resource_binding: GcpPrivateCampaignExactResourceBinding,
+        request_id: str,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignOperationResult:
+        return self._inner.reconcile_delete_exact_owned_boot_disk(
+            request,
+            disk,
+            exact_resource_binding=exact_resource_binding,
+            request_id=request_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def confirm_exact_absence(
+        self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignAbsenceObservation:
+        return self._inner.confirm_exact_absence(
+            request, timeout_seconds=timeout_seconds
+        )
+
+    def discover_exact_owned(
+        self, proposal: GcpPrivateCampaignProposal, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignOwnedResidualInventory:
+        return self._inner.discover_exact_owned(
+            proposal, timeout_seconds=timeout_seconds
+        )
+
+
+@runtime_checkable
+class GcpPrivateCampaignPreInsertGuardTransport(Protocol):
+    """A live transport that accepts the final local authority recheck."""
+
+    def bind_pre_insert_guard(self, guard: Callable[[], None]) -> None: ...
+
+
+@runtime_checkable
+class GcpPrivateCampaignCloseableTransport(Protocol):
+    """An adapter with local resources, such as supervised IAP processes."""
+
+    def close(self) -> None: ...
+
+
 @runtime_checkable
 class GcpPrivateCampaignEvidenceRootBindingTransport(Protocol):
     """A transport that can retain the exact preflight evidence-root fd."""
@@ -1811,6 +2803,10 @@ class GcpPrivateCampaignLifecycleController:
         *,
         journal: GcpPrivateCampaignJournal,
         transport_factory: Callable[[], GcpPrivateCampaignTransport],
+        cleanup_transport_factory: (
+            Callable[[], GcpPrivateCampaignCleanupTransport] | None
+        ) = None,
+        receipt_root: Path | None = None,
         launch_preflight: (
             Callable[[GcpPrivateCampaignProposal], SafeDirFD | None] | None
         ) = None,
@@ -1819,12 +2815,19 @@ class GcpPrivateCampaignLifecycleController:
     ) -> None:
         if (
             not callable(transport_factory)
+            or (
+                cleanup_transport_factory is not None
+                and not callable(cleanup_transport_factory)
+            )
+            or (receipt_root is not None and not receipt_root.is_absolute())
             or (launch_preflight is not None and not callable(launch_preflight))
             or not 1 <= operation_timeout_seconds <= 600
         ):
             raise GcpPrivateCampaignError("CONTROLLER_CONFIGURATION_INVALID")
         self._journal = journal
         self._transport_factory = transport_factory
+        self._cleanup_transport_factory = cleanup_transport_factory
+        self._receipt_root = receipt_root
         self._launch_preflight = launch_preflight
         self._clock = clock or SystemGcpPrivateCampaignClock()
         self._operation_timeout_seconds = operation_timeout_seconds
@@ -1837,6 +2840,63 @@ class GcpPrivateCampaignLifecycleController:
         if transport is None:
             raise GcpPrivateCampaignError("TRANSPORT_FACTORY_UNAVAILABLE")
         return transport
+
+    def _cleanup_transport_after_authority(self) -> GcpPrivateCampaignCleanupTransport:
+        """Create the recovery-only provider surface after cleanup authority."""
+
+        try:
+            if self._cleanup_transport_factory is not None:
+                transport = self._cleanup_transport_factory()
+            else:
+                # Compatibility for deterministic in-process fakes.  The
+                # facade deliberately hides all create/readiness/runner calls;
+                # the live CLI always provides a dedicated no-create factory.
+                transport = _CleanupTransportFacade(self._transport_after_authority())
+        except BaseException:
+            raise GcpPrivateCampaignError(
+                "CLEANUP_TRANSPORT_FACTORY_UNAVAILABLE"
+            ) from None
+        if transport is None:
+            raise GcpPrivateCampaignError("CLEANUP_TRANSPORT_FACTORY_UNAVAILABLE")
+        return transport
+
+    def _bind_pre_insert_guard(
+        self,
+        transport: GcpPrivateCampaignTransport,
+        *,
+        proposal: GcpPrivateCampaignProposal,
+        approval: GcpPrivateCampaignApproval,
+    ) -> None:
+        if not isinstance(transport, GcpPrivateCampaignPreInsertGuardTransport):
+            raise GcpPrivateCampaignError("PREINSERT_GUARD_UNAVAILABLE")
+
+        def guard() -> None:
+            verify_gcp_private_campaign_approval(
+                approval, expected_proposal=proposal, now=self._clock.now()
+            )
+            self._assert_execution_deadline(proposal)
+
+        try:
+            transport.bind_pre_insert_guard(guard)
+        except GcpPrivateCampaignError:
+            raise
+        except Exception:
+            raise GcpPrivateCampaignError("PREINSERT_GUARD_UNAVAILABLE") from None
+
+    @staticmethod
+    def _close_transport(transport: object) -> None:
+        if isinstance(transport, GcpPrivateCampaignCloseableTransport):
+            with suppress(Exception):
+                transport.close()
+
+    def _receipt_store(
+        self, preflight_root: SafeDirFD | None = None
+    ) -> GcpPrivateCampaignReceiptStore:
+        if preflight_root is not None:
+            return GcpPrivateCampaignReceiptStore(preflight_root)
+        if self._receipt_root is not None:
+            return GcpPrivateCampaignReceiptStore(self._receipt_root)
+        return GcpPrivateCampaignReceiptStore(self._journal.root)
 
     @staticmethod
     def _bind_evidence_root(
@@ -1964,6 +3024,25 @@ class GcpPrivateCampaignLifecycleController:
             )
         ):
             raise GcpPrivateCampaignError("READINESS_TOPOLOGY_DRIFT")
+        runner = request.startup_payload.runner
+        expected_runner = GcpPrivateCampaignRunnerAttestation(
+            schema_version=GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_VERSION,
+            container_name=runner.container_name,
+            private_port=runner.private_port,
+            runner_image=runner.runner_image,
+            container_command_module=runner.container_command_module,
+            adapter_source_sha256=runner.adapter_source_sha256,
+            runner_command_sha256=runner.runner_command_sha256,
+            startup_payload_digest=proposal.startup_payload_digest,
+            docker_network=runner.docker_network,
+            gpu_access=runner.gpu_access,
+            cloud_credentials=runner.cloud_credentials,
+            docker_socket=runner.docker_socket,
+            serving_role=runner.serving_role,
+            provider_mutation_authority=runner.provider_mutation_authority,
+        )
+        if readiness.runner != expected_runner:
+            raise GcpPrivateCampaignError("RUNNER_ATTESTATION_MISMATCH")
         now_ns = self._clock.monotonic_ns()
         for endpoint in readiness.endpoints:
             if (
@@ -2048,9 +3127,17 @@ class GcpPrivateCampaignLifecycleController:
         request = build_gcp_private_campaign_create_request(
             proposal=proposal, startup_payload=startup_payload
         )
+        receipt_store = (
+            self._receipt_store(preflight_root)
+            if preflight_root is not None or self._receipt_root is not None
+            else None
+        )
         self._journal.append(
             proposal,
-            state="BACKSTOP_READY",
+            # This is only a fsynced local create intent.  It is not called a
+            # watchdog or provider backstop; the latter is read back after
+            # create as Compute maxRunDuration + DELETE.
+            state="CREATE_INTENT_DURABLE",
             occurred_at=self._clock.now(),
             detail_digest=request.create_request_digest,
         )
@@ -2064,7 +3151,7 @@ class GcpPrivateCampaignLifecycleController:
             verify_gcp_private_campaign_approval(
                 approval, expected_proposal=proposal, now=self._clock.now()
             )
-            self._assert_cleanup_deadline(proposal)
+            self._assert_execution_deadline(proposal)
         except GcpPrivateCampaignError:
             if self._journal.load(proposal)[-1].state != "BLOCKED":
                 self._journal.append(
@@ -2080,10 +3167,11 @@ class GcpPrivateCampaignLifecycleController:
         try:
             if preflight_root is not None:
                 self._bind_evidence_root(transport, preflight_root)
+            self._bind_pre_insert_guard(transport, proposal=proposal, approval=approval)
             verify_gcp_private_campaign_approval(
                 approval, expected_proposal=proposal, now=self._clock.now()
             )
-            self._assert_cleanup_deadline(proposal)
+            self._assert_execution_deadline(proposal)
         except GcpPrivateCampaignError:
             if self._journal.load(proposal)[-1].state != "BLOCKED":
                 self._journal.append(
@@ -2096,6 +3184,12 @@ class GcpPrivateCampaignLifecycleController:
         exact_resource_binding: GcpPrivateCampaignExactResourceBinding | None = None
         try:
             try:
+                # Any exception after this point is potentially post-submit.
+                # Attempt exact recovery in ``finally`` even when the adapter
+                # cannot return an operation identity.  Without both durable
+                # provider-ID bindings recovery can only prove absence and
+                # must remain unconfirmed otherwise.
+                created_or_ambiguous = True
                 operation = transport.create_instance(
                     request,
                     request_id=proposal.request_ids.create_request_id,
@@ -2106,7 +3200,6 @@ class GcpPrivateCampaignLifecycleController:
                     kind="create",
                     request_id=proposal.request_ids.create_request_id,
                 )
-                created_or_ambiguous = True
                 self._journal.append(
                     proposal,
                     state="CREATE_SUBMITTED",
@@ -2158,6 +3251,27 @@ class GcpPrivateCampaignLifecycleController:
                 detail_digest=exact_resource_binding.boot_disk_provider_id_sha256,
             )
             self._assert_instance(observed, request)
+            # Only Compute's observed maxRunDuration + DELETE is an armed
+            # provider backstop.  The detail is a redacted binding digest, not
+            # a provider payload or an invoice claim.
+            self._journal.append(
+                proposal,
+                state="PROVIDER_BACKSTOP_VERIFIED",
+                occurred_at=self._clock.now(),
+                detail_digest=sha256_digest(
+                    canonical_json_bytes(
+                        {
+                            "instance_termination_action": (
+                                observed.instance_termination_action
+                            ),
+                            "max_runtime_seconds": observed.max_runtime_seconds,
+                            "provider_instance_id_sha256": (
+                                exact_resource_binding.provider_instance_id_sha256
+                            ),
+                        }
+                    )
+                ),
+            )
             readiness = transport.observe_readiness(
                 request, timeout_seconds=self._operation_timeout_seconds
             )
@@ -2170,8 +3284,17 @@ class GcpPrivateCampaignLifecycleController:
             self._journal.append(
                 proposal, state="READINESS_VERIFIED", occurred_at=self._clock.now()
             )
+            readiness_receipt: GcpPrivateCampaignReadinessReceipt | None = None
+            if receipt_store is not None:
+                readiness_receipt = receipt_store.write_readiness(proposal, readiness)
+                self._journal.append(
+                    proposal,
+                    state="READINESS_RECEIPT_RECORDED",
+                    occurred_at=self._clock.now(),
+                    detail_digest=readiness_receipt.readiness_receipt_sha256,
+                )
             config, workload, config_digest = self._build_handoff(proposal, readiness)
-            self._assert_cleanup_deadline(proposal)
+            self._assert_execution_deadline(proposal)
             handoff = transport.handoff_campaign(
                 request,
                 routing_config=config,
@@ -2184,6 +3307,9 @@ class GcpPrivateCampaignLifecycleController:
                 or handoff.selected_workload_sha256
                 != proposal.routing.selected_workload_sha256
                 or handoff.routed_after_verified_readiness is not True
+                or handoff.co_located_freshness_admitted is not True
+                or handoff.runner_command_sha256
+                != startup_payload.runner.runner_command_sha256
             ):
                 raise GcpPrivateCampaignError("CAMPAIGN_HANDOFF_MISMATCH")
             self._journal.append(
@@ -2192,7 +3318,7 @@ class GcpPrivateCampaignLifecycleController:
                 occurred_at=self._clock.now(),
                 detail_digest=handoff.routing_config_sha256,
             )
-            self._assert_cleanup_deadline(proposal)
+            self._assert_execution_deadline(proposal)
             evidence = transport.retrieve_evidence(
                 request, timeout_seconds=self._operation_timeout_seconds
             )
@@ -2207,17 +3333,31 @@ class GcpPrivateCampaignLifecycleController:
                 occurred_at=self._clock.now(),
                 detail_digest=evidence.retained_digest,
             )
+            if receipt_store is not None:
+                if readiness_receipt is None:
+                    raise GcpPrivateCampaignError("READINESS_RECEIPT_MISSING")
+                artifact_receipt = receipt_store.write_artifact(
+                    proposal, readiness_receipt, evidence
+                )
+                self._journal.append(
+                    proposal,
+                    state="SEALED_ARTIFACT_RECEIPT_RECORDED",
+                    occurred_at=self._clock.now(),
+                    detail_digest=artifact_receipt.sealed_artifact_receipt_sha256,
+                )
         except GcpPrivateCampaignError as error:
             primary_error = error
-        except (OSError, ValueError, ValidationError):
+        except Exception:
             primary_error = GcpPrivateCampaignError("CAMPAIGN_OPERATION_FAILED")
-        cleanup = self._cleanup_after_transport(
-            proposal=proposal,
-            request=request,
-            transport=transport,
-            may_exist=created_or_ambiguous,
-            exact_resource_binding=exact_resource_binding,
-        )
+        finally:
+            cleanup = self._cleanup_after_transport(
+                proposal=proposal,
+                request=request,
+                transport=transport,
+                may_exist=created_or_ambiguous,
+                exact_resource_binding=exact_resource_binding,
+            )
+            self._close_transport(transport)
         if primary_error is not None:
             raise primary_error
         if not cleanup.confirmed:
@@ -2231,7 +3371,7 @@ class GcpPrivateCampaignLifecycleController:
         *,
         proposal: GcpPrivateCampaignProposal,
         request: GcpPrivateCampaignCreateRequest,
-        transport: GcpPrivateCampaignTransport,
+        transport: GcpPrivateCampaignCleanupTransport,
         may_exist: bool,
         exact_resource_binding: GcpPrivateCampaignExactResourceBinding | None,
     ) -> GcpPrivateCampaignCleanupOutcome:
@@ -2252,7 +3392,6 @@ class GcpPrivateCampaignLifecycleController:
                 exact_resource_binding=exact_resource_binding,
             )
             if inventory.instance_state == "PRESENT":
-                self._assert_cleanup_deadline(proposal)
                 instance_phase = self._cleanup_resume_phase(proposal)
                 if instance_phase in {
                     "INSTANCE_DELETE_SUBMITTED",
@@ -2316,7 +3455,6 @@ class GcpPrivateCampaignLifecycleController:
                     raise GcpPrivateCampaignError("OWNED_RESIDUAL_AMBIGUOUS")
                 disk = inventory.disks[0]
                 self._assert_boot_disk(disk, proposal)
-                self._assert_cleanup_deadline(proposal)
                 disk_phase = self._cleanup_resume_phase(proposal)
                 if disk_phase in {
                     "BOOT_DISK_DELETE_INTENT",
@@ -2372,7 +3510,7 @@ class GcpPrivateCampaignLifecycleController:
         except GcpPrivateCampaignError:
             self._mark_cleanup_unconfirmed(proposal)
             return GcpPrivateCampaignCleanupOutcome(False, "CLEANUP_UNCONFIRMED")
-        except (OSError, ValueError, ValidationError):
+        except Exception:
             self._mark_cleanup_unconfirmed(proposal)
             return GcpPrivateCampaignCleanupOutcome(False, "CLEANUP_UNCONFIRMED")
 
@@ -2404,7 +3542,8 @@ class GcpPrivateCampaignLifecycleController:
         retry_intent = (
             len(events) >= 2
             and events[-1].state == "CLEANUP_INTENT"
-            and events[-2].state in {"CLEANUP_UNCONFIRMED", "CLEANUP_DEADLINE_EXCEEDED"}
+            and events[-2].state
+            in {"CLEANUP_UNCONFIRMED", "EXECUTION_DEADLINE_EXCEEDED"}
         )
         rows = events[:-1] if retry_intent else events
         for event in reversed(rows):
@@ -2422,17 +3561,24 @@ class GcpPrivateCampaignLifecycleController:
                 occurred_at=self._clock.now(),
             )
 
-    def _assert_cleanup_deadline(self, proposal: GcpPrivateCampaignProposal) -> None:
-        if self._clock.now() < self._journal.cleanup_deadline(proposal):
+    def _assert_execution_deadline(self, proposal: GcpPrivateCampaignProposal) -> None:
+        """Stop normal launch/handoff work at its bounded local deadline.
+
+        This intentionally is never called by exact cleanup or recovery.  A
+        cleanup authorization remains valid after this execution window so the
+        controller can reconcile a delayed provider operation safely.
+        """
+
+        if self._clock.now() < self._journal.execution_deadline(proposal):
             return
         state = self._journal.load(proposal)[-1].state
-        if state != "CLEANUP_DEADLINE_EXCEEDED":
+        if state != "EXECUTION_DEADLINE_EXCEEDED":
             self._journal.append(
                 proposal,
-                state="CLEANUP_DEADLINE_EXCEEDED",
+                state="EXECUTION_DEADLINE_EXCEEDED",
                 occurred_at=self._clock.now(),
             )
-        raise GcpPrivateCampaignError("CLEANUP_DEADLINE_EXCEEDED")
+        raise GcpPrivateCampaignError("EXECUTION_DEADLINE_EXCEEDED")
 
     def _mark_cleanup_unconfirmed(self, proposal: GcpPrivateCampaignProposal) -> None:
         if self._journal.load(proposal)[-1].state != "CLEANUP_UNCONFIRMED":
@@ -2519,7 +3665,14 @@ class GcpPrivateCampaignLifecycleController:
             proposal=proposal, startup_payload=startup_payload
         )
         events = self._journal.load(proposal)
+        sealed_artifact_recorded = any(
+            event.state == "SEALED_ARTIFACT_RECEIPT_RECORDED" for event in events
+        )
+        receipt_store = self._receipt_store()
+        sealed_artifact_published = receipt_store.has_artifact(proposal)
         if events[-1].state == "CLEANUP_CONFIRMED":
+            if sealed_artifact_recorded or sealed_artifact_published:
+                receipt_store.reverify_artifact(proposal)
             return GcpPrivateCampaignCleanupOutcome(True, "CLEANUP_CONFIRMED")
         exact_resource_binding = self._journal.exact_resource_binding(proposal)
         if exact_resource_binding is None:
@@ -2527,7 +3680,7 @@ class GcpPrivateCampaignLifecycleController:
             # durable leaves the provider-native DELETE backstop in place. A
             # label-scoped absence read is safe, but deletion may never target
             # a name/label match without both durable provider-ID bindings.
-            transport = self._transport_after_authority()
+            transport = self._cleanup_transport_after_authority()
             try:
                 absence = transport.confirm_exact_absence(
                     request, timeout_seconds=self._operation_timeout_seconds
@@ -2540,20 +3693,34 @@ class GcpPrivateCampaignLifecycleController:
                     occurred_at=self._clock.now(),
                 )
                 return GcpPrivateCampaignCleanupOutcome(True, "CLEANUP_CONFIRMED")
-            except (GcpPrivateCampaignError, OSError, ValueError, ValidationError):
+            except Exception:
                 self._ensure_cleanup_intent(proposal)
                 self._mark_cleanup_unconfirmed(proposal)
                 return GcpPrivateCampaignCleanupOutcome(False, "CLEANUP_UNCONFIRMED")
+            finally:
+                self._close_transport(transport)
         # Factory comes after the cleanup-only authority and trusted history;
         # this method has no create/handoff code path.
-        transport = self._transport_after_authority()
-        return self._cleanup_after_transport(
-            proposal=proposal,
-            request=request,
-            transport=transport,
-            may_exist=True,
-            exact_resource_binding=exact_resource_binding,
-        )
+        transport = self._cleanup_transport_after_authority()
+        try:
+            outcome = self._cleanup_after_transport(
+                proposal=proposal,
+                request=request,
+                transport=transport,
+                may_exist=True,
+                exact_resource_binding=exact_resource_binding,
+            )
+        finally:
+            self._close_transport(transport)
+        # If a prior crash occurred after the package receipt was journaled,
+        # re-open the deterministic sealed path and verify it rather than
+        # relying on process-local runner state.  Cleanup is completed first
+        # even if evidence re-verification finds tampering.
+        if outcome.confirmed and (
+            sealed_artifact_recorded or sealed_artifact_published
+        ):
+            receipt_store.reverify_artifact(proposal)
+        return outcome
 
     def discover_exact_orphans(
         self,
@@ -2566,12 +3733,15 @@ class GcpPrivateCampaignLifecycleController:
         verify_gcp_private_campaign_cleanup_authorization(
             authorization, expected_proposal=proposal, now=self._clock.now()
         )
-        transport = self._transport_after_authority()
-        inventory = transport.discover_exact_owned(
-            proposal, timeout_seconds=self._operation_timeout_seconds
-        )
-        self._assert_inventory(inventory, proposal)
-        return inventory
+        transport = self._cleanup_transport_after_authority()
+        try:
+            inventory = transport.discover_exact_owned(
+                proposal, timeout_seconds=self._operation_timeout_seconds
+            )
+            self._assert_inventory(inventory, proposal)
+            return inventory
+        finally:
+            self._close_transport(transport)
 
 
 @dataclass
@@ -2600,6 +3770,7 @@ class FakeGcpPrivateCampaignTransport:
     boot_disk_delete_calls: int = 0
     handoff_calls: int = 0
     bound_evidence_root_identity: tuple[int, int] | None = None
+    pre_insert_guard: Callable[[], None] | None = None
     _deleted_instance_request_ids: set[str] = field(default_factory=set)
     _deleted_boot_disk_request_ids: set[str] = field(default_factory=set)
 
@@ -2620,6 +3791,11 @@ class FakeGcpPrivateCampaignTransport:
         root.assert_open()
         self.bound_evidence_root_identity = (root.device, root.inode)
 
+    def bind_pre_insert_guard(self, guard: Callable[[], None]) -> None:
+        if self.pre_insert_guard is not None:
+            raise GcpPrivateCampaignTransportError("PREINSERT_GUARD_INVALID")
+        self.pre_insert_guard = guard
+
     def create_instance(
         self,
         request: GcpPrivateCampaignCreateRequest,
@@ -2628,6 +3804,9 @@ class FakeGcpPrivateCampaignTransport:
         timeout_seconds: int,
     ) -> GcpPrivateCampaignOperation:
         del timeout_seconds
+        if self.pre_insert_guard is None:
+            raise GcpPrivateCampaignTransportError("PREINSERT_GUARD_UNAVAILABLE")
+        self.pre_insert_guard()
         if request_id != request.proposal.request_ids.create_request_id:
             raise GcpPrivateCampaignTransportError("REQUEST_ID_MISMATCH")
         self.create_calls += 1
@@ -2721,6 +3900,30 @@ class FakeGcpPrivateCampaignTransport:
             startup_script_sha256=(
                 self.readiness_startup_script_sha256 or self.startup_script_sha256
             ),
+            runner=GcpPrivateCampaignRunnerAttestation(
+                schema_version=GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_VERSION,
+                container_name=request.startup_payload.runner.container_name,
+                private_port=request.startup_payload.runner.private_port,
+                runner_image=request.startup_payload.runner.runner_image,
+                container_command_module=(
+                    request.startup_payload.runner.container_command_module
+                ),
+                adapter_source_sha256=(
+                    request.startup_payload.runner.adapter_source_sha256
+                ),
+                runner_command_sha256=(
+                    request.startup_payload.runner.runner_command_sha256
+                ),
+                startup_payload_digest=proposal.startup_payload_digest,
+                docker_network=request.startup_payload.runner.docker_network,
+                gpu_access=request.startup_payload.runner.gpu_access,
+                cloud_credentials=request.startup_payload.runner.cloud_credentials,
+                docker_socket=request.startup_payload.runner.docker_socket,
+                serving_role=request.startup_payload.runner.serving_role,
+                provider_mutation_authority=(
+                    request.startup_payload.runner.provider_mutation_authority
+                ),
+            ),
             endpoints=(
                 GcpPrivateCampaignEndpointReadiness(
                     endpoint_id="endpoint-a",
@@ -2779,6 +3982,8 @@ class FakeGcpPrivateCampaignTransport:
             endpoint_a_origin_sha256=first.published_identity.origin_sha256,
             endpoint_b_origin_sha256=second.published_identity.origin_sha256,
             routed_after_verified_readiness=True,
+            co_located_freshness_admitted=True,
+            runner_command_sha256=request.startup_payload.runner.runner_command_sha256,
         )
 
     def retrieve_evidence(
@@ -3017,6 +4222,11 @@ def gcp_private_campaign_contract_schemas() -> dict[str, dict[str, Any]]:
             GcpPrivateCampaignEngineAttestation,
         ),
         (
+            "gcp-private-campaign-runner-attestation.schema.json",
+            GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_ID,
+            GcpPrivateCampaignRunnerAttestation,
+        ),
+        (
             "gcp-private-campaign-journal-event.schema.json",
             GCP_PRIVATE_CAMPAIGN_EVENT_SCHEMA_ID,
             GcpPrivateCampaignJournalEvent,
@@ -3025,6 +4235,16 @@ def gcp_private_campaign_contract_schemas() -> dict[str, dict[str, Any]]:
             "gcp-private-campaign-receipt.schema.json",
             GCP_PRIVATE_CAMPAIGN_RECEIPT_SCHEMA_ID,
             GcpPrivateCampaignEvidenceReceipt,
+        ),
+        (
+            "gcp-private-campaign-readiness-receipt.schema.json",
+            GCP_PRIVATE_CAMPAIGN_READINESS_RECEIPT_SCHEMA_ID,
+            GcpPrivateCampaignReadinessReceipt,
+        ),
+        (
+            "gcp-private-campaign-sealed-artifact-receipt.schema.json",
+            GCP_PRIVATE_CAMPAIGN_SEALED_ARTIFACT_RECEIPT_SCHEMA_ID,
+            GcpPrivateCampaignSealedArtifactReceipt,
         ),
     )
     output: dict[str, dict[str, Any]] = {}

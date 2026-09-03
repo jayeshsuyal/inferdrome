@@ -19,8 +19,9 @@ Engine VM in one exact project and zone:
 | Machine-fixed scratch storage | exactly two ephemeral local-NVMe scratch disks; no user-created data disk |
 | Serving layout | two independently addressed engine containers on that one VM |
 | GPU placement | endpoint A uses GPU 0; endpoint B uses GPU 1 |
+| Observer layout | one separately pinned CPU-only runner container on the same internal Docker network |
 | Network exposure | private/internal only; no public inference listener |
-| Engine interface | private health, OpenAI-compatible generation, target-specific metrics, and a bounded engine-attestation endpoint |
+| Engine interface | private health, OpenAI-compatible generation, target-specific metrics, and a bounded Inferdrome engine-attestation endpoint |
 
 This is a controlled same-host, two-engine benchmark topology. It lets the
 campaign exercise independently addressed engines and their admissible
@@ -30,24 +31,45 @@ counts, public origins, duplicate endpoint identities, missing health/metrics
 capabilities, or observed topology drift are rejected before campaign
 admission.
 
-Both the runner and the two serving images are repository-and-digest pinned.
+The runner and serving images are distinct, separately digest-pinned OCI
+identities; the contract rejects an equal image digest. The two engines use the
+serving image while the runner uses the observer image. The approved boot image
+must already contain both exact OCI images and the exact revision-pinned
+Qwen3-8B snapshot at `/opt/inferdrome/qwen3-8b`, with the declared model
+manifest and snapshot digests. Startup uses `--pull never`, verifies those
+bytes, and sets offline model loading; it never fetches from a registry or
+Hugging Face at boot.
+
+The repository ships the source-owned private engine adapter. For each engine,
+the reviewed Docker shape is
+`docker run --entrypoint /opt/inferdrome-runtime/bin/python <image@sha256> -m inferdrome.deployment.gcp_private_engine_adapter …`.
+The entrypoint is therefore the adapter Python executable and the CMD begins
+with its module—not `vllm serve`. That adapter is the only component that
+invokes `vllm serve`, exactly once, and it exposes the bounded
+`/inferdrome/v2/engine-attestation` route alongside the allowed private
+vLLM-compatible routes. This PR does not build, publish, or claim the
+availability of the required boot image or OCI artifact; a future campaign must
+supply and separately approve those immutable preloaded inputs.
+
 The model and tokenizer revisions, serving runtime/adapter identity, startup
 payload, fixed workload/trace/fault/policy inputs, source commit, and evidence
-destination identity are all content-addressed. The startup payload is an
-immutable semantic projection: it specifies exactly the two private engines,
-their GPU assignments and ports, and the required endpoint paths. It contains
-neither credentials nor prompts, generated text, authentication headers, or
-public addresses.
+destination identity are content-addressed. The startup payload is an immutable
+semantic projection: it specifies exactly the two private engines, their GPU
+assignments and ports, and the required endpoint paths. It contains neither
+credentials nor prompts, generated text, authentication headers, or public
+addresses.
 
 ## One-minute explanation
 
-Inferdrome first proves that a very specific two-GPU VM and two private engines
-are what an approved campaign asked for. Only then may a deliberately narrow
-controller create it. The VM reports what actually became ready, and that
-observation is converted into the already fail-closed PR-B routing-execution
-configuration. The controller retrieves a sealed producer-side evidence
-package, then proves exact resource cleanup. Every other result is an explicit
-unconfirmed state rather than a success claim.
+Inferdrome first verifies a specific approved two-GPU VM, preloaded runtime,
+and IAP-only controller path. The controller creates it only after the final
+approval/quote/deadline check, reads back the provider facts, then polls both
+engines through two supervised IAP TCP tunnels and verifies the CPU-only runner
+through a third. The runner performs the existing fail-closed PR-B measurement
+over its same-host private Docker-network engine origins, seals the producer
+package locally, and the controller retrieves and verifies the fixed archive
+before exact cleanup. Any ambiguity is an explicit unconfirmed record, never a
+success or routing verdict.
 
 ## Guarded lifecycle
 
@@ -57,57 +79,75 @@ they do not initialize an SDK, discover ADC, contact a provider, or construct
 a transport. The executable path is intentionally separate:
 
 1. Build the exact two-engine proposal from pinned local inputs. It binds the
-   provider, project, region/zone, machine and GPU topology, boot-image
-   identity, image digests, model/tokenizer revisions, startup-payload digest,
-   routing inputs, endpoint contract, request denominator, evidence-destination
-   identity, quote identity/rate/currency/expiry, maximum runtime, cleanup
-   horizon, and USD cap.
+   provider, project, region/zone, machine and GPU topology, provider boot-image
+   reference and numeric identity, image digests, preloaded model manifest and
+   snapshot digests, adapter source digest, startup-payload digest, routing
+   inputs, endpoint contract, request denominator, evidence-destination
+   identity, IAP principal/firewall/tag, quote identity/rate/currency/expiry,
+   maximum runtime, cleanup horizon, and USD cap.
 2. Verify a distinct exact human-approval artifact locally. A substituted,
    malformed, expired, or mismatched approval stops here. No provider client,
    network operation, or request dispatch is reachable before this check.
-3. Persist a hash-chained `BACKSTOP_READY` record followed by `CREATE_INTENT`.
-   The durable backstop projects provider maximum runtime with `DELETE`
-   termination where that feature is supported, plus the exact local recovery
-   identity. The cleanup horizon begins at that durable create intent: a
-   controller deadline can block a late create, handoff, or destructive cleanup
-   and record an unconfirmed state, while provider max-runtime `DELETE` remains
-   an independent backstop. It is a cleanup backstop, not invoice enforcement.
-4. Construct the lazy provider transport only after those checks, then repeat
-   the approval and quote-expiry checks immediately before create. The create
-   request uses caller-supplied idempotent request IDs and immutable ownership
-   labels; the controller records and reconciles exact provider operations.
-   After the first exact readback it retains only a hash of the provider
-   instance identity, and each later destructive operation re-reads and binds
-   that same identity before it can delete anything.
-5. Require observed instance topology, boot-disk behavior, two engine
-   identities, private readiness, and endpoint capability facts before handing
-   the two origins to the PR-B routing runner. The readback independently
-   verifies the approved boot-image provenance, owned boot-disk identity,
-   private-only network shape, and fixed A2 GPU topology. Readiness performs a
-   bounded direct (no proxy and no redirect) health, generation, and
-   target-gauge probe. Each engine must also return a bounded private
-   attestation matching its endpoint ID, container name, image digest, model,
-   runtime, GPU ordinal, port, and startup digest. A healthy port alone is not
-   admissible evidence of the GPU/container mapping; an unavailable or
-   mismatched attestation blocks admission. The runner retains its own topology
-   and telemetry-admissibility checks.
-6. Retrieve the producer-side sealed evidence package through its bounded,
-   digest-verified route. Receipts retain canonical identities and digests, not
-   raw logs, provider payloads, prompts, model output, tokens, instance IDs,
-   or public endpoint addresses. Local staging never places a raw workload
-   under the evidence root. The preflight root descriptor is retained through
-   handoff and receipt retrieval. Reservation, staging, and create-no-replace
-   publication are all relative to a duplicate of that held descriptor; the
-   visible root is independently rechecked so a same-user replacement yields
-   no returned package or receipt.
-7. Record cleanup intent, rebind the exact attached auto-delete boot disk
-   before instance deletion, delete only exact owned residual disks, reconcile
-   their operations, and direct-check the approved instance and boot-disk names
-   before label-scoped absence confirmation. The two machine-fixed scratch
-   disks are nonpersistent and disappear with the instance; extra or missing
-   scratch-disk facts are topology drift. A failed delete, incomplete inventory,
-   journal loss, or ambiguous operation is reported as unconfirmed; it is never
-   relabeled as clean.
+3. Persist a hash-chained `CREATE_INTENT_DURABLE` record followed by
+   `CREATE_INTENT`. This is only a fsynced local intent and recovery identity;
+   it is not an armed watchdog or provider backstop. The normal execution
+   deadline may stop create, handoff, or evidence work, but never exact cleanup
+   or recovery. The sole provider backstop is observed Compute
+   `maxRunDuration` plus `DELETE`, read back after create and journaled as
+   `PROVIDER_BACKSTOP_VERIFIED`. It is not invoice enforcement.
+4. Construct the lazy provider transport only after local approval validation.
+   Preflight provider boot-image, IAP-principal, and IAP-firewall facts, and
+   revalidate approval, quote, and execution deadline after every potentially
+   slow read and immediately before the GCE insert. The runner image and exact
+   command are bound in the startup projection; the controller never starts a
+   local Docker runner. The
+   request uses caller-supplied idempotent request IDs, a unique
+   approval-scoped name, immutable ownership labels, and an exclusive run lease.
+5. Create only the observed profile with one explicit user-managed guest service
+   account with no OAuth scopes; default service accounts are rejected. Readback
+   requires that account, the IAP network tag, `block-project-ssh-keys=TRUE`,
+   and `enable-oslogin=FALSE`. The VM has no public inference listener. The
+   controller principal and IAP firewall rule identity/tag/CIDR/three-port policy
+   are separately bound to the approval; neither SSH nor a direct
+   controller-to-RFC1918 path is an admitted transport.
+6. Read back and derive boot-image identity from provider reference plus numeric
+   ID rather than copying an approved digest into observations. Require observed
+   topology, boot-disk behavior, two engine identities, and endpoint capability
+   facts before handoff. After the VM is `RUNNING`, open exactly three
+   supervised, approval-bound IAP TCP tunnels: two engine readiness paths and
+   one runner control/retrieval path. Bounded polling/backoff verifies engine
+   health, generation, model, target gauge, and engine attestation, plus the
+   runner attestation. Each engine attestation binds endpoint, container, image,
+   model, runtime, GPU, port, startup digest, adapter digest, and model snapshot
+   digest. The runner attestation binds its separate image, exact command,
+   adapter digest, CPU-only/no-credential/no-Docker-socket role, and private
+   network. A healthy port is not enough.
+7. The controller sends one bounded canonical configuration/workload envelope
+   only through the loopback IAP runner tunnel. It never gives the runner a GPU,
+   cloud credential, Docker socket, serving role, provider mutation authority,
+   or controller-host Docker access. The runner resolves only the two topology-
+   admitted logical origins to its fixed same-host Docker-network engine origins,
+   performs a bounded co-located freshness admission, and fails closed if any
+   observation is older than 5 ms when the admission decision is made. This is
+   an observed admission condition, not a promised benchmark result or an
+   IAP-latency claim. PR-B repeats its own fail-closed freshness checks per
+   request.
+8. The runner seals the canonical request-level package and immutable manifest
+   in its VM-local evidence directory with create-no-replace semantics. The
+   controller retrieves only a bounded fixed-inventory tar over IAP, rejects
+   redirects, oversize members, links, duplicates, and malformed content, then
+   independently verifies and re-seals it under the held controller evidence
+   root. It durably publishes redacted readiness and sealed-artifact receipts;
+   recovery reopens and verifies those deterministic artifacts rather than
+   trusting process memory.
+9. Record cleanup intent and use only cleanup-capable recovery transport after a
+   launch approval expires. Before name-addressed GCE deletion, re-read the
+   exact name, labels, run lease, and provider IDs. GCE has no immutable-ID
+   conditional delete: the reread detects a mismatch and prevents deletion, but
+   cannot remove the residual provider TOCTOU window between reread and delete.
+   Exact residual disks receive the same treatment. A failed delete, incomplete
+   inventory, journal loss, mismatch, or ambiguous operation is unconfirmed,
+   never relabeled as clean.
 
 The runnable interface also has a constrained `recover-cleanup` path and a
 label-scoped, read-only orphan-discovery path. Cleanup recovery has its own
@@ -119,38 +159,52 @@ a hostname/IP, or delete a merely similar resource.
 ## Local/fake validation boundary
 
 This PR validates the lifecycle only against injected fakes and local files.
-Its tests exercise approval-before-factory ordering, crash windows,
-idempotency, request/operation reconciliation, deadline handling, startup
-integrity, topology drift, stale/malformed input, residual-disk cleanup,
-journal-loss recovery, and unconfirmed-cleanup outcomes. The two-endpoint
-routing handoff is proved through local loopback fixtures using the existing
-PR-B transport contract.
+Its tests exercise approval-before-factory ordering and pre-insert expiry,
+IAP/firewall/service-account policy drift, crash windows, idempotency,
+  readiness polling and timeout, startup/adapter/model integrity, three-
+  container GPU isolation, runner command/attestation binding, 5 ms freshness
+  admission, bounded IAP input/retrieval rejection, receipt recovery, residual-disk
+  cleanup, name-replacement refusal, journal-loss recovery, and unconfirmed
+  cleanup outcomes. The two-endpoint routing handoff is proved through local
+loopback fixtures using the existing PR-B transport contract.
 
 No test, validation command, or action taken for this PR accesses Google
-credentials, ADC, provider APIs, SSH, a GPU, a registry, a bucket, or a billable
-resource. The reviewed `execute` command is deliberately present but has not
-been invoked: it selects the optional SDK adapter only after its exact approval
-and durable-backstop gates. A real campaign still requires a separate, exact
-user authorization that binds the selected provider, project, zone, topology,
-images, workload, deadline, USD ceiling, watchdog, cleanup plan, and evidence
-destination. This PR does not grant that authority.
+credentials, ADC, provider APIs, SSH, a GPU, a registry, a bucket, Docker
+registry, or a billable resource. The reviewed `execute` command is deliberately
+present but has not been invoked: it can select the optional SDK adapter only
+  after exact local approval and evidence-destination preflight. A real campaign still
+requires a separate, exact authorization that binds the selected provider,
+project, zone, topology, preloaded images/model, workload, normal execution
+deadline, USD ceiling, observed-provider-backstop expectation, cleanup plan,
+IAP identity, and evidence destination. This PR does not grant that authority
+or publish any external artifact.
 
 ## Operator-facing limits and non-goals
 
 - A quote/rate/cap is a controller estimate and guardrail, never a provider
   invoice, account cap, SKU guarantee, or billing proof.
-- Provider maximum-runtime plus `DELETE` reduces known unbounded-instance
-  risk; it does not prove cleanup in every theoretical provider or controller
-  failure mode.
+- Provider maximum-runtime plus `DELETE` is the only provider-side backstop
+  observed by this controller. It reduces known unbounded-instance risk; it
+  does not prove cleanup in every theoretical provider or controller failure
+  mode.
 - The controller has no generic provider platform, autoscaler, GKE integration,
   public serving surface, model zoo, or generalized serving-runtime support.
 - There is no dashboard expansion or Kubernetes projection here; those remain
   later, separately bounded work.
 - Inferdrome records evidence and limitations. It does not declare a routing
   policy winner, a pass/fail/not-proven outcome, or a promotion decision.
-- The required private engine-attestation endpoint is an adapter capability,
-  not a claim about stock vLLM. A pinned image without that capability is
-  rejected; this PR does not implement or publish a serving runtime.
+- The required private engine-attestation endpoint is an Inferdrome adapter
+  capability, not a claim about stock vLLM. This repository ships the adapter
+  source and verifies its digest; a separately prepared, pinned image must
+  contain it and the preloaded model. This PR does not build or publish that
+  image or prove its availability.
+- The one-host topology has no host, zone, network, or control-plane failure
+  independence. Local fakes do not prove IAP authorization, GCE capacity,
+  artifact availability, telemetry freshness, or a GPU campaign.
+- The runner has one VM-local evidence bind and no controller-host Docker bind.
+  The controller accepts evidence only through the bounded IAP archive and
+  re-verifies it under a held descriptor; that does not turn the runner's local
+  attestation into a provider or hardware attestation.
 
 For the adversarial assumptions and recovery limits, see
 [`GCP_PRIVATE_PRECAMPAIGN_V2_THREAT_SUPPLEMENT.md`](GCP_PRIVATE_PRECAMPAIGN_V2_THREAT_SUPPLEMENT.md).

@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import inferdrome.deployment.gcp_private_campaign_v2 as campaign_v2
 from inferdrome.deployment.gcp_private_campaign_v2 import (
     GCP_PRIVATE_CAMPAIGN_APPROVAL_CONFIRMATION,
     GCP_PRIVATE_CAMPAIGN_APPROVAL_SCHEMA_VERSION,
@@ -20,6 +22,8 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignBootImage,
     GcpPrivateCampaignCleanupAuthorization,
     GcpPrivateCampaignError,
+    GcpPrivateCampaignGuestServiceAccount,
+    GcpPrivateCampaignIapConnectivity,
     GcpPrivateCampaignJournal,
     GcpPrivateCampaignLifecycleController,
     GcpPrivateCampaignOwnershipLabels,
@@ -29,6 +33,8 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignRequestIds,
     GcpPrivateCampaignRoutingBinding,
     GcpPrivateCampaignTopology,
+    _CleanupTransportFacade,
+    gcp_private_campaign_boot_image_identity,
     gcp_private_campaign_proposal_id,
     issue_gcp_private_campaign_proposal,
     issue_gcp_private_campaign_startup_payload,
@@ -74,6 +80,7 @@ def _reissued_proposal(
     proposal: GcpPrivateCampaignProposal,
     *,
     cleanup_horizon_seconds: int | None = None,
+    max_runtime_seconds: int | None = None,
     quote_overrides: dict[str, object] | None = None,
     routing_overrides: dict[str, object] | None = None,
 ) -> GcpPrivateCampaignProposal:
@@ -81,6 +88,8 @@ def _reissued_proposal(
     payload.pop("proposal_id")
     if cleanup_horizon_seconds is not None:
         payload["cleanup_horizon_seconds"] = cleanup_horizon_seconds
+    if max_runtime_seconds is not None:
+        payload["max_runtime_seconds"] = max_runtime_seconds
     if quote_overrides is not None:
         payload["quote"].update(quote_overrides)
     if routing_overrides is not None:
@@ -92,7 +101,7 @@ def _reissued_proposal(
 
 def _proposal() -> tuple[GcpPrivateCampaignProposal, object]:
     runner = ImageIdentity(reference="example/inferdrome-runner@sha256:" + ("1" * 64))
-    serving = ImageIdentity(reference="example/inferdrome-vllm@sha256:" + ("2" * 64))
+    serving = ImageIdentity(reference="example/inferdrome-serving@sha256:" + ("2" * 64))
     startup = issue_gcp_private_campaign_startup_payload(
         source_commit="1" * 40, runner_image=runner, serving_image=serving
     )
@@ -113,6 +122,11 @@ def _proposal() -> tuple[GcpPrivateCampaignProposal, object]:
             accelerator_count=2,
             topology_kind="same_host_two_independent_engines",
             runner_separate_from_serving=True,
+            runner_colocation="SAME_VM_SEPARATE_CPU_CONTAINER",
+            runner_gpu_access="NONE",
+            runner_cloud_credentials="NONE",
+            runner_docker_socket="ABSENT",
+            runner_provider_mutation_authority="NONE",
             serving_engine_count=2,
             one_engine_per_endpoint=True,
             persistent_disk_count=0,
@@ -127,14 +141,43 @@ def _proposal() -> tuple[GcpPrivateCampaignProposal, object]:
             role="two-engine-precampaign",
             controller_id="pcctl-12345678",
             ownership_nonce="0123456789abcdef",
+            run_lease_id="lease-0123456789ab",
         ),
         instance_name="inferdrome-pc-12345678",
         boot_disk_name="inferdrome-pc-12345678-boot",
         boot_image=GcpPrivateCampaignBootImage(
             image_ref="projects/inferdrome-lab/global/images/precampaign-image",
             provider_image_id=123,
-            boot_image_identity="sha256:" + ("3" * 64),
+            boot_image_identity=gcp_private_campaign_boot_image_identity(
+                image_ref="projects/inferdrome-lab/global/images/precampaign-image",
+                provider_image_id=123,
+            ),
         ),
+        guest_service_account=GcpPrivateCampaignGuestServiceAccount(
+            service_account_email=(
+                "precampaign-guest@inferdrome-lab.iam.gserviceaccount.com"
+            ),
+            service_account_mode="USER_MANAGED_LEAST_PRIVILEGE_V1",
+            oauth_scopes=(),
+            inherited_project_ssh_keys_blocked=True,
+            os_login_disabled=True,
+        ),
+        iap_connectivity=GcpPrivateCampaignIapConnectivity(
+            connectivity_kind="IAP_TCP_FORWARDING_V1",
+            controller_principal=(
+                "precampaign-controller@inferdrome-lab.iam.gserviceaccount.com"
+            ),
+            firewall_rule_ref=(
+                "projects/inferdrome-lab/global/firewalls/inferdrome-pc-iap"
+            ),
+            firewall_provider_id=456,
+            iap_source_cidr="35.235.240.0/20",
+            instance_network_tag="inferdrome-pc-0123456789abcdef",
+            local_tunnel_ports=(18000, 18001, 18002),
+            tunnel_binary="gcloud",
+            ssh_transport_forbidden=True,
+        ),
+        preloaded_artifacts=startup.preloaded_artifacts,
         runner_image=runner,
         serving_image=serving,
         model=startup.engines[0].model,
@@ -174,6 +217,15 @@ def _proposal() -> tuple[GcpPrivateCampaignProposal, object]:
         ),
     )
     return issue_gcp_private_campaign_proposal(payload), startup
+
+
+def test_startup_rejects_an_image_identity_shared_by_runner_and_engines() -> None:
+    image = ImageIdentity(reference="example/inferdrome@sha256:" + ("1" * 64))
+
+    with pytest.raises(ValueError, match="runner and serving images"):
+        issue_gcp_private_campaign_startup_payload(
+            source_commit="1" * 40, runner_image=image, serving_image=image
+        )
 
 
 def _self_consistent_unvalidated_proposal(
@@ -247,12 +299,13 @@ def test_fake_lifecycle_handoffs_only_after_two_endpoint_readiness_and_cleans(
     assert not fake.boot_disk_present
     events = controller._journal.load(proposal)
     assert [event.state for event in events] == [
-        "BACKSTOP_READY",
+        "CREATE_INTENT_DURABLE",
         "CREATE_INTENT",
         "CREATE_SUBMITTED",
         "CREATED",
         "INSTANCE_IDENTITY_BOUND",
         "BOOT_DISK_IDENTITY_BOUND",
+        "PROVIDER_BACKSTOP_VERIFIED",
         "READINESS_VERIFIED",
         "CAMPAIGN_HANDED_OFF",
         "EVIDENCE_RETRIEVED",
@@ -386,6 +439,30 @@ def test_evidence_destination_preflight_refuses_a_symlinked_root(
         verify_gcp_private_campaign_evidence_destination(rebound, evidence_root=link)
 
 
+def test_evidence_destination_preflight_requires_a_writable_private_root(
+    tmp_path: Path,
+) -> None:
+    proposal, _ = _proposal()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o700)
+    evidence_root.chmod(0o500)
+    rebound = _reissued_proposal(
+        proposal,
+        routing_overrides={
+            "evidence_destination_sha256": sha256_digest(
+                str(evidence_root.absolute()).encode("utf-8")
+            )
+        },
+    )
+
+    with pytest.raises(
+        GcpPrivateCampaignError, match="EVIDENCE_DESTINATION_UNAVAILABLE"
+    ):
+        verify_gcp_private_campaign_evidence_destination(
+            rebound, evidence_root=evidence_root
+        )
+
+
 def test_preflight_evidence_descriptor_is_bound_before_create(
     tmp_path: Path,
 ) -> None:
@@ -426,7 +503,10 @@ def test_backstop_and_create_intent_are_durable_before_factory(tmp_path: Path) -
 
     def factory() -> FakeGcpPrivateCampaignTransport:
         events = journal.load(proposal)
-        assert [event.state for event in events] == ["BACKSTOP_READY", "CREATE_INTENT"]
+        assert [event.state for event in events] == [
+            "CREATE_INTENT_DURABLE",
+            "CREATE_INTENT",
+        ]
         return fake
 
     controller = GcpPrivateCampaignLifecycleController(
@@ -501,7 +581,7 @@ def test_cleanup_recovery_is_valid_after_launch_approval_expiry(tmp_path: Path) 
     proposal, startup = _proposal()
     root = _journal_root(tmp_path)
     journal = GcpPrivateCampaignJournal(root)
-    journal.append(proposal, state="BACKSTOP_READY", occurred_at=_Clock().now())
+    journal.append(proposal, state="CREATE_INTENT_DURABLE", occurred_at=_Clock().now())
     journal.append(proposal, state="CREATE_INTENT", occurred_at=_Clock().now())
     journal.append(proposal, state="CREATE_SUBMITTED", occurred_at=_Clock().now())
     journal.append(proposal, state="CREATED", occurred_at=_Clock().now())
@@ -608,7 +688,7 @@ def test_durable_backstop_survives_crash_before_factory(tmp_path: Path) -> None:
         pass
 
     def crash_hook(point: str) -> None:
-        if point == "after-backstop_ready":
+        if point == "after-create_intent_durable":
             raise Crash
 
     def factory() -> FakeGcpPrivateCampaignTransport:
@@ -624,7 +704,9 @@ def test_durable_backstop_survives_crash_before_factory(tmp_path: Path) -> None:
         controller.execute(
             proposal=proposal, approval=_approval(proposal), startup_payload=startup
         )
-    assert [event.state for event in journal.load(proposal)] == ["BACKSTOP_READY"]
+    assert [event.state for event in journal.load(proposal)] == [
+        "CREATE_INTENT_DURABLE"
+    ]
     assert calls == 0
 
 
@@ -695,7 +777,12 @@ def test_recovery_without_durable_identity_uses_read_only_absence_only(
 ) -> None:
     proposal, startup = _proposal()
     journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
-    for state in ("BACKSTOP_READY", "CREATE_INTENT", "CREATE_SUBMITTED", "CREATED"):
+    for state in (
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_SUBMITTED",
+        "CREATED",
+    ):
         journal.append(proposal, state=state, occurred_at=_Clock().now())
     fake = FakeGcpPrivateCampaignTransport(created=True, boot_disk_present=True)
     controller = GcpPrivateCampaignLifecycleController(
@@ -775,7 +862,12 @@ def test_future_launch_and_cleanup_authority_never_reaches_factory(
     assert calls == 0
 
     journal = GcpPrivateCampaignJournal(_journal_root(tmp_path / "cleanup"))
-    for state in ("BACKSTOP_READY", "CREATE_INTENT", "CREATE_SUBMITTED", "CREATED"):
+    for state in (
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_SUBMITTED",
+        "CREATED",
+    ):
         journal.append(proposal, state=state, occurred_at=_Clock().now())
     cleanup_controller = GcpPrivateCampaignLifecycleController(
         journal=journal, transport_factory=factory, clock=_Clock()
@@ -842,11 +934,11 @@ def test_future_quote_and_pre_factory_revalidation_block_provider_factory(
     assert calls == 0
 
 
-def test_cleanup_deadline_blocks_create_and_exact_cleanup_mutations(
+def test_execution_deadline_blocks_create_but_exact_cleanup_survives_expiry(
     tmp_path: Path,
 ) -> None:
     proposal, startup = _proposal()
-    short = _reissued_proposal(proposal, cleanup_horizon_seconds=60)
+    short = _reissued_proposal(proposal, max_runtime_seconds=60)
     calls = 0
     fake = FakeGcpPrivateCampaignTransport()
 
@@ -869,7 +961,7 @@ def test_cleanup_deadline_blocks_create_and_exact_cleanup_mutations(
             )
         ),
     )
-    with pytest.raises(GcpPrivateCampaignError, match="CLEANUP_DEADLINE_EXCEEDED"):
+    with pytest.raises(GcpPrivateCampaignError, match="EXECUTION_DEADLINE_EXCEEDED"):
         controller.execute(
             proposal=short, approval=_approval(short), startup_payload=startup
         )
@@ -877,7 +969,12 @@ def test_cleanup_deadline_blocks_create_and_exact_cleanup_mutations(
     assert fake.create_calls == 0
 
     journal = GcpPrivateCampaignJournal(_journal_root(tmp_path / "cleanup"))
-    for state in ("BACKSTOP_READY", "CREATE_INTENT", "CREATE_SUBMITTED", "CREATED"):
+    for state in (
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_SUBMITTED",
+        "CREATED",
+    ):
         journal.append(short, state=state, occurred_at=_Clock().now())
     journal.append(
         short,
@@ -902,49 +999,257 @@ def test_cleanup_deadline_blocks_create_and_exact_cleanup_mutations(
         authorization=_cleanup_authorization(short),
         startup_payload=startup,
     )
-    assert not outcome.confirmed
-    assert cleanup_fake.delete_calls == 0
-    assert journal.load(short)[-2].state == "CLEANUP_DEADLINE_EXCEEDED"
+    assert outcome.confirmed
+    assert cleanup_fake.delete_calls == 1
+    assert journal.load(short)[-1].state == "CLEANUP_CONFIRMED"
 
 
-@pytest.mark.parametrize(
-    "terminal_phase",
-    ("READINESS_VERIFIED", "CAMPAIGN_HANDED_OFF", "EVIDENCE_RETRIEVED"),
-)
-def test_cleanup_deadline_is_durably_recorded_after_readiness_phases(
-    tmp_path: Path, terminal_phase: str
+def test_unexpected_post_create_failure_is_sanitized_and_always_cleans(
+    tmp_path: Path,
 ) -> None:
-    proposal, _ = _proposal()
-    short = _reissued_proposal(proposal, cleanup_horizon_seconds=60)
+    proposal, startup = _proposal()
+
+    class FailingReadiness(FakeGcpPrivateCampaignTransport):
+        def observe_readiness(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise RuntimeError("untrusted verifier detail")
+
+    fake = FailingReadiness()
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=GcpPrivateCampaignJournal(_journal_root(tmp_path)),
+        transport_factory=lambda: fake,
+        clock=_Clock(),
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="CAMPAIGN_OPERATION_FAILED"):
+        controller.execute(
+            proposal=proposal, approval=_approval(proposal), startup_payload=startup
+        )
+    assert fake.delete_calls == 1
+    assert controller._journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
+
+
+@pytest.mark.parametrize("failure_kind", ("malformed", "generic"))
+def test_post_dispatch_create_failures_attempt_exact_cleanup(
+    tmp_path: Path, failure_kind: str
+) -> None:
+    proposal, startup = _proposal()
+
+    class PostDispatchFailure(FakeGcpPrivateCampaignTransport):
+        def create_instance(self, *args: object, **kwargs: object) -> object:
+            super().create_instance(*args, **kwargs)  # type: ignore[arg-type]
+            if failure_kind == "malformed":
+                return object()
+            raise RuntimeError("untrusted post-send detail")
+
+    fake = PostDispatchFailure()
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=GcpPrivateCampaignJournal(_journal_root(tmp_path)),
+        transport_factory=lambda: fake,
+        clock=_Clock(),
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="CAMPAIGN_OPERATION_FAILED"):
+        controller.execute(
+            proposal=proposal, approval=_approval(proposal), startup_payload=startup
+        )
+
+    states = [event.state for event in controller._journal.load(proposal)]
+    assert "CLEANUP_INTENT" in states
+    assert states[-1] == "CLEANUP_UNCONFIRMED"
+    assert fake.delete_calls == 0
+
+
+def test_receipt_publication_uses_held_evidence_descriptor_and_fails_closed_on_swap(
+    tmp_path: Path,
+) -> None:
+    proposal, startup = _proposal()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(mode=0o700)
+    rebound = _reissued_proposal(
+        proposal,
+        routing_overrides={
+            "evidence_destination_sha256": sha256_digest(
+                str(evidence.absolute()).encode("utf-8")
+            )
+        },
+    )
+    moved = tmp_path / "evidence-original"
+
+    class ReplaceAfterRetrieve(FakeGcpPrivateCampaignTransport):
+        def retrieve_evidence(self, *args: object, **kwargs: object) -> object:
+            receipt = super().retrieve_evidence(*args, **kwargs)  # type: ignore[arg-type]
+            evidence.rename(moved)
+            evidence.mkdir(mode=0o700)
+            return receipt
+
+    fake = ReplaceAfterRetrieve()
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=GcpPrivateCampaignJournal(_journal_root(tmp_path)),
+        transport_factory=lambda: fake,
+        receipt_root=evidence,
+        launch_preflight=lambda value: verify_gcp_private_campaign_evidence_destination(
+            value, evidence_root=evidence
+        ),
+        clock=_Clock(),
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="RECEIPT_ROOT_CHANGED"):
+        controller.execute(
+            proposal=rebound, approval=_approval(rebound), startup_payload=startup
+        )
+
+    assert not list(evidence.glob("gcp-private-*.json"))
+    assert list(moved.glob("gcp-private-readiness-*.json"))
+    assert fake.delete_calls == 1
+
+
+def test_crash_after_artifact_receipt_recovery_reverifies_durable_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, startup = _proposal()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(mode=0o700)
+    rebound = _reissued_proposal(
+        proposal,
+        routing_overrides={
+            "evidence_destination_sha256": sha256_digest(
+                str(evidence.absolute()).encode("utf-8")
+            )
+        },
+    )
+
+    class CrashAfterReceipt(BaseException):
+        pass
+
+    original_write = campaign_v2.GcpPrivateCampaignReceiptStore.write_artifact
+
+    def write_then_crash(self: object, *args: object, **kwargs: object) -> object:
+        original_write(self, *args, **kwargs)  # type: ignore[arg-type]
+        raise CrashAfterReceipt
+
+    monkeypatch.setattr(
+        campaign_v2.GcpPrivateCampaignReceiptStore,
+        "write_artifact",
+        write_then_crash,
+    )
+    fake = FakeGcpPrivateCampaignTransport()
     journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
-    phases = [
-        "BACKSTOP_READY",
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: fake,
+        receipt_root=evidence,
+        launch_preflight=lambda value: verify_gcp_private_campaign_evidence_destination(
+            value, evidence_root=evidence
+        ),
+        clock=_Clock(),
+    )
+
+    with pytest.raises(CrashAfterReceipt):
+        controller.execute(
+            proposal=rebound, approval=_approval(rebound), startup_payload=startup
+        )
+
+    assert journal.load(rebound)[-1].state == "CLEANUP_CONFIRMED"
+    assert not any(
+        event.state == "SEALED_ARTIFACT_RECEIPT_RECORDED"
+        for event in journal.load(rebound)
+    )
+    artifact = next(evidence.glob("gcp-private-artifact-*.json"))
+    readiness = next(evidence.glob("gcp-private-readiness-*.json"))
+    receipt_bytes = artifact.read_bytes() + readiness.read_bytes()
+    assert b"10.23.0.17" not in receipt_bytes
+    assert b"123456789" not in receipt_bytes
+
+    monkeypatch.setattr(
+        campaign_v2.GcpPrivateCampaignReceiptStore,
+        "write_artifact",
+        original_write,
+    )
+    verified_paths: list[Path] = []
+
+    def fake_verify(path: Path, *, expected_digest: str) -> SimpleNamespace:
+        verified_paths.append(path)
+        return SimpleNamespace(report=SimpleNamespace(retained_digest=expected_digest))
+
+    monkeypatch.setattr(campaign_v2, "verify_execution_package", fake_verify)
+    recovery = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: fake,
+        receipt_root=evidence,
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
+    )
+    outcome = recovery.recover_exact_cleanup(
+        proposal=rebound,
+        authorization=_cleanup_authorization(rebound),
+        startup_payload=startup,
+    )
+
+    assert outcome.confirmed
+    assert verified_paths == [
+        evidence / f"routing-execution-{rebound.proposal_id[7:39]}"
+    ]
+
+    # A durable receipt is evidence, not a trust marker.  A later
+    # cleanup-only recovery must reopen and reject a same-user tamper even
+    # after the original run recorded confirmed absence.
+    artifact.write_bytes(b"{}")
+    with pytest.raises(
+        GcpPrivateCampaignError, match="SEALED_ARTIFACT_REVERIFY_FAILED"
+    ):
+        recovery.recover_exact_cleanup(
+            proposal=rebound,
+            authorization=_cleanup_authorization(rebound),
+            startup_payload=startup,
+        )
+
+
+def test_recovery_uses_a_no_create_transport_surface(tmp_path: Path) -> None:
+    proposal, startup = _proposal()
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
+    for state in (
+        "CREATE_INTENT_DURABLE",
         "CREATE_INTENT",
         "CREATE_SUBMITTED",
         "CREATED",
-        "INSTANCE_IDENTITY_BOUND",
-        "BOOT_DISK_IDENTITY_BOUND",
-    ]
-    if terminal_phase in {
-        "READINESS_VERIFIED",
-        "CAMPAIGN_HANDED_OFF",
-        "EVIDENCE_RETRIEVED",
-    }:
-        phases.append("READINESS_VERIFIED")
-    if terminal_phase in {"CAMPAIGN_HANDED_OFF", "EVIDENCE_RETRIEVED"}:
-        phases.append("CAMPAIGN_HANDED_OFF")
-    if terminal_phase == "EVIDENCE_RETRIEVED":
-        phases.append("EVIDENCE_RETRIEVED")
-    for phase in phases:
-        journal.append(short, state=phase, occurred_at=_Clock().now())
+    ):
+        journal.append(proposal, state=state, occurred_at=_Clock().now())
+    journal.append(
+        proposal,
+        state="INSTANCE_IDENTITY_BOUND",
+        occurred_at=_Clock().now(),
+        detail_digest=sha256_digest(b"123456789"),
+    )
+    journal.append(
+        proposal,
+        state="BOOT_DISK_IDENTITY_BOUND",
+        occurred_at=_Clock().now(),
+        detail_digest=sha256_digest(b"246813579"),
+    )
+    fake = FakeGcpPrivateCampaignTransport(created=True, boot_disk_present=True)
+    cleanup_only = _CleanupTransportFacade(fake)
+    factory_calls = 0
+
+    def forbidden_full_factory() -> FakeGcpPrivateCampaignTransport:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("recovery must not construct a full transport")
+
     controller = GcpPrivateCampaignLifecycleController(
         journal=journal,
-        transport_factory=FakeGcpPrivateCampaignTransport,
-        clock=_Clock(instant=datetime(2026, 9, 2, 0, 1, tzinfo=UTC)),
+        transport_factory=forbidden_full_factory,
+        cleanup_transport_factory=lambda: cleanup_only,
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
     )
-    with pytest.raises(GcpPrivateCampaignError, match="CLEANUP_DEADLINE_EXCEEDED"):
-        controller._assert_cleanup_deadline(short)
-    assert journal.load(short)[-1].state == "CLEANUP_DEADLINE_EXCEEDED"
+    outcome = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=_cleanup_authorization(proposal),
+        startup_payload=startup,
+    )
+
+    assert outcome.confirmed
+    assert factory_calls == 0
+    assert not hasattr(cleanup_only, "create_instance")
 
 
 def test_post_factory_expiry_and_exact_expiry_never_create(tmp_path: Path) -> None:
@@ -1119,6 +1424,11 @@ def test_profile_rejects_wrong_machine_shape_before_provider_surface() -> None:
             accelerator_count=2,
             topology_kind="same_host_two_independent_engines",
             runner_separate_from_serving=True,
+            runner_colocation="SAME_VM_SEPARATE_CPU_CONTAINER",
+            runner_gpu_access="NONE",
+            runner_cloud_credentials="NONE",
+            runner_docker_socket="ABSENT",
+            runner_provider_mutation_authority="NONE",
             serving_engine_count=2,
             one_engine_per_endpoint=True,
             persistent_disk_count=0,

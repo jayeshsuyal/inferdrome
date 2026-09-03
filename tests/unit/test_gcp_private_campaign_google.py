@@ -13,17 +13,20 @@ import pytest
 import inferdrome.deployment.gcp_private_campaign_google as campaign_google
 from inferdrome.deployment.gcp_private_campaign_google import (
     GoogleGcpPrivateCampaignTransport,
-    LocalGcpPrivateCampaignRunner,
+    _IapTunnelEndpoints,
     _metric_is_present,
+    render_gcp_private_campaign_engine_argv,
+    render_gcp_private_campaign_runner_argv,
     render_gcp_private_campaign_startup_script,
 )
 from inferdrome.deployment.gcp_private_campaign_v2 import (
+    GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_VERSION,
     GcpPrivateCampaignError,
+    GcpPrivateCampaignEvidenceReceipt,
     GcpPrivateCampaignExactResourceBinding,
-    GcpPrivateCampaignProposalPayload,
+    GcpPrivateCampaignHandoffReceipt,
+    GcpPrivateCampaignRunnerAttestation,
     build_gcp_private_campaign_create_request,
-    issue_gcp_private_campaign_proposal,
-    verify_gcp_private_campaign_evidence_destination,
 )
 from inferdrome.routing_execution.canonical import sha256_digest
 from tests.unit.test_gcp_private_campaign_v2 import _proposal
@@ -44,6 +47,8 @@ class _Sdk:
     AttachedDisk = _Record
     AttachedDiskInitializeParams = _Record
     NetworkInterface = _Record
+    ServiceAccount = _Record
+    Tags = _Record
     Scheduling = _Record
     Metadata = _Record
     Items = _Record
@@ -79,6 +84,12 @@ class _NoImages:
         raise AssertionError("provider image read was not expected")
 
 
+class _NoFirewalls:
+    def get(self, *, project: str, firewall: str, timeout: int) -> object:
+        del project, firewall, timeout
+        raise AssertionError("provider firewall read was not expected")
+
+
 class _Rows(list[object]):
     next_page_token: str | None = None
 
@@ -92,6 +103,117 @@ class _ReadyImage:
         del project, image, timeout
         self.calls += 1
         return self.row
+
+
+class _ReadyFirewall:
+    def __init__(self, row: object) -> None:
+        self.row = row
+        self.calls = 0
+
+    def get(self, *, project: str, firewall: str, timeout: int) -> object:
+        del project, firewall, timeout
+        self.calls += 1
+        return self.row
+
+
+class _Runner:
+    def __init__(self) -> None:
+        self.runner_origin: str | None = None
+        self.closed = False
+
+    def bind_evidence_root(self, root: object) -> None:
+        del root
+
+    def bind_iap_runner_origin(self, origin: str) -> None:
+        self.runner_origin = origin
+
+    def readiness_attestation(
+        self, request: Any, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignRunnerAttestation:
+        del timeout_seconds
+        runner = request.startup_payload.runner
+        return GcpPrivateCampaignRunnerAttestation(
+            schema_version=GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_VERSION,
+            container_name=runner.container_name,
+            private_port=runner.private_port,
+            runner_image=runner.runner_image,
+            container_command_module=runner.container_command_module,
+            adapter_source_sha256=runner.adapter_source_sha256,
+            runner_command_sha256=runner.runner_command_sha256,
+            startup_payload_digest=request.proposal.startup_payload_digest,
+            docker_network=runner.docker_network,
+            gpu_access=runner.gpu_access,
+            cloud_credentials=runner.cloud_credentials,
+            docker_socket=runner.docker_socket,
+            serving_role=runner.serving_role,
+            provider_mutation_authority=runner.provider_mutation_authority,
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RecordingRunner(_Runner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.handoff_calls: list[tuple[bytes, bytes, int]] = []
+        self.retrieve_calls: list[int] = []
+
+    def handoff(
+        self,
+        request: Any,
+        *,
+        routing_config: bytes,
+        workload: bytes,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignHandoffReceipt:
+        self.handoff_calls.append((routing_config, workload, timeout_seconds))
+        return GcpPrivateCampaignHandoffReceipt(
+            proposal_id=request.proposal.proposal_id,
+            routing_config_sha256=sha256_digest(routing_config),
+            selected_workload_sha256=request.proposal.routing.selected_workload_sha256,
+            endpoint_a_origin_sha256="sha256:" + ("a" * 64),
+            endpoint_b_origin_sha256="sha256:" + ("b" * 64),
+            routed_after_verified_readiness=True,
+            co_located_freshness_admitted=True,
+            runner_command_sha256=request.startup_payload.runner.runner_command_sha256,
+        )
+
+    def retrieve(
+        self, request: Any, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignEvidenceReceipt:
+        self.retrieve_calls.append(timeout_seconds)
+        return GcpPrivateCampaignEvidenceReceipt(
+            proposal_id=request.proposal.proposal_id,
+            retained_digest="sha256:" + ("c" * 64),
+            collection_mode="CREATE_NO_REPLACE_RETRIEVAL",
+            raw_prompt_or_output_retained=False,
+        )
+
+
+class _IapTunnels:
+    def __init__(self) -> None:
+        self.open_calls = 0
+        self.closed = False
+        self.preflight_calls = 0
+        self.principal_error: Exception | None = None
+
+    def preflight_principal(self, request: object) -> None:
+        del request
+        self.preflight_calls += 1
+        if self.principal_error is not None:
+            raise self.principal_error
+
+    def open(self, request: object, *, timeout_seconds: int) -> _IapTunnelEndpoints:
+        del request, timeout_seconds
+        self.open_calls += 1
+        return _IapTunnelEndpoints(
+            readiness_origins=("http://127.0.0.1:18000", "http://127.0.0.1:18001"),
+            runner_control_origin="http://127.0.0.1:18002",
+        )
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _InsertCounter:
@@ -172,6 +294,8 @@ def _full_instance(
                 value=proposal.startup_payload_digest,
             ),
             _Record(key="inferdrome-proposal-digest", value=proposal.proposal_id),
+            _Record(key="block-project-ssh-keys", value="TRUE"),
+            _Record(key="enable-oslogin", value="FALSE"),
         ]
     return _Record(
         name=proposal.instance_name,
@@ -191,6 +315,13 @@ def _full_instance(
                 network_i_p="10.23.0.17",
             )
         ],
+        service_accounts=[
+            _Record(
+                email=proposal.guest_service_account.service_account_email,
+                scopes=[],
+            )
+        ],
+        tags=_Record(items=[proposal.iap_connectivity.instance_network_tag]),
         guest_accelerators=[],
         can_ip_forward=False,
         status="RUNNING",
@@ -243,20 +374,50 @@ def _live_boot_disk(
     )
 
 
+def _live_firewall(proposal: object) -> _Record:
+    return _Record(
+        id=proposal.iap_connectivity.firewall_provider_id,
+        self_link=(
+            "https://www.googleapis.com/compute/v1/"
+            f"{proposal.iap_connectivity.firewall_rule_ref}"
+        ),
+        direction="INGRESS",
+        disabled=False,
+        source_ranges=[proposal.iap_connectivity.iap_source_cidr],
+        target_tags=[proposal.iap_connectivity.instance_network_tag],
+        allowed=[_Record(i_p_protocol="tcp", ports=["8000", "8001", "8002"])],
+        denied=[],
+    )
+
+
 def _adapter(
     *,
     instances: _InsertCounter | None = None,
     disks: _DiskRows | None = None,
     images: object | None = None,
+    firewalls: object | None = None,
+    runner: _Runner | None = None,
+    iap_tunnels: _IapTunnels | None = None,
+    monotonic: object | None = None,
+    sleeper: object | None = None,
+    pre_insert_guard: object | None = None,
     evidence_root: Path | None = None,
 ) -> GoogleGcpPrivateCampaignTransport:
-    return GoogleGcpPrivateCampaignTransport(
+    adapter = GoogleGcpPrivateCampaignTransport(
         sdk=_Sdk,
         instances_client=instances or _InsertCounter(),
         disks_client=disks or _DiskRows(_Rows()),
         images_client=images or _NoImages(),  # type: ignore[arg-type]
-        runner=LocalGcpPrivateCampaignRunner(evidence_root or Path("/private/tmp")),
+        firewalls_client=firewalls or _NoFirewalls(),  # type: ignore[arg-type]
+        iap_tunnels=iap_tunnels or _IapTunnels(),  # type: ignore[arg-type]
+        monotonic=monotonic,  # type: ignore[arg-type]
+        sleeper=sleeper,  # type: ignore[arg-type]
+        runner=runner or _Runner(),
     )
+    adapter.bind_pre_insert_guard(
+        pre_insert_guard if callable(pre_insert_guard) else lambda: None
+    )
+    return adapter
 
 
 def test_projection_contains_exact_two_gpu_private_profile_and_semantic_startup() -> (
@@ -288,15 +449,102 @@ def test_projection_contains_exact_two_gpu_private_profile_and_semantic_startup(
     assert not hasattr(instance.network_interfaces[0], "access_configs")
     assert instance.scheduling.instance_termination_action == "DELETE"
     assert instance.scheduling.max_run_duration == {"seconds": "300"}
+    assert instance.service_accounts[0].email == (
+        proposal.guest_service_account.service_account_email
+    )
+    assert instance.service_accounts[0].scopes == []
+    assert instance.tags.items == [proposal.iap_connectivity.instance_network_tag]
     metadata = {row.key: row.value for row in instance.metadata.items}
     assert metadata["inferdrome-startup-payload-digest"] == startup.startup_payload_id
     script = metadata["startup-script"]
     assert proposal.serving_image.reference in script
+    assert proposal.runner_image.reference in script
     assert "--gpus device=0" in script
     assert "--gpus device=1" in script
-    assert "--disable-log-requests" in script
+    assert script.count("docker run") == 3
+    assert "inferdrome-private-campaign" in script
+    assert "inferdrome-runner-observer" in script
+    assert metadata["block-project-ssh-keys"] == "TRUE"
+    assert metadata["enable-oslogin"] == "FALSE"
+    assert "docker pull" not in script
+    assert "vllm serve" not in script
     assert "api_key" not in script
     assert "ssh" not in script
+
+
+def test_engine_argv_overrides_default_entrypoint_and_starts_adapter_only() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    argv = render_gcp_private_campaign_engine_argv(request, startup.engines[0])
+
+    assert argv[:5] == ("docker", "run", "--pull", "never", "--detach")
+    assert argv.count("vllm") == 0
+    entrypoint_index = argv.index("--entrypoint")
+    assert argv[entrypoint_index + 1] == "/opt/inferdrome-runtime/bin/python"
+    image_index = argv.index(proposal.serving_image.reference)
+    assert argv[image_index + 1 : image_index + 4] == (
+        "-m",
+        "inferdrome.deployment.gcp_private_engine_adapter",
+        "--endpoint-id",
+    )
+    assert "--disable-log-requests" not in argv
+
+
+def test_runner_argv_is_cpu_only_and_has_no_engine_or_host_authority() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+
+    argv = render_gcp_private_campaign_runner_argv(request)
+
+    assert proposal.runner_image.reference in argv
+    assert proposal.serving_image.reference not in argv
+    assert "--gpus" not in argv
+    assert "docker.sock" not in "\0".join(argv)
+    assert startup.preloaded_artifacts.model_snapshot_path not in "\0".join(argv)
+    assert argv[argv.index("--network") + 1] == "inferdrome-private-campaign"
+    assert argv[argv.index("--entrypoint") + 1] == "/opt/inferdrome-runtime/bin/python"
+    image_index = argv.index(proposal.runner_image.reference)
+    assert argv[image_index + 1 : image_index + 4] == (
+        "-m",
+        "inferdrome.deployment.gcp_private_runner_adapter",
+        "--container-name",
+    )
+
+
+def test_controller_handoffs_and_retrieves_only_through_the_bound_runner() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    runner = _RecordingRunner()
+    adapter = _adapter(runner=runner)
+    adapter._iap_endpoints = _IapTunnelEndpoints(
+        readiness_origins=("http://127.0.0.1:18000", "http://127.0.0.1:18001"),
+        runner_control_origin="http://127.0.0.1:18002",
+    )
+    runner.bind_iap_runner_origin(adapter._iap_endpoints.runner_control_origin)
+
+    handoff = adapter.handoff_campaign(
+        request,
+        routing_config=b'{"config":"bounded"}',
+        workload=b'{"prompt":"redacted"}\n',
+        timeout_seconds=7,
+    )
+    evidence = adapter.retrieve_evidence(request, timeout_seconds=11)
+    adapter.close()
+
+    assert handoff.co_located_freshness_admitted is True
+    assert evidence.collection_mode == "CREATE_NO_REPLACE_RETRIEVAL"
+    assert runner.handoff_calls == [
+        (b'{"config":"bounded"}', b'{"prompt":"redacted"}\n', 7)
+    ]
+    assert runner.retrieve_calls == [11]
+    assert runner.runner_origin == "http://127.0.0.1:18002"
+    assert runner.closed is True
 
 
 def test_a2_readback_requires_empty_guest_accelerators_and_two_scratch_disks() -> None:
@@ -407,6 +655,128 @@ def test_create_checks_exact_boot_image_identity_before_insert() -> None:
     assert instances.insert_calls == 0
 
 
+def test_create_revalidates_after_slow_boot_read_and_verifies_iap_firewall() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    image = _ReadyImage(
+        _Record(
+            id=proposal.boot_image.provider_image_id,
+            status="READY",
+            self_link=(
+                f"https://www.googleapis.com/compute/v1/{proposal.boot_image.image_ref}"
+            ),
+        )
+    )
+    firewall = _ReadyFirewall(_live_firewall(proposal))
+    instances = _InsertCounter()
+    checks = 0
+
+    def expires_after_image_read() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise GcpPrivateCampaignError("APPROVAL_EXPIRED")
+
+    adapter = _adapter(
+        instances=instances,
+        images=image,
+        firewalls=firewall,
+        pre_insert_guard=expires_after_image_read,
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="APPROVAL_EXPIRED"):
+        adapter.create_instance(
+            request,
+            request_id=proposal.request_ids.create_request_id,
+            timeout_seconds=1,
+        )
+    assert image.calls == 1
+    assert firewall.calls == 0
+    assert instances.insert_calls == 0
+
+    wrong_firewall = _live_firewall(proposal)
+    wrong_firewall.source_ranges = ["10.0.0.0/8"]
+    instances = _InsertCounter()
+    adapter = _adapter(
+        instances=instances,
+        images=_ReadyImage(image.row),
+        firewalls=_ReadyFirewall(wrong_firewall),
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="IAP_FIREWALL_POLICY_MISMATCH"):
+        adapter.create_instance(
+            request,
+            request_id=proposal.request_ids.create_request_id,
+            timeout_seconds=1,
+        )
+    assert instances.insert_calls == 0
+
+
+def test_create_rejects_known_wrong_iap_principal_before_insert() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    instances = _InsertCounter()
+    iap = _IapTunnels()
+    iap.principal_error = GcpPrivateCampaignError("IAP_PRINCIPAL_MISMATCH")
+    adapter = _adapter(
+        instances=instances,
+        images=_ReadyImage(
+            _Record(
+                id=proposal.boot_image.provider_image_id,
+                status="READY",
+                self_link=(
+                    "https://www.googleapis.com/compute/v1/"
+                    f"{proposal.boot_image.image_ref}"
+                ),
+            )
+        ),
+        firewalls=_ReadyFirewall(_live_firewall(proposal)),
+        iap_tunnels=iap,
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="IAP_PRINCIPAL_MISMATCH"):
+        adapter.create_instance(
+            request,
+            request_id=proposal.request_ids.create_request_id,
+            timeout_seconds=1,
+        )
+
+    assert iap.preflight_calls == 1
+    assert instances.insert_calls == 0
+
+
+@pytest.mark.parametrize(
+    "field,value,code",
+    (
+        ("service_accounts", [], "INSTANCE_SERVICE_ACCOUNT_MISMATCH"),
+        ("tags", _Record(items=["wrong-tag"]), "INSTANCE_IAP_TAG_MISMATCH"),
+    ),
+)
+def test_instance_readback_rejects_guest_identity_and_iap_tag_drift(
+    field: str, value: object, code: str
+) -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    instance = _full_instance(proposal, request=request)
+    setattr(instance, field, value)
+    with pytest.raises(GcpPrivateCampaignError, match=code):
+        _adapter(instances=_InsertCounter(instance))._instance(
+            request, timeout_seconds=1
+        )
+
+    ssh_drift = _full_instance(proposal, request=request)
+    ssh_drift.metadata.items[-1].value = "TRUE"
+    with pytest.raises(GcpPrivateCampaignError, match="INSTANCE_STARTUP_BINDING"):
+        _adapter(
+            instances=_InsertCounter(ssh_drift),
+            disks=_DiskRows(_Rows([_live_boot_disk(proposal)])),
+        ).observe_exact_instance(request, timeout_seconds=1)
+
+
 def test_exact_delete_rechecks_bound_provider_instance_identity() -> None:
     proposal, startup = _proposal()
     request = build_gcp_private_campaign_create_request(
@@ -433,6 +803,50 @@ def test_exact_delete_rechecks_bound_provider_instance_identity() -> None:
             timeout_seconds=1,
         )
 
+    assert instances.delete_calls == 0
+
+
+def test_exact_delete_never_deletes_a_same_name_replacement_between_reads() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    first = _full_instance(proposal, provider_instance_id="123456789")
+    replacement = _full_instance(proposal, provider_instance_id="987654321")
+
+    class ReplacingInstances(_InsertCounter):
+        def __init__(self) -> None:
+            super().__init__(current=first)
+            self.reads = 0
+
+        def get(
+            self, *, project: str, zone: str, instance: str, timeout: int
+        ) -> object:
+            del project, zone, instance, timeout
+            self.reads += 1
+            return first if self.reads == 1 else replacement
+
+    instances = ReplacingInstances()
+    disks = _DiskRows(_Rows([_live_boot_disk(proposal, attached=True)]))
+    binding = GcpPrivateCampaignExactResourceBinding(
+        proposal_id=proposal.proposal_id,
+        project_id=proposal.topology.project_id,
+        zone=proposal.topology.zone,
+        instance_name=proposal.instance_name,
+        ownership_labels=proposal.ownership_labels,
+        provider_instance_id_sha256=sha256_digest(b"123456789"),
+        boot_disk_provider_id_sha256=sha256_digest(b"246813579"),
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="INSTANCE_IDENTITY_MISMATCH"):
+        _adapter(instances=instances, disks=disks).delete_exact_instance(
+            request,
+            exact_resource_binding=binding,
+            request_id=proposal.request_ids.delete_request_id,
+            timeout_seconds=1,
+        )
+
+    assert instances.reads == 2
     assert instances.delete_calls == 0
 
 
@@ -626,7 +1040,7 @@ def test_readiness_requires_real_generation_shape_and_fresh_local_monotonic_time
     calls: list[tuple[str, str]] = []
 
     def attestation_body(origin: str) -> bytes:
-        engine = startup.engines[0 if origin.endswith(":8000") else 1]
+        engine = startup.engines[0 if origin.endswith(":18000") else 1]
         return json.dumps(
             {
                 "schema_version": "inferdrome.gcp-private-engine-attestation.v2",
@@ -638,6 +1052,10 @@ def test_readiness_requires_real_generation_shape_and_fresh_local_monotonic_time
                 "model": engine.model.model_dump(mode="json"),
                 "runtime": engine.runtime.model_dump(mode="json"),
                 "startup_payload_digest": startup.startup_payload_id,
+                "adapter_source_sha256": engine.adapter_source_sha256,
+                "model_snapshot_sha256": (
+                    startup.preloaded_artifacts.model_snapshot_sha256
+                ),
                 "listener_scope": engine.listener_scope,
             }
         ).encode("utf-8")
@@ -699,7 +1117,7 @@ def test_readiness_requires_real_generation_shape_and_fresh_local_monotonic_time
     monkeypatch.setattr(
         GoogleGcpPrivateCampaignTransport, "_http", staticmethod(empty_choice_http)
     )
-    with pytest.raises(GcpPrivateCampaignError, match="PRIVATE_READINESS_UNAVAILABLE"):
+    with pytest.raises(GcpPrivateCampaignError, match="PRIVATE_GENERATION_INVALID"):
         _adapter(
             instances=_InsertCounter(_full_instance(proposal, request=request)),
             disks=_DiskRows(_Rows([_live_boot_disk(proposal)])),
@@ -726,14 +1144,128 @@ def test_readiness_rechecks_running_state_before_any_private_probe(
     monkeypatch.setattr(
         GoogleGcpPrivateCampaignTransport, "_http", staticmethod(unexpected_http)
     )
-    with pytest.raises(
-        GcpPrivateCampaignError, match="PRIVATE_READINESS_INSTANCE_NOT_RUNNING"
-    ):
+    with pytest.raises(GcpPrivateCampaignError, match="PRIVATE_READINESS_TIMEOUT"):
         _adapter(
             instances=_InsertCounter(stopped),
             disks=_DiskRows(_Rows([_live_boot_disk(proposal)])),
         ).observe_readiness(request, timeout_seconds=1)
     assert probe_calls == 0
+
+
+def test_readiness_polls_iap_only_until_delayed_engines_become_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    now = 0.0
+    attempts = 0
+    origins: list[str] = []
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    def fake_http(
+        origin: str,
+        path: str,
+        *,
+        method: str,
+        timeout_seconds: int,
+        body: bytes | None = None,
+    ) -> tuple[int, bytes]:
+        nonlocal attempts
+        del method, timeout_seconds, body
+        origins.append(origin)
+        if path == "/health" and origin.endswith(":18000"):
+            attempts += 1
+            if attempts == 1:
+                return 503, b""
+        if path == "/health":
+            return 200, b""
+        if path == "/v1/models":
+            return 200, b'{"data":[{"id":"Qwen/Qwen3-8B"}]}'
+        if path == "/v1/chat/completions":
+            return 200, (
+                b'{"choices":[{"finish_reason":"stop","index":0,'
+                b'"message":{"content":"ok","role":"assistant"}}]}'
+            )
+        if path == "/metrics":
+            return 200, b'vllm:num_requests_running{model_name="Qwen/Qwen3-8B"} 0\n'
+        if path == "/inferdrome/v2/engine-attestation":
+            engine = startup.engines[0 if origin.endswith(":18000") else 1]
+            return 200, json.dumps(
+                {
+                    "schema_version": "inferdrome.gcp-private-engine-attestation.v2",
+                    "endpoint_id": engine.endpoint_id,
+                    "container_name": engine.container_name,
+                    "gpu_ordinal": engine.gpu_ordinal,
+                    "private_port": engine.private_port,
+                    "serving_image": engine.serving_image.model_dump(mode="json"),
+                    "model": engine.model.model_dump(mode="json"),
+                    "runtime": engine.runtime.model_dump(mode="json"),
+                    "startup_payload_digest": startup.startup_payload_id,
+                    "adapter_source_sha256": engine.adapter_source_sha256,
+                    "model_snapshot_sha256": (
+                        startup.preloaded_artifacts.model_snapshot_sha256
+                    ),
+                    "listener_scope": engine.listener_scope,
+                }
+            ).encode("utf-8")
+        raise AssertionError(path)
+
+    monkeypatch.setattr(
+        GoogleGcpPrivateCampaignTransport, "_http", staticmethod(fake_http)
+    )
+    readiness = _adapter(
+        instances=_InsertCounter(_full_instance(proposal, request=request)),
+        disks=_DiskRows(_Rows([_live_boot_disk(proposal)])),
+        monotonic=monotonic,
+        sleeper=sleep,
+    ).observe_readiness(request, timeout_seconds=1)
+
+    assert attempts == 2
+    assert readiness.endpoints[0].endpoint_id == "endpoint-a"
+    assert origins and all(origin.startswith("http://127.0.0.1:") for origin in origins)
+
+
+def test_iap_path_loss_fails_before_any_endpoint_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    probes = 0
+
+    class LostIap:
+        def open(self, request: object, *, timeout_seconds: int) -> _IapTunnelEndpoints:
+            del request, timeout_seconds
+            raise GcpPrivateCampaignError("IAP_TUNNEL_UNAVAILABLE")
+
+        def close(self) -> None:
+            return None
+
+    def unexpected_http(*args: object, **kwargs: object) -> tuple[int, bytes]:
+        nonlocal probes
+        del args, kwargs
+        probes += 1
+        raise AssertionError("endpoint probe must not follow IAP path loss")
+
+    monkeypatch.setattr(
+        GoogleGcpPrivateCampaignTransport, "_http", staticmethod(unexpected_http)
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="IAP_TUNNEL_UNAVAILABLE"):
+        _adapter(
+            instances=_InsertCounter(_full_instance(proposal, request=request)),
+            disks=_DiskRows(_Rows([_live_boot_disk(proposal)])),
+            iap_tunnels=LostIap(),  # type: ignore[arg-type]
+        ).observe_readiness(request, timeout_seconds=1)
+    assert probes == 0
 
 
 def test_readiness_rejects_repeated_gpu_or_wrong_container_attestation(
@@ -765,7 +1297,7 @@ def test_readiness_rejects_repeated_gpu_or_wrong_container_attestation(
         if path == "/metrics":
             return 200, b'vllm:num_requests_running{model_name="Qwen/Qwen3-8B"} 0\n'
         if path == "/inferdrome/v2/engine-attestation":
-            engine = startup.engines[0 if origin.endswith(":8000") else 1]
+            engine = startup.engines[0 if origin.endswith(":18000") else 1]
             return 200, json.dumps(
                 {
                     "schema_version": "inferdrome.gcp-private-engine-attestation.v2",
@@ -779,6 +1311,10 @@ def test_readiness_rejects_repeated_gpu_or_wrong_container_attestation(
                     "model": engine.model.model_dump(mode="json"),
                     "runtime": engine.runtime.model_dump(mode="json"),
                     "startup_payload_digest": startup.startup_payload_id,
+                    "adapter_source_sha256": engine.adapter_source_sha256,
+                    "model_snapshot_sha256": (
+                        startup.preloaded_artifacts.model_snapshot_sha256
+                    ),
                     "listener_scope": engine.listener_scope,
                 }
             ).encode("utf-8")
@@ -826,106 +1362,3 @@ def test_direct_private_http_refuses_redirects_without_proxy_inheritance(
         )
         is None
     )
-
-
-def test_runner_refuses_evidence_root_replacement_without_staging_prompt_files(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    proposal, startup = _proposal()
-    evidence_root = tmp_path / "evidence"
-    evidence_root.mkdir(mode=0o700)
-    payload = proposal.model_dump(mode="python")
-    payload.pop("proposal_id")
-    payload["routing"] = proposal.routing.model_copy(
-        update={
-            "evidence_destination_sha256": sha256_digest(
-                str(evidence_root.absolute()).encode("utf-8")
-            )
-        }
-    )
-    exact_proposal = issue_gcp_private_campaign_proposal(
-        GcpPrivateCampaignProposalPayload(**payload)
-    )
-    request = build_gcp_private_campaign_create_request(
-        proposal=exact_proposal, startup_payload=startup
-    )
-    displaced = tmp_path / "displaced"
-
-    def replace_root(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        evidence_root.rename(displaced)
-        evidence_root.mkdir(mode=0o700)
-        return object()
-
-    monkeypatch.setattr(campaign_google, "run_execution", replace_root)
-    runner = LocalGcpPrivateCampaignRunner(evidence_root)
-    held_root = verify_gcp_private_campaign_evidence_destination(
-        exact_proposal, evidence_root=evidence_root
-    )
-    try:
-        runner.bind_evidence_root(held_root)
-        with pytest.raises(GcpPrivateCampaignError, match="EVIDENCE_ROOT_CHANGED"):
-            runner.handoff(
-                request,
-                routing_config=b"{}",
-                workload=b"{}\n",
-                timeout_seconds=1,
-            )
-    finally:
-        held_root.close()
-
-    assert not list(displaced.rglob("deployment-config.json"))
-    assert not list(displaced.rglob("workload.jsonl"))
-
-
-def test_runner_refuses_root_replacement_after_preflight_before_handoff(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    proposal, startup = _proposal()
-    evidence_root = tmp_path / "evidence"
-    evidence_root.mkdir(mode=0o700)
-    payload = proposal.model_dump(mode="python")
-    payload.pop("proposal_id")
-    payload["routing"] = proposal.routing.model_copy(
-        update={
-            "evidence_destination_sha256": sha256_digest(
-                str(evidence_root.absolute()).encode("utf-8")
-            )
-        }
-    )
-    exact_proposal = issue_gcp_private_campaign_proposal(
-        GcpPrivateCampaignProposalPayload(**payload)
-    )
-    request = build_gcp_private_campaign_create_request(
-        proposal=exact_proposal, startup_payload=startup
-    )
-    held_root = verify_gcp_private_campaign_evidence_destination(
-        exact_proposal, evidence_root=evidence_root
-    )
-    runner = LocalGcpPrivateCampaignRunner(evidence_root)
-    displaced = tmp_path / "displaced"
-    calls = 0
-
-    def unexpected_run_execution(*args: object, **kwargs: object) -> object:
-        nonlocal calls
-        del args, kwargs
-        calls += 1
-        raise AssertionError("replacement must fail before routing execution")
-
-    monkeypatch.setattr(campaign_google, "run_execution", unexpected_run_execution)
-    try:
-        runner.bind_evidence_root(held_root)
-        evidence_root.rename(displaced)
-        evidence_root.mkdir(mode=0o700)
-        with pytest.raises(GcpPrivateCampaignError, match="EVIDENCE_ROOT_CHANGED"):
-            runner.handoff(
-                request,
-                routing_config=b"{}",
-                workload=b"{}\n",
-                timeout_seconds=1,
-            )
-    finally:
-        held_root.close()
-
-    assert calls == 0
-    assert not list(evidence_root.iterdir())

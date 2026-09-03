@@ -4,8 +4,9 @@
 ``proposal`` and ``preview`` are offline/local commands.  ``execute`` is the
 only command that can select the optional Google transport, and its factory is
 invoked by the lifecycle controller only after exact approval validation and a
-durable provider DELETE/max-runtime backstop.  The command never discovers or
-prints credentials and offers no generic provider operation.
+durable local create intent.  The provider ``DELETE``/maximum-runtime backstop
+is observed only after create.  The command never discovers or prints
+credentials and offers no generic provider operation.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from inferdrome.deployment.gcp_private_campaign_google import (
+    create_google_private_campaign_cleanup_transport,
     create_google_private_campaign_transport,
 )
 from inferdrome.deployment.gcp_private_campaign_v2 import (
@@ -33,6 +35,7 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignProposalPayload,
     GcpPrivateCampaignStartupPayload,
     GcpPrivateCampaignStartupPayloadPayload,
+    GcpPrivateCampaignTransport,
     build_gcp_private_campaign_create_request,
     canonical_gcp_private_campaign_proposal_bytes,
     canonical_gcp_private_campaign_startup_bytes,
@@ -162,20 +165,25 @@ def _preview(arguments: argparse.Namespace) -> int:
 def _controller(arguments: argparse.Namespace) -> GcpPrivateCampaignLifecycleController:
     journal = GcpPrivateCampaignJournal(arguments.journal_root.absolute())
     evidence_root = arguments.evidence_root.absolute()
+
+    def launch_preflight(proposal: GcpPrivateCampaignProposal) -> SafeDirFD:
+        return verify_gcp_private_campaign_evidence_destination(
+            proposal, evidence_root=evidence_root
+        )
+
+    def transport_factory() -> GcpPrivateCampaignTransport:
+        return create_google_private_campaign_transport(evidence_root=evidence_root)
+
     # This lambda is intentionally inert until the controller has completed
-    # local approval/evidence-root validation and journaled BACKSTOP_READY +
-    # CREATE_INTENT.  The lifecycle's preflight checks the exact declared
+    # local approval/evidence-root validation and journaled CREATE_INTENT_DURABLE
+    # + CREATE_INTENT.  The lifecycle's preflight checks the exact declared
     # destination before this factory can import the optional SDK.
     return GcpPrivateCampaignLifecycleController(
         journal=journal,
-        launch_preflight=(
-            lambda proposal: verify_gcp_private_campaign_evidence_destination(
-                proposal, evidence_root=evidence_root
-            )
-        ),
-        transport_factory=lambda: create_google_private_campaign_transport(
-            evidence_root=evidence_root
-        ),
+        launch_preflight=launch_preflight,
+        transport_factory=transport_factory,
+        cleanup_transport_factory=create_google_private_campaign_cleanup_transport,
+        receipt_root=evidence_root,
     )
 
 

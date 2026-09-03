@@ -73,6 +73,31 @@
       "title": "Region",
       "type": "string"
     },
+    "runner_cloud_credentials": {
+      "const": "NONE",
+      "title": "Runner Cloud Credentials",
+      "type": "string"
+    },
+    "runner_colocation": {
+      "const": "SAME_VM_SEPARATE_CPU_CONTAINER",
+      "title": "Runner Colocation",
+      "type": "string"
+    },
+    "runner_docker_socket": {
+      "const": "ABSENT",
+      "title": "Runner Docker Socket",
+      "type": "string"
+    },
+    "runner_gpu_access": {
+      "const": "NONE",
+      "title": "Runner Gpu Access",
+      "type": "string"
+    },
+    "runner_provider_mutation_authority": {
+      "const": "NONE",
+      "title": "Runner Provider Mutation Authority",
+      "type": "string"
+    },
     "runner_separate_from_serving": {
       "const": true,
       "title": "Runner Separate From Serving",
@@ -113,6 +138,11 @@
     "accelerator_count",
     "topology_kind",
     "runner_separate_from_serving",
+    "runner_colocation",
+    "runner_gpu_access",
+    "runner_cloud_credentials",
+    "runner_docker_socket",
+    "runner_provider_mutation_authority",
     "serving_engine_count",
     "one_engine_per_endpoint",
     "persistent_disk_count",

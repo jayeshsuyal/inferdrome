@@ -4,9 +4,24 @@
       "additionalProperties": false,
       "description": "Semantic engine declaration from which the fixed startup script is made.",
       "properties": {
+        "adapter_source_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Adapter Source Sha256",
+          "type": "string"
+        },
         "attestation_path": {
           "const": "/inferdrome/v2/engine-attestation",
           "title": "Attestation Path",
+          "type": "string"
+        },
+        "container_command_module": {
+          "const": "inferdrome.deployment.gcp_private_engine_adapter",
+          "title": "Container Command Module",
+          "type": "string"
+        },
+        "container_entrypoint": {
+          "const": "/opt/inferdrome-runtime/bin/python",
+          "title": "Container Entrypoint",
           "type": "string"
         },
         "container_name": {
@@ -56,6 +71,11 @@
         "model": {
           "$ref": "#/$defs/ModelIdentity"
         },
+        "model_snapshot_path": {
+          "const": "/opt/inferdrome/qwen3-8b",
+          "title": "Model Snapshot Path",
+          "type": "string"
+        },
         "private_port": {
           "enum": [
             8000,
@@ -88,10 +108,178 @@
         "generation_path",
         "metrics_path",
         "attestation_path",
+        "container_entrypoint",
+        "container_command_module",
+        "adapter_source_sha256",
+        "model_snapshot_path",
         "listener_scope",
         "request_logging"
       ],
       "title": "GcpPrivateCampaignEngine",
+      "type": "object"
+    },
+    "GcpPrivateCampaignPreloadedArtifacts": {
+      "additionalProperties": false,
+      "description": "Exact model and OCI cache required before a spend-capable create.\n\nThis is a declaration of a separately prepared immutable boot image, not\na claim that this repository or this PR has built or published one.",
+      "properties": {
+        "availability_kind": {
+          "const": "BOOT_IMAGE_PRELOADED_V1",
+          "title": "Availability Kind",
+          "type": "string"
+        },
+        "model_manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Model Manifest Sha256",
+          "type": "string"
+        },
+        "model_snapshot_path": {
+          "const": "/opt/inferdrome/qwen3-8b",
+          "title": "Model Snapshot Path",
+          "type": "string"
+        },
+        "model_snapshot_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Model Snapshot Sha256",
+          "type": "string"
+        },
+        "offline_model_loading": {
+          "const": true,
+          "title": "Offline Model Loading",
+          "type": "boolean"
+        },
+        "runner_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        },
+        "serving_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        }
+      },
+      "required": [
+        "availability_kind",
+        "model_snapshot_path",
+        "model_manifest_sha256",
+        "model_snapshot_sha256",
+        "offline_model_loading",
+        "runner_image",
+        "serving_image"
+      ],
+      "title": "GcpPrivateCampaignPreloadedArtifacts",
+      "type": "object"
+    },
+    "GcpPrivateCampaignRunner": {
+      "additionalProperties": false,
+      "description": "The one separately pinned, CPU-only observer on the approved VM.\n\nIt is intentionally a control/evidence service, never a serving engine or\nprovider client.  It runs on the same internal Docker network as the two\nengines so the frozen 5 ms freshness condition is observed at the runner\nrather than inferred across the controller's IAP path.",
+      "properties": {
+        "adapter_source_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Adapter Source Sha256",
+          "type": "string"
+        },
+        "cloud_credentials": {
+          "const": "NONE",
+          "title": "Cloud Credentials",
+          "type": "string"
+        },
+        "container_command_module": {
+          "const": "inferdrome.deployment.gcp_private_runner_adapter",
+          "title": "Container Command Module",
+          "type": "string"
+        },
+        "container_entrypoint": {
+          "const": "/opt/inferdrome-runtime/bin/python",
+          "title": "Container Entrypoint",
+          "type": "string"
+        },
+        "container_evidence_root": {
+          "const": "/evidence",
+          "title": "Container Evidence Root",
+          "type": "string"
+        },
+        "container_name": {
+          "const": "inferdrome-runner-observer",
+          "title": "Container Name",
+          "type": "string"
+        },
+        "docker_network": {
+          "const": "inferdrome-private-campaign",
+          "title": "Docker Network",
+          "type": "string"
+        },
+        "docker_socket": {
+          "const": "ABSENT",
+          "title": "Docker Socket",
+          "type": "string"
+        },
+        "endpoint_a_local_origin": {
+          "const": "http://inferdrome-engine-a:8000",
+          "title": "Endpoint A Local Origin",
+          "type": "string"
+        },
+        "endpoint_b_local_origin": {
+          "const": "http://inferdrome-engine-b:8001",
+          "title": "Endpoint B Local Origin",
+          "type": "string"
+        },
+        "evidence_root": {
+          "const": "/var/lib/inferdrome-private-runner/evidence",
+          "title": "Evidence Root",
+          "type": "string"
+        },
+        "gpu_access": {
+          "const": "NONE",
+          "title": "Gpu Access",
+          "type": "string"
+        },
+        "private_port": {
+          "const": 8002,
+          "title": "Private Port",
+          "type": "integer"
+        },
+        "provider_mutation_authority": {
+          "const": "NONE",
+          "title": "Provider Mutation Authority",
+          "type": "string"
+        },
+        "request_logging": {
+          "const": "DISABLED",
+          "title": "Request Logging",
+          "type": "string"
+        },
+        "runner_command_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runner Command Sha256",
+          "type": "string"
+        },
+        "runner_image": {
+          "$ref": "#/$defs/ImageIdentity"
+        },
+        "serving_role": {
+          "const": "OBSERVER_ONLY",
+          "title": "Serving Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "container_name",
+        "private_port",
+        "runner_image",
+        "container_entrypoint",
+        "container_command_module",
+        "adapter_source_sha256",
+        "runner_command_sha256",
+        "docker_network",
+        "evidence_root",
+        "container_evidence_root",
+        "endpoint_a_local_origin",
+        "endpoint_b_local_origin",
+        "gpu_access",
+        "cloud_credentials",
+        "docker_socket",
+        "serving_role",
+        "provider_mutation_authority",
+        "request_logging"
+      ],
+      "title": "GcpPrivateCampaignRunner",
       "type": "object"
     },
     "ImageIdentity": {
@@ -200,10 +388,16 @@
       "title": "No Public Inference",
       "type": "boolean"
     },
+    "preloaded_artifacts": {
+      "$ref": "#/$defs/GcpPrivateCampaignPreloadedArtifacts"
+    },
     "provider_max_runtime_delete": {
       "const": true,
       "title": "Provider Max Runtime Delete",
       "type": "boolean"
+    },
+    "runner": {
+      "$ref": "#/$defs/GcpPrivateCampaignRunner"
     },
     "runner_image": {
       "$ref": "#/$defs/ImageIdentity"
@@ -229,7 +423,7 @@
       "type": "string"
     },
     "startup_kind": {
-      "const": "two_private_vllm_engines",
+      "const": "two_private_vllm_engines_and_cpu_runner",
       "title": "Startup Kind",
       "type": "string"
     },
@@ -244,7 +438,9 @@
     "startup_kind",
     "source_commit",
     "runner_image",
+    "preloaded_artifacts",
     "engines",
+    "runner",
     "startup_adapter_id",
     "startup_adapter_version",
     "no_public_inference",

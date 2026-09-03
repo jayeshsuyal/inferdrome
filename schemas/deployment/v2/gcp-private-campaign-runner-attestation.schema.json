@@ -1,0 +1,113 @@
+{
+  "$defs": {
+    "ImageIdentity": {
+      "additionalProperties": false,
+      "description": "An immutable OCI repository digest, never a mutable tag.",
+      "properties": {
+        "reference": {
+          "maxLength": 300,
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,220}@sha256:[0-9a-f]{64}$",
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "title": "ImageIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "urn:inferdrome:gcp-private-runner-attestation:v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded self-report from the dedicated local runner adapter.",
+  "properties": {
+    "adapter_source_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Adapter Source Sha256",
+      "type": "string"
+    },
+    "cloud_credentials": {
+      "const": "NONE",
+      "title": "Cloud Credentials",
+      "type": "string"
+    },
+    "container_command_module": {
+      "const": "inferdrome.deployment.gcp_private_runner_adapter",
+      "title": "Container Command Module",
+      "type": "string"
+    },
+    "container_name": {
+      "const": "inferdrome-runner-observer",
+      "title": "Container Name",
+      "type": "string"
+    },
+    "docker_network": {
+      "const": "inferdrome-private-campaign",
+      "title": "Docker Network",
+      "type": "string"
+    },
+    "docker_socket": {
+      "const": "ABSENT",
+      "title": "Docker Socket",
+      "type": "string"
+    },
+    "gpu_access": {
+      "const": "NONE",
+      "title": "Gpu Access",
+      "type": "string"
+    },
+    "private_port": {
+      "const": 8002,
+      "title": "Private Port",
+      "type": "integer"
+    },
+    "provider_mutation_authority": {
+      "const": "NONE",
+      "title": "Provider Mutation Authority",
+      "type": "string"
+    },
+    "runner_command_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Runner Command Sha256",
+      "type": "string"
+    },
+    "runner_image": {
+      "$ref": "#/$defs/ImageIdentity"
+    },
+    "schema_version": {
+      "const": "inferdrome.gcp-private-runner-attestation.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "serving_role": {
+      "const": "OBSERVER_ONLY",
+      "title": "Serving Role",
+      "type": "string"
+    },
+    "startup_payload_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Startup Payload Digest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "container_name",
+    "private_port",
+    "runner_image",
+    "container_command_module",
+    "adapter_source_sha256",
+    "runner_command_sha256",
+    "startup_payload_digest",
+    "docker_network",
+    "gpu_access",
+    "cloud_credentials",
+    "docker_socket",
+    "serving_role",
+    "provider_mutation_authority"
+  ],
+  "title": "GcpPrivateCampaignRunnerAttestation",
+  "type": "object"
+}

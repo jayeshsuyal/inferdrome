@@ -83,6 +83,11 @@
   "additionalProperties": false,
   "description": "One private engine's bounded, independently observable runtime identity.\n\nStock OpenAI-compatible health and metrics responses do not identify a\ncontainer image or GPU ordinal.  The pinned vLLM-compatible adapter must\ntherefore expose this small private attestation contract before Inferdrome\ncan claim the endpoint-to-engine mapping needed for campaign admission.",
   "properties": {
+    "adapter_source_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Adapter Source Sha256",
+      "type": "string"
+    },
     "container_name": {
       "enum": [
         "inferdrome-engine-a",
@@ -114,6 +119,11 @@
     },
     "model": {
       "$ref": "#/$defs/ModelIdentity"
+    },
+    "model_snapshot_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Model Snapshot Sha256",
+      "type": "string"
     },
     "private_port": {
       "enum": [
@@ -150,6 +160,8 @@
     "model",
     "runtime",
     "startup_payload_digest",
+    "adapter_source_sha256",
+    "model_snapshot_sha256",
     "listener_scope"
   ],
   "title": "GcpPrivateCampaignEngineAttestation",

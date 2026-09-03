@@ -2,21 +2,27 @@
 
 Importing this module is inert.  The official Google SDK is imported only by
 ``create_google_private_campaign_transport``; the lifecycle controller calls
-that factory only after exact approval validation and a durable DELETE/max-run
-backstop.  Normal tests inject local fakes and never call the factory.
+that factory only after exact local approval validation and a durable local
+create intent.  The provider-side ``maxRunDuration``/``DELETE`` backstop is
+observed and verified only after a successful create.  Normal tests inject
+local fakes and never call the factory.
 """
 
 from __future__ import annotations
 
 import hashlib
 import importlib
+import io
 import ipaddress
 import json
-import os
 import re
-import tempfile
+import shlex
+import socket
+import subprocess
+import tarfile
 import threading
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,13 +53,18 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignOwnedResidualInventory,
     GcpPrivateCampaignProposal,
     GcpPrivateCampaignReadiness,
+    GcpPrivateCampaignRunnerAttestation,
     GcpPrivateCampaignTransport,
     GcpPrivateCampaignTransportError,
+    gcp_private_campaign_boot_image_identity,
 )
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.domain.digests import canonical_json_bytes
+from inferdrome.errors import VerificationError
 from inferdrome.routing_execution.canonical import sha256_digest
-from inferdrome.routing_execution.executor import run_execution
+from inferdrome.routing_execution.contracts import IntegrityManifest
+from inferdrome.routing_execution.package import EvidenceReservation
+from inferdrome.routing_execution.stdin_bundle import RuntimeInputBundle
 from inferdrome.routing_execution.verifier import verify_execution_package
 
 _GOOGLE_SCOPE_URLS: Final = {
@@ -72,6 +83,17 @@ _A2_HIGHGPU_2G_ACCELERATOR_PROFILE: Final = (
 )
 _A2_HIGHGPU_2G_MACHINE_FIXED_LOCAL_SSD_COUNT: Final = 2
 _MAX_HTTP_BODY_BYTES: Final = 524_288
+_MAX_RUNNER_ARCHIVE_BYTES: Final = 33_554_432
+_MAX_RUNNER_ARCHIVE_MEMBER_BYTES: Final = 8_388_608
+_RUNNER_HANDOFF_PATH: Final = "/inferdrome/v2/runner/handoff"
+_RUNNER_EVIDENCE_PATH: Final = "/inferdrome/v2/runner/evidence"
+_RUNNER_ATTESTATION_PATH: Final = "/inferdrome/v2/runner/attestation"
+_RUNNER_ARCHIVE_FILES: Final = (
+    "executed-manifest.json",
+    "input-transfer-receipt.json",
+    "integrity-manifest.json",
+    "producer-receipt.json",
+)
 _GENERATION_PROBE: Final = (
     b'{"max_tokens":1,"messages":[{"content":"readiness-probe","role":"user"}],'
     b'"model":"Qwen/Qwen3-8B","stream":false}'
@@ -112,6 +134,10 @@ class _DisksClient(Protocol):
 
 class _ImagesClient(Protocol):
     def get(self, *, project: str, image: str, timeout: int) -> object: ...
+
+
+class _FirewallsClient(Protocol):
+    def get(self, *, project: str, firewall: str, timeout: int) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -283,52 +309,311 @@ def render_gcp_private_campaign_startup_script(
     """
 
     engines = request.startup_payload.engines
+    runner = request.startup_payload.runner
+    artifacts = request.startup_payload.preloaded_artifacts
     lines = ["#!/bin/sh", "set -eu", "umask 077"]
-    for engine in engines:
-        model = engine.model
-        lines.extend(
+    # The approved boot image must already contain the exact image and model
+    # bytes.  This script never contacts a registry or Hugging Face at boot.
+    lines.append(
+        shlex.join(
             (
-                f"docker pull {engine.serving_image.reference}",
-                "docker run --detach --rm "
-                f"--name {engine.container_name} "
-                f"--gpus device={engine.gpu_ordinal} --network host "
-                f"{engine.serving_image.reference} "
-                f"vllm serve {model.model_id} "
-                f"--revision {model.model_revision} "
-                f"--tokenizer {model.model_id} "
-                f"--tokenizer-revision {model.tokenizer_revision} "
-                f"--host 0.0.0.0 --port {engine.private_port} "
-                "--disable-log-requests",
+                "test",
+                "-d",
+                artifacts.model_snapshot_path,
             )
         )
+    )
+    lines.append(
+        shlex.join(
+            (
+                "docker",
+                "network",
+                "create",
+                "--internal",
+                runner.docker_network,
+            )
+        )
+    )
+    lines.append(
+        shlex.join(
+            (
+                "install",
+                "-d",
+                "-m",
+                "0700",
+                "-o",
+                "2000",
+                "-g",
+                "0",
+                runner.evidence_root,
+            )
+        )
+    )
+    for engine in engines:
+        lines.append(
+            shlex.join(("docker", "image", "inspect", engine.serving_image.reference))
+            + " >/dev/null"
+        )
+        lines.append(
+            shlex.join(render_gcp_private_campaign_engine_argv(request, engine))
+        )
+    lines.append(
+        shlex.join(("docker", "image", "inspect", runner.runner_image.reference))
+        + " >/dev/null"
+    )
+    lines.append(shlex.join(render_gcp_private_campaign_runner_argv(request)))
     return "\n".join(lines) + "\n"
 
 
-class LocalGcpPrivateCampaignRunner:
-    """Bounded local PR-B runner/evidence adapter for a private reachable VM.
+def render_gcp_private_campaign_engine_argv(
+    request: GcpPrivateCampaignCreateRequest,
+    engine: GcpPrivateCampaignEngine,
+) -> tuple[str, ...]:
+    """Render the exact Docker ENTRYPOINT + CMD contract for one engine.
 
-    It is useful when the controller runs from the same private VPC or another
-    approved private path.  It performs the existing PR-B run and offline
-    verifier, creates evidence once, and retains no input staging directory.
-    It never makes a provider call.
+    The runtime image's default entrypoint is deliberately overridden to the
+    checked-in adapter Python executable.  Docker receives the adapter module
+    as CMD; only that adapter starts ``vllm serve`` once on an internal port.
+    It is therefore impossible for the stock vLLM entrypoint and startup
+    script to duplicate ``vllm serve`` arguments.
     """
 
-    def __init__(self, evidence_root: Path) -> None:
+    artifacts = request.startup_payload.preloaded_artifacts
+    return (
+        "docker",
+        "run",
+        "--pull",
+        "never",
+        "--detach",
+        "--rm",
+        "--name",
+        engine.container_name,
+        "--gpus",
+        f"device={engine.gpu_ordinal}",
+        "--network",
+        request.startup_payload.runner.docker_network,
+        "--publish",
+        f"{engine.private_port}:{engine.private_port}",
+        "--user",
+        "2000:0",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges=true",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=1g",
+        "--tmpfs",
+        "/home/vllm:rw,nosuid,nodev,size=1g",
+        "--mount",
+        (
+            "type=bind,src="
+            f"{artifacts.model_snapshot_path},dst={engine.model_snapshot_path},readonly"
+        ),
+        "--env",
+        "HF_HUB_OFFLINE=1",
+        "--env",
+        "TRANSFORMERS_OFFLINE=1",
+        "--entrypoint",
+        engine.container_entrypoint,
+        engine.serving_image.reference,
+        "-m",
+        engine.container_command_module,
+        "--endpoint-id",
+        engine.endpoint_id,
+        "--container-name",
+        engine.container_name,
+        "--gpu-ordinal",
+        str(engine.gpu_ordinal),
+        "--private-port",
+        str(engine.private_port),
+        "--upstream-port",
+        str(18000 + engine.gpu_ordinal),
+        "--serving-image-reference",
+        engine.serving_image.reference,
+        "--model-snapshot-path",
+        engine.model_snapshot_path,
+        "--model-id",
+        engine.model.model_id,
+        "--model-revision",
+        engine.model.model_revision,
+        "--tokenizer-revision",
+        engine.model.tokenizer_revision,
+        "--startup-payload-digest",
+        request.proposal.startup_payload_digest,
+        "--adapter-source-sha256",
+        engine.adapter_source_sha256,
+        "--model-manifest-sha256",
+        artifacts.model_manifest_sha256,
+        "--model-snapshot-sha256",
+        artifacts.model_snapshot_sha256,
+    )
+
+
+def render_gcp_private_campaign_runner_argv(
+    request: GcpPrivateCampaignCreateRequest,
+) -> tuple[str, ...]:
+    """Render the CPU-only observer's exact, separately pinned command.
+
+    Unlike the two engine commands, this argv intentionally contains no GPU
+    attachment, Docker socket, cloud credential, model mount, or serving
+    command.  Its only writable mount is its local create-no-replace evidence
+    directory on the approved VM boot disk.
+    """
+
+    runner = request.startup_payload.runner
+    return (
+        "docker",
+        "run",
+        "--pull",
+        "never",
+        "--detach",
+        "--rm",
+        "--name",
+        runner.container_name,
+        "--network",
+        runner.docker_network,
+        "--publish",
+        f"{runner.private_port}:{runner.private_port}",
+        "--user",
+        "2000:0",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges=true",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=1g",
+        "--tmpfs",
+        "/home/vllm:rw,nosuid,nodev,size=1g",
+        "--mount",
+        f"type=bind,src={runner.evidence_root},dst={runner.container_evidence_root}",
+        "--entrypoint",
+        runner.container_entrypoint,
+        runner.runner_image.reference,
+        "-m",
+        runner.container_command_module,
+        "--container-name",
+        runner.container_name,
+        "--private-port",
+        str(runner.private_port),
+        "--runner-image-reference",
+        runner.runner_image.reference,
+        "--runner-command-sha256",
+        runner.runner_command_sha256,
+        "--adapter-source-sha256",
+        runner.adapter_source_sha256,
+        "--startup-payload-digest",
+        request.proposal.startup_payload_digest,
+        "--proposal-id",
+        request.proposal.proposal_id,
+        "--evidence-root",
+        runner.container_evidence_root,
+        "--endpoint-a-local-origin",
+        runner.endpoint_a_local_origin,
+        "--endpoint-b-local-origin",
+        runner.endpoint_b_local_origin,
+    )
+
+
+@dataclass(frozen=True)
+class _RunnerIapResponse:
+    status: int
+    content: bytes
+    headers: Mapping[str, str]
+
+
+class _RunnerIapHttp(Protocol):
+    def request(
+        self,
+        origin: str,
+        path: str,
+        *,
+        method: Literal["GET", "POST"],
+        body: bytes | None,
+        timeout_seconds: int,
+        maximum_body_bytes: int,
+    ) -> _RunnerIapResponse: ...
+
+
+class _UrllibRunnerIapHttp:
+    """No-proxy, no-redirect control/retrieval edge for the one runner tunnel."""
+
+    def request(
+        self,
+        origin: str,
+        path: str,
+        *,
+        method: Literal["GET", "POST"],
+        body: bytes | None,
+        timeout_seconds: int,
+        maximum_body_bytes: int,
+    ) -> _RunnerIapResponse:
+        try:
+            request = Request(
+                origin + path,
+                data=body,
+                headers={"Content-Type": "application/json"} if body else {},
+                method=method,
+            )
+            opener = build_opener(ProxyHandler({}), _NoRedirect())
+            with opener.open(request, timeout=timeout_seconds) as response:
+                content = response.read(maximum_body_bytes + 1)
+                if len(content) > maximum_body_bytes:
+                    raise GcpPrivateCampaignTransportError("RUNNER_RETRIEVAL_TOO_LARGE")
+                return _RunnerIapResponse(
+                    status=int(response.status),
+                    content=content,
+                    headers={
+                        key.lower(): value for key, value in response.headers.items()
+                    },
+                )
+        except GcpPrivateCampaignError:
+            raise
+        except HTTPError as error:
+            try:
+                content = error.read(maximum_body_bytes + 1)
+            except OSError:
+                content = b""
+            if len(content) > maximum_body_bytes:
+                content = b""
+            return _RunnerIapResponse(
+                status=int(error.code),
+                content=content,
+                headers={key.lower(): value for key, value in error.headers.items()},
+            )
+        except (URLError, OSError, ValueError):
+            raise GcpPrivateCampaignTransportError(
+                "RUNNER_IAP_TRANSPORT_FAILED"
+            ) from None
+
+
+class IapGcpPrivateCampaignRunner:
+    """Controller-side IAP client for the CPU-only runner on the approved VM.
+
+    This class deliberately has no Docker integration.  The controller sends
+    one bounded in-memory handoff across the supervised IAP runner tunnel and
+    receives one bounded immutable package archive back across that same
+    tunnel.  Measurement itself stays inside the runner container.
+    """
+
+    def __init__(
+        self,
+        evidence_root: Path,
+        *,
+        http: _RunnerIapHttp | None = None,
+    ) -> None:
         self._evidence_root = evidence_root.absolute()
-        self._sealed: dict[str, tuple[Path, str]] = {}
+        self._http = http or _UrllibRunnerIapHttp()
         self._bound_root: SafeDirFD | None = None
+        self._runner_origin: str | None = None
 
     def bind_evidence_root(self, root: SafeDirFD) -> None:
-        """Retain the approval-preflight root by descriptor, never pathname."""
-
         if self._bound_root is not None or root.path.absolute() != self._evidence_root:
             raise GcpPrivateCampaignTransportError("EVIDENCE_ROOT_BINDING_MISMATCH")
         try:
             root.assert_open()
             bound = SafeDirFD.from_inherited_fd(root.fd)
-            # ``from_inherited_fd`` deliberately uses a diagnostic path.  This
-            # runner needs the approved lexical path only for run_execution's
-            # consistency check; every filesystem mutation still uses the fd.
             bound.path = self._evidence_root
             self._bound_root = bound
         except (OSError, SafeDirFSError):
@@ -336,10 +621,29 @@ class LocalGcpPrivateCampaignRunner:
                 "EVIDENCE_ROOT_BINDING_UNAVAILABLE"
             ) from None
 
-    def _release_bound_root(self) -> None:
+    def close(self) -> None:
         if self._bound_root is not None:
             self._bound_root.close()
             self._bound_root = None
+        self._runner_origin = None
+
+    def bind_iap_runner_origin(self, origin: str) -> None:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.port != 18002
+            or parsed.path not in {"", "/"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_BINDING_MISMATCH")
+        canonical = origin.rstrip("/")
+        if self._runner_origin not in {None, canonical}:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_BINDING_MISMATCH")
+        self._runner_origin = canonical
 
     def _root(self) -> SafeDirFD:
         try:
@@ -349,44 +653,101 @@ class LocalGcpPrivateCampaignRunner:
             root = SafeDirFD.from_inherited_fd(self._bound_root.fd)
             root.path = self._evidence_root
             return root
-        except (SafeDirFSError, OSError):
+        except (OSError, SafeDirFSError):
             raise GcpPrivateCampaignTransportError("EVIDENCE_ROOT_UNSAFE") from None
 
     @staticmethod
-    def _write_stage_file(root: SafeDirFD, name: str, content: bytes) -> None:
-        descriptor: int | None = None
-        try:
-            descriptor = root.open_child(
-                name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-            )
-            view = memoryview(content)
-            while view:
-                written = os.write(descriptor, view)
-                if written <= 0:
-                    raise OSError("short staged input write")
-                view = view[written:]
-            os.fsync(descriptor)
-            root.validated_regular_child(name, descriptor=descriptor)
-        except (OSError, SafeDirFSError):
-            raise GcpPrivateCampaignTransportError(
-                "ROUTING_INPUT_STAGE_UNSAFE"
-            ) from None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-
-    def _assert_visible_root(self, held: SafeDirFD) -> None:
-        """Reject a same-UID evidence-root replacement before issuing a receipt."""
-
+    def _assert_visible_root(held: SafeDirFD, path: Path) -> None:
         visible: SafeDirFD | None = None
         try:
             held.assert_open()
-            visible = SafeDirFD.open(self._evidence_root)
+            visible = SafeDirFD.open(path)
             if (visible.device, visible.inode) != (held.device, held.inode):
                 raise GcpPrivateCampaignTransportError("EVIDENCE_ROOT_CHANGED")
+        except GcpPrivateCampaignError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignTransportError("EVIDENCE_ROOT_CHANGED") from None
         finally:
             if visible is not None:
                 visible.close()
+
+    @staticmethod
+    def _package_name(request: GcpPrivateCampaignCreateRequest) -> str:
+        return f"routing-execution-{request.proposal.proposal_id[7:39]}"
+
+    def _request(
+        self,
+        path: str,
+        *,
+        method: Literal["GET", "POST"],
+        body: bytes | None,
+        timeout_seconds: int,
+        maximum_body_bytes: int,
+    ) -> _RunnerIapResponse:
+        if self._runner_origin is None:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
+        if timeout_seconds < 1:
+            raise GcpPrivateCampaignTransportError("RUNNER_TIMEOUT_INVALID")
+        return self._http.request(
+            self._runner_origin,
+            path,
+            method=method,
+            body=body,
+            timeout_seconds=timeout_seconds,
+            maximum_body_bytes=maximum_body_bytes,
+        )
+
+    @staticmethod
+    def _canonical_model(
+        content: bytes,
+        model: type[GcpPrivateCampaignRunnerAttestation]
+        | type[GcpPrivateCampaignHandoffReceipt],
+    ) -> GcpPrivateCampaignRunnerAttestation | GcpPrivateCampaignHandoffReceipt:
+        try:
+            value = model.model_validate_json(content)
+            if canonical_json_bytes(value.model_dump(mode="json")) != content:
+                raise ValueError
+            return value
+        except (ValidationError, ValueError):
+            raise GcpPrivateCampaignTransportError("RUNNER_RESPONSE_INVALID") from None
+
+    def readiness_attestation(
+        self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignRunnerAttestation:
+        response = self._request(
+            _RUNNER_ATTESTATION_PATH,
+            method="GET",
+            body=None,
+            timeout_seconds=timeout_seconds,
+            maximum_body_bytes=_MAX_HTTP_BODY_BYTES,
+        )
+        if response.status != 200:
+            raise GcpPrivateCampaignTransportError("RUNNER_ATTESTATION_UNAVAILABLE")
+        parsed = self._canonical_model(
+            response.content, GcpPrivateCampaignRunnerAttestation
+        )
+        assert isinstance(parsed, GcpPrivateCampaignRunnerAttestation)
+        runner = request.startup_payload.runner
+        expected = GcpPrivateCampaignRunnerAttestation(
+            schema_version="inferdrome.gcp-private-runner-attestation.v2",
+            container_name=runner.container_name,
+            private_port=runner.private_port,
+            runner_image=runner.runner_image,
+            container_command_module=runner.container_command_module,
+            adapter_source_sha256=runner.adapter_source_sha256,
+            runner_command_sha256=runner.runner_command_sha256,
+            startup_payload_digest=request.proposal.startup_payload_digest,
+            docker_network=runner.docker_network,
+            gpu_access=runner.gpu_access,
+            cloud_credentials=runner.cloud_credentials,
+            docker_socket=runner.docker_socket,
+            serving_role=runner.serving_role,
+            provider_mutation_authority=runner.provider_mutation_authority,
+        )
+        if parsed != expected:
+            raise GcpPrivateCampaignTransportError("RUNNER_ATTESTATION_MISMATCH")
+        return parsed
 
     def handoff(
         self,
@@ -396,116 +757,347 @@ class LocalGcpPrivateCampaignRunner:
         workload: bytes,
         timeout_seconds: int,
     ) -> GcpPrivateCampaignHandoffReceipt:
-        del timeout_seconds
-        expected_root_identity = sha256_digest(str(self._evidence_root).encode("utf-8"))
-        if (
-            expected_root_identity
-            != request.proposal.routing.evidence_destination_sha256
-        ):
-            raise GcpPrivateCampaignTransportError("EVIDENCE_DESTINATION_MISMATCH")
-        root: SafeDirFD | None = None
-        handoff_succeeded = False
-        final = (
-            self._evidence_root
-            / f"routing-execution-{request.proposal.proposal_id[7:39]}"
-        )
         try:
-            root = self._root()
-            self._assert_visible_root(root)
-            try:
-                os.stat(final.name, dir_fd=root.fd, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                raise GcpPrivateCampaignTransportError("EVIDENCE_CREATE_NO_REPLACE")
-            with tempfile.TemporaryDirectory(
-                prefix="inferdrome-gcp-private-input-"
-            ) as stage:
-                stage_root = Path(stage)
-                stage_fd = SafeDirFD.open(stage_root)
-                try:
-                    self._write_stage_file(
-                        stage_fd, "deployment-config.json", routing_config
-                    )
-                    self._write_stage_file(stage_fd, "workload.jsonl", workload)
-                    stage_fd.assert_open()
-                    sealed = run_execution(
-                        stage_root / "deployment-config.json",
-                        stage_root / "workload.jsonl",
-                        final,
-                        evidence_parent=root,
-                    )
-                    stage_fd.assert_open()
-                finally:
-                    stage_fd.close()
-            self._assert_visible_root(root)
-            verified = verify_execution_package(sealed.path)
-            self._assert_visible_root(root)
-            if (
-                verified.executed_manifest.config_sha256
-                != sha256_digest(routing_config)
-                or verified.executed_manifest.mode != "GCP_PRIVATE"
-            ):
-                raise GcpPrivateCampaignTransportError(
-                    "ROUTING_HANDOFF_RECEIPT_INVALID"
-                )
-            endpoints = {
-                item.endpoint_id: item.origin_sha256
-                for item in verified.executed_manifest.endpoints
-            }
-            if set(endpoints) != {"endpoint-a", "endpoint-b"}:
-                raise GcpPrivateCampaignTransportError(
-                    "ROUTING_HANDOFF_RECEIPT_INVALID"
-                )
-            self._sealed[request.proposal.proposal_id] = (
-                sealed.path,
-                sealed.retained_digest,
-            )
-            handoff_succeeded = True
-            return GcpPrivateCampaignHandoffReceipt(
-                proposal_id=request.proposal.proposal_id,
-                routing_config_sha256=verified.executed_manifest.config_sha256,
-                selected_workload_sha256=(
-                    request.proposal.routing.selected_workload_sha256
-                ),
-                endpoint_a_origin_sha256=endpoints["endpoint-a"],
-                endpoint_b_origin_sha256=endpoints["endpoint-b"],
-                routed_after_verified_readiness=True,
-            )
-        except GcpPrivateCampaignError:
-            raise
-        except (OSError, SafeDirFSError, ValueError):
+            bundle = RuntimeInputBundle(
+                config_bytes=routing_config,
+                workload_bytes=workload,
+                iap_transport_map_bytes=None,
+            ).encode()
+        except ValueError:
             raise GcpPrivateCampaignTransportError("ROUTING_HANDOFF_FAILED") from None
-        finally:
-            if root is not None:
-                root.close()
-            if not handoff_succeeded:
-                self._release_bound_root()
+        response = self._request(
+            _RUNNER_HANDOFF_PATH,
+            method="POST",
+            body=bundle,
+            timeout_seconds=timeout_seconds,
+            maximum_body_bytes=_MAX_HTTP_BODY_BYTES,
+        )
+        if response.status != 200:
+            raise GcpPrivateCampaignTransportError("ROUTING_HANDOFF_FAILED")
+        parsed = self._canonical_model(
+            response.content, GcpPrivateCampaignHandoffReceipt
+        )
+        assert isinstance(parsed, GcpPrivateCampaignHandoffReceipt)
+        if any(
+            (
+                parsed.proposal_id != request.proposal.proposal_id,
+                parsed.routing_config_sha256 != sha256_digest(routing_config),
+                parsed.selected_workload_sha256
+                != request.proposal.routing.selected_workload_sha256,
+                parsed.co_located_freshness_admitted is not True,
+                parsed.runner_command_sha256
+                != request.startup_payload.runner.runner_command_sha256,
+            )
+        ):
+            raise GcpPrivateCampaignTransportError("ROUTING_HANDOFF_RECEIPT_INVALID")
+        return parsed
 
-    def retrieve(
-        self, request: GcpPrivateCampaignCreateRequest
+    @staticmethod
+    def _archive_payloads(content: bytes) -> dict[str, bytes]:
+        if not 1 <= len(content) <= _MAX_RUNNER_ARCHIVE_BYTES:
+            raise GcpPrivateCampaignTransportError("RUNNER_RETRIEVAL_TOO_LARGE")
+        try:
+            with tarfile.open(fileobj=io.BytesIO(content), mode="r:") as archive:
+                members = archive.getmembers()
+                if len(members) != len(_RUNNER_ARCHIVE_FILES):
+                    raise ValueError
+                payloads: dict[str, bytes] = {}
+                total = 0
+                for member in members:
+                    if (
+                        member.name not in _RUNNER_ARCHIVE_FILES
+                        or member.name in payloads
+                        or not member.isfile()
+                        or member.size < 1
+                        or member.size > _MAX_RUNNER_ARCHIVE_MEMBER_BYTES
+                        or member.mode & 0o222
+                    ):
+                        raise ValueError
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise ValueError
+                    with source:
+                        payload = source.read(member.size + 1)
+                    if len(payload) != member.size:
+                        raise ValueError
+                    total += len(payload)
+                    if total > _MAX_RUNNER_ARCHIVE_BYTES:
+                        raise ValueError
+                    payloads[member.name] = payload
+        except (tarfile.TarError, OSError, ValueError):
+            raise GcpPrivateCampaignTransportError("RUNNER_RETRIEVAL_INVALID") from None
+        if set(payloads) != set(_RUNNER_ARCHIVE_FILES):
+            raise GcpPrivateCampaignTransportError("RUNNER_RETRIEVAL_INVALID")
+        return payloads
+
+    def _import_archive(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        archive: bytes,
+        retained_digest: str,
     ) -> GcpPrivateCampaignEvidenceReceipt:
+        payloads = self._archive_payloads(archive)
+        try:
+            integrity = IntegrityManifest.model_validate_json(
+                payloads["integrity-manifest.json"]
+            )
+            if (
+                canonical_json_bytes(integrity.model_dump(mode="json"))
+                != payloads["integrity-manifest.json"]
+            ):
+                raise ValueError
+        except (ValidationError, ValueError):
+            raise GcpPrivateCampaignTransportError("RUNNER_RETRIEVAL_INVALID") from None
         root: SafeDirFD | None = None
         try:
             root = self._root()
-            self._assert_visible_root(root)
-            path, digest = self._sealed[request.proposal.proposal_id]
-            verified = verify_execution_package(path, expected_digest=digest)
-            self._assert_visible_root(root)
-        except (KeyError, OSError, ValueError):
+            self._assert_visible_root(root, self._evidence_root)
+            reservation = EvidenceReservation.reserve_in_parent(
+                root, self._package_name(request)
+            )
+            sealed = reservation.publish(
+                {
+                    "executed-manifest.json": payloads["executed-manifest.json"],
+                    "input-transfer-receipt.json": payloads[
+                        "input-transfer-receipt.json"
+                    ],
+                    "producer-receipt.json": payloads["producer-receipt.json"],
+                },
+                integrity,
+            )
+            self._assert_visible_root(root, self._evidence_root)
+            verified = verify_execution_package(
+                sealed.path, expected_digest=retained_digest
+            )
+            self._assert_visible_root(root, self._evidence_root)
+        except (GcpPrivateCampaignError, VerificationError, ValueError, OSError):
             raise GcpPrivateCampaignTransportError(
                 "EVIDENCE_RETRIEVAL_FAILED"
             ) from None
         finally:
             if root is not None:
                 root.close()
-            self._release_bound_root()
+        if verified.report.retained_digest != retained_digest:
+            raise GcpPrivateCampaignTransportError("EVIDENCE_RETRIEVAL_FAILED")
         return GcpPrivateCampaignEvidenceReceipt(
             proposal_id=request.proposal.proposal_id,
             retained_digest=verified.report.retained_digest,
             collection_mode="CREATE_NO_REPLACE_RETRIEVAL",
             raw_prompt_or_output_retained=False,
         )
+
+    def retrieve(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignEvidenceReceipt:
+        try:
+            response = self._request(
+                _RUNNER_EVIDENCE_PATH,
+                method="GET",
+                body=None,
+                timeout_seconds=timeout_seconds,
+                maximum_body_bytes=_MAX_RUNNER_ARCHIVE_BYTES,
+            )
+            retained_digest = response.headers.get("x-inferdrome-retained-digest")
+            if (
+                response.status != 200
+                or response.headers.get("content-type") != "application/x-tar"
+                or not isinstance(retained_digest, str)
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", retained_digest)
+            ):
+                raise GcpPrivateCampaignTransportError("EVIDENCE_RETRIEVAL_FAILED")
+            return self._import_archive(
+                request, archive=response.content, retained_digest=retained_digest
+            )
+        finally:
+            self.close()
+
+
+@dataclass(frozen=True)
+class _IapTunnelEndpoints:
+    readiness_origins: tuple[str, str]
+    runner_control_origin: str
+
+
+class _IapInvocation(Protocol):
+    def active_principal(self) -> str: ...
+
+    def start(self, argv: tuple[str, ...]) -> subprocess.Popen[bytes]: ...
+
+
+class _SubprocessIapInvocation:
+    """Lazy gcloud invocation; no auth is initialized until this live edge."""
+
+    def active_principal(self) -> str:
+        try:
+            completed = subprocess.run(
+                (
+                    "gcloud",
+                    "auth",
+                    "list",
+                    "--filter=status:ACTIVE",
+                    "--format=value(account)",
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise GcpPrivateCampaignTransportError(
+                "IAP_PRINCIPAL_UNAVAILABLE"
+            ) from None
+        values = tuple(
+            line.strip() for line in completed.stdout.splitlines() if line.strip()
+        )
+        if completed.returncode != 0 or len(values) != 1:
+            raise GcpPrivateCampaignTransportError("IAP_PRINCIPAL_UNAVAILABLE")
+        return values[0]
+
+    def start(self, argv: tuple[str, ...]) -> subprocess.Popen[bytes]:
+        try:
+            return subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE") from None
+
+
+class GcpPrivateCampaignIapTunnelSupervisor:
+    """Own the two engine and one runner IAP tunnels without SSH ingress."""
+
+    def __init__(
+        self,
+        *,
+        invocation: _IapInvocation | None = None,
+        connector: Callable[..., Any] | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        self._invocation = invocation or _SubprocessIapInvocation()
+        self._connector = connector or socket.create_connection
+        self._monotonic = monotonic or time.monotonic
+        self._sleeper = sleeper or time.sleep
+        self._processes: list[subprocess.Popen[bytes]] = []
+
+    @staticmethod
+    def _argv(
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        private_port: int,
+        local_port: int,
+    ) -> tuple[str, ...]:
+        proposal = request.proposal
+        return (
+            proposal.iap_connectivity.tunnel_binary,
+            "compute",
+            "start-iap-tunnel",
+            proposal.instance_name,
+            str(private_port),
+            "--project",
+            proposal.topology.project_id,
+            "--zone",
+            proposal.topology.zone,
+            "--local-host-port",
+            f"127.0.0.1:{local_port}",
+            "--quiet",
+        )
+
+    def _wait_listening(
+        self, process: subprocess.Popen[bytes], *, port: int, deadline: float
+    ) -> None:
+        while self._monotonic() < deadline:
+            if process.poll() is not None:
+                raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
+            try:
+                socket_value = self._connector(("127.0.0.1", port), timeout=0.25)
+                with suppress(OSError):
+                    socket_value.close()
+                return
+            except OSError:
+                self._sleeper(0.1)
+        raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
+
+    def preflight_principal(self, request: GcpPrivateCampaignCreateRequest) -> None:
+        """Reject a known-wrong local IAP principal before any VM insert."""
+
+        proposal = request.proposal
+        if proposal.iap_connectivity.ssh_transport_forbidden is not True:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_POLICY_MISMATCH")
+        try:
+            principal = self._invocation.active_principal()
+        except GcpPrivateCampaignError:
+            raise
+        except Exception:
+            raise GcpPrivateCampaignTransportError(
+                "IAP_PRINCIPAL_UNAVAILABLE"
+            ) from None
+        if principal != proposal.iap_connectivity.controller_principal:
+            raise GcpPrivateCampaignTransportError("IAP_PRINCIPAL_MISMATCH")
+
+    def open(
+        self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+    ) -> _IapTunnelEndpoints:
+        proposal = request.proposal
+        if not 1 <= timeout_seconds <= 600:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_TIMEOUT_INVALID")
+        if self._processes:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_ALREADY_OPEN")
+        try:
+            self.preflight_principal(request)
+            deadline = self._monotonic() + timeout_seconds
+            private_ports = (
+                request.startup_payload.engines[0].private_port,
+                request.startup_payload.engines[1].private_port,
+                request.startup_payload.runner.private_port,
+            )
+            for private_port, local_port in zip(
+                private_ports, proposal.iap_connectivity.local_tunnel_ports, strict=True
+            ):
+                process = self._invocation.start(
+                    self._argv(
+                        request,
+                        private_port=private_port,
+                        local_port=local_port,
+                    )
+                )
+                self._processes.append(process)
+                self._wait_listening(process, port=local_port, deadline=deadline)
+        except GcpPrivateCampaignError:
+            self.close()
+            raise
+        except Exception:
+            self.close()
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE") from None
+        first, second, runner_port = proposal.iap_connectivity.local_tunnel_ports
+        return _IapTunnelEndpoints(
+            readiness_origins=(
+                f"http://127.0.0.1:{first}",
+                f"http://127.0.0.1:{second}",
+            ),
+            runner_control_origin=f"http://127.0.0.1:{runner_port}",
+        )
+
+    def close(self) -> None:
+        while self._processes:
+            process = self._processes.pop()
+            if process.poll() is not None:
+                continue
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                with suppress(OSError):
+                    process.kill()
+                with suppress(OSError, subprocess.SubprocessError):
+                    process.wait(timeout=5)
 
 
 class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
@@ -518,13 +1110,23 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         instances_client: _InstancesClient,
         disks_client: _DisksClient,
         images_client: _ImagesClient,
-        runner: LocalGcpPrivateCampaignRunner,
+        runner: Any,
+        firewalls_client: _FirewallsClient | None = None,
+        iap_tunnels: GcpPrivateCampaignIapTunnelSupervisor | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         self._sdk = sdk
         self._instances = instances_client
         self._disks = disks_client
         self._images = images_client
+        self._firewalls = firewalls_client
         self._runner = runner
+        self._iap_tunnels = iap_tunnels
+        self._iap_endpoints: _IapTunnelEndpoints | None = None
+        self._pre_insert_guard: Callable[[], None] | None = None
+        self._monotonic = monotonic or time.monotonic
+        self._sleeper = sleeper or time.sleep
         self._operations: dict[str, object] = {}
         self._lock = threading.Lock()
 
@@ -532,6 +1134,35 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         """Bind the controller-held preflight root before any create request."""
 
         self._runner.bind_evidence_root(root)
+
+    def bind_pre_insert_guard(self, guard: Callable[[], None]) -> None:
+        """Bind a local approval/quote/deadline recheck at the mutation edge."""
+
+        if self._pre_insert_guard is not None or not callable(guard):
+            raise GcpPrivateCampaignTransportError("PREINSERT_GUARD_INVALID")
+        self._pre_insert_guard = guard
+
+    def _revalidate_before_insert(self) -> None:
+        if self._pre_insert_guard is None:
+            raise GcpPrivateCampaignTransportError("PREINSERT_GUARD_UNAVAILABLE")
+        try:
+            self._pre_insert_guard()
+        except GcpPrivateCampaignError:
+            raise
+        except Exception:
+            raise GcpPrivateCampaignTransportError("PREINSERT_GUARD_FAILED") from None
+
+    def _preflight_iap_principal(
+        self, request: GcpPrivateCampaignCreateRequest
+    ) -> None:
+        """Make a local IAP identity mismatch fail before provider spend."""
+
+        if self._iap_tunnels is None:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
+        preflight = getattr(self._iap_tunnels, "preflight_principal", None)
+        if not callable(preflight):
+            raise GcpPrivateCampaignTransportError("IAP_PRINCIPAL_UNAVAILABLE")
+        preflight(request)
 
     def project_create_request(
         self, request: GcpPrivateCampaignCreateRequest, *, request_id: str
@@ -565,6 +1196,15 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                         stack_type="IPV4_ONLY",
                     )
                 ],
+                service_accounts=[
+                    self._sdk.ServiceAccount(
+                        email=proposal.guest_service_account.service_account_email,
+                        scopes=[],
+                    )
+                ],
+                tags=self._sdk.Tags(
+                    items=[proposal.iap_connectivity.instance_network_tag]
+                ),
                 can_ip_forward=False,
                 deletion_protection=False,
                 scheduling=self._sdk.Scheduling(
@@ -588,6 +1228,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                         self._sdk.Items(
                             key=_PROPOSAL_METADATA_KEY, value=proposal.proposal_id
                         ),
+                        self._sdk.Items(key="block-project-ssh-keys", value="TRUE"),
+                        self._sdk.Items(key="enable-oslogin", value="FALSE"),
                     ]
                 ),
             )
@@ -611,8 +1253,19 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         request_id: str,
         timeout_seconds: int,
     ) -> GcpPrivateCampaignOperation:
+        # These checks happen only after the lifecycle has performed its
+        # exact local approval check and bound ``_pre_insert_guard``.  Each
+        # potentially slow read is followed by the same local check so an
+        # expired approval, quote, or execution horizon cannot reach insert.
+        self._revalidate_before_insert()
         self._verify_boot_image_identity(request, timeout_seconds=timeout_seconds)
+        self._revalidate_before_insert()
+        self._verify_iap_firewall(request, timeout_seconds=timeout_seconds)
+        self._revalidate_before_insert()
+        self._preflight_iap_principal(request)
+        self._revalidate_before_insert()
         projected = self.project_create_request(request, request_id=request_id)
+        self._revalidate_before_insert()
         try:
             result = self._instances.insert(request=projected, timeout=timeout_seconds)
             operation = _operation(result, kind="create", request_id=request_id)
@@ -663,11 +1316,96 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 expected=proposal.boot_image.image_ref,
                 code="BOOT_IMAGE_IDENTITY_MISMATCH",
             )
+            observed_identity = gcp_private_campaign_boot_image_identity(
+                image_ref=proposal.boot_image.image_ref,
+                provider_image_id=_positive_provider_id(
+                    getattr(image, "id", None),
+                    code="BOOT_IMAGE_IDENTITY_MISMATCH",
+                ),
+            )
+            if observed_identity != proposal.boot_image.boot_image_identity:
+                raise GcpPrivateCampaignTransportError("BOOT_IMAGE_IDENTITY_MISMATCH")
         except GcpPrivateCampaignError:
             raise
         except Exception:
             raise GcpPrivateCampaignTransportError(
                 "BOOT_IMAGE_OBSERVATION_FAILED"
+            ) from None
+
+    def _verify_iap_firewall(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        timeout_seconds: int,
+    ) -> None:
+        """Read the one approved IAP ingress rule before creating a VM.
+
+        IAP TCP forwarding still requires a private ingress rule.  The
+        approval binds that rule by immutable provider ID, canonical reference,
+        source CIDR, target tag, and only the two engine ports plus one
+        CPU-only runner control/retrieval port.
+        """
+
+        if self._firewalls is None:
+            raise GcpPrivateCampaignTransportError("IAP_FIREWALL_UNAVAILABLE")
+        proposal = request.proposal
+        reference = proposal.iap_connectivity.firewall_rule_ref
+        parts = reference.split("/")
+        if (
+            len(parts) != 5
+            or parts[:3] != ["projects", proposal.topology.project_id, "global"]
+            or parts[3] != "firewalls"
+        ):
+            raise GcpPrivateCampaignTransportError("IAP_FIREWALL_REFERENCE_INVALID")
+        try:
+            firewall = self._firewalls.get(
+                project=proposal.topology.project_id,
+                firewall=parts[4],
+                timeout=timeout_seconds,
+            )
+            if (
+                _positive_provider_id(
+                    getattr(firewall, "id", None), code="IAP_FIREWALL_IDENTITY_MISMATCH"
+                )
+                != proposal.iap_connectivity.firewall_provider_id
+            ):
+                raise GcpPrivateCampaignTransportError("IAP_FIREWALL_IDENTITY_MISMATCH")
+            _canonical_compute_reference(
+                getattr(firewall, "self_link", None),
+                expected=reference,
+                code="IAP_FIREWALL_IDENTITY_MISMATCH",
+            )
+            if (
+                str(getattr(firewall, "direction", "")) != "INGRESS"
+                or bool(getattr(firewall, "disabled", False))
+                or tuple(getattr(firewall, "source_ranges", ()) or ())
+                != (proposal.iap_connectivity.iap_source_cidr,)
+                or tuple(getattr(firewall, "target_tags", ()) or ())
+                != (proposal.iap_connectivity.instance_network_tag,)
+                or getattr(firewall, "denied", None) not in (None, (), [])
+            ):
+                raise GcpPrivateCampaignTransportError("IAP_FIREWALL_POLICY_MISMATCH")
+            allowed = tuple(getattr(firewall, "allowed", ()) or ())
+            normalized = tuple(
+                (
+                    str(
+                        getattr(
+                            item,
+                            "i_p_protocol",
+                            getattr(item, "ip_protocol", ""),
+                        )
+                    ).lower(),
+                    tuple(str(port) for port in (getattr(item, "ports", ()) or ())),
+                )
+                for item in allowed
+            )
+            if normalized != (("tcp", ("8000", "8001", "8002")),):
+                raise GcpPrivateCampaignTransportError("IAP_FIREWALL_POLICY_MISMATCH")
+        except GcpPrivateCampaignError:
+            raise
+        except Exception:
+            raise GcpPrivateCampaignTransportError(
+                "IAP_FIREWALL_OBSERVATION_FAILED"
             ) from None
 
     def _provider_operation(self, operation: GcpPrivateCampaignOperation) -> object:
@@ -789,6 +1527,26 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 or getattr(value, "can_ip_forward", None) is not False
             ):
                 raise GcpPrivateCampaignTransportError("INSTANCE_NETWORK_MISMATCH")
+            service_accounts = list(getattr(value, "service_accounts", ()) or ())
+            if len(service_accounts) != 1:
+                raise GcpPrivateCampaignTransportError(
+                    "INSTANCE_SERVICE_ACCOUNT_MISMATCH"
+                )
+            service_account = service_accounts[0]
+            if (
+                str(getattr(service_account, "email", ""))
+                != proposal.guest_service_account.service_account_email
+                or tuple(getattr(service_account, "scopes", ()) or ())
+                != proposal.guest_service_account.oauth_scopes
+            ):
+                raise GcpPrivateCampaignTransportError(
+                    "INSTANCE_SERVICE_ACCOUNT_MISMATCH"
+                )
+            tags = getattr(value, "tags", None)
+            if tuple(getattr(tags, "items", ()) or ()) != (
+                proposal.iap_connectivity.instance_network_tag,
+            ):
+                raise GcpPrivateCampaignTransportError("INSTANCE_IAP_TAG_MISMATCH")
             # A2 high-GPU shapes are fixed-GPU machine types.  Like the
             # established one-GPU guarded path, Compute's normal readback
             # proves the accelerator through the exact machine type rather
@@ -894,17 +1652,22 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             ),
             code="BOOT_DISK_IDENTITY_MISMATCH",
         )
-        _canonical_compute_reference(
+        observed_source_image = _canonical_compute_reference(
             getattr(value, "source_image", None),
             expected=proposal.boot_image.image_ref,
             code="BOOT_DISK_PROVENANCE_MISMATCH",
         )
+        observed_source_image_id = _positive_provider_id(
+            getattr(value, "source_image_id", None),
+            code="BOOT_DISK_PROVENANCE_MISMATCH",
+        )
+        observed_boot_image_identity = gcp_private_campaign_boot_image_identity(
+            image_ref=observed_source_image,
+            provider_image_id=observed_source_image_id,
+        )
         if (
-            _positive_provider_id(
-                getattr(value, "source_image_id", None),
-                code="BOOT_DISK_PROVENANCE_MISMATCH",
-            )
-            != proposal.boot_image.provider_image_id
+            observed_source_image_id != proposal.boot_image.provider_image_id
+            or observed_boot_image_identity != proposal.boot_image.boot_image_identity
         ):
             raise GcpPrivateCampaignTransportError("BOOT_DISK_PROVENANCE_MISMATCH")
         try:
@@ -939,10 +1702,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             disk_name=proposal.boot_disk_name,
             provider_disk_id_sha256=sha256_digest(provider_disk_id.encode("ascii")),
             ownership_labels=proposal.ownership_labels,
-            # The provider exposes an immutable source image ref/ID rather than
-            # an OCI-like content digest.  It is checked above; this approved
-            # identity is retained only after that exact provenance check.
-            source_boot_image_identity=proposal.boot_image.boot_image_identity,
+            source_boot_image_identity=observed_boot_image_identity,
             attached_provider_instance_id=attached_provider_instance_id,
             attachment_state=attachment_state,
             boot_attachment=True,
@@ -1015,6 +1775,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 _STARTUP_SCRIPT_DIGEST_METADATA_KEY,
                 _STARTUP_PAYLOAD_METADATA_KEY,
                 _PROPOSAL_METADATA_KEY,
+                "block-project-ssh-keys",
+                "enable-oslogin",
             }
             or metadata.get(_STARTUP_SCRIPT_METADATA_KEY) != expected_script
             or metadata.get(_STARTUP_SCRIPT_DIGEST_METADATA_KEY)
@@ -1022,6 +1784,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             or metadata.get(_STARTUP_PAYLOAD_METADATA_KEY)
             != proposal.startup_payload_digest
             or metadata.get(_PROPOSAL_METADATA_KEY) != proposal.proposal_id
+            or metadata.get("block-project-ssh-keys") != "TRUE"
+            or metadata.get("enable-oslogin") != "FALSE"
         ):
             raise GcpPrivateCampaignTransportError("INSTANCE_STARTUP_BINDING_MISMATCH")
         boot_disk = self._verify_live_boot_disk(
@@ -1163,6 +1927,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         *,
         engine: GcpPrivateCampaignEngine,
         startup_payload_digest: str,
+        model_snapshot_sha256: str,
     ) -> str:
         """Parse and bind the adapter's private endpoint-to-engine attestation."""
 
@@ -1185,6 +1950,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             model=engine.model,
             runtime=engine.runtime,
             startup_payload_digest=startup_payload_digest,
+            adapter_source_sha256=engine.adapter_source_sha256,
+            model_snapshot_sha256=model_snapshot_sha256,
             listener_scope=engine.listener_scope,
         )
         if observed != expected:
@@ -1193,8 +1960,43 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             )
         return sha256_digest(canonical_json_bytes(observed.model_dump(mode="json")))
 
-    def observe_readiness(
+    def _open_iap_tunnels(
         self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+    ) -> _IapTunnelEndpoints:
+        if self._iap_endpoints is not None:
+            return self._iap_endpoints
+        if self._iap_tunnels is None:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
+        self._iap_endpoints = self._iap_tunnels.open(
+            request, timeout_seconds=timeout_seconds
+        )
+        try:
+            self._runner.bind_iap_runner_origin(
+                self._iap_endpoints.runner_control_origin
+            )
+        except Exception:
+            self._iap_tunnels.close()
+            self._iap_endpoints = None
+            raise
+        return self._iap_endpoints
+
+    @staticmethod
+    def _transient_readiness_error(error: GcpPrivateCampaignError) -> bool:
+        return error.code in {
+            "INSTANCE_NOT_FOUND",
+            "PRIVATE_READINESS_INSTANCE_NOT_RUNNING",
+            "PRIVATE_READINESS_TRANSPORT_FAILED",
+            "PRIVATE_READINESS_UNAVAILABLE",
+            "RUNNER_ATTESTATION_UNAVAILABLE",
+            "RUNNER_IAP_TRANSPORT_FAILED",
+        }
+
+    def _readiness_attempt(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        endpoints: _IapTunnelEndpoints,
+        timeout_seconds: int,
     ) -> GcpPrivateCampaignReadiness:
         proposal = request.proposal
         value = self._instance(request, timeout_seconds=timeout_seconds)
@@ -1212,11 +2014,10 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             getattr(interface, "network_i_p", None)
             or getattr(interface, "network_ip", None)
         )
-        endpoints: list[GcpPrivateCampaignEndpointReadiness] = []
-        import time
-
-        for engine in request.startup_payload.engines:
-            origin = f"http://{private_ip}:{engine.private_port}"
+        observations: list[GcpPrivateCampaignEndpointReadiness] = []
+        for engine, origin in zip(
+            request.startup_payload.engines, endpoints.readiness_origins, strict=True
+        ):
             health, _ = self._http(
                 origin,
                 engine.health_path,
@@ -1251,17 +2052,24 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 or generation != 200
                 or metrics_status != 200
                 or attestation_status != 200
-                or not self._model_capability_present(model_content)
-                or not self._valid_generation_response(generation_content)
             ):
                 raise GcpPrivateCampaignTransportError("PRIVATE_READINESS_UNAVAILABLE")
+            if not self._model_capability_present(model_content):
+                raise GcpPrivateCampaignTransportError(
+                    "PRIVATE_MODEL_IDENTITY_MISMATCH"
+                )
+            if not self._valid_generation_response(generation_content):
+                raise GcpPrivateCampaignTransportError("PRIVATE_GENERATION_INVALID")
             _metric_is_present(metrics)
             attestation_digest = self._engine_attestation_digest(
                 attestation_content,
                 engine=engine,
                 startup_payload_digest=proposal.startup_payload_digest,
+                model_snapshot_sha256=(
+                    request.startup_payload.preloaded_artifacts.model_snapshot_sha256
+                ),
             )
-            endpoints.append(
+            observations.append(
                 GcpPrivateCampaignEndpointReadiness(
                     endpoint_id=engine.endpoint_id,
                     gpu_ordinal=engine.gpu_ordinal,
@@ -1277,6 +2085,9 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                     observed_monotonic_ns=time.monotonic_ns(),
                 )
             )
+        runner_attestation = self._runner.readiness_attestation(
+            request, timeout_seconds=timeout_seconds
+        )
         return GcpPrivateCampaignReadiness(
             schema_version=GCP_PRIVATE_CAMPAIGN_READINESS_SCHEMA_VERSION,
             proposal_id=proposal.proposal_id,
@@ -1291,15 +2102,68 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             accelerator_count=2,
             startup_payload_digest=proposal.startup_payload_digest,
             startup_script_sha256=exact_instance.startup_script_sha256,
+            runner=runner_attestation,
             endpoints=cast(
                 tuple[
                     GcpPrivateCampaignEndpointReadiness,
                     GcpPrivateCampaignEndpointReadiness,
                 ],
-                tuple(endpoints),
+                tuple(observations),
             ),
             observed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
+
+    def observe_readiness(
+        self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignReadiness:
+        """Poll the two IAP-only paths within one shared startup deadline."""
+
+        if not 1 <= timeout_seconds <= 600:
+            raise GcpPrivateCampaignTransportError("PRIVATE_READINESS_TIMEOUT_INVALID")
+        deadline = self._monotonic() + timeout_seconds
+        delay = 0.1
+        last_error: GcpPrivateCampaignError | None = None
+        while self._monotonic() < deadline:
+            remaining = deadline - self._monotonic()
+            probe_timeout = max(1, min(5, int(remaining) + 1))
+            try:
+                # IAP is deliberately opened only after exact readback proves
+                # that the approved instance is RUNNING.  The controller never
+                # probes the retained RFC1918 address from the host.
+                if self._iap_endpoints is None:
+                    preflight_value = self._instance(
+                        request, timeout_seconds=probe_timeout
+                    )
+                    preflight_instance = self._observe_exact_instance_value(
+                        request, preflight_value, timeout_seconds=probe_timeout
+                    )
+                    if preflight_instance.state != "RUNNING":
+                        raise GcpPrivateCampaignTransportError(
+                            "PRIVATE_READINESS_INSTANCE_NOT_RUNNING"
+                        )
+                    self._open_iap_tunnels(
+                        request, timeout_seconds=max(1, int(remaining) + 1)
+                    )
+                endpoints = self._iap_endpoints
+                if endpoints is None:
+                    raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
+                return self._readiness_attempt(
+                    request, endpoints=endpoints, timeout_seconds=probe_timeout
+                )
+            except GcpPrivateCampaignError as error:
+                if not self._transient_readiness_error(error):
+                    raise
+                last_error = error
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                break
+            self._sleeper(min(delay, remaining))
+            delay = min(delay * 2, 1.0)
+        if last_error is not None:
+            raise GcpPrivateCampaignTransportError(
+                "PRIVATE_READINESS_TIMEOUT"
+            ) from None
+        raise GcpPrivateCampaignTransportError("PRIVATE_READINESS_TIMEOUT")
 
     def handoff_campaign(
         self,
@@ -1309,18 +2173,35 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         workload: bytes,
         timeout_seconds: int,
     ) -> GcpPrivateCampaignHandoffReceipt:
-        return self._runner.handoff(
+        if self._iap_endpoints is None:
+            raise GcpPrivateCampaignTransportError("IAP_TUNNEL_UNAVAILABLE")
+        handoff = self._runner.handoff(
             request,
             routing_config=routing_config,
             workload=workload,
             timeout_seconds=timeout_seconds,
         )
+        if not isinstance(handoff, GcpPrivateCampaignHandoffReceipt):
+            raise GcpPrivateCampaignTransportError("ROUTING_HANDOFF_RECEIPT_INVALID")
+        return handoff
 
     def retrieve_evidence(
         self, request: GcpPrivateCampaignCreateRequest, *, timeout_seconds: int
     ) -> GcpPrivateCampaignEvidenceReceipt:
-        del timeout_seconds
-        return self._runner.retrieve(request)
+        evidence = self._runner.retrieve(request, timeout_seconds=timeout_seconds)
+        if not isinstance(evidence, GcpPrivateCampaignEvidenceReceipt):
+            raise GcpPrivateCampaignTransportError("EVIDENCE_RETRIEVAL_FAILED")
+        return evidence
+
+    def close(self) -> None:
+        """Close only locally supervised IAP processes; never mutate GCE here."""
+
+        try:
+            self._runner.close()
+        finally:
+            if self._iap_tunnels is not None:
+                self._iap_tunnels.close()
+            self._iap_endpoints = None
 
     def project_delete_instance_request(
         self, request: GcpPrivateCampaignCreateRequest, *, request_id: str
@@ -1412,6 +2293,26 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 != exact_resource_binding.boot_disk_provider_id_sha256
             ):
                 raise GcpPrivateCampaignTransportError("BOOT_DISK_IDENTITY_MISMATCH")
+            # Compute delete is name-addressed; it offers no immutable-ID
+            # conditional delete.  Narrow the provider TOCTOU window with a
+            # second exact read immediately before the mutation and never
+            # delete a same-name replacement.
+            current = self._maybe_instance(request, timeout_seconds=timeout_seconds)
+            if current is None:
+                return self._already_absent_operation(
+                    kind="delete_instance", request_id=request_id
+                )
+            self._assert_instance_identity(current, request.proposal)
+            current_provider_id = str(
+                _positive_provider_id(
+                    getattr(current, "id", None), code="INSTANCE_IDENTITY_MISMATCH"
+                )
+            )
+            self._assert_resource_binding(
+                exact_resource_binding,
+                request.proposal,
+                provider_instance_id=current_provider_id,
+            )
             value = self._instances.delete(request=projected, timeout=timeout_seconds)
             operation = _operation(value, kind="delete_instance", request_id=request_id)
             with self._lock:
@@ -1448,6 +2349,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 "labels.inferdrome = inferdrome",
                 f"labels.controller_id = {labels.controller_id}",
                 f"labels.ownership_nonce = {labels.ownership_nonce}",
+                f"labels.run_lease_id = {labels.run_lease_id}",
             )
         )
 
@@ -1571,6 +2473,27 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 len(current) != 1
                 or current[0] != disk
                 or current[0].provider_disk_id_sha256
+                != exact_resource_binding.boot_disk_provider_id_sha256
+            ):
+                raise GcpPrivateCampaignTransportError(
+                    "BOOT_DISK_DELETE_SCOPE_MISMATCH"
+                )
+            # Repeat an exact direct disk read immediately before the
+            # name-addressed provider delete.  This cannot make GCE's delete
+            # atomic by ID; it prevents us from deleting a detected replacement.
+            exact_disk = self._maybe_boot_disk(request, timeout_seconds=timeout_seconds)
+            if exact_disk is None:
+                return self._already_absent_operation(
+                    kind="delete_boot_disk", request_id=request_id
+                )
+            final_disk = self._disk_observation(
+                proposal,
+                exact_disk,
+                attached_provider_instance_id=None,
+            )
+            if (
+                final_disk != disk
+                or final_disk.provider_disk_id_sha256
                 != exact_resource_binding.boot_disk_provider_id_sha256
             ):
                 raise GcpPrivateCampaignTransportError(
@@ -1714,22 +2637,101 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             ) from None
 
 
+class GoogleGcpPrivateCampaignCleanupTransport:
+    """No-create facade for cleanup authorization and orphan discovery only."""
+
+    def __init__(self, inner: GoogleGcpPrivateCampaignTransport) -> None:
+        self._inner = inner
+
+    def wait_operation(
+        self, operation: GcpPrivateCampaignOperation, *, timeout_seconds: int
+    ) -> GcpPrivateCampaignOperationResult:
+        return self._inner.wait_operation(operation, timeout_seconds=timeout_seconds)
+
+    def delete_exact_instance(
+        self, *args: Any, **kwargs: Any
+    ) -> GcpPrivateCampaignOperation:
+        return self._inner.delete_exact_instance(*args, **kwargs)
+
+    def reconcile_delete_instance(
+        self, *args: Any, **kwargs: Any
+    ) -> GcpPrivateCampaignOperationResult:
+        return self._inner.reconcile_delete_instance(*args, **kwargs)
+
+    def list_exact_owned_residuals(
+        self, *args: Any, **kwargs: Any
+    ) -> GcpPrivateCampaignOwnedResidualInventory:
+        return self._inner.list_exact_owned_residuals(*args, **kwargs)
+
+    def delete_exact_owned_boot_disk(
+        self, *args: Any, **kwargs: Any
+    ) -> GcpPrivateCampaignOperation:
+        return self._inner.delete_exact_owned_boot_disk(*args, **kwargs)
+
+    def reconcile_delete_exact_owned_boot_disk(
+        self, *args: Any, **kwargs: Any
+    ) -> GcpPrivateCampaignOperationResult:
+        return self._inner.reconcile_delete_exact_owned_boot_disk(*args, **kwargs)
+
+    def confirm_exact_absence(
+        self, *args: Any, **kwargs: Any
+    ) -> GcpPrivateCampaignAbsenceObservation:
+        return self._inner.confirm_exact_absence(*args, **kwargs)
+
+    def discover_exact_owned(
+        self, *args: Any, **kwargs: Any
+    ) -> GcpPrivateCampaignOwnedResidualInventory:
+        return self._inner.discover_exact_owned(*args, **kwargs)
+
+
+class _NoCreateRunner:
+    """Marker used by the cleanup facade; it has no runner or create surface."""
+
+
+def _google_clients() -> tuple[Any, Any, Any, Any, Any]:
+    try:
+        sdk = importlib.import_module("google.cloud.compute_v1")
+        return (
+            sdk,
+            sdk.InstancesClient(),
+            sdk.DisksClient(),
+            sdk.ImagesClient(),
+            sdk.FirewallsClient(),
+        )
+    except Exception:
+        raise GcpPrivateCampaignOptionalDependencyUnavailable() from None
+
+
 def create_google_private_campaign_transport(
     *, evidence_root: Path
 ) -> GoogleGcpPrivateCampaignTransport:
     """Construct the only live adapter, at the controller's gated factory edge."""
 
-    try:
-        sdk = importlib.import_module("google.cloud.compute_v1")
-        instances = sdk.InstancesClient()
-        disks = sdk.DisksClient()
-        images = sdk.ImagesClient()
-    except Exception:
-        raise GcpPrivateCampaignOptionalDependencyUnavailable() from None
+    sdk, instances, disks, images, firewalls = _google_clients()
     return GoogleGcpPrivateCampaignTransport(
         sdk=sdk,
         instances_client=instances,
         disks_client=disks,
         images_client=images,
-        runner=LocalGcpPrivateCampaignRunner(evidence_root),
+        firewalls_client=firewalls,
+        iap_tunnels=GcpPrivateCampaignIapTunnelSupervisor(),
+        runner=IapGcpPrivateCampaignRunner(evidence_root),
+    )
+
+
+def create_google_private_campaign_cleanup_transport() -> (
+    GoogleGcpPrivateCampaignCleanupTransport
+):
+    """Construct an exact cleanup-only adapter after cleanup authorization."""
+
+    sdk, instances, disks, images, firewalls = _google_clients()
+    return GoogleGcpPrivateCampaignCleanupTransport(
+        GoogleGcpPrivateCampaignTransport(
+            sdk=sdk,
+            instances_client=instances,
+            disks_client=disks,
+            images_client=images,
+            firewalls_client=firewalls,
+            runner=_NoCreateRunner(),
+        )
     )

@@ -37,10 +37,11 @@ RUN case "${BUILD_FLAVOR}" in \
 
 WORKDIR /opt/inferdrome-source
 
-# This is the benchmark-runner role. It copies the lock-built Inferdrome
-# environment alongside the upstream vLLM client package but deliberately
-# overrides the upstream server entrypoint; only the separate engine service
-# runs `vllm serve`.
+# This Dockerfile supplies the shared reviewed runtime code for two separately
+# pinned role images: the CPU-only observer and the private engine. Their GCP
+# contract rejects an equal image digest. The guarded startup script overrides
+# the engine entrypoint to the checked-in adapter; only that adapter launches
+# `vllm serve`, exactly once.
 USER root
 COPY --from=inferdrome-dependencies --chown=2000:0 /opt/inferdrome-runtime /opt/inferdrome-runtime
 COPY --from=inferdrome-dependencies /build/LICENSE /build/THIRD_PARTY_NOTICES.md /usr/share/licenses/inferdrome/
@@ -54,9 +55,10 @@ RUN test "$(/opt/inferdrome-runtime/bin/python -c 'from inferdrome import __vers
 LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome" \
       org.opencontainers.image.revision="${SOURCE_REPOSITORY_COMMIT}" \
       org.opencontainers.image.version="${INFERDROME_VERSION}" \
-      com.inferdrome.image-purpose="benchmark-runner-only" \
+      com.inferdrome.image-purpose="private-engine-or-cpu-observer-runtime" \
+      com.inferdrome.engine-service-boundary="separate-vllm-engine-service" \
       com.inferdrome.vllm-version="0.26.0" \
-      com.inferdrome.engine-entrypoint="separate-vllm-engine-service"
+      com.inferdrome.engine-entrypoint="inferdrome.deployment.gcp_private_engine_adapter"
 
 USER 2000:0
 ENV HOME="/home/vllm" \

@@ -91,52 +91,6 @@
       "title": "GcpPrivateCampaignEndpointReadiness",
       "type": "object"
     },
-    "GcpPrivateCampaignOwnershipLabels": {
-      "additionalProperties": false,
-      "description": "Immutable labels used for exact ownership, never hostname inference.",
-      "properties": {
-        "controller_id": {
-          "pattern": "^pcctl-[a-z0-9]{8,24}$",
-          "title": "Controller Id",
-          "type": "string"
-        },
-        "inferdrome": {
-          "const": "inferdrome",
-          "title": "Inferdrome",
-          "type": "string"
-        },
-        "managed_by": {
-          "const": "inferdrome_gcp_private_campaign_v2",
-          "title": "Managed By",
-          "type": "string"
-        },
-        "ownership_nonce": {
-          "pattern": "^[a-z0-9]{16,32}$",
-          "title": "Ownership Nonce",
-          "type": "string"
-        },
-        "role": {
-          "const": "two-engine-precampaign",
-          "title": "Role",
-          "type": "string"
-        },
-        "run_lease_id": {
-          "pattern": "^lease-[a-z0-9]{12,24}$",
-          "title": "Run Lease Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "inferdrome",
-        "managed_by",
-        "role",
-        "controller_id",
-        "ownership_nonce",
-        "run_lease_id"
-      ],
-      "title": "GcpPrivateCampaignOwnershipLabels",
-      "type": "object"
-    },
     "GcpPrivateCampaignRunnerAttestation": {
       "additionalProperties": false,
       "description": "Bounded self-report from the dedicated local runner adapter.",
@@ -247,21 +201,10 @@
       "type": "object"
     }
   },
-  "$id": "urn:inferdrome:gcp-private-campaign-readiness:v2",
+  "$id": "urn:inferdrome:gcp-private-campaign-readiness-receipt:v2",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Observed topology and two capability probes, not a provider payload dump.",
   "properties": {
-    "accelerator_count": {
-      "const": 2,
-      "title": "Accelerator Count",
-      "type": "integer"
-    },
-    "accelerator_model": {
-      "const": "NVIDIA A100-SXM4-40GB",
-      "title": "Accelerator Model",
-      "type": "string"
-    },
     "endpoints": {
       "maxItems": 2,
       "minItems": 2,
@@ -276,33 +219,10 @@
       "title": "Endpoints",
       "type": "array"
     },
-    "instance_name": {
-      "pattern": "^inferdrome-pc-[a-z0-9]{8,24}$",
-      "title": "Instance Name",
-      "type": "string"
-    },
-    "machine_type": {
-      "const": "a2-highgpu-2g",
-      "title": "Machine Type",
-      "type": "string"
-    },
     "observed_at": {
       "maxLength": 32,
       "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
       "title": "Observed At",
-      "type": "string"
-    },
-    "ownership_labels": {
-      "$ref": "#/$defs/GcpPrivateCampaignOwnershipLabels"
-    },
-    "private_ipv4": {
-      "maxLength": 15,
-      "title": "Private Ipv4",
-      "type": "string"
-    },
-    "project_id": {
-      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
-      "title": "Project Id",
       "type": "string"
     },
     "proposal_id": {
@@ -310,16 +230,21 @@
       "title": "Proposal Id",
       "type": "string"
     },
-    "provider_instance_id": {
-      "pattern": "^[1-9][0-9]{0,18}$",
-      "title": "Provider Instance Id",
+    "provider_instance_id_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Provider Instance Id Sha256",
+      "type": "string"
+    },
+    "readiness_receipt_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Readiness Receipt Sha256",
       "type": "string"
     },
     "runner": {
       "$ref": "#/$defs/GcpPrivateCampaignRunnerAttestation"
     },
     "schema_version": {
-      "const": "inferdrome.gcp-private-campaign-readiness.v2",
+      "const": "inferdrome.gcp-private-campaign-readiness-receipt.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -332,33 +257,19 @@
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Startup Script Sha256",
       "type": "string"
-    },
-    "zone": {
-      "maxLength": 64,
-      "minLength": 7,
-      "pattern": "^[a-z]+-[a-z]+[0-9]{1,2}-[a-z]$",
-      "title": "Zone",
-      "type": "string"
     }
   },
   "required": [
     "schema_version",
     "proposal_id",
-    "project_id",
-    "zone",
-    "instance_name",
-    "provider_instance_id",
-    "ownership_labels",
-    "private_ipv4",
-    "machine_type",
-    "accelerator_model",
-    "accelerator_count",
+    "provider_instance_id_sha256",
     "startup_payload_digest",
     "startup_script_sha256",
     "runner",
     "endpoints",
-    "observed_at"
+    "observed_at",
+    "readiness_receipt_sha256"
   ],
-  "title": "GcpPrivateCampaignReadiness",
+  "title": "GcpPrivateCampaignReadinessReceipt",
   "type": "object"
 }
