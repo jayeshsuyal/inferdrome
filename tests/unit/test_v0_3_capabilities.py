@@ -18,6 +18,7 @@ def test_v0_3_capability_contract_is_complete_and_non_verdicting() -> None:
     assert set(facts) == {
         "local_routing_execution",
         "external_router_evidence_adapter",
+        "stale_telemetry_qualification",
         "historical_a10_serving_evidence",
         "two_a100_multi_endpoint_campaign",
         "gcp_operation",
@@ -27,6 +28,10 @@ def test_v0_3_capability_contract_is_complete_and_non_verdicting() -> None:
     assert (
         facts["external_router_evidence_adapter"].status
         == "LOCAL_FIXTURE_VALIDATED"
+    )
+    assert (
+        facts["stale_telemetry_qualification"].status
+        == "LOCAL_DETERMINISTIC_VALIDATED"
     )
     assert facts["historical_a10_serving_evidence"].status == "PRESERVED_EXTERNAL_ONLY"
     assert facts["two_a100_multi_endpoint_campaign"].status == "UNEXECUTED"
