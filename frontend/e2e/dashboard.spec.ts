@@ -38,8 +38,15 @@ interface LocalDemoSummary {
   readonly roots: {
     readonly comparison_plans: string;
     readonly comparison_results: string;
+    readonly routing_campaign: string;
     readonly runs: string;
     readonly trial_sets: string;
+  };
+  readonly routing_campaign: {
+    readonly campaign_id: string;
+    readonly execution_mode: string;
+    readonly retained_digest: string;
+    readonly verified_by_replay: boolean;
   };
 }
 
@@ -109,34 +116,6 @@ function prepareLocalDemoFixture(root: string): LocalDemoSummary {
   }
 }
 
-function prepareRoutingCampaignFixture(root: string): string {
-  const routingCampaigns = join(root, "routing-campaign-package");
-  const campaignRoot = join(REPOSITORY_ROOT, "campaigns", "routing-campaign-v1");
-  const result = spawnSync(
-    pythonExecutable(),
-    [
-      "-m", "inferdrome.routing_campaign", "run",
-      "--campaign-plan", join(campaignRoot, "stale-load-fresh-health.plan.json"),
-      "--request-trace", join(campaignRoot, "stale-load-fresh-health.trace.jsonl"),
-      "--fault-schedule", join(campaignRoot, "stale-load-fresh-health.fault-schedule.json"),
-      "--trial-plan", join(campaignRoot, "trial-plan.json"),
-      "--output", routingCampaigns,
-    ],
-    {
-      cwd: REPOSITORY_ROOT,
-      encoding: "utf8",
-      env: inferdromeEnvironment(),
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    },
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0 || !existsSync(routingCampaigns)) {
-    throw new Error(`routing-campaign fixture preparation failed:\n${result.stderr || result.stdout}`);
-  }
-  return routingCampaigns;
-}
-
 function createPopulatedFixture(): FixturePaths {
   const root = mkdtempSync(join(tmpdir(), FIXTURE_PREFIX));
   const paths: FixturePaths = {
@@ -145,7 +124,7 @@ function createPopulatedFixture(): FixturePaths {
     trialSets: join(root, "trial-sets"),
     comparisonPlans: join(root, "comparison-plans"),
     comparisonResults: join(root, "comparison-results"),
-    routingCampaigns: join(root, "routing-campaign-package"),
+    routingCampaigns: join(root, "routing-campaign-v1"),
   };
   try {
     const prepared = prepareLocalDemoFixture(root);
@@ -155,6 +134,10 @@ function createPopulatedFixture(): FixturePaths {
       || prepared.comparison.planned_run_count !== 4
       || prepared.comparison.executed_run_ids.length !== 4
       || prepared.comparison.reused_run_ids.length !== 0
+      || prepared.routing_campaign.campaign_id !== ROUTING_CAMPAIGN_ID
+      || prepared.routing_campaign.execution_mode !== "SYNTHETIC_CPU_ONLY"
+      || !prepared.routing_campaign.retained_digest
+      || prepared.routing_campaign.verified_by_replay !== true
     ) {
       throw new Error("The populated dashboard fixture did not execute all four planned runs.");
     }
@@ -164,11 +147,9 @@ function createPopulatedFixture(): FixturePaths {
       || resolve(preparedRoots.trial_sets) !== resolve(paths.trialSets)
       || resolve(preparedRoots.comparison_plans) !== resolve(paths.comparisonPlans)
       || resolve(preparedRoots.comparison_results) !== resolve(paths.comparisonResults)
+      || resolve(preparedRoots.routing_campaign) !== resolve(paths.routingCampaigns)
     ) {
       throw new Error("The local demo prepared dashboard roots outside its fixture.");
-    }
-    if (resolve(prepareRoutingCampaignFixture(root)) !== resolve(paths.routingCampaigns)) {
-      throw new Error("The routing-campaign fixture was prepared outside its fixture root.");
     }
     return paths;
   } catch (error) {
@@ -463,6 +444,10 @@ test.describe("populated dashboard", () => {
     await expect(page.getByRole("heading", { name: "Fault timeline", level: 2 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Cold reset receipt", level: 2 }).first()).toBeVisible();
     await expect(page.getByRole("heading", { name: "Complete terminal population", level: 2 }).first()).toBeVisible();
+    await expect(page.getByText("Inadmissible", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("REQUIRED_LOAD_STALE", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("NO SAFE ROUTE", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("endpoint-b", { exact: true }).first()).toBeVisible();
 
     expect(visitedByClick).toEqual(new Set([
       "/runs",

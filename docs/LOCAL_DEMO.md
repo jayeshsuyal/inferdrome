@@ -2,9 +2,10 @@
 
 Status: **Recording-ready synthetic product walkthrough**
 
-This demo runs the real Inferdrome CLI, evidence pipeline, comparison executor,
-offline verifier, API, and packaged dashboard on one workstation. It does not
-mock the UI or return canned API responses.
+This demo runs the real Inferdrome CLI, evidence pipeline, deterministic
+routing campaign, comparison executor, offline verifiers, API, and packaged
+dashboard on one workstation. It does not mock the UI or return canned API
+responses.
 
 The claim boundary is absolute: every generated run is `SYNTHETIC_ONLY`. This
 demonstrates product mechanics and integrity behavior, not genuine GPU
@@ -29,9 +30,18 @@ Then, from the repository root, run:
 The command creates a persistent `~/.inferdrome/local-demo` workspace outside
 the Git checkout, freezes one two-arm comparison, executes four synthetic runs
 through the production CLI, publishes both Trial Sets and the comparison
-result, independently reverifies the result, prints the claim boundary, and
-opens the loopback dashboard at `http://127.0.0.1:8787`. Press Ctrl-C to stop
-the server.
+result, and seals one fixed two-endpoint `routing-campaign-v1` package. It
+independently reverifies both the comparison result and the routing package,
+prints the claim boundary, and opens the loopback dashboard at
+`http://127.0.0.1:8787`. Press Ctrl-C to stop the server.
+
+The **Routing campaigns** view is the causal routing walkthrough. It starts
+from one cold reset per policy, shows the controlled pause of load collection
+while health remains fresh, then binds each request's telemetry
+age/admissibility to its candidates, selection or fallback reason, endpoint,
+terminal outcome, and full terminal population. The package is
+`SYNTHETIC_CPU_ONLY`: it is an inspectable evidence path, not a live GPU,
+cloud, or production-routing claim.
 
 The controlled result is intentionally `INCOMPARABLE`. Four controls close.
 `COMPLETE_EQUAL_OBSERVED_ENVIRONMENT` remains unsatisfied because the synthetic
@@ -44,10 +54,10 @@ also returns `INCOMPARABLE`, shows the bounded eligibility/contract reasons and
 configuration context, and suppresses all deltas. Neutral run-level exploration
 remains available only in explicitly `DESCRIPTIVE_ONLY` Trial Set views.
 
-The second invocation does not create replacement runs. It requires the
-retained plan digest, verifies the existing immutable artifacts, and reuses all
-four exact run IDs. A missing digest, changed source, damaged artifact,
-incomplete schedule, or occupied identity fails closed.
+The second invocation does not create replacement runs or a replacement routing
+package. It requires the retained digests, verifies the existing immutable
+artifacts, and reuses all four exact run IDs. A missing digest, changed source,
+damaged artifact, incomplete schedule, or occupied identity fails closed.
 
 Useful options:
 
@@ -75,10 +85,13 @@ Use a five-minute walkthrough:
    treatment, frozen schedule, four satisfied controls, the unsatisfied
    `COMPLETE_EQUAL_OBSERVED_ENVIRONMENT` and
    `OUTCOME_COVERAGE_AND_SEMANTICS` controls, and the withheld estimate.
-6. Open **Compare two runs** to show the explicit synthetic/missing-contract
+6. Open **Routing campaigns** and the verified campaign to trace a stale-load /
+   fresh-health observation through candidates, fallback or selected endpoint,
+   terminal receipt, reset, fault timeline, and complete request population.
+7. Open **Compare two runs** to show the explicit synthetic/missing-contract
    incompatibility reasons, configuration context, and suppressed deltas.
-7. Close on the boundary: the same workflow accepts real managed-GPU bundles,
-   but this recording contains no genuine GPU receipt.
+8. Close on the boundary: this recording contains no genuine GPU receipt,
+   cloud operation, or production-routing result.
 
 Recommended opening line:
 
@@ -121,7 +134,15 @@ Use this as a read-aloud guide while moving through the routes above:
    showing the immutable schedule and bounded reasons. That is a successful
    fail-closed behavior, not a winner or a recommendation.”
 
-4. **2:45 — Deployment layer.** “Docker changes the packaging and runtime
+4. **2:45 — Routing evidence.** “Routing campaigns shows a separate,
+   deterministic two-endpoint experiment. Every policy trial begins from a
+   cold reset. When the fixed fault pauses only load collection, health remains
+   fresh and the dashboard makes that age/admissibility difference visible
+   before showing the decision, endpoint or fallback, and terminal receipt.
+   It is a sealed, replay-verified synthetic package—not a live routing data
+   plane or GPU result.”
+
+5. **3:25 — Deployment layer.** “Docker changes the packaging and runtime
    boundary: the runner image and serving runtime remain separate, and the local
    Compose qualification is synthetic. A Docker image or digest is not an
    execution receipt. GCP is represented here by offline inventory and guarded
@@ -131,7 +152,7 @@ Use this as a read-aloud guide while moving through the routes above:
    deployment surfaces change where the benchmark components run, not the frozen
    measurement methodology or evidence schemas.”
 
-5. **3:45 — ExitSpec boundary and close.** “Inferdrome supplies measurements,
+6. **4:15 — ExitSpec boundary and close.** “Inferdrome supplies measurements,
    provenance, integrity, and a portable bundle. Independent acceptance starts
    after this point: ExitSpec owns evaluation against a customer contract and
    any `PASS`, `FAIL`, or `NOT_PROVEN` outcome. Inferdrome does not issue that
@@ -145,5 +166,6 @@ The populated Playwright release test invokes this launcher with
 `--prepare-only --json`, boots the real server over its generated roots, clicks
 every dashboard route, reloads every deep link, checks the visible synthetic
 label, rejects browser/network errors, and requires GET-only API traffic. The
-engineering integration test runs the launcher twice and proves exact
-four-run reuse on the second invocation.
+engineering integration test runs the launcher twice and proves exact four-run
+and routing-package reuse on the second invocation, then rejects a tampered
+routing package.

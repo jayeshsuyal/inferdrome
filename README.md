@@ -9,6 +9,36 @@ to an independent acceptance verifier such as ExitSpec.
 
 Inferdrome produces measurements. ExitSpec owns customer acceptance.
 
+## v0.2 product boundary
+
+Inferdrome v0.2 is the evidence plane for qualifying changes to open-weight
+inference systems. It links configuration to observation identity and
+freshness, routing decision, selected endpoint, request outcome, and a sealed
+evidence package that can be checked offline. Measurements are sensors in that
+evidence chain, not a leaderboard or the product itself. Inferdrome is not a
+production router, cloud provisioner product, Kubernetes platform, promotion
+controller, or `PASS`/`FAIL`/`NOT_PROVEN` authority.
+
+The active [v0.2 capability and limitations contract](docs/V0_2_CAPABILITIES.md)
+is deliberately explicit: local two-endpoint routing execution is proven only
+at loopback socket level; historical A10 serving evidence is preserved as
+`EXTERNAL_ONLY`; no two-A100 multi-endpoint campaign has executed; and GCP or
+Kubernetes production operation is not claimed. Inspect the same closed claim
+boundary with `python -m inferdrome capabilities`.
+
+For an interviewable local walkthrough, run:
+
+```bash
+./scripts/run_local_demo.py
+```
+
+It creates and independently rechecks a sealed, deterministic two-endpoint
+routing campaign before launching the read-only dashboard. The **Routing
+campaigns** view explains observation age/admissibility, routing decision,
+endpoint/fallback, terminal outcome, reset/fault timeline, and complete request
+population. The demonstration is `SYNTHETIC_ONLY`; it is not GPU or cloud
+evidence.
+
 ## Project status
 
 The v0.1 product charter, pinned-vLLM `0.26.0` capability contract, and its
