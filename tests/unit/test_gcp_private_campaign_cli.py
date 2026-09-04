@@ -1,4 +1,4 @@
-"""Offline command tests: v0.2 execute stays before every live factory edge."""
+"""Offline command tests: preview and rejected execute stay before live factory."""
 
 from __future__ import annotations
 
@@ -7,14 +7,13 @@ import runpy
 from pathlib import Path
 from typing import Any, cast
 
-import pytest
-
-import inferdrome.deployment.gcp_private_campaign_google as campaign_google
 from inferdrome.deployment.gcp_private_campaign_v2 import (
     GCP_PRIVATE_CAMPAIGN_APPROVAL_CONFIRMATION,
     GCP_PRIVATE_CAMPAIGN_APPROVAL_SCHEMA_VERSION,
+    GCP_PRIVATE_CAMPAIGN_CLEANUP_AUTHORIZATION_SCHEMA_VERSION,
+    GCP_PRIVATE_CAMPAIGN_CLEANUP_CONFIRMATION,
     GcpPrivateCampaignApproval,
-    GcpPrivateCampaignTransportError,
+    GcpPrivateCampaignCleanupAuthorization,
     canonical_gcp_private_campaign_proposal_bytes,
     canonical_gcp_private_campaign_startup_bytes,
 )
@@ -26,58 +25,39 @@ def _command() -> dict[str, Any]:
     return runpy.run_path(str(root / "scripts/gcp_private_campaign_v2.py"))
 
 
-def test_preview_is_offline_and_execute_is_watchdog_fail_closed(
-    tmp_path: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+def test_preview_is_offline_and_expired_execute_does_not_construct_live_adapter(
+    tmp_path: Path, capsys: Any, monkeypatch: Any
 ) -> None:
     proposal, startup = _proposal()
     proposal_path = tmp_path / "proposal.json"
     startup_path = tmp_path / "startup.json"
     proposal_path.write_bytes(canonical_gcp_private_campaign_proposal_bytes(proposal))
     startup_path.write_bytes(canonical_gcp_private_campaign_startup_bytes(startup))
-    main = cast(Any, _command()["main"])
-    main_globals = cast(dict[str, Any], main.__globals__)
-    approval_parse_calls = 0
-    controller_calls = 0
+    command = _command()
     factory_calls = 0
-    sdk_calls = 0
-    insert_calls = 0
 
-    def forbidden_approval_parse(*args: object, **kwargs: object) -> object:
-        nonlocal approval_parse_calls
-        del args, kwargs
-        approval_parse_calls += 1
-        raise AssertionError("execute must not parse the supplied approval")
-
-    def forbidden_controller(*args: object, **kwargs: object) -> object:
-        nonlocal controller_calls
-        del args, kwargs
-        controller_calls += 1
-        raise AssertionError("execute must not construct a lifecycle controller")
-
-    def forbidden_factory(*args: object, **kwargs: object) -> object:
+    def factory(*, evidence_root: Path, watchdog_capability: object) -> object:
         nonlocal factory_calls
-        del args, kwargs
+        del evidence_root, watchdog_capability
         factory_calls += 1
-        raise AssertionError("execute must not reach the create-capable factory")
+        raise AssertionError("live adapter factory must not run")
 
-    def forbidden_sdk() -> object:
-        nonlocal sdk_calls
-        sdk_calls += 1
-        raise AssertionError("execute must not import the optional Google SDK")
-
-    def forbidden_insert(*args: object, **kwargs: object) -> object:
-        nonlocal insert_calls
-        del args, kwargs
-        insert_calls += 1
-        raise AssertionError("execute must not reach InstancesClient.insert")
-
-    monkeypatch.setitem(main_globals, "_controller", forbidden_controller)
-    monkeypatch.setattr(campaign_google, "_google_sdk", forbidden_sdk)
-    monkeypatch.setattr(
-        campaign_google.GoogleGcpPrivateCampaignTransport,
-        "create_instance",
-        forbidden_insert,
+    main = cast(Any, command["main"])
+    # ``runpy.run_path`` returns a copy of the globals mapping.  Patch the
+    # function's actual global namespace so this test proves the live factory
+    # seam instead of mutating an inert dictionary.
+    monkeypatch.setitem(
+        main.__globals__, "create_google_private_campaign_transport", factory
     )
+
+    controller_calls = 0
+
+    def forbidden_controller(_: object) -> object:
+        nonlocal controller_calls
+        controller_calls += 1
+        raise AssertionError("controller must stay behind approval validation")
+
+    monkeypatch.setitem(main.__globals__, "_controller", forbidden_controller)
 
     assert (
         main(
@@ -94,15 +74,15 @@ def test_preview_is_offline_and_execute_is_watchdog_fail_closed(
     preview = json.loads(capsys.readouterr().out)
     assert preview["provider_call_performed"] is False
     assert preview["proposal_id"] == proposal.proposal_id
-    assert controller_calls == sdk_calls == insert_calls == 0
+    assert factory_calls == 0
 
     approval = GcpPrivateCampaignApproval(
         schema_version=GCP_PRIVATE_CAMPAIGN_APPROVAL_SCHEMA_VERSION,
         approval_kind="exact_human_campaign_approval",
         confirmation=GCP_PRIVATE_CAMPAIGN_APPROVAL_CONFIRMATION,
-        human_approval_record_id="approval-valid-cli",
+        human_approval_record_id="approval-expired-cli",
         approved_at="2026-09-02T00:00:00Z",
-        expires_at="2026-09-02T00:10:00Z",
+        expires_at="2026-09-02T00:00:01Z",
         proposal=proposal,
         proposal_digest=proposal.proposal_id,
     )
@@ -112,19 +92,28 @@ def test_preview_is_offline_and_execute_is_watchdog_fail_closed(
             approval.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
     )
+    cleanup = GcpPrivateCampaignCleanupAuthorization(
+        schema_version=GCP_PRIVATE_CAMPAIGN_CLEANUP_AUTHORIZATION_SCHEMA_VERSION,
+        authorization_kind="exact_cleanup_recovery",
+        confirmation=GCP_PRIVATE_CAMPAIGN_CLEANUP_CONFIRMATION,
+        cleanup_record_id="cleanup-expired-cli",
+        authorized_at="2026-09-02T00:00:00Z",
+        proposal=proposal,
+        proposal_digest=proposal.proposal_id,
+        cleanup_request_id=proposal.request_ids.delete_request_id,
+    )
+    cleanup_path = tmp_path / "cleanup.json"
+    cleanup_path.write_bytes(
+        json.dumps(
+            cleanup.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    )
     journal = tmp_path / "journal"
     evidence = tmp_path / "evidence"
+    watchdog = tmp_path / "watchdog"
     journal.mkdir(mode=0o700)
     evidence.mkdir(mode=0o700)
-
-    # Patch only after the offline preview: executing with a syntactically
-    # valid approval must still stop before approval parsing or any live seam.
-    monkeypatch.setitem(main_globals, "_parse", forbidden_approval_parse)
-    monkeypatch.setattr(
-        campaign_google,
-        "create_google_private_campaign_transport",
-        forbidden_factory,
-    )
+    watchdog.mkdir(mode=0o700)
 
     assert (
         main(
@@ -136,47 +125,19 @@ def test_preview_is_offline_and_execute_is_watchdog_fail_closed(
                 str(startup_path),
                 "--approval",
                 str(approval_path),
+                "--cleanup-authorization",
+                str(cleanup_path),
                 "--journal-root",
                 str(journal),
                 "--evidence-root",
                 str(evidence),
+                "--watchdog-root",
+                str(watchdog),
             ]
         )
         == 2
     )
     failure = json.loads(capsys.readouterr().out)
-    assert failure == {
-        "cleanup_status": "NOT_REQUIRED",
-        "error": "LIVE_EXECUTION_WATCHDOG_UNAVAILABLE",
-        "provider_call_performed": False,
-    }
-    assert (
-        approval_parse_calls
-        == controller_calls
-        == factory_calls
-        == sdk_calls
-        == insert_calls
-        == 0
-    )
-    assert not list(journal.iterdir())
-
-
-def test_create_capable_google_factory_fails_before_optional_sdk_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sdk_calls = 0
-
-    def forbidden_sdk() -> object:
-        nonlocal sdk_calls
-        sdk_calls += 1
-        raise AssertionError("watchdog-disabled factory must not import an SDK")
-
-    monkeypatch.setattr(campaign_google, "_google_sdk", forbidden_sdk)
-
-    with pytest.raises(
-        GcpPrivateCampaignTransportError,
-        match="LIVE_EXECUTION_WATCHDOG_UNAVAILABLE",
-    ):
-        campaign_google.create_google_private_campaign_transport(evidence_root=tmp_path)
-
-    assert sdk_calls == 0
+    assert failure == {"error": "APPROVAL_EXPIRED"}
+    assert controller_calls == 0
+    assert factory_calls == 0

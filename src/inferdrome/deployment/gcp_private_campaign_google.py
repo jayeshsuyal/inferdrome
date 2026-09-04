@@ -1,12 +1,11 @@
-"""Official-GCE adapters for the exact two-engine pre-campaign profile.
+"""Lazy official-GCE adapter for the exact two-engine pre-campaign profile.
 
-Importing this module is inert.  v0.2 deliberately disables the create-capable
-factory because the old one-A100 watchdog worker cannot be truthfully reused
-as an independently durable two-A100 cleanup backstop.  Calling that factory
-therefore fails before an optional Google SDK import, client construction, or
-provider request.  The separate cleanup-only factory remains available only
-behind the existing exact cleanup authorization path.  Normal tests inject
-local fakes and never call a provider.
+Importing this module is inert.  The official Google SDK is imported only by
+``create_google_private_campaign_transport``; the lifecycle controller calls
+that factory only after exact local approval validation and a durable local
+create intent.  The provider-side ``maxRunDuration``/``DELETE`` backstop is
+observed and verified only after a successful create.  Normal tests inject
+local fakes and never call the factory.
 """
 
 from __future__ import annotations
@@ -62,6 +61,9 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     PrecampaignServiceAccount,
     gcp_private_campaign_boot_image_identity,
 )
+from inferdrome.deployment.gcp_private_campaign_watchdog_v3 import (
+    GcpPrivateCampaignWatchdogCapability,
+)
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.errors import AdapterError, VerificationError
@@ -84,6 +86,8 @@ _GOOGLE_SCOPE_URLS: Final = {
     "logging.write": "https://www.googleapis.com/auth/logging.write",
     "monitoring.write": "https://www.googleapis.com/auth/monitoring.write",
 }
+
+
 _GAUGE_RE: Final = re.compile(
     r"^vllm:num_requests_running\{(?P<labels>[^}]*)\}\s+(?P<value>[^\s#]+)(?:\s+[^\s#]+)?\s*$"
 )
@@ -116,6 +120,7 @@ _STARTUP_SCRIPT_METADATA_KEY: Final = "startup-script"
 _STARTUP_SCRIPT_DIGEST_METADATA_KEY: Final = "inferdrome-startup-script-sha256"
 _STARTUP_PAYLOAD_METADATA_KEY: Final = "inferdrome-startup-payload-digest"
 _PROPOSAL_METADATA_KEY: Final = "inferdrome-proposal-digest"
+_CREATE_REQUEST_METADATA_KEY: Final = "inferdrome-create-request-digest"
 _IAP_PROCESS_TERMINATION_TIMEOUT_SECONDS: Final = 5
 
 
@@ -1300,6 +1305,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         credential_resolver: _ComputeCredentialResolver | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
+        watchdog_capability: GcpPrivateCampaignWatchdogCapability | None = None,
+        cleanup_only: bool = False,
     ) -> None:
         clients = (
             instances_client,
@@ -1312,6 +1319,19 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             value is not None for value in clients
         ):
             raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_INVALID")
+        if cleanup_only and watchdog_capability is not None:
+            raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
+        # A direct client-injection instance is a non-live test seam.  Any
+        # transport that can lazily resolve real credentials/construct Google
+        # clients must instead be either the exact watchdog-gated live path or
+        # the explicit cleanup-only facade below.  This keeps an arbitrary
+        # caller from reaching ADC/client construction with create authority.
+        if (
+            credential_resolver is not None
+            and watchdog_capability is None
+            and not cleanup_only
+        ):
+            raise GcpPrivateCampaignError("WATCHDOG_CREATE_AUTHORITY_REQUIRED")
         self._sdk = sdk
         self._instances = instances_client
         self._disks = disks_client
@@ -1323,6 +1343,13 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         self._iap_tunnels = iap_tunnels
         self._iap_endpoints: _IapTunnelEndpoints | None = None
         self._pre_insert_guard: Callable[[], None] | None = None
+        if (
+            watchdog_capability is not None
+            and type(watchdog_capability) is not GcpPrivateCampaignWatchdogCapability
+        ):
+            raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
+        self._watchdog_capability = watchdog_capability
+        self._cleanup_only = cleanup_only
         self._monotonic = monotonic or time.monotonic
         self._sleeper = sleeper or time.sleep
         self._operations: dict[str, object] = {}
@@ -1337,6 +1364,11 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             if self._controller_principal != controller_principal:
                 raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_MISMATCH")
             return
+        capability = self._watchdog_capability
+        if capability is not None:
+            # Do this before resolver/ADC/client construction.  A capability
+            # bound to another controller cannot reach even the client edge.
+            capability.assert_controller_principal(controller_principal)
         if self._credential_resolver is None:
             if self._instances is None or self._disks is None or self._images is None:
                 raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_UNAVAILABLE")
@@ -1487,6 +1519,10 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                         self._sdk.Items(
                             key=_PROPOSAL_METADATA_KEY, value=proposal.proposal_id
                         ),
+                        self._sdk.Items(
+                            key=_CREATE_REQUEST_METADATA_KEY,
+                            value=request.create_request_digest,
+                        ),
                         self._sdk.Items(key="block-project-ssh-keys", value="TRUE"),
                         self._sdk.Items(key="enable-oslogin", value="FALSE"),
                     ]
@@ -1516,6 +1552,12 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         # exact local approval check and bound ``_pre_insert_guard``.  Each
         # potentially slow read is followed by the same local check so an
         # expired approval, quote, or execution horizon cannot reach insert.
+        if self._cleanup_only:
+            raise GcpPrivateCampaignError("WATCHDOG_CREATE_AUTHORITY_REQUIRED")
+        capability = self._watchdog_capability
+        if capability is None:
+            raise GcpPrivateCampaignError("WATCHDOG_CREATE_AUTHORITY_REQUIRED")
+        capability.assert_request(request)
         self._revalidate_before_insert()
         self._verify_boot_image_identity(request, timeout_seconds=timeout_seconds)
         self._revalidate_before_insert()
@@ -1526,9 +1568,13 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         projected = self.project_create_request(request, request_id=request_id)
         self._revalidate_before_insert()
         try:
-            result = self._bound_instances.insert(
-                request=projected, timeout=timeout_seconds
-            )
+            # The opaque capability writes durable CREATE_SUBMITTED and
+            # rechecks the independently running watchdog immediately before
+            # this provider edge.  It is never a duck-typed test authority.
+            with capability.insert_claim(request):
+                result = self._bound_instances.insert(
+                    request=projected, timeout=timeout_seconds
+                )
             operation = _operation(result, kind="create", request_id=request_id)
             with self._lock:
                 self._operations[operation.operation_id] = result
@@ -2034,6 +2080,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 _STARTUP_SCRIPT_DIGEST_METADATA_KEY,
                 _STARTUP_PAYLOAD_METADATA_KEY,
                 _PROPOSAL_METADATA_KEY,
+                _CREATE_REQUEST_METADATA_KEY,
                 "block-project-ssh-keys",
                 "enable-oslogin",
             }
@@ -2043,6 +2090,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             or metadata.get(_STARTUP_PAYLOAD_METADATA_KEY)
             != proposal.startup_payload_digest
             or metadata.get(_PROPOSAL_METADATA_KEY) != proposal.proposal_id
+            or metadata.get(_CREATE_REQUEST_METADATA_KEY)
+            != request.create_request_digest
             or metadata.get("block-project-ssh-keys") != "TRUE"
             or metadata.get("enable-oslogin") != "FALSE"
         ):
@@ -2075,6 +2124,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             max_runtime_seconds=proposal.max_runtime_seconds,
             instance_termination_action="DELETE",
             startup_payload_digest=proposal.startup_payload_digest,
+            create_request_digest=request.create_request_digest,
             startup_script_sha256=expected_script_sha256,
         )
 
@@ -2922,6 +2972,9 @@ class GoogleGcpPrivateCampaignCleanupTransport:
     def close(self) -> None:
         self._inner.close()
 
+    def observe_exact_instance(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.observe_exact_instance(*args, **kwargs)
+
     def wait_operation(
         self, operation: GcpPrivateCampaignOperation, *, timeout_seconds: int
     ) -> GcpPrivateCampaignOperationResult:
@@ -2980,20 +3033,29 @@ def _google_sdk() -> Any:
 
 
 def create_google_private_campaign_transport(
-    *, evidence_root: Path
+    *,
+    evidence_root: Path,
+    watchdog_capability: GcpPrivateCampaignWatchdogCapability,
 ) -> GoogleGcpPrivateCampaignTransport:
-    """Fail closed until a real private two-A100 watchdog is reviewed.
+    """Construct a live adapter only after an exact watchdog recheck.
 
-    Keeping the guard at the factory boundary prevents a direct module caller
-    from bypassing the CLI's disabled ``execute`` command.  The accepted
-    future design must supply a canonical, durably re-read activation receipt
-    bound to the exact private proposal/request/topology/cleanup horizon and a
-    provider-capable no-create watchdog worker; the current one-A100 fake
-    worker is intentionally not substituted here.
+    The opaque capability is issued only by the detached v3 cleanup worker.
+    Rechecking it here is intentionally before ``_google_sdk`` so a stale,
+    missing, tampered, or dead watchdog cannot even construct the optional
+    SDK/client edge.
     """
 
-    del evidence_root
-    raise GcpPrivateCampaignTransportError("LIVE_EXECUTION_WATCHDOG_UNAVAILABLE")
+    if type(watchdog_capability) is not GcpPrivateCampaignWatchdogCapability:
+        raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
+    watchdog_capability.consume_for_factory()
+
+    return GoogleGcpPrivateCampaignTransport(
+        sdk=_google_sdk(),
+        credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
+        iap_tunnels=GcpPrivateCampaignIapTunnelSupervisor(),
+        runner=IapGcpPrivateCampaignRunner(evidence_root),
+        watchdog_capability=watchdog_capability,
+    )
 
 
 def create_google_private_campaign_cleanup_transport() -> (
@@ -3006,5 +3068,6 @@ def create_google_private_campaign_cleanup_transport() -> (
             sdk=_google_sdk(),
             credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
             runner=_NoCreateRunner(),
+            cleanup_only=True,
         )
     )

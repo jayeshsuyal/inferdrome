@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Guarded command surface for the exact two-A100 GCP_PRIVATE canary.
 
-``proposal`` and ``preview`` are offline/local commands.  The former live
-``execute`` edge is deliberately fail-closed in v0.2: this profile does not
-yet have a reviewed, two-A100, independently durable watchdog worker.  It
-therefore never constructs a lifecycle controller, a Google transport, an SDK
-client, or a create request.  Separately authorized cleanup-only diagnostics
-remain available for an exact pre-existing ownership record; they have no
-create surface.  The command never discovers or prints credentials and offers
-no generic provider operation.
+``proposal`` and ``preview`` are offline/local commands.  ``execute`` is the
+only command that can select the optional Google transport, and its factory is
+invoked by the lifecycle controller only after exact approval validation and a
+durable local create intent.  The provider ``DELETE``/maximum-runtime backstop
+is observed only after create.  The command never discovers or prints
+credentials and offers no generic provider operation.
 """
 
 from __future__ import annotations
@@ -18,6 +16,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +24,10 @@ from pydantic import ValidationError
 
 from inferdrome.deployment.gcp_private_campaign_google import (
     create_google_private_campaign_cleanup_transport,
+    create_google_private_campaign_transport,
 )
 from inferdrome.deployment.gcp_private_campaign_v2 import (
+    GcpPrivateCampaignApproval,
     GcpPrivateCampaignCleanupAuthorization,
     GcpPrivateCampaignError,
     GcpPrivateCampaignJournal,
@@ -35,17 +36,22 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignProposalPayload,
     GcpPrivateCampaignStartupPayload,
     GcpPrivateCampaignStartupPayloadPayload,
+    GcpPrivateCampaignTransport,
     build_gcp_private_campaign_create_request,
     canonical_gcp_private_campaign_proposal_bytes,
     canonical_gcp_private_campaign_startup_bytes,
     gcp_private_campaign_startup_payload_id,
     issue_gcp_private_campaign_proposal,
+    verify_gcp_private_campaign_approval,
+    verify_gcp_private_campaign_cleanup_authorization,
     verify_gcp_private_campaign_evidence_destination,
+)
+from inferdrome.deployment.gcp_private_campaign_watchdog_v3 import (
+    GcpPrivateCampaignWatchdog,
 )
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 
 _MAX_INPUT_BYTES = 524_288
-_LIVE_EXECUTION_WATCHDOG_UNAVAILABLE = "LIVE_EXECUTION_WATCHDOG_UNAVAILABLE"
 
 
 def _read_regular(path: Path) -> bytes:
@@ -165,40 +171,71 @@ def _preview(arguments: argparse.Namespace) -> int:
 def _controller(arguments: argparse.Namespace) -> GcpPrivateCampaignLifecycleController:
     journal = GcpPrivateCampaignJournal(arguments.journal_root.absolute())
     evidence_root = arguments.evidence_root.absolute()
+    watchdog: GcpPrivateCampaignWatchdog | None = None
+    if getattr(arguments, "watchdog_root", None) is not None:
+        watchdog = GcpPrivateCampaignWatchdog(
+            watchdog_root=arguments.watchdog_root.absolute(),
+            journal_root=arguments.journal_root.absolute(),
+        )
 
     def launch_preflight(proposal: GcpPrivateCampaignProposal) -> SafeDirFD:
         return verify_gcp_private_campaign_evidence_destination(
             proposal, evidence_root=evidence_root
         )
 
-    def transport_factory() -> object:
-        # This defensive fallback is never selected by the CLI's disabled
-        # ``execute`` command.  It also prevents a future accidental call to
-        # this shared recovery controller from reintroducing a create-capable
-        # Google factory before a separately reviewed private watchdog bridge
-        # exists.  Recovery receives its dedicated no-create factory below.
-        raise GcpPrivateCampaignError(_LIVE_EXECUTION_WATCHDOG_UNAVAILABLE)
+    def transport_factory() -> GcpPrivateCampaignTransport:
+        if watchdog is None:
+            raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
+        return create_google_private_campaign_transport(
+            evidence_root=evidence_root,
+            watchdog_capability=watchdog.take_create_capability(),
+        )
 
-    # ``recover-cleanup`` and ``discover-orphans`` select only this dedicated
-    # no-create factory after cleanup-only authorization.  They never fall
-    # back to ``transport_factory`` above.
+    # This lambda is intentionally inert until the controller has completed
+    # local approval/evidence-root validation and journaled CREATE_INTENT_DURABLE
+    # + CREATE_INTENT.  The lifecycle's preflight checks the exact declared
+    # destination before this factory can import the optional SDK.
     return GcpPrivateCampaignLifecycleController(
         journal=journal,
         launch_preflight=launch_preflight,
         transport_factory=transport_factory,
         cleanup_transport_factory=create_google_private_campaign_cleanup_transport,
         receipt_root=evidence_root,
+        watchdog=watchdog,
     )
 
 
 def _execute(arguments: argparse.Namespace) -> int:
-    # Do not even parse a human approval or construct the lifecycle here: a
-    # valid-looking artifact must not turn the unavailable two-A100 watchdog
-    # design into a reachable provider boundary.  The explicit terminal state
-    # below is emitted by ``main`` and truthfully states that no cleanup was
-    # required because no provider action was reachable.
-    del arguments
-    raise GcpPrivateCampaignError(_LIVE_EXECUTION_WATCHDOG_UNAVAILABLE)
+    proposal = _parse(GcpPrivateCampaignProposal, arguments.proposal)
+    approval = _parse(GcpPrivateCampaignApproval, arguments.approval)
+    cleanup_authorization = _parse(
+        GcpPrivateCampaignCleanupAuthorization, arguments.cleanup_authorization
+    )
+    startup = _parse(GcpPrivateCampaignStartupPayload, arguments.startup)
+    # Keep controller, watchdog, and optional SDK construction behind the
+    # exact local authority parse.  The lifecycle repeats these checks after
+    # it has journaled the create intent and immediately before create.
+    now = datetime.now(UTC)
+    verify_gcp_private_campaign_approval(
+        approval, expected_proposal=proposal, now=now
+    )
+    verify_gcp_private_campaign_cleanup_authorization(
+        cleanup_authorization, expected_proposal=proposal, now=now
+    )
+    receipt = _controller(arguments).execute(
+        proposal=proposal,
+        approval=approval,
+        startup_payload=startup,
+        cleanup_authorization=cleanup_authorization,
+    )
+    _emit(
+        {
+            "cleanup_confirmed": True,
+            "proposal_id": receipt.proposal_id,
+            "retained_digest": receipt.retained_digest,
+        }
+    )
+    return 0
 
 
 def _recover_cleanup(arguments: argparse.Namespace) -> int:
@@ -264,12 +301,11 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--journal-root", type=Path, required=True)
         command.add_argument("--evidence-root", type=Path, required=True)
 
-    execute = commands.add_parser(
-        "execute",
-        help="fail closed: live execution awaits a reviewed two-A100 watchdog",
-    )
+    execute = commands.add_parser("execute", help="run the approval-gated live canary")
     lifecycle_inputs(execute)
     execute.add_argument("--approval", type=Path, required=True)
+    execute.add_argument("--cleanup-authorization", type=Path, required=True)
+    execute.add_argument("--watchdog-root", type=Path, required=True)
     recovery = commands.add_parser(
         "recover-cleanup", help="run exact cleanup after a launch approval expires"
     )
@@ -299,21 +335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "discover-orphans":
             return _discover(arguments)
     except GcpPrivateCampaignError as error:
-        response: dict[str, object] = {"error": error.code}
-        if (
-            arguments.command == "execute"
-            and error.code == _LIVE_EXECUTION_WATCHDOG_UNAVAILABLE
-        ):
-            # Nothing has reached the controller, transport, or provider, so
-            # reporting confirmed cleanup here would be false.  Make the
-            # no-resource terminal state explicit instead.
-            response.update(
-                {
-                    "cleanup_status": "NOT_REQUIRED",
-                    "provider_call_performed": False,
-                }
-            )
-        _emit(response)
+        _emit({"error": error.code})
         return 2
     raise AssertionError("unreachable command")
 

@@ -15,6 +15,7 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GCP_PRIVATE_CAMPAIGN_APPROVAL_SCHEMA_VERSION,
     GCP_PRIVATE_CAMPAIGN_CLEANUP_AUTHORIZATION_SCHEMA_VERSION,
     GCP_PRIVATE_CAMPAIGN_CLEANUP_CONFIRMATION,
+    GCP_PRIVATE_CAMPAIGN_MAX_EVENTS,
     GCP_PRIVATE_CAMPAIGN_PROPOSAL_SCHEMA_VERSION,
     GCP_PRIVATE_CAMPAIGN_TOPOLOGY_SCHEMA_VERSION,
     FakeGcpPrivateCampaignTransport,
@@ -34,6 +35,7 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignRoutingBinding,
     GcpPrivateCampaignTopology,
     _CleanupTransportFacade,
+    build_gcp_private_campaign_create_request,
     gcp_private_campaign_boot_image_identity,
     gcp_private_campaign_proposal_id,
     issue_gcp_private_campaign_proposal,
@@ -219,6 +221,47 @@ def _proposal() -> tuple[GcpPrivateCampaignProposal, object]:
     return issue_gcp_private_campaign_proposal(payload), startup
 
 
+def _seed_exact_cleanup_journal(
+    journal: GcpPrivateCampaignJournal,
+    proposal: GcpPrivateCampaignProposal,
+    startup: object,
+) -> object:
+    """Create the smallest durable post-create history for cleanup tests."""
+
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    now = _Clock().now()
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    journal.append(proposal, state="CREATE_SUBMITTED", occurred_at=now)
+    journal.append(proposal, state="CREATED", occurred_at=now)
+    journal.append(
+        proposal,
+        state="INSTANCE_IDENTITY_BOUND",
+        occurred_at=now,
+        detail_digest=sha256_digest(b"123456789"),
+    )
+    journal.append(
+        proposal,
+        state="BOOT_DISK_IDENTITY_BOUND",
+        occurred_at=now,
+        detail_digest=sha256_digest(b"246813579"),
+    )
+    journal.append(
+        proposal,
+        state="PROVIDER_BACKSTOP_VERIFIED",
+        occurred_at=now,
+        detail_digest="sha256:" + ("c" * 64),
+    )
+    return request
+
+
 def test_startup_rejects_an_image_identity_shared_by_runner_and_engines() -> None:
     image = ImageIdentity(reference="example/inferdrome@sha256:" + ("1" * 64))
 
@@ -361,6 +404,7 @@ def test_fake_lifecycle_handoffs_only_after_two_endpoint_readiness_and_cleans(
     assert [event.state for event in events] == [
         "CREATE_INTENT_DURABLE",
         "CREATE_INTENT",
+        "CREATE_CLAIMED",
         "CREATE_SUBMITTED",
         "CREATED",
         "INSTANCE_IDENTITY_BOUND",
@@ -600,6 +644,8 @@ def test_lost_create_and_delete_responses_reconcile_exact_request_ids(
     assert fake.create_calls == 1
     assert fake.delete_calls == 1
     states = [event.state for event in controller._journal.load(proposal)]
+    assert states.index("CREATE_INTENT") < states.index("CREATE_CLAIMED")
+    assert states.index("CREATE_CLAIMED") < states.index("CREATE_SUBMITTED")
     assert "CREATE_RECONCILING" in states
     assert "INSTANCE_DELETE_RECONCILING" in states
     assert states[-1] == "CLEANUP_CONFIRMED"
@@ -737,6 +783,229 @@ def test_cleanup_recovery_is_valid_after_launch_approval_expiry(tmp_path: Path) 
     assert outcome.confirmed
     assert fake.create_calls == 0
     assert fake.delete_calls == 1
+
+
+def test_cleanup_retries_keep_provider_cleanup_callable_after_journal_budget(
+    tmp_path: Path,
+) -> None:
+    """A transient failure cannot spend the finite journal before cleanup."""
+
+    proposal, startup = _proposal()
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
+    _seed_exact_cleanup_journal(journal, proposal, startup)
+
+    class EventuallyDeleting(FakeGcpPrivateCampaignTransport):
+        attempts: int = 0
+
+        def delete_exact_instance(self, *args: object, **kwargs: object) -> object:
+            self.attempts += 1
+            if self.attempts <= GCP_PRIVATE_CAMPAIGN_MAX_EVENTS + 8:
+                raise GcpPrivateCampaignError("TRANSIENT_DELETE_FAILURE")
+            return super().delete_exact_instance(*args, **kwargs)  # type: ignore[arg-type]
+
+    fake = EventuallyDeleting(created=True, boot_disk_present=True)
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: fake,
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
+    )
+    authorization = _cleanup_authorization(proposal)
+
+    for _ in range(GCP_PRIVATE_CAMPAIGN_MAX_EVENTS + 8):
+        outcome = controller.recover_exact_cleanup(
+            proposal=proposal,
+            authorization=authorization,
+            startup_payload=startup,
+        )
+        assert outcome.confirmed is False
+        assert journal.load(proposal)[-1].state == "CLEANUP_UNCONFIRMED"
+
+    outcome = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=authorization,
+        startup_payload=startup,
+    )
+
+    assert outcome.confirmed is True
+    assert fake.attempts == GCP_PRIVATE_CAMPAIGN_MAX_EVENTS + 9
+    assert fake.delete_calls == 1
+    assert len(journal.load(proposal)) < GCP_PRIVATE_CAMPAIGN_MAX_EVENTS
+    assert journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
+
+
+def test_cleanup_revokes_claim_and_fences_a_submitted_create_before_terminal_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A wedged provider call cannot hold the lifecycle journal lock forever."""
+
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path / "revoked"))
+    now = _Clock().now()
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    journal.claim_create_for_factory(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=FakeGcpPrivateCampaignTransport,
+        clock=_Clock(),
+    )
+
+    # A cleanup intent observed after the factory claim revokes the remaining
+    # create authority before the final insert seam can take its lock.
+    controller._ensure_cleanup_intent(proposal)
+    with (
+        pytest.raises(GcpPrivateCampaignError, match="CREATE_CLAIM_REVOKED"),
+        journal.create_insert_claim(
+            proposal,
+            request_digest=request.create_request_digest,
+            occurred_at=now,
+        ),
+    ):
+        pytest.fail("revoked create claim reached the insert seam")
+
+    # A submitted create no longer holds the journal lock through the provider
+    # call.  Ordinary cleanup must fail closed until the watchdog writes an
+    # irreversible fence and proves the creator is gone.
+    concurrent = GcpPrivateCampaignJournal(_journal_root(tmp_path / "concurrent"))
+    concurrent.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    concurrent.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    concurrent.claim_create_for_factory(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    concurrent.begin_create_submission(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_FENCE_REQUIRED"):
+        concurrent_controller = GcpPrivateCampaignLifecycleController(
+            journal=concurrent,
+            transport_factory=FakeGcpPrivateCampaignTransport,
+            clock=_Clock(),
+        )
+        concurrent_controller._ensure_cleanup_intent(proposal)
+    concurrent.begin_create_reconciliation(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    # Reconciliation remains a submitted create. Ordinary cleanup cannot use
+    # it as a shortcut around the independent watchdog fence.
+    with pytest.raises(GcpPrivateCampaignError, match="JOURNAL_TRANSITION_INVALID"):
+        concurrent.append(
+            proposal,
+            state="CLEANUP_INTENT",
+            occurred_at=now,
+        )
+    with pytest.raises(GcpPrivateCampaignError, match="JOURNAL_TRANSITION_INVALID"):
+        concurrent.append(
+            proposal,
+            state="BLOCKED",
+            occurred_at=now,
+        )
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_FENCE_REQUIRED"):
+        concurrent_controller._ensure_cleanup_intent(proposal)
+    concurrent.fence_submitted_create(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_CLAIM_REVOKED"):
+        concurrent.assert_create_submission_live(
+            proposal, request_digest=request.create_request_digest
+        )
+    # A returned/lost insert response cannot revive this creator through the
+    # reconciliation edge after the watchdog has durably fenced it.
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_CLAIM_REVOKED"):
+        concurrent.begin_create_reconciliation(
+            proposal,
+            request_digest=request.create_request_digest,
+            occurred_at=now,
+        )
+    concurrent.release_fenced_create_for_cleanup(proposal, occurred_at=now)
+    assert [event.state for event in concurrent.load(proposal)] == [
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_CLAIMED",
+        "CREATE_SUBMITTED",
+        "CREATE_RECONCILING",
+        "CREATE_FENCE_PENDING",
+        "CLEANUP_INTENT",
+    ]
+
+
+def test_manual_recovery_never_confirms_temporary_absence_after_submitted_create(
+    tmp_path: Path,
+) -> None:
+    """A delayed insert must not be mistaken for terminal provider absence."""
+
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
+    now = _Clock().now()
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    journal.append(proposal, state="CREATE_SUBMITTED", occurred_at=now)
+
+    class DelayedMaterialization(FakeGcpPrivateCampaignTransport):
+        remaining_invisible_reads = 1
+
+        def observe_exact_instance(self, *args: object, **kwargs: object) -> object:
+            if self.remaining_invisible_reads:
+                self.remaining_invisible_reads -= 1
+                raise campaign_v2.GcpPrivateCampaignTransportError("INSTANCE_NOT_FOUND")
+            return super().observe_exact_instance(*args, **kwargs)  # type: ignore[arg-type]
+
+    fake = DelayedMaterialization(created=True, boot_disk_present=True)
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: fake,
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
+    )
+
+    first = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=_cleanup_authorization(proposal),
+        startup_payload=startup,
+    )
+    assert first.confirmed is False
+    assert first.cleanup_error == "CREATE_SUBMISSION_UNRECONCILED"
+    assert journal.load(proposal)[-1].state == "CREATE_SUBMITTED"
+
+    second = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=_cleanup_authorization(proposal),
+        startup_payload=startup,
+    )
+    assert second.confirmed is True
+    assert fake.delete_calls == 1
+    assert journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
 
 
 @pytest.mark.parametrize("artifact_state", ("broken", "missing", "tampered"))
@@ -1079,7 +1348,7 @@ def test_readiness_same_name_replacement_never_reaches_handoff(tmp_path: Path) -
     assert fake.delete_calls == 1
 
 
-def test_recovery_without_durable_identity_uses_read_only_absence_only(
+def test_recovery_without_durable_identity_binds_and_deletes_exact_observation(
     tmp_path: Path,
 ) -> None:
     proposal, startup = _proposal()
@@ -1104,10 +1373,19 @@ def test_recovery_without_durable_identity_uses_read_only_absence_only(
         startup_payload=startup,
     )
 
-    assert not outcome.confirmed
-    assert fake.delete_calls == 0
+    # A fully matching post-crash readback is sufficient to record the
+    # previously missing provider-ID hashes and use the exact delete path.
+    # Temporary absence and replacement/mismatch cases remain covered by the
+    # separate conservative-unconfirmed regressions.
+    assert outcome.confirmed
+    assert fake.delete_calls == 1
+    # The deterministic fake models the ordinary instance-delete behavior:
+    # its non-retained boot disk disappears with the exact instance deletion.
     assert fake.boot_disk_delete_calls == 0
-    assert journal.load(proposal)[-1].state == "CLEANUP_UNCONFIRMED"
+    states = [event.state for event in journal.load(proposal)]
+    assert "INSTANCE_IDENTITY_BOUND" in states
+    assert "BOOT_DISK_IDENTITY_BOUND" in states
+    assert states[-1] == "CLEANUP_CONFIRMED"
 
 
 def test_residual_disk_same_name_replacement_is_never_deleted(tmp_path: Path) -> None:
@@ -1362,6 +1640,13 @@ def test_post_dispatch_create_failures_attempt_exact_cleanup(
         )
 
     states = [event.state for event in controller._journal.load(proposal)]
+    assert states[:5] == [
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_CLAIMED",
+        "CREATE_SUBMITTED",
+        "BLOCKED",
+    ]
     assert "CLEANUP_INTENT" in states
     assert states[-1] == "CLEANUP_UNCONFIRMED"
     assert fake.delete_calls == 0

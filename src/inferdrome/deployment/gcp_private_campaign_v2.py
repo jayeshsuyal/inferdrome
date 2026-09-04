@@ -1518,6 +1518,7 @@ class GcpPrivateCampaignInstanceObservation(PrecampaignModel):
     max_runtime_seconds: Annotated[int | None, Field(ge=60, le=86_400)]
     instance_termination_action: Literal["DELETE"] | None
     startup_payload_digest: Sha256Digest | None
+    create_request_digest: Sha256Digest
     startup_script_sha256: Sha256Digest | None
 
 
@@ -1793,7 +1794,9 @@ def issue_gcp_private_campaign_sealed_artifact_receipt(
 GcpPrivateCampaignJournalState = Literal[
     "CREATE_INTENT_DURABLE",
     "CREATE_INTENT",
+    "CREATE_CLAIMED",
     "CREATE_SUBMITTED",
+    "CREATE_FENCE_PENDING",
     "CREATE_RECONCILING",
     "CREATED",
     "INSTANCE_IDENTITY_BOUND",
@@ -1838,6 +1841,21 @@ class GcpPrivateCampaignJournalEvent(GcpPrivateCampaignJournalEventPayload):
         return self
 
 
+class GcpPrivateCampaignJournalIdentity(PrecampaignModel):
+    """Exact directory and history-file identity bound before live creation.
+
+    A hash chain proves journal content, not the identity of the filesystem
+    objects through which that content was reached.  The live watchdog binds
+    both directory and event-file device/inode pairs before READY, and every
+    later live-create or cleanup journal operation rechecks them.
+    """
+
+    root_device: Annotated[int, Field(ge=0)]
+    root_inode: Annotated[int, Field(ge=0)]
+    event_device: Annotated[int, Field(ge=0)]
+    event_inode: Annotated[int, Field(ge=0)]
+
+
 def canonical_gcp_private_campaign_journal_event_payload_bytes(
     event: GcpPrivateCampaignJournalEvent | GcpPrivateCampaignJournalEventPayload,
 ) -> bytes:
@@ -1859,14 +1877,38 @@ _TRANSITIONS: Final[
 ] = {
     "CREATE_INTENT_DURABLE": {"CREATE_INTENT", "CLEANUP_INTENT", "BLOCKED"},
     "CREATE_INTENT": {
+        "CREATE_CLAIMED",
         "CREATE_SUBMITTED",
         "CREATE_RECONCILING",
         "CLEANUP_INTENT",
         "EXECUTION_DEADLINE_EXCEEDED",
         "BLOCKED",
     },
-    "CREATE_SUBMITTED": {"CREATE_RECONCILING", "CREATED", "CLEANUP_INTENT", "BLOCKED"},
-    "CREATE_RECONCILING": {"CREATED", "CLEANUP_INTENT", "BLOCKED"},
+    # A live Google factory holds this one-use claim between construction and
+    # the final provider insert.  Exact cleanup may revoke it, but no other
+    # path may advance it to a provider submission.
+    "CREATE_CLAIMED": {
+        "CREATE_SUBMITTED",
+        "CLEANUP_INTENT",
+        "BLOCKED",
+    },
+    "CREATE_SUBMITTED": {
+        "CREATE_FENCE_PENDING",
+        "CREATE_RECONCILING",
+        "CREATED",
+        # Only the deterministic local fake records BLOCKED after its
+        # in-process call has returned or raised. Live cleanup still cannot
+        # advance a submitted create without the watchdog fence.
+        "BLOCKED",
+    },
+    # A watchdog records this durable fence before it terminates the exact
+    # creator process.  The controller may no longer advance a returned RPC
+    # result into normal execution; recovery must reconcile or clean instead.
+    "CREATE_FENCE_PENDING": {"CLEANUP_INTENT", "BLOCKED"},
+    "CREATE_RECONCILING": {
+        "CREATE_FENCE_PENDING",
+        "CREATED",
+    },
     "CREATED": {"INSTANCE_IDENTITY_BOUND", "CLEANUP_INTENT", "BLOCKED"},
     "INSTANCE_IDENTITY_BOUND": {
         "BOOT_DISK_IDENTITY_BOUND",
@@ -1916,6 +1958,10 @@ _TRANSITIONS: Final[
         "BLOCKED",
     },
     "CLEANUP_INTENT": {
+        # An independent watchdog may safely reconcile a known, exact name and
+        # label set after an ambiguous create.  It still cannot delete until a
+        # fresh provider readback binds both hashed provider identities.
+        "CREATE_RECONCILING",
         "INSTANCE_DELETE_SUBMITTED",
         "INSTANCE_DELETE_RECONCILING",
         "BOOT_DISK_DELETE_INTENT",
@@ -1952,11 +1998,14 @@ _TRANSITIONS: Final[
         "BLOCKED",
     },
     "CLEANUP_UNCONFIRMED": {
+        "CREATE_RECONCILING",
         "CLEANUP_INTENT",
+        "CLEANUP_CONFIRMED",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
     },
     "EXECUTION_DEADLINE_EXCEEDED": {
+        "CREATE_RECONCILING",
         "CLEANUP_INTENT",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
@@ -1970,11 +2019,16 @@ class GcpPrivateCampaignJournal:
     """No-follow, fsync, hash-chained lifecycle journal for one exact proposal."""
 
     def __init__(
-        self, root: Path, *, crash_hook: Callable[[str], None] | None = None
+        self,
+        root: Path,
+        *,
+        crash_hook: Callable[[str], None] | None = None,
+        expected_identity: GcpPrivateCampaignJournalIdentity | None = None,
     ) -> None:
         self.root = root
         self._lock = threading.Lock()
         self._crash_hook = crash_hook
+        self._expected_identity = expected_identity
 
     @staticmethod
     def _name(proposal: GcpPrivateCampaignProposal) -> str:
@@ -1991,11 +2045,32 @@ class GcpPrivateCampaignJournal:
         if not self.root.is_absolute():
             raise GcpPrivateCampaignError("JOURNAL_PATH_INVALID")
         try:
-            return SafeDirFD.open(self.root)
+            root = SafeDirFD.open(self.root)
         except (SafeDirFSError, FileNotFoundError):
             raise GcpPrivateCampaignError("JOURNAL_UNSAFE") from None
         except OSError:
             raise GcpPrivateCampaignError("JOURNAL_UNAVAILABLE") from None
+        try:
+            self._assert_root_identity(root)
+            return root
+        except BaseException:
+            root.close()
+            raise
+
+    def _assert_root_identity(self, root: SafeDirFD) -> None:
+        expected = self._expected_identity
+        if expected is not None and (
+            root.device != expected.root_device or root.inode != expected.root_inode
+        ):
+            raise GcpPrivateCampaignError("JOURNAL_IDENTITY_MISMATCH")
+
+    def _assert_event_identity(self, metadata: os.stat_result) -> None:
+        expected = self._expected_identity
+        if expected is not None and (
+            metadata.st_dev != expected.event_device
+            or metadata.st_ino != expected.event_inode
+        ):
+            raise GcpPrivateCampaignError("JOURNAL_IDENTITY_MISMATCH")
 
     @contextmanager
     def _exclusive(self, proposal: GcpPrivateCampaignProposal) -> Iterator[SafeDirFD]:
@@ -2045,6 +2120,7 @@ class GcpPrivateCampaignJournal:
         try:
             descriptor = root.open_child(name, os.O_RDONLY)
             before = root.validated_regular_child(name, descriptor=descriptor)
+            self._assert_event_identity(before)
             if (
                 before.st_size < 1
                 or before.st_size > GCP_PRIVATE_CAMPAIGN_MAX_JOURNAL_BYTES
@@ -2052,6 +2128,7 @@ class GcpPrivateCampaignJournal:
                 raise GcpPrivateCampaignError("JOURNAL_INVALID")
             content = os.read(descriptor, GCP_PRIVATE_CAMPAIGN_MAX_JOURNAL_BYTES + 1)
             after = root.validated_regular_child(name, descriptor=descriptor)
+            self._assert_event_identity(after)
             if len(
                 content
             ) > GCP_PRIVATE_CAMPAIGN_MAX_JOURNAL_BYTES or after.st_size != len(content):
@@ -2079,8 +2156,10 @@ class GcpPrivateCampaignJournal:
             self._validate_transitions(events)
             return tuple(events)
         except FileNotFoundError:
-            if missing_ok:
+            if missing_ok and self._expected_identity is None:
                 return ()
+            if self._expected_identity is not None:
+                raise GcpPrivateCampaignError("JOURNAL_IDENTITY_MISMATCH") from None
             raise GcpPrivateCampaignError("JOURNAL_MISSING") from None
         except GcpPrivateCampaignError:
             raise
@@ -2102,6 +2181,64 @@ class GcpPrivateCampaignJournal:
             ):
                 raise GcpPrivateCampaignError("JOURNAL_TIME_REGRESSED")
 
+    def _append_locked(
+        self,
+        root: SafeDirFD,
+        proposal: GcpPrivateCampaignProposal,
+        events: tuple[GcpPrivateCampaignJournalEvent, ...],
+        *,
+        state: GcpPrivateCampaignJournalState,
+        occurred_at: datetime,
+        operation_id: str | None = None,
+        detail_digest: str | None = None,
+    ) -> GcpPrivateCampaignJournalEvent:
+        """Append one transition while the caller owns the durable journal lock."""
+
+        if not events and state != "CREATE_INTENT_DURABLE":
+            raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
+        if events and state not in _TRANSITIONS[events[-1].state]:
+            raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
+        payload = GcpPrivateCampaignJournalEventPayload(
+            schema_version=GCP_PRIVATE_CAMPAIGN_EVENT_SCHEMA_VERSION,
+            proposal_id=proposal.proposal_id,
+            proposal_digest=proposal.proposal_id,
+            sequence=len(events),
+            state=state,
+            occurred_at=_timestamp(occurred_at),
+            previous_event_digest=events[-1].event_digest if events else None,
+            operation_id=operation_id,
+            detail_digest=detail_digest,
+        )
+        event = GcpPrivateCampaignJournalEvent(
+            **_model_value(payload),
+            event_digest=gcp_private_campaign_journal_event_digest(payload),
+        )
+        descriptor: int | None = None
+        name = self._name(proposal)
+        try:
+            descriptor = root.open_child(
+                name, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600
+            )
+            before = root.validated_regular_child(name, descriptor=descriptor)
+            self._assert_event_identity(before)
+            self._write_all(
+                descriptor, canonical_json_bytes(_model_value(event)) + b"\n"
+            )
+            os.fsync(descriptor)
+            after = root.validated_regular_child(name, descriptor=descriptor)
+            self._assert_event_identity(after)
+            root.fsync()
+        except GcpPrivateCampaignError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignError("JOURNAL_UNAVAILABLE") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        if self._crash_hook is not None:
+            self._crash_hook(f"after-{state.lower()}")
+        return event
+
     def append(
         self,
         proposal: GcpPrivateCampaignProposal,
@@ -2115,54 +2252,367 @@ class GcpPrivateCampaignJournal:
 
         with self._exclusive(proposal) as root:
             events = self._read_locked(root, proposal, missing_ok=True)
-            if not events and state != "CREATE_INTENT_DURABLE":
-                raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
-            if events and state not in _TRANSITIONS[events[-1].state]:
-                raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
-            payload = GcpPrivateCampaignJournalEventPayload(
-                schema_version=GCP_PRIVATE_CAMPAIGN_EVENT_SCHEMA_VERSION,
-                proposal_id=proposal.proposal_id,
-                proposal_digest=proposal.proposal_id,
-                sequence=len(events),
+            return self._append_locked(
+                root,
+                proposal,
+                events,
                 state=state,
-                occurred_at=_timestamp(occurred_at),
-                previous_event_digest=events[-1].event_digest if events else None,
+                occurred_at=occurred_at,
                 operation_id=operation_id,
                 detail_digest=detail_digest,
             )
-            event = GcpPrivateCampaignJournalEvent(
-                **_model_value(payload),
-                event_digest=gcp_private_campaign_journal_event_digest(payload),
+
+    @staticmethod
+    def _assert_create_intent_binding(
+        events: tuple[GcpPrivateCampaignJournalEvent, ...],
+        *,
+        request_digest: Sha256Digest,
+        expected_state: GcpPrivateCampaignJournalState,
+    ) -> None:
+        if (
+            len(events) < 2
+            or events[0].state != "CREATE_INTENT_DURABLE"
+            or events[0].detail_digest != request_digest
+            or events[1].state != "CREATE_INTENT"
+            or events[-1].state != expected_state
+        ):
+            raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+
+    def claim_create_for_factory(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalEvent:
+        """Durably claim exactly one live create before SDK construction.
+
+        Cleanup uses the same lock and may advance ``CREATE_CLAIMED`` only to
+        ``CLEANUP_INTENT``.  A later factory or insert call then fails closed.
+        """
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state="CREATE_INTENT",
             )
-            descriptor: int | None = None
-            name = self._name(proposal)
-            try:
-                descriptor = root.open_child(
-                    name, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600
-                )
-                root.validated_regular_child(name, descriptor=descriptor)
-                self._write_all(
-                    descriptor, canonical_json_bytes(_model_value(event)) + b"\n"
-                )
-                os.fsync(descriptor)
-                root.validated_regular_child(name, descriptor=descriptor)
-                root.fsync()
-            except GcpPrivateCampaignError:
-                raise
-            except (OSError, SafeDirFSError):
-                raise GcpPrivateCampaignError("JOURNAL_UNAVAILABLE") from None
-            finally:
-                if descriptor is not None:
-                    os.close(descriptor)
-            if self._crash_hook is not None:
-                self._crash_hook(f"after-{state.lower()}")
-            return event
+            return self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CREATE_CLAIMED",
+                occurred_at=occurred_at,
+                detail_digest=request_digest,
+            )
+
+    @contextmanager
+    def create_insert_claim(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+        occurred_at: datetime,
+    ) -> Iterator[None]:
+        """Record durable submission, then expose one bounded insert seam.
+
+        The journal lock never spans an external provider RPC.  Holding it
+        there would let a wedged creator block the independently running
+        cleanup worker forever.  Instead, the caller first writes
+        ``CREATE_SUBMITTED`` durably, then performs one final locked recheck
+        immediately before the provider edge.  A watchdog can subsequently
+        write the irreversible ``CREATE_FENCE_PENDING`` state, terminate the
+        exact creator, and only then start cleanup reconciliation.
+        """
+
+        self.begin_create_submission(
+            proposal,
+            request_digest=request_digest,
+            occurred_at=occurred_at,
+        )
+        self.assert_create_submission_live(
+            proposal,
+            request_digest=request_digest,
+        )
+        yield
+
+    def begin_create_submission(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalEvent:
+        """Fsync the exact create submission before any insert byte exists."""
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state="CREATE_CLAIMED",
+            )
+            if events[-1].detail_digest != request_digest:
+                raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+            return self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CREATE_SUBMITTED",
+                occurred_at=occurred_at,
+                detail_digest=request_digest,
+            )
+
+    def assert_create_submission_live(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+    ) -> None:
+        """Reject a fenced, cleaned, or replaced submission before insert."""
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state="CREATE_SUBMITTED",
+            )
+            if events[-1].detail_digest != request_digest:
+                raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+
+    def begin_create_reconciliation(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalEvent:
+        """Record an ambiguous insert before any provider reconciliation read.
+
+        ``CREATE_FENCE_PENDING`` is intentionally not a predecessor here.  A
+        watchdog fence irrevocably transfers control away from the creator;
+        even a late reconciliation read must not advance the creator's
+        journal after that point.
+        """
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state="CREATE_SUBMITTED",
+            )
+            if events[-1].detail_digest != request_digest:
+                raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+            return self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CREATE_RECONCILING",
+                occurred_at=occurred_at,
+                detail_digest=request_digest,
+            )
+
+    def assert_create_reconciliation_live(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+    ) -> None:
+        """Reject a fenced or replaced ambiguous-create reconciliation."""
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state="CREATE_RECONCILING",
+            )
+            if events[-1].detail_digest != request_digest:
+                raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+
+    def fence_submitted_create(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalEvent | None:
+        """Irreversibly revoke a submitted creator before watchdog cleanup.
+
+        This method only records the fence.  The watchdog must additionally
+        prove that the exact creator has exited (or its liveness descriptor
+        reached EOF) before it may transition the campaign into cleanup.
+        """
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            state = events[-1].state
+            if state == "CREATE_FENCE_PENDING":
+                return None
+            if state not in {"CREATE_SUBMITTED", "CREATE_RECONCILING"}:
+                raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state=state,
+            )
+            if events[-1].detail_digest != request_digest:
+                raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+            return self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CREATE_FENCE_PENDING",
+                occurred_at=occurred_at,
+                detail_digest=request_digest,
+            )
+
+    def release_fenced_create_for_cleanup(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalEvent | None:
+        """Enter cleanup only after the watchdog independently fenced creator."""
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            state = events[-1].state
+            if state in {
+                "CLEANUP_INTENT",
+                "INSTANCE_DELETE_SUBMITTED",
+                "INSTANCE_DELETE_RECONCILING",
+                "BOOT_DISK_DELETE_INTENT",
+                "BOOT_DISK_DELETE_SUBMITTED",
+                "CLEANUP_UNCONFIRMED",
+            }:
+                return None
+            if state != "CREATE_FENCE_PENDING":
+                raise GcpPrivateCampaignError("CREATE_FENCE_REQUIRED")
+            return self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CLEANUP_INTENT",
+                occurred_at=occurred_at,
+            )
+
+    def revoke_create_for_cleanup(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalEvent | None:
+        """Atomically revoke an unsubmitted create before cleanup can begin."""
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            state = events[-1].state
+            if state in {
+                "CLEANUP_INTENT",
+                "INSTANCE_DELETE_SUBMITTED",
+                "INSTANCE_DELETE_RECONCILING",
+                "BOOT_DISK_DELETE_INTENT",
+                "BOOT_DISK_DELETE_SUBMITTED",
+                "CLEANUP_UNCONFIRMED",
+            }:
+                return None
+            if state in {
+                "CREATE_SUBMITTED",
+                "CREATE_RECONCILING",
+                "CREATE_FENCE_PENDING",
+            }:
+                # A submitted provider mutation may still materialize after a
+                # lost response.  Only the independently running watchdog can
+                # advance it through CREATE_FENCE_PENDING after it has fenced
+                # the exact creator; no ordinary cleanup path may race it.
+                raise GcpPrivateCampaignError("CREATE_FENCE_REQUIRED")
+            return self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CLEANUP_INTENT",
+                occurred_at=occurred_at,
+            )
 
     def load(
         self, proposal: GcpPrivateCampaignProposal
     ) -> tuple[GcpPrivateCampaignJournalEvent, ...]:
         with self._exclusive(proposal) as root:
             return self._read_locked(root, proposal, missing_ok=False)
+
+    def identity(
+        self, proposal: GcpPrivateCampaignProposal
+    ) -> GcpPrivateCampaignJournalIdentity:
+        """Return the exact fs identity of one validated durable history.
+
+        This read-only helper is useful to test an already-bound history.  A
+        live controller must use
+        :meth:`append_create_intent_and_capture_identity` so its binding is
+        captured through the same retained directory descriptor that wrote the
+        create intent, rather than rediscovering a pathname later.
+        """
+
+        with self._exclusive(proposal) as root:
+            self._read_locked(root, proposal, missing_ok=False)
+            return self._identity_locked(root, proposal)
+
+    def _identity_locked(
+        self,
+        root: SafeDirFD,
+        proposal: GcpPrivateCampaignProposal,
+    ) -> GcpPrivateCampaignJournalIdentity:
+        """Capture root/event identity from the caller's retained root FD."""
+
+        descriptor: int | None = None
+        try:
+            descriptor = root.open_child(self._name(proposal), os.O_RDONLY)
+            metadata = root.validated_regular_child(
+                self._name(proposal), descriptor=descriptor
+            )
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignError("JOURNAL_UNAVAILABLE") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        self._assert_event_identity(metadata)
+        return GcpPrivateCampaignJournalIdentity(
+            root_device=root.device,
+            root_inode=root.inode,
+            event_device=metadata.st_dev,
+            event_inode=metadata.st_ino,
+        )
+
+    def append_create_intent_and_capture_identity(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalIdentity:
+        """Append ``CREATE_INTENT`` and capture its exact FS identity atomically.
+
+        The returned identity is the one a live watchdog must receive.  The
+        append, fsync, and root/event inode capture happen while the original
+        controller still owns the same directory lock and retained descriptor,
+        closing the pathname-replacement gap between durable intent and
+        watchdog activation.
+        """
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            if events[-1].state != "CREATE_INTENT_DURABLE":
+                raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
+            self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CREATE_INTENT",
+                occurred_at=occurred_at,
+            )
+            return self._identity_locked(root, proposal)
 
     def exact_resource_binding(
         self, proposal: GcpPrivateCampaignProposal
@@ -2593,6 +3043,13 @@ class GcpPrivateCampaignTransport(Protocol):
 class GcpPrivateCampaignCleanupTransport(Protocol):
     """The recovery-only surface: intentionally no create or runner methods."""
 
+    def observe_exact_instance(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignInstanceObservation: ...
+
     def wait_operation(
         self,
         operation: GcpPrivateCampaignOperation,
@@ -2676,6 +3133,16 @@ class _CleanupTransportFacade:
         ):
             raise GcpPrivateCampaignError("CONTROLLER_PRINCIPAL_BINDING_UNAVAILABLE")
         self._inner.bind_controller_principal(controller_principal)
+
+    def observe_exact_instance(
+        self,
+        request: GcpPrivateCampaignCreateRequest,
+        *,
+        timeout_seconds: int,
+    ) -> GcpPrivateCampaignInstanceObservation:
+        return self._inner.observe_exact_instance(
+            request, timeout_seconds=timeout_seconds
+        )
 
     def wait_operation(
         self, operation: GcpPrivateCampaignOperation, *, timeout_seconds: int
@@ -2775,6 +3242,28 @@ class GcpPrivateCampaignPreInsertGuardTransport(Protocol):
     def bind_pre_insert_guard(self, guard: Callable[[], None]) -> None: ...
 
 
+class GcpPrivateCampaignWatchdogActivation(Protocol):
+    """One live capability issued only by an independently ready watchdog."""
+
+    def assert_active(self) -> None: ...
+
+
+class GcpPrivateCampaignWatchdog(Protocol):
+    """Independent cleanup actor required by a live private-campaign caller."""
+
+    def activate(
+        self,
+        *,
+        proposal: GcpPrivateCampaignProposal,
+        approval: GcpPrivateCampaignApproval,
+        cleanup_authorization: GcpPrivateCampaignCleanupAuthorization,
+        request: GcpPrivateCampaignCreateRequest,
+        journal_identity: GcpPrivateCampaignJournalIdentity,
+        execution_deadline: datetime,
+        now: datetime,
+    ) -> GcpPrivateCampaignWatchdogActivation: ...
+
+
 @runtime_checkable
 class GcpPrivateCampaignCloseableTransport(Protocol):
     """An adapter with local resources, such as supervised IAP processes."""
@@ -2830,6 +3319,22 @@ class GcpPrivateCampaignCleanupOutcome:
     journal_error: str | None = None
 
 
+@dataclass(frozen=True)
+class GcpPrivateCampaignWatchdogRecoveryProgress:
+    """One bounded recovery observation made by the independent watchdog.
+
+    ``RETRY`` intentionally makes no claim about provider absence.  The
+    watchdog never treats a pre-bind absence as terminal proof without an
+    authoritative create-operation identity.  It keeps reconciling ordinary
+    cleanup failures through the separately frozen cleanup horizon, then
+    reports ``CLEANUP_UNCONFIRMED`` rather than claiming absence.
+    """
+
+    disposition: Literal["RETRY", "CLEANUP_CONFIRMED"]
+    outcome: GcpPrivateCampaignCleanupOutcome | None = None
+    retry_code: str | None = None
+
+
 class GcpPrivateCampaignLifecycleController:
     """Approval-gated exact lifecycle owner for the two-engine profile."""
 
@@ -2845,6 +3350,7 @@ class GcpPrivateCampaignLifecycleController:
         launch_preflight: (
             Callable[[GcpPrivateCampaignProposal], SafeDirFD | None] | None
         ) = None,
+        watchdog: GcpPrivateCampaignWatchdog | None = None,
         clock: GcpPrivateCampaignClock | None = None,
         operation_timeout_seconds: int = 60,
     ) -> None:
@@ -2856,6 +3362,10 @@ class GcpPrivateCampaignLifecycleController:
             )
             or (receipt_root is not None and not receipt_root.is_absolute())
             or (launch_preflight is not None and not callable(launch_preflight))
+            or (
+                watchdog is not None
+                and not callable(getattr(watchdog, "activate", None))
+            )
             or not 1 <= operation_timeout_seconds <= 600
         ):
             raise GcpPrivateCampaignError("CONTROLLER_CONFIGURATION_INVALID")
@@ -2864,6 +3374,7 @@ class GcpPrivateCampaignLifecycleController:
         self._cleanup_transport_factory = cleanup_transport_factory
         self._receipt_root = receipt_root
         self._launch_preflight = launch_preflight
+        self._watchdog = watchdog
         self._clock = clock or SystemGcpPrivateCampaignClock()
         self._operation_timeout_seconds = operation_timeout_seconds
 
@@ -2901,6 +3412,7 @@ class GcpPrivateCampaignLifecycleController:
         *,
         proposal: GcpPrivateCampaignProposal,
         approval: GcpPrivateCampaignApproval,
+        watchdog_activation: GcpPrivateCampaignWatchdogActivation | None = None,
     ) -> None:
         if not isinstance(transport, GcpPrivateCampaignPreInsertGuardTransport):
             raise GcpPrivateCampaignError("PREINSERT_GUARD_UNAVAILABLE")
@@ -2910,6 +3422,8 @@ class GcpPrivateCampaignLifecycleController:
                 approval, expected_proposal=proposal, now=self._clock.now()
             )
             self._assert_execution_deadline(proposal)
+            if watchdog_activation is not None:
+                self._assert_watchdog_active(watchdog_activation)
 
         try:
             transport.bind_pre_insert_guard(guard)
@@ -2917,6 +3431,17 @@ class GcpPrivateCampaignLifecycleController:
             raise
         except Exception:
             raise GcpPrivateCampaignError("PREINSERT_GUARD_UNAVAILABLE") from None
+
+    @staticmethod
+    def _assert_watchdog_active(
+        activation: GcpPrivateCampaignWatchdogActivation,
+    ) -> None:
+        try:
+            activation.assert_active()
+        except GcpPrivateCampaignError:
+            raise
+        except Exception:
+            raise GcpPrivateCampaignError("WATCHDOG_ACTIVATION_UNAVAILABLE") from None
 
     @staticmethod
     def _bind_controller_principal(
@@ -3023,6 +3548,7 @@ class GcpPrivateCampaignLifecycleController:
                 observed.max_runtime_seconds != proposal.max_runtime_seconds,
                 observed.instance_termination_action != "DELETE",
                 observed.startup_payload_digest != proposal.startup_payload_digest,
+                observed.create_request_digest != request.create_request_digest,
                 observed.startup_script_sha256 is None,
             )
         ):
@@ -3164,6 +3690,7 @@ class GcpPrivateCampaignLifecycleController:
         proposal: GcpPrivateCampaignProposal,
         approval: GcpPrivateCampaignApproval,
         startup_payload: GcpPrivateCampaignStartupPayload,
+        cleanup_authorization: GcpPrivateCampaignCleanupAuthorization | None = None,
     ) -> GcpPrivateCampaignEvidenceReceipt:
         """Run one exact campaign lifecycle after all local authority gates pass."""
 
@@ -3196,6 +3723,7 @@ class GcpPrivateCampaignLifecycleController:
                 proposal=proposal,
                 approval=approval,
                 startup_payload=startup_payload,
+                cleanup_authorization=cleanup_authorization,
                 preflight_root=preflight_root,
             )
         finally:
@@ -3208,6 +3736,7 @@ class GcpPrivateCampaignLifecycleController:
         proposal: GcpPrivateCampaignProposal,
         approval: GcpPrivateCampaignApproval,
         startup_payload: GcpPrivateCampaignStartupPayload,
+        cleanup_authorization: GcpPrivateCampaignCleanupAuthorization | None,
         preflight_root: SafeDirFD | None,
     ) -> GcpPrivateCampaignEvidenceReceipt:
         """Execute after authority and retained-evidence-root preflight."""
@@ -3229,17 +3758,51 @@ class GcpPrivateCampaignLifecycleController:
             occurred_at=self._clock.now(),
             detail_digest=request.create_request_digest,
         )
-        self._journal.append(
-            proposal, state="CREATE_INTENT", occurred_at=self._clock.now()
-        )
+        journal_identity: GcpPrivateCampaignJournalIdentity | None = None
+        if self._watchdog is None:
+            self._journal.append(
+                proposal, state="CREATE_INTENT", occurred_at=self._clock.now()
+            )
+        else:
+            # Capture the expected root/history inode pair through the same
+            # retained directory descriptor that fsyncs CREATE_INTENT.  The
+            # watchdog receives this controller-originated identity; it must
+            # never choose its own baseline by reopening a pathname later.
+            journal_identity = self._journal.append_create_intent_and_capture_identity(
+                proposal,
+                occurred_at=self._clock.now(),
+            )
         # A second local authority check closes the fsync/lock delay window:
         # the provider factory remains unreachable if approval or quote expiry
         # crosses between the first parse and durable create intent.
+        watchdog_activation: GcpPrivateCampaignWatchdogActivation | None = None
         try:
             verify_gcp_private_campaign_approval(
                 approval, expected_proposal=proposal, now=self._clock.now()
             )
             self._assert_execution_deadline(proposal)
+            if self._watchdog is not None:
+                if cleanup_authorization is None:
+                    raise GcpPrivateCampaignError(
+                        "WATCHDOG_CLEANUP_AUTHORIZATION_MISSING"
+                    )
+                if journal_identity is None:
+                    raise GcpPrivateCampaignError("WATCHDOG_JOURNAL_IDENTITY_MISSING")
+                verify_gcp_private_campaign_cleanup_authorization(
+                    cleanup_authorization,
+                    expected_proposal=proposal,
+                    now=self._clock.now(),
+                )
+                watchdog_activation = self._watchdog.activate(
+                    proposal=proposal,
+                    approval=approval,
+                    cleanup_authorization=cleanup_authorization,
+                    request=request,
+                    journal_identity=journal_identity,
+                    execution_deadline=self._journal.execution_deadline(proposal),
+                    now=self._clock.now(),
+                )
+                self._assert_watchdog_active(watchdog_activation)
         except GcpPrivateCampaignError:
             if self._journal.load(proposal)[-1].state != "BLOCKED":
                 self._journal.append(
@@ -3247,6 +3810,15 @@ class GcpPrivateCampaignLifecycleController:
                 )
             raise
 
+        except Exception:
+            if self._journal.load(proposal)[-1].state != "BLOCKED":
+                self._journal.append(
+                    proposal, state="BLOCKED", occurred_at=self._clock.now()
+                )
+            raise GcpPrivateCampaignError("WATCHDOG_ACTIVATION_UNAVAILABLE") from None
+
+        if watchdog_activation is not None:
+            self._assert_watchdog_active(watchdog_activation)
         transport = self._transport_after_authority()
         # Factory initialization can itself consume enough wall time for an
         # exact human approval or quote to expire.  Recheck at the final local
@@ -3256,7 +3828,12 @@ class GcpPrivateCampaignLifecycleController:
             self._bind_controller_principal(transport, proposal=proposal)
             if preflight_root is not None:
                 self._bind_evidence_root(transport, preflight_root)
-            self._bind_pre_insert_guard(transport, proposal=proposal, approval=approval)
+            self._bind_pre_insert_guard(
+                transport,
+                proposal=proposal,
+                approval=approval,
+                watchdog_activation=watchdog_activation,
+            )
             verify_gcp_private_campaign_approval(
                 approval, expected_proposal=proposal, now=self._clock.now()
             )
@@ -3276,17 +3853,38 @@ class GcpPrivateCampaignLifecycleController:
                 self._close_transport(transport)
             raise
         created_or_ambiguous = False
+        local_fake_create_call_started = False
         primary_error: GcpPrivateCampaignError | None = None
         evidence: GcpPrivateCampaignEvidenceReceipt | None = None
         exact_resource_binding: GcpPrivateCampaignExactResourceBinding | None = None
         try:
             try:
+                if watchdog_activation is None:
+                    # The deterministic no-watchdog fake path still models
+                    # the exact live mutation boundary: first claim the
+                    # request, then fsync CREATE_SUBMITTED before its local
+                    # create seam.  Lost responses therefore reconcile from
+                    # the same durable state as the live capability path.
+                    self._journal.claim_create_for_factory(
+                        proposal,
+                        request_digest=request.create_request_digest,
+                        occurred_at=self._clock.now(),
+                    )
+                    self._journal.begin_create_submission(
+                        proposal,
+                        request_digest=request.create_request_digest,
+                        occurred_at=self._clock.now(),
+                    )
                 # Any exception after this point is potentially post-submit.
                 # Attempt exact recovery in ``finally`` even when the adapter
                 # cannot return an operation identity.  Without both durable
                 # provider-ID bindings recovery can only prove absence and
                 # must remain unconfirmed otherwise.
                 created_or_ambiguous = True
+                local_fake_create_call_started = (
+                    watchdog_activation is None
+                    and isinstance(transport, FakeGcpPrivateCampaignTransport)
+                )
                 operation = transport.create_instance(
                     request,
                     request_id=proposal.request_ids.create_request_id,
@@ -3297,12 +3895,14 @@ class GcpPrivateCampaignLifecycleController:
                     kind="create",
                     request_id=proposal.request_ids.create_request_id,
                 )
-                self._journal.append(
-                    proposal,
-                    state="CREATE_SUBMITTED",
-                    occurred_at=self._clock.now(),
-                    operation_id=operation.operation_id,
-                )
+                # Both paths now durably reach CREATE_SUBMITTED before the
+                # create edge: the live capability owns that claim under its
+                # watchdog gate and deterministic fakes use the local helper
+                # immediately above.  A returned response cannot retroactively
+                # create the journaled mutation boundary.
+                create_state = self._journal.load(proposal)[-1].state
+                if create_state != "CREATE_SUBMITTED":
+                    raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
                 result = transport.wait_operation(
                     operation, timeout_seconds=self._operation_timeout_seconds
                 )
@@ -3310,8 +3910,23 @@ class GcpPrivateCampaignLifecycleController:
                 if not error.ambiguous:
                     raise
                 created_or_ambiguous = True
-                self._journal.append(
-                    proposal, state="CREATE_RECONCILING", occurred_at=self._clock.now()
+                if self._journal.load(proposal)[-1].state == "CREATE_FENCE_PENDING":
+                    # A detached watchdog already revoked this creator.  Do
+                    # not turn a returned/lost insert response into another
+                    # provider reconciliation edge after the fence.
+                    raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED") from error
+                self._journal.begin_create_reconciliation(
+                    proposal,
+                    request_digest=request.create_request_digest,
+                    occurred_at=self._clock.now(),
+                )
+                # This second locked read is deliberately directly adjacent to
+                # the provider reconciliation edge.  A watchdog fence between
+                # the ambiguous response and this point aborts the creator;
+                # it can never make a post-fence reconciliation request.
+                self._journal.assert_create_reconciliation_live(
+                    proposal,
+                    request_digest=request.create_request_digest,
                 )
                 result = transport.reconcile_create(
                     request,
@@ -3446,8 +4061,22 @@ class GcpPrivateCampaignLifecycleController:
                     detail_digest=artifact_receipt.sealed_artifact_receipt_sha256,
                 )
         except GcpPrivateCampaignError as error:
+            self._handoff_local_fake_post_dispatch_cleanup(
+                proposal=proposal,
+                request=request,
+                transport=transport,
+                watchdog_activation=watchdog_activation,
+                create_call_started=local_fake_create_call_started,
+            )
             primary_error = error
         except Exception:
+            self._handoff_local_fake_post_dispatch_cleanup(
+                proposal=proposal,
+                request=request,
+                transport=transport,
+                watchdog_activation=watchdog_activation,
+                create_call_started=local_fake_create_call_started,
+            )
             primary_error = GcpPrivateCampaignError("CAMPAIGN_OPERATION_FAILED")
         finally:
             cleanup: GcpPrivateCampaignCleanupOutcome | None = None
@@ -3503,6 +4132,15 @@ class GcpPrivateCampaignLifecycleController:
             )
         try:
             self._ensure_cleanup_intent(proposal)
+            # A transient provider failure is retained once as
+            # CLEANUP_UNCONFIRMED.  Repeating an intent/submission pair for
+            # every retry would exhaust the deliberately finite journal and
+            # could make exact cleanup impossible.  The stable request IDs,
+            # exact immutable-ID binding, and retained unconfirmed state let
+            # us retry the provider operation without appending a new event.
+            retry_without_new_event = (
+                self._journal.load(proposal)[-1].state == "CLEANUP_UNCONFIRMED"
+            )
             if exact_resource_binding is None:
                 raise GcpPrivateCampaignError("EXACT_RESOURCE_BINDING_MISSING")
             inventory = transport.list_exact_owned_residuals(
@@ -3519,7 +4157,8 @@ class GcpPrivateCampaignLifecycleController:
                     "INSTANCE_DELETE_SUBMITTED",
                     "INSTANCE_DELETE_RECONCILING",
                 }:
-                    self._append_instance_reconciling_if_needed(proposal)
+                    if not retry_without_new_event:
+                        self._append_instance_reconciling_if_needed(proposal)
                     result = transport.reconcile_delete_instance(
                         request,
                         exact_resource_binding=exact_resource_binding,
@@ -3547,12 +4186,13 @@ class GcpPrivateCampaignLifecycleController:
                         )
                         operation = result.operation
                     else:
-                        self._journal.append(
-                            proposal,
-                            state="INSTANCE_DELETE_SUBMITTED",
-                            occurred_at=self._clock.now(),
-                            operation_id=operation.operation_id,
-                        )
+                        if not retry_without_new_event:
+                            self._journal.append(
+                                proposal,
+                                state="INSTANCE_DELETE_SUBMITTED",
+                                occurred_at=self._clock.now(),
+                                operation_id=operation.operation_id,
+                            )
                         result = transport.wait_operation(
                             operation, timeout_seconds=self._operation_timeout_seconds
                         )
@@ -3591,11 +4231,12 @@ class GcpPrivateCampaignLifecycleController:
                     )
                     disk_operation = disk_result.operation
                 else:
-                    self._journal.append(
-                        proposal,
-                        state="BOOT_DISK_DELETE_INTENT",
-                        occurred_at=self._clock.now(),
-                    )
+                    if not retry_without_new_event:
+                        self._journal.append(
+                            proposal,
+                            state="BOOT_DISK_DELETE_INTENT",
+                            occurred_at=self._clock.now(),
+                        )
                     disk_operation = transport.delete_exact_owned_boot_disk(
                         request,
                         disk,
@@ -3603,12 +4244,13 @@ class GcpPrivateCampaignLifecycleController:
                         request_id=proposal.request_ids.boot_disk_delete_request_id,
                         timeout_seconds=self._operation_timeout_seconds,
                     )
-                    self._journal.append(
-                        proposal,
-                        state="BOOT_DISK_DELETE_SUBMITTED",
-                        occurred_at=self._clock.now(),
-                        operation_id=disk_operation.operation_id,
-                    )
+                    if not retry_without_new_event:
+                        self._journal.append(
+                            proposal,
+                            state="BOOT_DISK_DELETE_SUBMITTED",
+                            occurred_at=self._clock.now(),
+                            operation_id=disk_operation.operation_id,
+                        )
                     disk_result = transport.wait_operation(
                         disk_operation, timeout_seconds=self._operation_timeout_seconds
                     )
@@ -3647,17 +4289,41 @@ class GcpPrivateCampaignLifecycleController:
             )
 
     def _ensure_cleanup_intent(self, proposal: GcpPrivateCampaignProposal) -> None:
-        state = self._journal.load(proposal)[-1].state
-        if state in {
-            "CLEANUP_INTENT",
-            "INSTANCE_DELETE_SUBMITTED",
-            "INSTANCE_DELETE_RECONCILING",
-            "BOOT_DISK_DELETE_INTENT",
-            "BOOT_DISK_DELETE_SUBMITTED",
-        }:
+        # This is one locked state transition, not a load-then-append pair.
+        # It can revoke a factory claim, but a watchdog-bound submitted create
+        # must first pass through its irreversible creator-fence protocol.
+        self._journal.revoke_create_for_cleanup(proposal, occurred_at=self._clock.now())
+
+    def _handoff_local_fake_post_dispatch_cleanup(
+        self,
+        *,
+        proposal: GcpPrivateCampaignProposal,
+        request: GcpPrivateCampaignCreateRequest,
+        transport: GcpPrivateCampaignTransport,
+        watchdog_activation: GcpPrivateCampaignWatchdogActivation | None,
+        create_call_started: bool,
+    ) -> None:
+        """Make only a deterministic fake post-call failure cleanup-eligible.
+
+        This is not a general submitted-create cleanup path. It runs only
+        after an in-process ``FakeGcpPrivateCampaignTransport`` create call
+        has returned or raised, with no watchdog activation. A live Google
+        transport remains at ``CREATE_SUBMITTED`` or ``CREATE_RECONCILING``
+        until the independent watchdog fences its exact creator.
+        """
+
+        if (
+            not create_call_started
+            or watchdog_activation is not None
+            or not isinstance(transport, FakeGcpPrivateCampaignTransport)
+            or self._journal.load(proposal)[-1].state != "CREATE_SUBMITTED"
+        ):
             return
         self._journal.append(
-            proposal, state="CLEANUP_INTENT", occurred_at=self._clock.now()
+            proposal,
+            state="BLOCKED",
+            occurred_at=self._clock.now(),
+            detail_digest=request.create_request_digest,
         )
 
     def _cleanup_resume_phase(
@@ -3839,6 +4505,215 @@ class GcpPrivateCampaignLifecycleController:
             journal_error=outcome.journal_error,
         )
 
+    def _record_watchdog_exact_binding(
+        self,
+        *,
+        proposal: GcpPrivateCampaignProposal,
+        request: GcpPrivateCampaignCreateRequest,
+        observed: GcpPrivateCampaignInstanceObservation,
+    ) -> GcpPrivateCampaignExactResourceBinding:
+        """Recover a lost create response only from a fully verified readback.
+
+        The watchdog never infers provider identity from a host name.  It
+        first validates the exact two-A100 topology, then records only hashes
+        of the readback IDs.  The deliberately narrow transition through
+        ``CREATE_RECONCILING`` is what lets a cleanup-only actor recover a
+        parent crash after insert but before the parent persisted identities.
+        """
+
+        self._assert_instance(observed, request)
+        binding = self._exact_resource_binding(observed, proposal)
+        events = self._journal.load(proposal)
+        instance_digests = [
+            event.detail_digest
+            for event in events
+            if event.state == "INSTANCE_IDENTITY_BOUND"
+        ]
+        disk_digests = [
+            event.detail_digest
+            for event in events
+            if event.state == "BOOT_DISK_IDENTITY_BOUND"
+        ]
+        if (
+            len(instance_digests) > 1
+            or len(disk_digests) > 1
+            or any(value is None for value in (*instance_digests, *disk_digests))
+            or (
+                instance_digests
+                and instance_digests[0] != binding.provider_instance_id_sha256
+            )
+            or (
+                disk_digests and disk_digests[0] != binding.boot_disk_provider_id_sha256
+            )
+        ):
+            raise GcpPrivateCampaignError("WATCHDOG_RESOURCE_IDENTITY_MISMATCH")
+
+        state = events[-1].state
+        if state == "CREATE_INTENT_DURABLE":
+            self._journal.append(
+                proposal, state="CREATE_INTENT", occurred_at=self._clock.now()
+            )
+            state = "CREATE_INTENT"
+        if state in {
+            "CREATE_INTENT",
+            "CREATE_SUBMITTED",
+            "CLEANUP_INTENT",
+            "CLEANUP_UNCONFIRMED",
+            "EXECUTION_DEADLINE_EXCEEDED",
+        }:
+            self._journal.append(
+                proposal,
+                state="CREATE_RECONCILING",
+                occurred_at=self._clock.now(),
+            )
+            state = "CREATE_RECONCILING"
+        if state == "CREATE_RECONCILING":
+            self._journal.append(
+                proposal, state="CREATED", occurred_at=self._clock.now()
+            )
+            state = "CREATED"
+        if state == "CREATED" and not instance_digests:
+            self._journal.append(
+                proposal,
+                state="INSTANCE_IDENTITY_BOUND",
+                occurred_at=self._clock.now(),
+                detail_digest=binding.provider_instance_id_sha256,
+            )
+            state = "INSTANCE_IDENTITY_BOUND"
+        if state == "INSTANCE_IDENTITY_BOUND" and not disk_digests:
+            self._journal.append(
+                proposal,
+                state="BOOT_DISK_IDENTITY_BOUND",
+                occurred_at=self._clock.now(),
+                detail_digest=binding.boot_disk_provider_id_sha256,
+            )
+            state = "BOOT_DISK_IDENTITY_BOUND"
+        if state == "BOOT_DISK_IDENTITY_BOUND":
+            self._journal.append(
+                proposal,
+                state="PROVIDER_BACKSTOP_VERIFIED",
+                occurred_at=self._clock.now(),
+                detail_digest=sha256_digest(
+                    canonical_json_bytes(
+                        {
+                            "instance_termination_action": (
+                                observed.instance_termination_action
+                            ),
+                            "max_runtime_seconds": observed.max_runtime_seconds,
+                            "provider_instance_id_sha256": (
+                                binding.provider_instance_id_sha256
+                            ),
+                        }
+                    )
+                ),
+            )
+            state = "PROVIDER_BACKSTOP_VERIFIED"
+        if state not in {
+            "PROVIDER_BACKSTOP_VERIFIED",
+            "READINESS_VERIFIED",
+            "READINESS_RECEIPT_RECORDED",
+            "CAMPAIGN_HANDED_OFF",
+            "EVIDENCE_RETRIEVED",
+            "SEALED_ARTIFACT_RECEIPT_RECORDED",
+        }:
+            raise GcpPrivateCampaignError("WATCHDOG_RECOVERY_STATE_INVALID")
+        return binding
+
+    def recover_watchdog_cleanup(
+        self,
+        *,
+        proposal: GcpPrivateCampaignProposal,
+        authorization: GcpPrivateCampaignCleanupAuthorization,
+        startup_payload: GcpPrivateCampaignStartupPayload,
+        prebind_absence_observed: bool,
+    ) -> GcpPrivateCampaignWatchdogRecoveryProgress:
+        """Let a cleanup-only worker settle one post-intent crash window.
+
+        A pre-bind absence is never terminal proof: without the provider
+        create-operation identity, a delayed successful insert can materialize
+        after an otherwise clean name/label read.  The worker records a
+        bounded settlement vote and keeps reconciling through its cleanup
+        horizon.  If authoritative terminal absence never becomes available,
+        it fails closed as ``CLEANUP_UNCONFIRMED`` rather than claiming success.
+        If a resource is observable, full topology validation binds its IDs
+        before any delete seam is reachable.
+        """
+
+        verify_gcp_private_campaign_cleanup_authorization(
+            authorization, expected_proposal=proposal, now=self._clock.now()
+        )
+        request = build_gcp_private_campaign_create_request(
+            proposal=proposal, startup_payload=startup_payload
+        )
+        events = self._journal.load(proposal)
+        if events[-1].state == "CLEANUP_CONFIRMED":
+            return GcpPrivateCampaignWatchdogRecoveryProgress(
+                "CLEANUP_CONFIRMED",
+                GcpPrivateCampaignCleanupOutcome(True, "CLEANUP_CONFIRMED"),
+            )
+
+        transport = self._cleanup_transport_after_authority()
+        try:
+            self._bind_controller_principal(transport, proposal=proposal)
+            exact_resource_binding = self._journal.exact_resource_binding(proposal)
+            if exact_resource_binding is None:
+                # This lock-backed transition revokes any still-viable live
+                # create claim before recovery reads provider state.  A final
+                # insert can therefore never follow cleanup intent.
+                self._ensure_cleanup_intent(proposal)
+                try:
+                    observed = transport.observe_exact_instance(
+                        request, timeout_seconds=self._operation_timeout_seconds
+                    )
+                except GcpPrivateCampaignTransportError as error:
+                    if error.code != "INSTANCE_NOT_FOUND":
+                        return GcpPrivateCampaignWatchdogRecoveryProgress(
+                            "RETRY", retry_code=error.code
+                        )
+                    observed = None
+                if observed is not None and observed.state == "RUNNING":
+                    exact_resource_binding = self._record_watchdog_exact_binding(
+                        proposal=proposal, request=request, observed=observed
+                    )
+                else:
+                    try:
+                        absence = transport.confirm_exact_absence(
+                            request, timeout_seconds=self._operation_timeout_seconds
+                        )
+                        self._assert_absence(absence, proposal)
+                    except GcpPrivateCampaignError as error:
+                        return GcpPrivateCampaignWatchdogRecoveryProgress(
+                            "RETRY", retry_code=error.code
+                        )
+                    if not prebind_absence_observed:
+                        return GcpPrivateCampaignWatchdogRecoveryProgress(
+                            "RETRY", retry_code="PREBIND_ABSENCE_PENDING"
+                        )
+                    return GcpPrivateCampaignWatchdogRecoveryProgress(
+                        "RETRY", retry_code="PREBIND_ABSENCE_UNCONFIRMED"
+                    )
+
+            outcome = self._cleanup_after_transport(
+                proposal=proposal,
+                request=request,
+                transport=transport,
+                may_exist=True,
+                exact_resource_binding=exact_resource_binding,
+            )
+            if outcome.confirmed:
+                return GcpPrivateCampaignWatchdogRecoveryProgress(
+                    "CLEANUP_CONFIRMED", outcome
+                )
+            return GcpPrivateCampaignWatchdogRecoveryProgress(
+                "RETRY", outcome=outcome, retry_code=outcome.cleanup_error
+            )
+        except GcpPrivateCampaignError as error:
+            return GcpPrivateCampaignWatchdogRecoveryProgress(
+                "RETRY", retry_code=error.code
+            )
+        finally:
+            self._close_transport(transport)
+
     def recover_exact_cleanup(
         self,
         *,
@@ -3881,9 +4756,72 @@ class GcpPrivateCampaignLifecycleController:
             # durable leaves the provider-native DELETE backstop in place. A
             # label-scoped absence read is safe, but deletion may never target
             # a name/label match without both durable provider-ID bindings.
+            # More importantly, an observed *temporary absence* after a
+            # submitted or ambiguous create is not authoritative terminal
+            # proof: a delayed provider create may still materialize.  Such a
+            # history may become confirmed only after an exact resource is
+            # observed and bound (or another authoritative reconciliation is
+            # added in a future version).
+            submitted_or_ambiguous = any(
+                event.state
+                in {
+                    "CREATE_SUBMITTED",
+                    "CREATE_FENCE_PENDING",
+                    "CREATE_RECONCILING",
+                    "CREATED",
+                    "INSTANCE_IDENTITY_BOUND",
+                    "BOOT_DISK_IDENTITY_BOUND",
+                    "PROVIDER_BACKSTOP_VERIFIED",
+                    "READINESS_VERIFIED",
+                    "READINESS_RECEIPT_RECORDED",
+                    "CAMPAIGN_HANDED_OFF",
+                    "EVIDENCE_RETRIEVED",
+                    "SEALED_ARTIFACT_RECEIPT_RECORDED",
+                    "CLEANUP_INTENT",
+                    "INSTANCE_DELETE_SUBMITTED",
+                    "INSTANCE_DELETE_RECONCILING",
+                    "BOOT_DISK_DELETE_INTENT",
+                    "BOOT_DISK_DELETE_SUBMITTED",
+                    "CLEANUP_UNCONFIRMED",
+                    "EXECUTION_DEADLINE_EXCEEDED",
+                }
+                for event in events
+            )
             transport = self._cleanup_transport_after_authority()
             try:
                 self._bind_controller_principal(transport, proposal=proposal)
+                if submitted_or_ambiguous:
+                    try:
+                        observed = transport.observe_exact_instance(
+                            request, timeout_seconds=self._operation_timeout_seconds
+                        )
+                    except GcpPrivateCampaignTransportError as error:
+                        if error.code != "INSTANCE_NOT_FOUND":
+                            raise
+                        return GcpPrivateCampaignCleanupOutcome(
+                            False,
+                            "CLEANUP_UNCONFIRMED",
+                            retained_artifact_error=retained_artifact_error,
+                            cleanup_error="CREATE_SUBMISSION_UNRECONCILED",
+                            journal_error="CREATE_FENCE_REQUIRED",
+                        )
+                    exact_resource_binding = self._record_watchdog_exact_binding(
+                        proposal=proposal,
+                        request=request,
+                        observed=observed,
+                    )
+                    self._ensure_cleanup_intent(proposal)
+                    outcome = self._cleanup_after_transport(
+                        proposal=proposal,
+                        request=request,
+                        transport=transport,
+                        may_exist=True,
+                        exact_resource_binding=exact_resource_binding,
+                    )
+                    return self._with_retained_artifact_error(
+                        outcome, retained_artifact_error
+                    )
+                self._ensure_cleanup_intent(proposal)
                 absence = transport.confirm_exact_absence(
                     request, timeout_seconds=self._operation_timeout_seconds
                 )
@@ -4106,6 +5044,7 @@ class FakeGcpPrivateCampaignTransport:
                 if not self.topology_drift
                 else "sha256:" + ("f" * 64)
             ),
+            create_request_digest=request.create_request_digest,
             startup_script_sha256=self.startup_script_sha256,
         )
 
