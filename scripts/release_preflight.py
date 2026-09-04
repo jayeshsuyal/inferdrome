@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the offline, fail-closed active v0.2 release-series preflight.
+"""Run the offline, fail-closed active v0.3 release-series preflight.
 
 This command checks repository-owned release inputs and can delegate to the
 existing engineering and dashboard gates. It never contacts a provider,
@@ -39,7 +39,7 @@ V0_1_RELEASE_BASE_COMMIT = "a9e325de4794f741453e37df515a595060d5a2ca"
 # These closure and review records were frozen at the v0.1.0 release base
 # above.
 # They are retained for historical integrity only: none is an input to the
-# active v0.2 release decision.
+# active v0.3 release decision.
 FROZEN_V0_1_CLOSURE_FILE_SHA256: tuple[tuple[str, str], ...] = (
     (
         "docs/V0_1_DEFINITION_OF_DONE.md",
@@ -74,10 +74,10 @@ FROZEN_V0_1_CLOSURE_FILE_SHA256: tuple[tuple[str, str], ...] = (
         "f01dc7a64772dcf1078371cfe714ab8d9aadc532d32ad8367239674dc6f509ba",
     ),
 )
-# This manifest protects every historical path that the v0.2 documentation
+# This manifest protects every historical path that current documentation
 # describes as frozen.  It is deliberately derived from the exact v0.1.0 base
 # commit above, rather than from the active release-series inputs.  Nothing in
-# this manifest can satisfy a v0.2 approval or release check.
+# this manifest can satisfy a current-series approval or release check.
 FROZEN_PROTECTED_PATH_SHA256: tuple[tuple[str, str], ...] = (
     (
         "docs/reviews/V0_1_A10_RAW_ARCHIVE_PRIVACY_LICENSING_REVIEW.md",
@@ -401,53 +401,53 @@ _COMMON_DOCUMENT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 ACTIVE_RELEASE_SERIES = ReleaseSeries(
-    name="v0.2",
-    development_version="0.2.0.dev0",
-    final_version="0.2.0",
-    final_tag="v0.2.0",
-    checklist_path="docs/V0_2_RELEASE_CHECKLIST.md",
-    inputs_path="docs/V0_2_RELEASE_INPUTS.md",
+    name="v0.3",
+    development_version="0.3.0.dev0",
+    final_version="0.3.0",
+    final_tag="v0.3.0",
+    checklist_path="docs/V0_3_RELEASE_CHECKLIST.md",
+    inputs_path="docs/V0_3_RELEASE_INPUTS.md",
     required_files=(
-        "docs/V0_2_RELEASE_INPUTS.md",
-        "docs/V0_2_RELEASE_CHECKLIST.md",
+        "docs/V0_3_RELEASE_INPUTS.md",
+        "docs/V0_3_RELEASE_CHECKLIST.md",
     ),
     document_markers=(
         (
-            "docs/V0_2_RELEASE_INPUTS.md",
+            "docs/V0_3_RELEASE_INPUTS.md",
             (
-                "v0.2 release inputs",
-                "v0.1 closure records do not authorize a v0.2 release",
+                "v0.3 release inputs",
+                "v0.2 release history does not authorize a v0.3 release",
                 "Content-addressed local bindings are not signatures",
             ),
         ),
         (
-            "docs/V0_2_RELEASE_CHECKLIST.md",
+            "docs/V0_3_RELEASE_CHECKLIST.md",
             (
-                "No v0.2 release is currently authorized",
-                "v0.2 release inputs",
-                "All v0.2 release checkboxes below are deliberately unchecked",
+                "No v0.3 release is currently authorized",
+                "v0.3 release inputs",
+                "All v0.3 release checkboxes below are deliberately unchecked",
             ),
         ),
     ),
     input_markers=(
         "exact final source commit, package version, and annotated tag",
-        "fresh v0.2 security and lifecycle review records",
+        "fresh v0.3 security and evidence-integrity review records",
         "all three required CI job URLs for the exact final source commit",
     ),
     manual_items=(
         ManualItem(
-            "v0-2-scope-review",
-            "Review the exact v0.2 release scope and deferred boundaries",
+            "v0-3-scope-review",
+            "Review the exact v0.3 release scope and deferred boundaries",
             "release reviewer",
         ),
         ManualItem(
-            "v0-2-gcp-safety-review",
-            "Complete an independent v0.2 GCP safety and cleanup review",
+            "v0-3-evidence-lifecycle-review",
+            "Complete an independent v0.3 external-router evidence-integrity review",
             "security reviewer",
         ),
         ManualItem(
-            "v0-2-release-authorization",
-            "Record explicit v0.2 release authorization for the exact release "
+            "v0-3-release-authorization",
+            "Record explicit v0.3 release authorization for the exact release "
             "commit and annotated tag",
             "release owner",
         ),
@@ -455,7 +455,7 @@ ACTIVE_RELEASE_SERIES = ReleaseSeries(
 )
 
 # These aliases retain the narrow public surface used by repository tests while
-# making every active check derive from the v0.2 series contract above.
+# making every active check derive from the v0.3 series contract above.
 DEVELOPMENT_VERSION = ACTIVE_RELEASE_SERIES.development_version
 FINAL_VERSION = ACTIVE_RELEASE_SERIES.final_version
 FINAL_TAG = ACTIVE_RELEASE_SERIES.final_tag
@@ -465,8 +465,8 @@ DOCUMENT_MARKERS = (
 )
 MANUAL_RELEASE_ITEMS = ACTIVE_RELEASE_SERIES.manual_items
 
-# This is historical v0.1 lineage integrity only. It is not a v0.2 release
-# input, and no v0.1 checklist or approval can satisfy a v0.2 manual check.
+# This is historical v0.1 lineage integrity only. It is not a v0.3 release
+# input, and no v0.1 checklist or approval can satisfy a v0.3 manual check.
 V0_1_CAPTURE_PRODUCER_COMMIT = "c08b46d9fbd87477f45d130aa3c63615937c4dc3"
 _MAX_REPOSITORY_RELEASE_FILE_BYTES = 2 * 1024 * 1024
 
@@ -643,7 +643,7 @@ def _check_required_files(repository_root: Path) -> Check:
 
 
 def _check_frozen_v0_1_closure_records(repository_root: Path) -> Check:
-    """Require exact v0.1 closure bytes without treating them as v0.2 inputs."""
+    """Require exact v0.1 closure bytes without treating them as v0.3 inputs."""
 
     invalid: list[str] = []
     for relative_path, expected_digest in FROZEN_V0_1_CLOSURE_FILE_SHA256:
@@ -1894,7 +1894,7 @@ def _print_report(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the offline v0.2 release preflight. The default release-closure "
+            "Run the offline v0.3 release preflight. The default release-closure "
             "mode fails closed on open manual inputs."
         )
     )

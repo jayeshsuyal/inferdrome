@@ -144,28 +144,28 @@ def test_engineering_ci_preflight_resolves_phase_and_fetches_tags() -> None:
     assert '--phase "$RELEASE_PREFLIGHT_PHASE"' in engineering_job
 
 
-def test_active_preflight_series_uses_distinct_v0_2_release_inputs() -> None:
+def test_active_preflight_series_uses_distinct_v0_3_release_inputs() -> None:
     series = release_preflight.ACTIVE_RELEASE_SERIES
     source = (REPOSITORY_ROOT / "scripts/release_preflight.py").read_text(
         encoding="utf-8"
     )
 
-    assert series.name == "v0.2"
-    assert series.development_version == "0.2.0.dev0"
-    assert series.final_version == "0.2.0"
-    assert series.final_tag == "v0.2.0"
-    assert series.checklist_path == "docs/V0_2_RELEASE_CHECKLIST.md"
-    assert series.inputs_path == "docs/V0_2_RELEASE_INPUTS.md"
+    assert series.name == "v0.3"
+    assert series.development_version == "0.3.0.dev0"
+    assert series.final_version == "0.3.0"
+    assert series.final_tag == "v0.3.0"
+    assert series.checklist_path == "docs/V0_3_RELEASE_CHECKLIST.md"
+    assert series.inputs_path == "docs/V0_3_RELEASE_INPUTS.md"
     assert "docs/V0_1_RELEASE_CHECKLIST.md" not in release_preflight.REQUIRED_FILES
-    assert "active v0.2 release-series preflight" in source
+    assert "active v0.3 release-series preflight" in source
     assert "Inferdrome {ACTIVE_RELEASE_SERIES.name} release preflight" in source
     assert (
-        "offline v0.2 release preflight"
+        "offline v0.3 release preflight"
         in release_preflight.build_parser().format_help()
     )
 
 
-def test_v0_2_release_inputs_fail_closed_when_a_required_input_is_missing(
+def test_v0_3_release_inputs_fail_closed_when_a_required_input_is_missing(
     tmp_path: Path,
 ) -> None:
     _minimal_repository(tmp_path)
@@ -220,13 +220,13 @@ def test_active_release_files_reject_symlink_indirection(
     "relative_path",
     release_preflight.ACTIVE_RELEASE_SERIES.required_files,
 )
-def test_active_v0_2_input_and_checklist_symlinks_fail_their_own_checks(
+def test_active_v0_3_input_and_checklist_symlinks_fail_their_own_checks(
     tmp_path: Path,
     relative_path: str,
 ) -> None:
     _minimal_repository(tmp_path)
     path = tmp_path / relative_path
-    outside_target = tmp_path / "outside-v0-2-input"
+    outside_target = tmp_path / "outside-v0-3-input"
     outside_target.write_bytes(path.read_bytes())
     path.unlink()
     path.symlink_to(outside_target)
@@ -248,7 +248,7 @@ def test_active_v0_2_input_and_checklist_symlinks_fail_their_own_checks(
         )
 
 
-def test_active_v0_2_inputs_reject_an_intermediate_directory_symlink(
+def test_active_v0_3_inputs_reject_an_intermediate_directory_symlink(
     tmp_path: Path,
 ) -> None:
     _minimal_repository(tmp_path)
@@ -1435,7 +1435,7 @@ def test_release_closure_reports_open_manual_inputs(capsys) -> None:
     assert result == 1
     assert "[SKIPPED] engineering-gate" in captured
     assert "phase: candidate" in captured
-    assert "[PENDING] manual-v0-2-scope-review" in captured
+    assert "[PENDING] manual-v0-3-scope-review" in captured
     assert "result: BLOCKED" in captured
 
 

@@ -136,7 +136,7 @@ def _verify_installed_cli(package_root: Path, expected_version: str) -> None:
         raise AssertionError(
             "installed Inferdrome capabilities output is not an object"
         )
-    if capability_contract.get("schema_version") != "inferdrome.v0_2_capabilities.v1":
+    if capability_contract.get("schema_version") != "inferdrome.v0_3_capabilities.v1":
         raise AssertionError(
             "installed Inferdrome capabilities contract is unavailable"
         )
