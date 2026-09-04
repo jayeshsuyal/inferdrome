@@ -18,6 +18,7 @@ Its claims are deliberately narrow:
 | --- | --- | --- |
 | Local two-endpoint routing execution | `PROVEN_LOCAL_SOCKET_LEVEL` | Loopback/socket proof only; no GPU, Docker, cloud, or production-router claim. |
 | Attached external-router evidence | `LOCAL_FIXTURE_VALIDATED` | `llm-d-attached-v1` validates local supplied facts; it does not embed llm-d or claim a native llm-d API, live cluster, or observed router. |
+| Stale-telemetry qualification | `LOCAL_DETERMINISTIC_VALIDATED` | One virtual-time, six-request fresh-health/stale-load vector is sealed and replayed locally; it is not a model run, live router observation, or a general routing conclusion. |
 | Historical Qwen3-8B A10 evidence | `PRESERVED_EXTERNAL_ONLY` | Raw archive remains `EXTERNAL_ONLY`; it is not a v0.3 campaign or acceptance decision. |
 | Two-A100 multi-endpoint campaign | `UNEXECUTED` | No real two-A100 campaign evidence exists. |
 | GCP operation | `LOCAL_FAKE_VALIDATED` | No provider operation, invoice fact, GPU campaign, or production execution is claimed. |

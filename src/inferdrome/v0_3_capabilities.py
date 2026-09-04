@@ -17,11 +17,13 @@ CapabilityStatus = Literal[
     "UNEXECUTED",
     "LOCAL_FAKE_VALIDATED",
     "LOCAL_FIXTURE_VALIDATED",
+    "LOCAL_DETERMINISTIC_VALIDATED",
     "NOT_CLAIMED",
 ]
 CapabilityId = Literal[
     "local_routing_execution",
     "external_router_evidence_adapter",
+    "stale_telemetry_qualification",
     "historical_a10_serving_evidence",
     "two_a100_multi_endpoint_campaign",
     "gcp_operation",
@@ -83,6 +85,20 @@ V0_3_CAPABILITY_CONTRACT = V0_3CapabilityContract(
             limitation=(
                 "No native llm-d API, live cluster, router decision, or endpoint "
                 "telemetry has been observed by this profile."
+            ),
+        ),
+        V0_3Capability(
+            capability_id="stale_telemetry_qualification",
+            status="LOCAL_DETERMINISTIC_VALIDATED",
+            supported_fact=(
+                "A sealed virtual-time two-endpoint source package is replayed "
+                "and bound to an immutable descriptor for the fixed fresh-health/"
+                "stale-load scenario and three declared policy labels."
+            ),
+            limitation=(
+                "This is one synthetic six-request vector with one cold trial per "
+                "policy; it is not a model run, live router observation, or a "
+                "general routing conclusion."
             ),
         ),
         V0_3Capability(

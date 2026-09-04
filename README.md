@@ -44,6 +44,13 @@ endpoint/fallback, terminal outcome, reset/fault timeline, and complete request
 population. The demonstration is `SYNTHETIC_ONLY`; it is not GPU or cloud
 evidence.
 
+The additive [stale-telemetry qualification](docs/STALE_TELEMETRY_QUALIFICATION_V1.md)
+reuses that sealed request-level package for the fixed health-fresh/load-stale
+experiment. It compares three declared local policy labels under one virtual
+fault vector, keeps every six-request terminal population separate, and
+replays the source package offline. It does not create a live routing data
+plane, download a model, or claim a general routing winner.
+
 ## Project status
 
 The v0.1 product charter, pinned-vLLM `0.26.0` capability contract, and its
