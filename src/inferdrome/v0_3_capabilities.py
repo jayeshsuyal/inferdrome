@@ -1,8 +1,8 @@
-"""Closed released-v0.2 product capability and limitations contract.
+"""Closed v0.3 development capability and limitations contract.
 
-This is a claim boundary, not a runtime attestation or release decision.  Its
-small fixed surface makes the local demonstration and historical evidence
-status inspectable without turning Inferdrome into a verdict authority.
+The contract keeps current implementation facts separate from release, routing,
+promotion, cloud, and acceptance authority. It is a product-story sensor, not
+an attestation emitted by an external router or provider.
 """
 
 from __future__ import annotations
@@ -16,10 +16,12 @@ CapabilityStatus = Literal[
     "PRESERVED_EXTERNAL_ONLY",
     "UNEXECUTED",
     "LOCAL_FAKE_VALIDATED",
+    "LOCAL_FIXTURE_VALIDATED",
     "NOT_CLAIMED",
 ]
 CapabilityId = Literal[
     "local_routing_execution",
+    "external_router_evidence_adapter",
     "historical_a10_serving_evidence",
     "two_a100_multi_endpoint_campaign",
     "gcp_operation",
@@ -27,8 +29,8 @@ CapabilityId = Literal[
 ]
 
 
-class V0_2Capability(FrozenModel):
-    """One closed claim and the boundary that keeps it honest."""
+class V0_3Capability(FrozenModel):
+    """One bounded implementation fact and the limit that keeps it honest."""
 
     capability_id: CapabilityId
     status: CapabilityStatus
@@ -36,12 +38,12 @@ class V0_2Capability(FrozenModel):
     limitation: str
 
 
-class V0_2CapabilityContract(FrozenModel):
-    """The retained v0.2 product claim boundary, not the active CLI output."""
+class V0_3CapabilityContract(FrozenModel):
+    """The active v0.3 development product claim boundary."""
 
-    schema_version: Literal["inferdrome.v0_2_capabilities.v1"]
+    schema_version: Literal["inferdrome.v0_3_capabilities.v1"]
     product_role: Literal["MEASUREMENT_EVIDENCE_ONLY"]
-    capabilities: tuple[V0_2Capability, ...]
+    capabilities: tuple[V0_3Capability, ...]
     authorities_not_provided: tuple[
         Literal[
             "PRODUCTION_ROUTING",
@@ -53,11 +55,11 @@ class V0_2CapabilityContract(FrozenModel):
     ]
 
 
-V0_2_CAPABILITY_CONTRACT = V0_2CapabilityContract(
-    schema_version="inferdrome.v0_2_capabilities.v1",
+V0_3_CAPABILITY_CONTRACT = V0_3CapabilityContract(
+    schema_version="inferdrome.v0_3_capabilities.v1",
     product_role="MEASUREMENT_EVIDENCE_ONLY",
     capabilities=(
-        V0_2Capability(
+        V0_3Capability(
             capability_id="local_routing_execution",
             status="PROVEN_LOCAL_SOCKET_LEVEL",
             supported_fact=(
@@ -66,23 +68,36 @@ V0_2_CAPABILITY_CONTRACT = V0_2CapabilityContract(
                 "offline."
             ),
             limitation=(
-                "This local proof does not establish a GPU, Docker, cloud, or "
+                "This local proof does not establish GPU, Docker, cloud, or "
                 "production-routing operation."
             ),
         ),
-        V0_2Capability(
+        V0_3Capability(
+            capability_id="external_router_evidence_adapter",
+            status="LOCAL_FIXTURE_VALIDATED",
+            supported_fact=(
+                "The llm-d-attached-v1 profile validates supplied local router "
+                "facts into canonical, digest-bound evidence without importing "
+                "or controlling a router."
+            ),
+            limitation=(
+                "No native llm-d API, live cluster, router decision, or endpoint "
+                "telemetry has been observed by this profile."
+            ),
+        ),
+        V0_3Capability(
             capability_id="historical_a10_serving_evidence",
             status="PRESERVED_EXTERNAL_ONLY",
             supported_fact=(
                 "The historical Qwen3-8B A10 serving archive remains preserved "
-                "with its committed privacy-safe handoff metadata."
+                "with committed privacy-safe handoff metadata."
             ),
             limitation=(
-                "The raw archive remains EXTERNAL_ONLY and is not a new v0.2 "
+                "The raw archive remains EXTERNAL_ONLY and is not a v0.3 "
                 "campaign, hardware comparison, or acceptance decision."
             ),
         ),
-        V0_2Capability(
+        V0_3Capability(
             capability_id="two_a100_multi_endpoint_campaign",
             status="UNEXECUTED",
             supported_fact=(
@@ -94,7 +109,7 @@ V0_2_CAPABILITY_CONTRACT = V0_2CapabilityContract(
                 "neither same-host nor distributed execution is claimed."
             ),
         ),
-        V0_2Capability(
+        V0_3Capability(
             capability_id="gcp_operation",
             status="LOCAL_FAKE_VALIDATED",
             supported_fact=(
@@ -106,7 +121,7 @@ V0_2_CAPABILITY_CONTRACT = V0_2CapabilityContract(
                 "or GPU campaign is claimed."
             ),
         ),
-        V0_2Capability(
+        V0_3Capability(
             capability_id="kubernetes_operation",
             status="NOT_CLAIMED",
             supported_fact=(

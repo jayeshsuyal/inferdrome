@@ -1,6 +1,6 @@
 # Inferdrome v0.2 capability and limitations contract
 
-Status: **Active product claim boundary**
+Status: **Released v0.2 baseline; retained historical claim boundary**
 
 Inferdrome v0.2 is an evidence plane and qualification harness for changes to
 open-weight inference systems. It binds configuration to observation identity
@@ -10,11 +10,13 @@ does not operate a production router, decide promotion, or issue an acceptance
 verdict. Measurements are sensors that feed the evidence chain, not a model
 leaderboard or standalone product score.
 
-The executable contract is `inferdrome.v0_2_capabilities.v1`. Inspect the
-exact machine-readable form with:
+The retained executable contract is `inferdrome.v0_2_capabilities.v1`. The
+active `python -m inferdrome capabilities` command reports the current v0.3
+development boundary instead; this document preserves the v0.2 release basis.
+Inspect the retained exact machine-readable form with:
 
 ```bash
-python -m inferdrome capabilities
+python -c 'from inferdrome.v0_2_capabilities import V0_2_CAPABILITY_CONTRACT; print(V0_2_CAPABILITY_CONTRACT.model_dump_json())'
 ```
 
 ## What is established, and what is not

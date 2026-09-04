@@ -697,11 +697,11 @@ def _command_dashboard(namespace: argparse.Namespace) -> int:
 
 
 def _command_capabilities(_: argparse.Namespace) -> int:
-    """Render the closed v0.2 capability and limitations contract."""
+    """Render the closed active v0.3 capability and limitations contract."""
 
-    from inferdrome.v0_2_capabilities import V0_2_CAPABILITY_CONTRACT
+    from inferdrome.v0_3_capabilities import V0_3_CAPABILITY_CONTRACT
 
-    _json_output(V0_2_CAPABILITY_CONTRACT.model_dump(mode="json"))
+    _json_output(V0_3_CAPABILITY_CONTRACT.model_dump(mode="json"))
     return 0
 
 
@@ -794,7 +794,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     capabilities = commands.add_parser(
         "capabilities",
-        help="print the active v0.2 capability and limitations contract",
+        help="print the active v0.3 capability and limitations contract",
     )
     capabilities.set_defaults(handler=_command_capabilities)
 

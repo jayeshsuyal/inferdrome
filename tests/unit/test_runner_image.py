@@ -13,6 +13,7 @@ from urllib.error import URLError
 
 import pytest
 
+from inferdrome import __version__
 from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.runner import RunnerError, build_parser, run_endpoint_request
 
@@ -69,6 +70,12 @@ def test_runner_dockerfile_has_pinned_base_non_root_and_locked_install() -> None
     ) in dockerfile
     assert "/usr/share/licenses/inferdrome/" in dockerfile
     assert "/opt/inferdrome-runtime/bin/inferdrome --version" in dockerfile
+
+
+def test_packaged_runtime_dockerfile_defaults_match_the_package_version() -> None:
+    for filename in ("Dockerfile", "Dockerfile.vllm-benchmark-runner"):
+        dockerfile = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
+        assert f"ARG INFERDROME_VERSION={__version__}" in dockerfile
 
 
 def test_package_license_metadata_and_notices_are_pinned() -> None:
