@@ -361,9 +361,7 @@ def _command_trial_set_create(namespace: argparse.Namespace) -> int:
             "controlled_comparison_authority_issues": list(
                 verified.comparison_authority.issues
             ),
-            "controlled_comparison_scope": (
-                verified.comparison_authority.scope
-            ),
+            "controlled_comparison_scope": (verified.comparison_authority.scope),
             "member_count": len(verified.descriptor.members),
             "path": str(verified.path),
             "trial_set_digest": verified.trial_set_digest,
@@ -387,9 +385,7 @@ def _command_trial_set_verify(namespace: argparse.Namespace) -> int:
             "controlled_comparison_authority_issues": list(
                 verified.comparison_authority.issues
             ),
-            "controlled_comparison_scope": (
-                verified.comparison_authority.scope
-            ),
+            "controlled_comparison_scope": (verified.comparison_authority.scope),
             "execution_fingerprint": (verified.descriptor.execution_fingerprint),
             "member_count": len(verified.members),
             "trial_set_digest": verified.trial_set_digest,
@@ -414,9 +410,7 @@ def _command_trial_set_summarize(namespace: argparse.Namespace) -> int:
             "controlled_comparison_authority_issues": list(
                 verified.comparison_authority.issues
             ),
-            "controlled_comparison_scope": (
-                verified.comparison_authority.scope
-            ),
+            "controlled_comparison_scope": (verified.comparison_authority.scope),
             "inference": "DESCRIPTIVE_ONLY",
             "member_count": len(verified.members),
             "request_population_policy": "separate_per_run_v1",
@@ -584,9 +578,7 @@ def _command_comparison_plan_execute(namespace: argparse.Namespace) -> int:
     value = _comparison_result_json(executed.result)
     value.update(
         {
-            "baseline_trial_set_digest": (
-                executed.baseline_trial_set.trial_set_digest
-            ),
+            "baseline_trial_set_digest": (executed.baseline_trial_set.trial_set_digest),
             "baseline_trial_set_id": (
                 executed.baseline_trial_set.descriptor.trial_set_id
             ),
@@ -598,9 +590,7 @@ def _command_comparison_plan_execute(namespace: argparse.Namespace) -> int:
             ),
             "comparison_plan_digest": executed.plan.comparison_plan_digest,
             "executed_run_ids": executed.executed_run_ids,
-            "planned_run_count": len(
-                executed.plan.descriptor.ordered_schedule
-            ),
+            "planned_run_count": len(executed.plan.descriptor.ordered_schedule),
             "reused_run_ids": executed.reused_run_ids,
         }
     )
@@ -689,6 +679,12 @@ def _command_dashboard(namespace: argparse.Namespace) -> int:
         comparison_plans_root=_path(namespace, "comparison_plans_root"),
         comparison_results_root=_path(namespace, "comparison_results_root"),
         routing_campaigns_root=_optional_path(namespace, "routing_campaigns_root"),
+        routing_qualifications_root=_optional_path(
+            namespace, "routing_qualification_root"
+        ),
+        expected_routing_qualification_digest=_optional_text(
+            namespace, "routing_qualification_digest"
+        ),
         port=cast(int, namespace.port),
         open_browser=cast(bool, namespace.open_browser),
         keyring_path=_optional_path(namespace, "keyring"),
@@ -732,9 +728,7 @@ def _command_dashboard_keyring_list(namespace: argparse.Namespace) -> int:
     from inferdrome.dashboard.auth import DashboardKeyringStore
 
     _json_output(
-        {
-            "keys": DashboardKeyringStore(_keyring_path(namespace)).list_public()
-        }
+        {"keys": DashboardKeyringStore(_keyring_path(namespace)).list_public()}
     )
     return 0
 
@@ -1056,9 +1050,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(QWEN3_8B_PROFILE_ID,),
         help="opt into one exact operational model/workload profile",
     )
-    comparison_plan_execute.set_defaults(
-        handler=_command_comparison_plan_execute
-    )
+    comparison_plan_execute.set_defaults(handler=_command_comparison_plan_execute)
 
     comparison_result = commands.add_parser(
         "comparison-result",
@@ -1155,6 +1147,17 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument(
         "--routing-campaigns-root",
         help="one sealed routing-campaign-v1 package root to project read-only",
+    )
+    dashboard.add_argument(
+        "--routing-qualification-root",
+        help=(
+            "one sealed stale-telemetry qualification root; requires the routing "
+            "campaign root and retained qualification digest"
+        ),
+    )
+    dashboard.add_argument(
+        "--routing-qualification-digest",
+        help="externally retained sha256 digest for the configured qualification",
     )
     dashboard.add_argument(
         "--port",

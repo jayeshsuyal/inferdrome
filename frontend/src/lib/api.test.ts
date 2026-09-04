@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import { api, setDashboardToken } from "./api";
 import {
   baselineRunIds,
   baselineTrialSetSummary,
@@ -242,6 +242,92 @@ const routingDetail = {
   interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY" as const,
 };
 
+const routingQualificationSummary = {
+  qualification_id: "stale-telemetry-qualification-v1" as const,
+  retained_digest: `sha256:${"8".repeat(64)}`,
+  source_campaign_id: "routing-campaign-v1" as const,
+  source_package_retained_digest: routingSummary.retained_digest,
+  source_execution_mode: "SYNTHETIC_CPU_ONLY" as const,
+  repetitions_per_mode: 1 as const,
+  population_accounting: "SEPARATE_PER_TRIAL_NO_POOLING" as const,
+  verified_by_source_replay: true as const,
+  verified_descriptor_binding: true as const,
+};
+
+function qualificationTrial(
+  policyId: "fail_closed_required_load_v1" | "explicit_fail_open_stale_load_v1" | "typed_admissible_state_only_v1",
+  trialId: string,
+) {
+  const selected = policyId === "fail_closed_required_load_v1" ? null : policyId === "explicit_fail_open_stale_load_v1" ? "endpoint-b" : "endpoint-a";
+  const fallback = policyId === "fail_closed_required_load_v1" ? "REQUIRED_LOAD_STALE" : policyId === "explicit_fail_open_stale_load_v1" ? "STALE_LOAD_FAIL_OPEN" : "HEALTH_ONLY_TIE_BREAK";
+  const terminal = policyId === "fail_closed_required_load_v1" ? "NO_SAFE_ROUTE" : policyId === "explicit_fail_open_stale_load_v1" ? "TIMED_OUT" : "SUCCEEDED";
+  const population = policyId === "fail_closed_required_load_v1"
+    ? [2, 0, 0, 0, 4]
+    : policyId === "explicit_fail_open_stale_load_v1"
+      ? [2, 4, 0, 0, 0]
+      : [6, 0, 0, 0, 0];
+  return {
+    policy_id: policyId,
+    repetition_index: 0,
+    trial_id: trialId,
+    request_denominator: 6,
+    reset: {
+      virtual_time_ms: 0,
+      endpoint_a_instance_id: `${trialId}-endpoint-a-instance-v1`,
+      endpoint_b_instance_id: `${trialId}-endpoint-b-instance-v1`,
+      observer_epochs: [1, 1, 1],
+      queue_cleared: true,
+      load_state_cleared: true,
+      kv_state_cleared: true,
+    },
+    focal_request_id: "request-002" as const,
+    focal_decision_id: `decision-${trialId}-002`,
+    focal_endpoint_states: ["endpoint-a", "endpoint-b"].map((endpoint_id) => ({
+      endpoint_id,
+      health_epoch: 1,
+      health_age_ms: 0,
+      health_admissibility: "ADMISSIBLE" as const,
+      load_epoch: 1,
+      load_age_ms: 10,
+      load_admissibility: "INADMISSIBLE" as const,
+    })),
+    selected_endpoint_id: selected,
+    fallback_reason: fallback,
+    terminal_status: terminal,
+    terminal_reason: fallback,
+    reset_receipt_sha256: `sha256:${"1".repeat(64)}`,
+    state_observations_sha256: `sha256:${"2".repeat(64)}`,
+    route_decisions_sha256: `sha256:${"3".repeat(64)}`,
+    terminal_outcomes_sha256: `sha256:${"4".repeat(64)}`,
+    terminal_population: ["SUCCEEDED", "TIMED_OUT", "FAILED", "CANCELLED", "NO_SAFE_ROUTE"].map((status) => ({
+      status,
+      count: population[["SUCCEEDED", "TIMED_OUT", "FAILED", "CANCELLED", "NO_SAFE_ROUTE"].indexOf(status)],
+    })),
+    terminal_population_total: 6,
+  };
+}
+
+const routingQualificationDetail = {
+  projection_version: "inferdrome.routing-qualification-dashboard.v1",
+  summary: routingQualificationSummary,
+  fault_timeline: {
+    load_observer_pause_at_ms: 15,
+    health_collection_continues: true,
+    focal_decision_time_ms: 20,
+    health_age_ms: 0,
+    load_age_ms: 10,
+    freshness_bound_ms: 5,
+  },
+  trials: [
+    qualificationTrial("fail_closed_required_load_v1", "trial-fail-closed-v1"),
+    qualificationTrial("explicit_fail_open_stale_load_v1", "trial-fail-open-v1"),
+    qualificationTrial("typed_admissible_state_only_v1", "trial-typed-v1"),
+  ],
+  source_receipts_path: "/routing-campaigns/routing-campaign-v1" as const,
+  descriptor_download_path: "/api/v1/routing-qualifications/stale-telemetry-qualification-v1/evidence" as const,
+  interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY" as const,
+};
+
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status: 200,
@@ -249,7 +335,11 @@ function jsonResponse(value: unknown): Response {
   });
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  setDashboardToken(null);
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("dashboard API client", () => {
   it("accepts the exact run index projection", async () => {
@@ -477,6 +567,131 @@ describe("dashboard API client", () => {
     }))));
 
     await expect(api.getRoutingCampaign("routing-campaign-v1")).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("allowlist"),
+    });
+  });
+
+  it("reads the source-replayed, descriptor-bound causal qualification", async () => {
+    const index = {
+      projection_version: "inferdrome.routing-qualification-dashboard.v1",
+      routing_qualifications: [routingQualificationSummary],
+      rejected: [],
+      page: { limit: 25, returned: 1, total: 1, has_more: false, next_cursor: null },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(index))
+      .mockResolvedValueOnce(jsonResponse(routingQualificationDetail));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const qualifications = await api.listRoutingQualifications();
+    const detail = await api.getRoutingQualification("stale-telemetry-qualification-v1");
+
+    expect(qualifications.routing_qualifications).toHaveLength(1);
+    expect(detail.summary.verified_by_source_replay).toBe(true);
+    expect(detail.summary.verified_descriptor_binding).toBe(true);
+    expect(detail.trials.map((trial) => trial.terminal_population_total)).toEqual([6, 6, 6]);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/routing-qualifications?limit=25");
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "/api/v1/routing-qualifications/stale-telemetry-qualification-v1",
+    );
+  });
+
+  it("fails closed when a causal qualification loses its fixed freshness binding", async () => {
+    const malformed = structuredClone(routingQualificationDetail);
+    malformed.trials[0].focal_endpoint_states[0].load_age_ms = 0;
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(malformed))));
+
+    await expect(api.getRoutingQualification("stale-telemetry-qualification-v1")).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("fixed stale-load/fresh-health state"),
+    });
+  });
+
+  it("fails closed when a complete causal population disagrees with its declared mode", async () => {
+    const malformed = structuredClone(routingQualificationDetail);
+    malformed.trials[0].terminal_population[0].count = 3;
+    malformed.trials[0].terminal_population[4].count = 3;
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(malformed))));
+
+    await expect(api.getRoutingQualification("stale-telemetry-qualification-v1")).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("terminal_population disagrees with the declared mode"),
+    });
+  });
+
+  it("fails closed when a causal trial reuses another cold-reset identity", async () => {
+    const malformed = structuredClone(routingQualificationDetail);
+    malformed.trials[1].reset.endpoint_a_instance_id = malformed.trials[0].reset.endpoint_a_instance_id;
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(malformed))));
+
+    await expect(api.getRoutingQualification("stale-telemetry-qualification-v1")).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("complete cold-reset receipt"),
+    });
+  });
+
+  it("rejects an evidence download when its digest does not bind the rendered descriptor", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("{}", {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "content-disposition": 'attachment; filename="stale-telemetry-qualification-v1.json"',
+        "x-inferdrome-evidence-digest": `sha256:${"0".repeat(64)}`,
+      },
+    }))));
+
+    await expect(api.downloadRoutingQualification(
+      "stale-telemetry-qualification-v1",
+      routingQualificationSummary.retained_digest,
+    )).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("does not match the rendered descriptor"),
+    });
+  });
+
+  it("downloads descriptor evidence through the authenticated GET-only path", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response("{}", {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "content-disposition": 'attachment; filename="stale-telemetry-qualification-v1.json"',
+        "x-inferdrome-evidence-digest": routingQualificationSummary.retained_digest,
+      },
+    })));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const createObjectURL = vi.fn(() => "blob:qualification");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    setDashboardToken("test-dashboard-token");
+
+    await expect(api.downloadRoutingQualification(
+      "stale-telemetry-qualification-v1",
+      routingQualificationSummary.retained_digest,
+    )).resolves.toBe(routingQualificationSummary.retained_digest);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/routing-qualifications/stale-telemetry-qualification-v1/evidence",
+      expect.objectContaining({
+        method: "GET",
+        headers: expect.objectContaining({ Authorization: "Bearer test-dashboard-token" }),
+      }),
+    );
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(click).toHaveBeenCalledOnce();
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:qualification");
+  });
+
+  it("fails closed when causal qualification content exceeds its allowlist", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      ...routingQualificationDetail,
+      raw_descriptor_path: "/must-not-render",
+    }))));
+
+    await expect(api.getRoutingQualification("stale-telemetry-qualification-v1")).rejects.toMatchObject({
       status: 502,
       message: expect.stringContaining("allowlist"),
     });

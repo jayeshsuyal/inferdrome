@@ -4760,9 +4760,225 @@ td strong {
   margin-top: 15px;
 }
 
+/* Causal qualification is a compact cross-policy view over the already
+ * detailed R1 receipt browser. Wide tables are intentionally contained in the
+ * existing horizontal-scroll boundary rather than widening the document. */
+.routing-qualifications-panel,
+.routing-qualification-rejections,
+.qualification-comparison-panel,
+.qualification-populations-panel,
+.qualification-resets-panel,
+.qualification-evidence-panel {
+  margin-top: 14px;
+}
+
+.routing-qualification-scope-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px 14px;
+  margin: 12px 0 14px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.routing-qualification-scope-note > svg {
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.routing-qualification-scope-note strong,
+.routing-qualification-scope-note p {
+  margin: 0;
+}
+
+.routing-qualification-scope-note strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.routing-qualification-scope-note p {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.routing-qualification-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.routing-qualification-link:hover {
+  color: var(--accent-strong);
+}
+
+.routing-qualification-link svg {
+  width: 13px;
+  height: 13px;
+}
+
+.routing-qualifications-table {
+  min-width: 820px;
+}
+
+.routing-qualifications-table td code {
+  font-size: 8px;
+}
+
+.qualification-boundary {
+  margin-bottom: 14px;
+}
+
+.qualification-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.qualification-comparison-table {
+  min-width: 1120px;
+}
+
+.qualification-comparison-table th,
+.qualification-comparison-table td,
+.qualification-resets-table th,
+.qualification-resets-table td {
+  vertical-align: top;
+}
+
+.qualification-change-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 160px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.qualification-change-copy strong {
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.qualification-candidate-state {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(176px, 1fr));
+  gap: 7px;
+}
+
+.qualification-candidate-state > div {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.qualification-candidate-state strong {
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.qualification-candidate-state b {
+  font-weight: 590;
+}
+
+.qualification-populations-table {
+  min-width: 920px;
+}
+
+.qualification-populations-table th:not(:first-child),
+.qualification-populations-table td:not(:first-child) {
+  text-align: right;
+}
+
+.qualification-resets-table {
+  min-width: 890px;
+}
+
+.qualification-resets-table td > svg {
+  width: 13px;
+  height: 13px;
+  margin-right: 5px;
+  vertical-align: -2px;
+  color: var(--accent);
+}
+
+.qualification-evidence-panel {
+  display: grid;
+  gap: 0;
+}
+
+.qualification-evidence-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 15px;
+  border-top: 1px solid var(--border);
+}
+
+.qualification-evidence-actions > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  min-width: 0;
+}
+
+.qualification-evidence-actions > div > svg {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.qualification-evidence-actions strong,
+.qualification-evidence-actions span {
+  display: block;
+}
+
+.qualification-evidence-actions strong {
+  margin-bottom: 3px;
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.qualification-evidence-actions span,
+.qualification-download-state {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.qualification-download-state {
+  padding: 0 15px 13px;
+  margin: 0;
+}
+
+.qualification-download-error {
+  color: var(--danger);
+}
+
 @media (max-width: 900px) {
   .routing-overview-grid,
-  .routing-reset-grid {
+  .routing-reset-grid,
+  .qualification-overview-grid {
     grid-template-columns: 1fr;
   }
 
@@ -4793,6 +5009,16 @@ td strong {
   .routing-fault-timeline strong {
     grid-column: 2;
     text-align: left;
+  }
+
+  .qualification-evidence-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .qualification-evidence-actions > .button {
+    width: 100%;
+    justify-content: center;
   }
 }
 

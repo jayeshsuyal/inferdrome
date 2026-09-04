@@ -27,12 +27,20 @@ from inferdrome.dashboard.routing_campaign_models import (
     RoutingCampaignDetail,
     RoutingCampaignIndexResponse,
 )
+from inferdrome.dashboard.routing_qualification import (
+    RoutingQualificationDashboardIndex,
+)
+from inferdrome.dashboard.routing_qualification_models import (
+    RoutingQualificationDetail,
+    RoutingQualificationIndexResponse,
+)
 from inferdrome.errors import (
     DashboardAuthError,
     DashboardControlledComparisonNotFound,
     DashboardError,
     DashboardPaginationError,
     DashboardRoutingCampaignNotFound,
+    DashboardRoutingQualificationNotFound,
     DashboardRunNotFound,
     DashboardTrialSetNotFound,
 )
@@ -51,6 +59,9 @@ _BEARER = HTTPBearer(auto_error=False, scheme_name="DashboardBearer")
 _AUTH_HEADER_RE = re.compile(r"^Bearer ([A-Za-z0-9._-]+)$")
 _AUTH_FAILURE = "dashboard authentication failed"
 _AUTH_UNAVAILABLE = "dashboard authentication data unavailable"
+_ROUTING_QUALIFICATION_UNAVAILABLE = (
+    "routing-qualification verification work is temporarily unavailable"
+)
 
 
 def _auth_error(status_code: int, detail: str) -> HTTPException:
@@ -72,9 +83,7 @@ def _authorization_headers(request: Request) -> tuple[str, ...]:
 
 def _require_dashboard_read(
     request: Request,
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Security(_BEARER)
-    ],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_BEARER)],
     *,
     store: DashboardKeyringStore,
 ) -> None:
@@ -103,6 +112,9 @@ def create_app(
     runs_root: Path | None = None,
     routing_campaign_index: RoutingCampaignDashboardIndex | None = None,
     routing_campaigns_root: Path | None = None,
+    routing_qualification_index: RoutingQualificationDashboardIndex | None = None,
+    routing_qualifications_root: Path | None = None,
+    expected_routing_qualification_digest: str | None = None,
     static_dir: Path | None = None,
     keyring_path: Path | None = None,
 ) -> FastAPI:
@@ -118,6 +130,20 @@ def create_app(
         )
     if routing_campaign_index is None:
         routing_campaign_index = RoutingCampaignDashboardIndex(routing_campaigns_root)
+    if routing_qualification_index is not None and (
+        routing_qualifications_root is not None
+        or expected_routing_qualification_digest is not None
+    ):
+        raise ValueError(
+            "create_app accepts either a routing qualification index or "
+            "configuration, not both"
+        )
+    if routing_qualification_index is None:
+        routing_qualification_index = RoutingQualificationDashboardIndex(
+            routing_campaigns_root=routing_campaigns_root,
+            routing_qualifications_root=routing_qualifications_root,
+            expected_qualification_digest=expected_routing_qualification_digest,
+        )
 
     auth_store = (
         DashboardKeyringStore(keyring_path) if keyring_path is not None else None
@@ -155,9 +181,7 @@ def create_app(
 
     def require_dashboard_read(
         request: Request,
-        credentials: Annotated[
-            HTTPAuthorizationCredentials | None, Security(_BEARER)
-        ],
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_BEARER)],
     ) -> None:
         if auth_store is None:
             return
@@ -351,6 +375,74 @@ def create_app(
                 status_code=503,
                 detail="routing-campaign verification work is temporarily unavailable",
             ) from None
+
+    @app.get(
+        "/api/v1/routing-qualifications",
+        response_model=RoutingQualificationIndexResponse,
+        dependencies=protected_dependencies,
+    )
+    def list_routing_qualifications(
+        limit: Annotated[int, Query(ge=1, le=25)] = 25,
+    ) -> RoutingQualificationIndexResponse:
+        try:
+            return routing_qualification_index.refresh(limit=limit)
+        except DashboardPaginationError:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid routing-qualification pagination cursor",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail=_ROUTING_QUALIFICATION_UNAVAILABLE,
+            ) from None
+
+    @app.get(
+        "/api/v1/routing-qualifications/{qualification_id}",
+        response_model=RoutingQualificationDetail,
+        dependencies=protected_dependencies,
+    )
+    def get_routing_qualification(qualification_id: str) -> RoutingQualificationDetail:
+        try:
+            return routing_qualification_index.get_qualification(qualification_id)
+        except DashboardRoutingQualificationNotFound:
+            raise HTTPException(
+                status_code=404,
+                detail="routing qualification not found",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail=_ROUTING_QUALIFICATION_UNAVAILABLE,
+            ) from None
+
+    @app.get(
+        "/api/v1/routing-qualifications/{qualification_id}/evidence",
+        dependencies=protected_dependencies,
+    )
+    def get_routing_qualification_evidence(qualification_id: str) -> Response:
+        try:
+            content, digest = routing_qualification_index.get_evidence(qualification_id)
+        except DashboardRoutingQualificationNotFound:
+            raise HTTPException(
+                status_code=404,
+                detail="routing qualification not found",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail=_ROUTING_QUALIFICATION_UNAVAILABLE,
+            ) from None
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    'attachment; filename="stale-telemetry-qualification-v1.json"'
+                ),
+                "X-Inferdrome-Evidence-Digest": digest,
+            },
+        )
 
     selected_static = static_dir or Path(__file__).with_name("static")
     if (selected_static / "index.html").is_file():

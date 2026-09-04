@@ -30,18 +30,27 @@ Then, from the repository root, run:
 The command creates a persistent `~/.inferdrome/local-demo` workspace outside
 the Git checkout, freezes one two-arm comparison, executes four synthetic runs
 through the production CLI, publishes both Trial Sets and the comparison
-result, and seals one fixed two-endpoint `routing-campaign-v1` package. It
-independently reverifies both the comparison result and the routing package,
-prints the claim boundary, and opens the loopback dashboard at
+result, seals one fixed two-endpoint `routing-campaign-v1` package, and binds
+it to one immutable `stale-telemetry-qualification-v1` descriptor. It
+independently reverifies the comparison result, routing package, and descriptor
+binding; then it prints the claim boundary and opens the loopback dashboard at
 `http://127.0.0.1:8787`. Press Ctrl-C to stop the server.
 
-The **Routing campaigns** view is the causal routing walkthrough. It starts
+The **Routing campaigns** view is the full request-receipt walkthrough. It starts
 from one cold reset per policy, shows the controlled pause of load collection
 while health remains fresh, then binds each request's telemetry
 age/admissibility to its candidates, selection or fallback reason, endpoint,
 terminal outcome, and full terminal population. The package is
 `SYNTHETIC_CPU_ONLY`: it is an inspectable evidence path, not a live GPU,
 cloud, or production-routing claim.
+
+The **Causal qualification** view is the compact policy comparison for the
+same sealed source. It makes the fixed load-pause/fresh-health observation at
+20 ms explicit, then shows what each declared mode saw, selected or rejected,
+and terminalized. Each cold trial retains its own six-request terminal
+population—there is no pooled score, winner, promotion control, or acceptance
+verdict. The descriptor download contains only its canonical integrity binding;
+the complete request-level receipts remain in Routing campaigns.
 
 The controlled result is intentionally `INCOMPARABLE`. Four controls close.
 `COMPLETE_EQUAL_OBSERVED_ENVIRONMENT` remains unsatisfied because the synthetic
@@ -54,8 +63,9 @@ also returns `INCOMPARABLE`, shows the bounded eligibility/contract reasons and
 configuration context, and suppresses all deltas. Neutral run-level exploration
 remains available only in explicitly `DESCRIPTIVE_ONLY` Trial Set views.
 
-The second invocation does not create replacement runs or a replacement routing
-package. It requires the retained digests, verifies the existing immutable
+The second invocation does not create replacement runs, a replacement routing
+package, or a replacement qualification descriptor. It requires retained
+digests, verifies the existing immutable
 artifacts, and reuses all four exact run IDs. A missing digest, changed source,
 damaged artifact, incomplete schedule, or occupied identity fails closed.
 
@@ -88,9 +98,12 @@ Use a five-minute walkthrough:
 6. Open **Routing campaigns** and the verified campaign to trace a stale-load /
    fresh-health observation through candidates, fallback or selected endpoint,
    terminal receipt, reset, fault timeline, and complete request population.
-7. Open **Compare two runs** to show the explicit synthetic/missing-contract
+7. Open **Causal qualification** to compare the three declared modes at the
+   fixed focal request, verify replay/integrity state, and download its bounded
+   canonical descriptor.
+8. Open **Compare two runs** to show the explicit synthetic/missing-contract
    incompatibility reasons, configuration context, and suppressed deltas.
-8. Close on the boundary: this recording contains no genuine GPU receipt,
+9. Close on the boundary: this recording contains no genuine GPU receipt,
    cloud operation, or production-routing result.
 
 Recommended opening line:
@@ -142,7 +155,13 @@ Use this as a read-aloud guide while moving through the routes above:
    It is a sealed, replay-verified synthetic package—not a live routing data
    plane or GPU result.”
 
-5. **3:25 — Deployment layer.** “Docker changes the packaging and runtime
+5. **3:20 — Causal qualification.** “This compact view uses the same
+   replay-verified source package and an immutable descriptor. It compares the
+   three declared mode labels at one fixed stale-load/fresh-health observation,
+   keeping all terminal populations separate. The dashboard explains what was
+   observed; it does not declare one mode a winner or issue a verdict.”
+
+6. **3:45 — Deployment layer.** “Docker changes the packaging and runtime
    boundary: the runner image and serving runtime remain separate, and the local
    Compose qualification is synthetic. A Docker image or digest is not an
    execution receipt. GCP is represented here by offline inventory and guarded
@@ -152,7 +171,7 @@ Use this as a read-aloud guide while moving through the routes above:
    deployment surfaces change where the benchmark components run, not the frozen
    measurement methodology or evidence schemas.”
 
-6. **4:15 — ExitSpec boundary and close.** “Inferdrome supplies measurements,
+7. **4:20 — ExitSpec boundary and close.** “Inferdrome supplies measurements,
    provenance, integrity, and a portable bundle. Independent acceptance starts
    after this point: ExitSpec owns evaluation against a customer contract and
    any `PASS`, `FAIL`, or `NOT_PROVEN` outcome. Inferdrome does not issue that
@@ -166,6 +185,6 @@ The populated Playwright release test invokes this launcher with
 `--prepare-only --json`, boots the real server over its generated roots, clicks
 every dashboard route, reloads every deep link, checks the visible synthetic
 label, rejects browser/network errors, and requires GET-only API traffic. The
-engineering integration test runs the launcher twice and proves exact four-run
-and routing-package reuse on the second invocation, then rejects a tampered
-routing package.
+engineering integration test runs the launcher twice and proves exact four-run,
+routing-package, and qualification reuse on the second invocation, then rejects
+a tampered routing package.

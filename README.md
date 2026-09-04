@@ -38,17 +38,21 @@ For an interviewable local walkthrough, run:
 ```
 
 It creates and independently rechecks a sealed, deterministic two-endpoint
-routing campaign before launching the read-only dashboard. The **Routing
-campaigns** view explains observation age/admissibility, routing decision,
+routing campaign plus an immutable stale-telemetry qualification descriptor
+before launching the read-only dashboard. The **Routing campaigns** view
+explains every observation age/admissibility, routing decision,
 endpoint/fallback, terminal outcome, reset/fault timeline, and complete request
-population. The demonstration is `SYNTHETIC_ONLY`; it is not GPU or cloud
-evidence.
+population. The **Causal qualification** view gives a compact, verified
+cross-policy explanation of the fixed health-fresh/load-stale observation and
+links back to those full receipts. The demonstration is `SYNTHETIC_ONLY`; it
+is not GPU or cloud evidence.
 
 The additive [stale-telemetry qualification](docs/STALE_TELEMETRY_QUALIFICATION_V1.md)
 reuses that sealed request-level package for the fixed health-fresh/load-stale
 experiment. It compares three declared local policy labels under one virtual
 fault vector, keeps every six-request terminal population separate, and
-replays the source package offline. It does not create a live routing data
+replays the source package offline. Its [dashboard projection](docs/ROUTING_QUALIFICATION_DASHBOARD_V1.md)
+is read-only and descriptor-only for evidence download. It does not create a live routing data
 plane, download a model, or claim a general routing winner.
 
 ## Project status
