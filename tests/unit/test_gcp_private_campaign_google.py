@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -13,6 +15,7 @@ from urllib.error import HTTPError
 import pytest
 
 import inferdrome.deployment.gcp_private_campaign_google as campaign_google
+import inferdrome.deployment.gcp_private_campaign_watchdog_v3 as watchdog_v3
 from inferdrome.deployment.gcp_private_campaign_google import (
     GoogleGcpPrivateCampaignTransport,
     _ComputeCredentialBinding,
@@ -478,6 +481,22 @@ def live_google_capability(
     type.  These tests use a real local worker and journal rather than a
     structurally compatible authority, while keeping all Compute clients fake.
     """
+
+    if not watchdog_v3._pidfd_send_available():
+        pytest.skip("requires Linux pidfd support for the live Google boundary")
+    opener = getattr(os, "pidfd_open", None)
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if not callable(opener) or not callable(sender):
+        pytest.skip("requires Linux pidfd support for the live Google boundary")
+    pidfd: int | None = None
+    try:
+        pidfd = opener(os.getpid(), 0)
+        sender(pidfd, 0)
+    except (OSError, TypeError, ValueError):
+        pytest.skip("requires kernel pidfd signalling for the live Google boundary")
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
 
     watchdogs: list[GcpPrivateCampaignWatchdog] = []
 

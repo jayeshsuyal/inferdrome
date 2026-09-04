@@ -25,7 +25,11 @@ fsync activation record -> detached cleanup-only worker -> READY receipt
 one-use exact-request capability + durable CREATE_CLAIMED
                     |
                     v
-fresh capability recheck -> optional Google SDK/client -> locked exact insert
+fresh capability recheck -> optional Google SDK/client + read-only preflights
+                    |
+                    v
+fsync CREATE_SUBMITTED -> final locked/local recheck -> unlocked
+InstancesClient.insert
 ```
 
 The activation record binds the exact proposal, create request and startup
@@ -37,10 +41,13 @@ local state, not a signature or evidence of human authorship.
 The Google create factory accepts only the opaque, one-use capability that the
 ready worker issued. It binds that capability to the exact proposal and create
 request under the core journal lock before importing the optional Google SDK.
-The same lock is held across the final `InstancesClient.insert`, so cleanup
-cannot revoke an unclaimed create edge and then race a later insert. Missing,
-stale, mismatched, replayed, tampered, or dead-worker state fails closed before
-the SDK/client/create edge.
+`CREATE_SUBMITTED` is fsync-durable before any possible insert byte; the core
+lock is then released before `InstancesClient.insert`, with one final
+locked/local recheck at that provider edge. If cleanup takes control, its
+irreversible Linux-pidfd fence stops the exact creator before conservative
+reconciliation may reason about terminal cleanup. Missing, stale, mismatched,
+replayed, tampered, or dead-worker state fails closed before the SDK/client/
+create edge.
 
 ## Worker behavior
 

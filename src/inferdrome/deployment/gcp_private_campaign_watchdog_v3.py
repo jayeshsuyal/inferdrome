@@ -76,7 +76,11 @@ _PREBIND_SETTLEMENT_SECONDS: Final = 1.0
 _SOURCE_ROOT: Final = Path(__file__).resolve().parents[2]
 _CAPABILITY_TOKEN: Final = object()
 _WorkerBackend = Literal["google_cleanup_only_v1", "file_fake_cleanup_v1"]
-_CreatorLivenessMode = Literal["pipe_bound_v1", "pid_observation_only_v1"]
+_CreatorLivenessMode = Literal[
+    "pidfd_pipe_bound_v1",
+    "pipe_observation_only_v1",
+    "pid_observation_only_v1",
+]
 _EventState = Literal[
     "WORKER_READY",
     "RECOVERY_ATTEMPT",
@@ -691,6 +695,8 @@ class GcpPrivateCampaignWatchdogCapability:
         record = self._assert_exact_binding()
         if record.binding.worker_backend != "google_cleanup_only_v1":
             raise GcpPrivateCampaignError("WATCHDOG_LIVE_BACKEND_REQUIRED")
+        if record.binding.creator_liveness_mode != "pidfd_pipe_bound_v1":
+            raise GcpPrivateCampaignError("WATCHDOG_PIDFD_UNAVAILABLE")
         self._activation._watchdog._claim_create_for_factory(record)
         self._phase = "FACTORY_BOUND"
 
@@ -771,10 +777,11 @@ class GcpPrivateCampaignWatchdog:
         self._activation: GcpPrivateCampaignWatchdogActivation | None = None
         self._create_capability_issued = False
         # The real controller retains only this write end.  The detached
-        # worker receives the corresponding read end and can distinguish the
-        # original creator exiting from a reused numeric PID.  Explicit test
-        # parent PIDs deliberately omit the descriptor and may never be
-        # signalled by the worker.
+        # worker receives the corresponding read end together with a Linux
+        # pidfd for the current controller.  The pipe closes on parent death;
+        # the pidfd is the only live signal authority.  Explicit test parent
+        # PIDs deliberately omit both descriptors and may never be signalled
+        # by the worker.
         self._creator_liveness_write: int | None = None
 
     @staticmethod
@@ -815,6 +822,7 @@ class GcpPrivateCampaignWatchdog:
         record: GcpPrivateCampaignWatchdogActivationRecord,
         *,
         creator_liveness_read: int | None = None,
+        creator_pidfd: int | None = None,
     ) -> tuple[subprocess.Popen[bytes], int]:
         root: SafeDirFD | None = None
         ready_read: int | None = None
@@ -845,6 +853,9 @@ class GcpPrivateCampaignWatchdog:
             if creator_liveness_read is not None:
                 command.extend(["--creator-liveness-fd", str(creator_liveness_read)])
                 pass_fds.append(creator_liveness_read)
+            if creator_pidfd is not None:
+                command.extend(["--creator-pidfd", str(creator_pidfd)])
+                pass_fds.append(creator_pidfd)
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
@@ -919,17 +930,39 @@ class GcpPrivateCampaignWatchdog:
         parent_process_id = self._parent_process_id or os.getpid()
         creator_liveness_read: int | None = None
         creator_liveness_write: int | None = None
+        creator_pidfd: int | None = None
         if self._parent_process_id is None:
             try:
                 creator_liveness_read, creator_liveness_write = os.pipe()
                 os.set_inheritable(creator_liveness_write, False)
             except OSError:
                 raise GcpPrivateCampaignError("WATCHDOG_LIVENESS_UNAVAILABLE") from None
-        creator_liveness_mode: _CreatorLivenessMode = (
-            "pipe_bound_v1"
-            if creator_liveness_read is not None
-            else "pid_observation_only_v1"
-        )
+            try:
+                creator_pidfd = _acquire_current_creator_pidfd()
+            except GcpPrivateCampaignError:
+                if self._worker_backend == "google_cleanup_only_v1":
+                    if creator_liveness_read is not None:
+                        with suppress(OSError):
+                            os.close(creator_liveness_read)
+                    if creator_liveness_write is not None:
+                        with suppress(OSError):
+                            os.close(creator_liveness_write)
+                    raise
+                # The local file-fake profile may run on macOS, but it never
+                # receives a live Google capability or numeric-PID signal
+                # authority.  Its worker can only observe parent exit.
+                creator_pidfd = None
+            creator_liveness_mode: _CreatorLivenessMode = (
+                "pidfd_pipe_bound_v1"
+                if creator_pidfd is not None
+                else "pipe_observation_only_v1"
+            )
+        else:
+            # An injected parent PID is test/recovery-only.  It can never
+            # stand in for a current-controller pidfd on the live profile.
+            if self._worker_backend == "google_cleanup_only_v1":
+                raise GcpPrivateCampaignError("WATCHDOG_PIDFD_UNAVAILABLE")
+            creator_liveness_mode = "pid_observation_only_v1"
         binding_seed = GcpPrivateCampaignWatchdogBinding.model_construct(
             schema_version=GCP_PRIVATE_CAMPAIGN_WATCHDOG_SCHEMA_VERSION,
             proposal=proposal,
@@ -973,7 +1006,9 @@ class GcpPrivateCampaignWatchdog:
         try:
             store.write_activation(record)
             process, ready_descriptor = self._spawn_worker(
-                record, creator_liveness_read=creator_liveness_read
+                record,
+                creator_liveness_read=creator_liveness_read,
+                creator_pidfd=creator_pidfd,
             )
         except BaseException:
             if creator_liveness_write is not None:
@@ -985,6 +1020,10 @@ class GcpPrivateCampaignWatchdog:
                 with suppress(OSError):
                     os.close(creator_liveness_read)
                 creator_liveness_read = None
+            if creator_pidfd is not None:
+                with suppress(OSError):
+                    os.close(creator_pidfd)
+                creator_pidfd = None
         accepted = False
         try:
             self._await_ready(ready_descriptor)
@@ -1239,12 +1278,81 @@ class GcpPrivateCampaignWatchdog:
 
 
 def _pid_alive(process_id: int) -> bool:
+    """Read a stored numeric PID only for conservative recovery diagnostics.
+
+    This helper never supplies signal authority.  A live creator is signalled
+    exclusively through the pidfd that was opened for the original process
+    before the watchdog became READY.
+    """
+
     try:
         os.kill(process_id, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    return True
+
+
+def _pidfd_send_available() -> bool:
+    """Return whether this interpreter exposes the required Linux pidfd APIs."""
+
+    return callable(getattr(os, "pidfd_open", None)) and callable(
+        getattr(signal, "pidfd_send_signal", None)
+    )
+
+
+def _acquire_current_creator_pidfd() -> int:
+    """Open and capability-check a pidfd for this exact controller process."""
+
+    if not _pidfd_send_available():
+        raise GcpPrivateCampaignError("WATCHDOG_PIDFD_UNAVAILABLE")
+    opener = getattr(os, "pidfd_open", None)
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if not callable(opener) or not callable(sender):
+        raise GcpPrivateCampaignError("WATCHDOG_PIDFD_UNAVAILABLE")
+    descriptor: int | None = None
+    handed_off = False
+    try:
+        descriptor = opener(os.getpid(), 0)
+        # Signal zero validates kernel pidfd signalling support without
+        # changing the controller's execution state.
+        sender(descriptor, 0)
+        handed_off = True
+        return descriptor
+    except (OSError, TypeError, ValueError):
+        raise GcpPrivateCampaignError("WATCHDOG_PIDFD_UNAVAILABLE") from None
+    finally:
+        # Ownership transfers only through the successful return path.
+        if descriptor is not None and not handed_off:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _pidfd_status(
+    descriptor: int | None,
+) -> Literal["ACTIVE", "EXITED", "INVALID", "UNAVAILABLE"]:
+    """Poll a Linux pidfd without ever deriving authority from its PID."""
+
+    if descriptor is None:
+        return "UNAVAILABLE"
+    try:
+        readable, _, _ = select.select([descriptor], [], [], 0)
+        return "EXITED" if readable else "ACTIVE"
+    except OSError:
+        return "INVALID"
+
+
+def _pidfd_send_signal(descriptor: int, signal_number: int) -> bool:
+    """Signal only the process bound to ``descriptor``; never a numeric PID."""
+
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if not callable(sender):
+        return False
+    try:
+        sender(descriptor, signal_number)
+    except (OSError, TypeError, ValueError):
+        return False
     return True
 
 
@@ -1274,18 +1382,27 @@ def _creator_is_proven_dead(
     record: GcpPrivateCampaignWatchdogActivationRecord,
     *,
     creator_liveness_fd: int | None,
+    creator_pidfd: int | None,
 ) -> bool:
     """Return true only when this worker can rule out a resumed creator."""
 
-    if record.binding.creator_liveness_mode == "pipe_bound_v1":
+    if record.binding.creator_liveness_mode == "pidfd_pipe_bound_v1":
         status = _creator_liveness_status(creator_liveness_fd)
-        if status == "EOF":
-            return not _pid_alive(record.binding.parent_process_id)
-        # A fresh recovery worker cannot inherit the original pipe.  It may
-        # treat that creator as dead only when the exact bound PID is already
-        # absent; it must never signal a merely matching/reused PID without
-        # the original descriptor.
+        pidfd_status = _pidfd_status(creator_pidfd)
+        if creator_pidfd is not None:
+            # Terminal cleanup needs both the exact kernel process identity
+            # and the parent-owned liveness pipe to have closed.  A leaked or
+            # inherited pipe writer therefore remains fail-closed.
+            return status == "EOF" and pidfd_status == "EXITED"
+        # A fresh recovery process does not inherit a pidfd.  It may never
+        # signal a stored PID and may proceed only once that diagnostic PID is
+        # absent; a reused/live PID remains conservatively unconfirmed.
         return status == "UNAVAILABLE" and not _pid_alive(
+            record.binding.parent_process_id
+        )
+    if record.binding.creator_liveness_mode == "pipe_observation_only_v1":
+        status = _creator_liveness_status(creator_liveness_fd)
+        return (status == "EOF" or status == "UNAVAILABLE") and not _pid_alive(
             record.binding.parent_process_id
         )
     return not _pid_alive(record.binding.parent_process_id)
@@ -1295,54 +1412,64 @@ def _fence_exact_creator(
     record: GcpPrivateCampaignWatchdogActivationRecord,
     *,
     creator_liveness_fd: int | None,
+    creator_pidfd: int | None,
     cleanup_deadline: datetime,
     sleeper: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
-    """Fence only the original pipe-bound controller process.
+    """Fence only the original controller through its inherited pidfd.
 
-    An explicit testing/recovery PID has no dedicated liveness descriptor and
-    is never signalled.  It is safe only after it is already absent.  A live
-    campaign receives SIGTERM then SIGKILL for its one exact PID; the worker
-    waits for both its liveness EOF and PID disappearance before it allows
-    cleanup to reason about terminal absence.
+    Numeric PID values are diagnostic only.  No recovery/fake mode can turn a
+    stored PID into a signal target; those paths wait for observed absence.
     """
 
-    if _creator_is_proven_dead(record, creator_liveness_fd=creator_liveness_fd):
+    if _creator_is_proven_dead(
+        record,
+        creator_liveness_fd=creator_liveness_fd,
+        creator_pidfd=creator_pidfd,
+    ):
         return True
-    if record.binding.creator_liveness_mode != "pipe_bound_v1":
+    if record.binding.creator_liveness_mode != "pidfd_pipe_bound_v1":
         return False
-    if _creator_liveness_status(creator_liveness_fd) != "ACTIVE":
+    if (
+        _creator_liveness_status(creator_liveness_fd) != "ACTIVE"
+        or _pidfd_status(creator_pidfd) != "ACTIVE"
+        or creator_pidfd is None
+    ):
         return False
-    process_id = record.binding.parent_process_id
-    if not _pid_alive(process_id):
-        # A live pipe paired with an absent PID is an identity mismatch, not
-        # permission to signal or terminally clean.
+    if not _pidfd_send_signal(creator_pidfd, signal.SIGTERM):
         return False
-    try:
-        os.kill(process_id, signal.SIGTERM)
-    except OSError:
-        return False
+    fence_started_at = monotonic()
     deadline = min(
-        monotonic() + _CREATOR_FENCE_TIMEOUT_SECONDS,
-        monotonic()
+        fence_started_at + _CREATOR_FENCE_TIMEOUT_SECONDS,
+        fence_started_at
         + max(
             0.0,
             (cleanup_deadline - datetime.now(UTC)).total_seconds(),
         ),
     )
+    grace_deadline = min(
+        fence_started_at + _CREATOR_FENCE_GRACE_SECONDS,
+        deadline,
+    )
     escalated = False
     while monotonic() < deadline:
-        if _creator_is_proven_dead(record, creator_liveness_fd=creator_liveness_fd):
+        if _creator_is_proven_dead(
+            record,
+            creator_liveness_fd=creator_liveness_fd,
+            creator_pidfd=creator_pidfd,
+        ):
             return True
-        if not escalated and monotonic() + _CREATOR_FENCE_GRACE_SECONDS <= deadline:
-            try:
-                os.kill(process_id, signal.SIGKILL)
-            except OSError:
+        if not escalated and monotonic() >= grace_deadline:
+            if not _pidfd_send_signal(creator_pidfd, signal.SIGKILL):
                 return False
             escalated = True
         sleeper(0.02)
-    return _creator_is_proven_dead(record, creator_liveness_fd=creator_liveness_fd)
+    return _creator_is_proven_dead(
+        record,
+        creator_liveness_fd=creator_liveness_fd,
+        creator_pidfd=creator_pidfd,
+    )
 
 
 def _fence_submitted_creator_before_cleanup(
@@ -1350,6 +1477,7 @@ def _fence_submitted_creator_before_cleanup(
     *,
     journal_root: Path,
     creator_liveness_fd: int | None,
+    creator_pidfd: int | None,
     now: datetime,
 ) -> bool:
     """Durably fence a submitted create and wait until its creator is gone."""
@@ -1372,6 +1500,7 @@ def _fence_submitted_creator_before_cleanup(
     if not _fence_exact_creator(
         record,
         creator_liveness_fd=creator_liveness_fd,
+        creator_pidfd=creator_pidfd,
         cleanup_deadline=_parse_timestamp(record.binding.cleanup_deadline_at),
     ):
         return False
@@ -1797,19 +1926,34 @@ def _worker_main(arguments: argparse.Namespace) -> int:
             != record.binding.journal_root_sha256
         ):
             return 2
-        if (
-            record.binding.creator_liveness_mode == "pid_observation_only_v1"
-            and arguments.creator_liveness_fd is not None
-        ):
-            return 2
-        if (
-            record.binding.creator_liveness_mode == "pipe_bound_v1"
-            and arguments.creator_liveness_fd is None
-            and _pid_alive(record.binding.parent_process_id)
-        ):
-            # A recovery worker may omit the inherited descriptor only after
-            # the original creator is already absent.  Otherwise it cannot
-            # distinguish a live controller from PID reuse safely.
+        mode = record.binding.creator_liveness_mode
+        if mode == "pidfd_pipe_bound_v1":
+            if (arguments.creator_liveness_fd is None) != (
+                arguments.creator_pidfd is None
+            ):
+                return 2
+            if arguments.creator_pidfd is None:
+                # A fresh cleanup worker has no original pidfd and must never
+                # signal a numeric PID.  It may proceed only after that
+                # diagnostic PID is absent.
+                if _pid_alive(record.binding.parent_process_id):
+                    return 2
+            elif not _pidfd_send_available():
+                return 2
+        elif mode == "pipe_observation_only_v1":
+            if arguments.creator_pidfd is not None:
+                return 2
+            if arguments.creator_liveness_fd is None and _pid_alive(
+                record.binding.parent_process_id
+            ):
+                return 2
+        elif mode == "pid_observation_only_v1":
+            if (
+                arguments.creator_liveness_fd is not None
+                or arguments.creator_pidfd is not None
+            ):
+                return 2
+        else:
             return 2
         checked_journal_root = SafeDirFD.open(journal_root)
         checked_journal_root.close()
@@ -1864,6 +2008,7 @@ def _worker_main(arguments: argparse.Namespace) -> int:
             creator_proven_dead = _creator_is_proven_dead(
                 record,
                 creator_liveness_fd=arguments.creator_liveness_fd,
+                creator_pidfd=arguments.creator_pidfd,
             )
             submitted_create = core_state in {
                 "CREATE_SUBMITTED",
@@ -1882,6 +2027,7 @@ def _worker_main(arguments: argparse.Namespace) -> int:
                     record,
                     journal_root=journal_root,
                     creator_liveness_fd=arguments.creator_liveness_fd,
+                    creator_pidfd=arguments.creator_pidfd,
                     now=now,
                 ):
                     if now >= _parse_timestamp(record.binding.cleanup_deadline_at):
@@ -1978,6 +2124,9 @@ def _worker_main(arguments: argparse.Namespace) -> int:
         if arguments.creator_liveness_fd is not None:
             with suppress(OSError):
                 os.close(arguments.creator_liveness_fd)
+        if arguments.creator_pidfd is not None:
+            with suppress(OSError):
+                os.close(arguments.creator_pidfd)
         if root is not None:
             root.close()
 
@@ -1991,6 +2140,7 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--controller-id", type=str, required=True)
     worker.add_argument("--ready-fd", type=int, required=True)
     worker.add_argument("--creator-liveness-fd", type=int)
+    worker.add_argument("--creator-pidfd", type=int)
     worker.add_argument("--poll-ms", type=int, required=True)
     return parser
 

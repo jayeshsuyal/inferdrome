@@ -643,6 +643,8 @@ def test_lost_create_and_delete_responses_reconcile_exact_request_ids(
     assert fake.create_calls == 1
     assert fake.delete_calls == 1
     states = [event.state for event in controller._journal.load(proposal)]
+    assert states.index("CREATE_INTENT") < states.index("CREATE_CLAIMED")
+    assert states.index("CREATE_CLAIMED") < states.index("CREATE_SUBMITTED")
     assert "CREATE_RECONCILING" in states
     assert "INSTANCE_DELETE_RECONCILING" in states
     assert states[-1] == "CLEANUP_CONFIRMED"
@@ -1323,7 +1325,7 @@ def test_readiness_same_name_replacement_never_reaches_handoff(tmp_path: Path) -
     assert fake.delete_calls == 1
 
 
-def test_recovery_without_durable_identity_uses_read_only_absence_only(
+def test_recovery_without_durable_identity_binds_and_deletes_exact_observation(
     tmp_path: Path,
 ) -> None:
     proposal, startup = _proposal()
@@ -1348,10 +1350,17 @@ def test_recovery_without_durable_identity_uses_read_only_absence_only(
         startup_payload=startup,
     )
 
-    assert not outcome.confirmed
-    assert fake.delete_calls == 0
-    assert fake.boot_disk_delete_calls == 0
-    assert journal.load(proposal)[-1].state == "CLEANUP_UNCONFIRMED"
+    # A fully matching post-crash readback is sufficient to record the
+    # previously missing provider-ID hashes and use the exact delete path.
+    # Temporary absence and replacement/mismatch cases remain covered by the
+    # separate conservative-unconfirmed regressions.
+    assert outcome.confirmed
+    assert fake.delete_calls == 1
+    assert fake.boot_disk_delete_calls == 1
+    states = [event.state for event in journal.load(proposal)]
+    assert "INSTANCE_IDENTITY_BOUND" in states
+    assert "BOOT_DISK_IDENTITY_BOUND" in states
+    assert states[-1] == "CLEANUP_CONFIRMED"
 
 
 def test_residual_disk_same_name_replacement_is_never_deleted(tmp_path: Path) -> None:

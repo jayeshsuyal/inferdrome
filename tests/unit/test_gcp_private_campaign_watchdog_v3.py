@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import signal
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import inferdrome.deployment.gcp_private_campaign_watchdog_v3 as watchdog_v3
 from inferdrome.deployment.gcp_private_campaign_google import (
     create_google_private_campaign_transport,
 )
@@ -34,6 +36,7 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
 from inferdrome.deployment.gcp_private_campaign_watchdog_v3 import (
     GcpPrivateCampaignFileFakeWorkerState,
     GcpPrivateCampaignWatchdog,
+    GcpPrivateCampaignWatchdogActivationRecord,
     _WatchdogStore,
     read_gcp_private_campaign_file_fake_worker_state,
     write_gcp_private_campaign_file_fake_worker_state,
@@ -185,6 +188,26 @@ def _request(
     )
 
 
+def _require_linux_pidfd() -> None:
+    """Skip exact live-process fencing only where the kernel API is absent."""
+
+    if not watchdog_v3._pidfd_send_available():
+        pytest.skip("requires Linux pidfd support")
+    opener = getattr(os, "pidfd_open", None)
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if not callable(opener) or not callable(sender):
+        pytest.skip("requires Linux pidfd support")
+    descriptor: int | None = None
+    try:
+        descriptor = opener(os.getpid(), 0)
+        sender(descriptor, 0)
+    except (OSError, TypeError, ValueError):
+        pytest.skip("requires kernel pidfd signalling support")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _append_exact_binding(
     journal: GcpPrivateCampaignJournal,
     proposal: GcpPrivateCampaignProposal,
@@ -220,6 +243,186 @@ def _append_exact_binding(
     )
 
 
+def _pidfd_fence_record(tmp_path: Path) -> GcpPrivateCampaignWatchdogActivationRecord:
+    """Build an activation record for pure local pidfd-bound fence tests."""
+
+    proposal, startup, approval, cleanup = _fresh_inputs()
+    journal_root = _private_root(tmp_path, "journal")
+    watchdog_root = _private_root(tmp_path, "watchdog")
+    journal = GcpPrivateCampaignJournal(journal_root)
+    _append_create_intent(journal, proposal, startup)
+    watchdog = GcpPrivateCampaignWatchdog(
+        watchdog_root=watchdog_root,
+        journal_root=journal_root,
+        worker_backend="file_fake_cleanup_v1",
+    )
+    activation = watchdog.activate(
+        proposal=proposal,
+        approval=approval,
+        cleanup_authorization=cleanup,
+        request=_request(proposal, startup),
+        journal_identity=journal.identity(proposal),
+        execution_deadline=datetime.now(UTC) + timedelta(seconds=30),
+        now=datetime.now(UTC),
+    )
+    record = _WatchdogStore(watchdog_root).read_activation(
+        proposal.ownership_labels.controller_id
+    )
+    if watchdog._handle is not None:
+        watchdog._kill_process(watchdog._handle.process)
+    if watchdog._creator_liveness_write is not None:
+        os.close(watchdog._creator_liveness_write)
+        watchdog._creator_liveness_write = None
+    # The fence helpers use these values only as a deliberately synthetic
+    # record.  They do not validate the content digest themselves.
+    binding = record.binding.model_copy(
+        update={
+            "creator_liveness_mode": "pidfd_pipe_bound_v1",
+            "parent_process_id": os.getpid(),
+        }
+    )
+    del activation
+    return record.model_copy(update={"binding": binding})
+
+
+def test_pidfd_fence_never_signals_a_stale_or_reused_numeric_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _pidfd_fence_record(tmp_path)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(watchdog_v3, "_creator_liveness_status", lambda _: "EOF")
+    monkeypatch.setattr(watchdog_v3, "_pidfd_status", lambda _: "EXITED")
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pid_alive",
+        lambda _: pytest.fail("pidfd-bound fence must not inspect numeric PID"),
+    )
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pidfd_send_signal",
+        lambda descriptor, number: sent.append((descriptor, number)) or True,
+    )
+
+    assert watchdog_v3._fence_exact_creator(
+        record,
+        creator_liveness_fd=101,
+        creator_pidfd=102,
+        cleanup_deadline=datetime.now(UTC) + timedelta(seconds=1),
+    )
+    assert sent == []
+
+
+def test_pidfd_fence_stays_unconfirmed_when_an_inherited_pipe_writer_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _pidfd_fence_record(tmp_path)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(watchdog_v3, "_creator_liveness_status", lambda _: "ACTIVE")
+    monkeypatch.setattr(watchdog_v3, "_pidfd_status", lambda _: "EXITED")
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pid_alive",
+        lambda _: pytest.fail("pidfd-bound fence must not inspect numeric PID"),
+    )
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pidfd_send_signal",
+        lambda descriptor, number: sent.append((descriptor, number)) or True,
+    )
+
+    assert not watchdog_v3._fence_exact_creator(
+        record,
+        creator_liveness_fd=101,
+        creator_pidfd=102,
+        cleanup_deadline=datetime.now(UTC) + timedelta(seconds=1),
+    )
+    assert sent == []
+
+
+def test_pidfd_fence_waits_for_sigterm_grace_before_sigkill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _pidfd_fence_record(tmp_path)
+    clock = {"seconds": 0.0}
+    killed = {"value": False}
+    sent: list[tuple[float, int]] = []
+
+    def _pidfd_status(_: int | None) -> str:
+        return "EXITED" if killed["value"] else "ACTIVE"
+
+    def _pipe_status(_: int | None) -> str:
+        return "EOF" if killed["value"] else "ACTIVE"
+
+    def _send_signal(_: int, number: int) -> bool:
+        sent.append((clock["seconds"], number))
+        if number == signal.SIGKILL:
+            killed["value"] = True
+        return True
+
+    def _sleep(_: float) -> None:
+        clock["seconds"] += 0.02
+
+    monkeypatch.setattr(watchdog_v3, "_pidfd_status", _pidfd_status)
+    monkeypatch.setattr(watchdog_v3, "_creator_liveness_status", _pipe_status)
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pid_alive",
+        lambda _: pytest.fail("pidfd-bound fence must not inspect numeric PID"),
+    )
+    monkeypatch.setattr(watchdog_v3, "_pidfd_send_signal", _send_signal)
+
+    assert watchdog_v3._fence_exact_creator(
+        record,
+        creator_liveness_fd=101,
+        creator_pidfd=102,
+        cleanup_deadline=datetime.now(UTC) + timedelta(seconds=1),
+        sleeper=_sleep,
+        monotonic=lambda: clock["seconds"],
+    )
+    assert sent[0] == (0.0, signal.SIGTERM)
+    assert sent[1][1] == signal.SIGKILL
+    assert sent[1][0] >= watchdog_v3._CREATOR_FENCE_GRACE_SECONDS
+
+
+def test_pidfd_fence_survives_post_sigterm_numeric_pid_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _pidfd_fence_record(tmp_path)
+    state = {"exited": False}
+    sent: list[tuple[int, int]] = []
+
+    def _pidfd_status(_: int | None) -> str:
+        return "EXITED" if state["exited"] else "ACTIVE"
+
+    def _pipe_status(_: int | None) -> str:
+        return "EOF" if state["exited"] else "ACTIVE"
+
+    def _send_signal(descriptor: int, number: int) -> bool:
+        sent.append((descriptor, number))
+        if number == signal.SIGTERM:
+            state["exited"] = True
+        return True
+
+    monkeypatch.setattr(watchdog_v3, "_pidfd_status", _pidfd_status)
+    monkeypatch.setattr(watchdog_v3, "_creator_liveness_status", _pipe_status)
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pid_alive",
+        lambda _: pytest.fail("pidfd-bound fence must not inspect numeric PID"),
+    )
+    monkeypatch.setattr(watchdog_v3, "_pidfd_send_signal", _send_signal)
+
+    assert watchdog_v3._fence_exact_creator(
+        record,
+        creator_liveness_fd=101,
+        creator_pidfd=102,
+        cleanup_deadline=datetime.now(UTC) + timedelta(seconds=1),
+        sleeper=lambda _: pytest.fail("creator exited after SIGTERM; no wait expected"),
+        monotonic=lambda: 0.0,
+    )
+    assert sent == [(102, signal.SIGTERM)]
+
+
 def _stalled_creator_process(
     journal_root_text: str,
     watchdog_root_text: str,
@@ -251,10 +454,10 @@ def _stalled_creator_process(
         cleanup_authorization=cleanup,
         request=request,
         journal_identity=journal.identity(proposal),
-        # This test exercises parent-death fencing, not expiry.  Leave enough
-        # activation margin that CI process startup cannot accidentally turn
-        # it into a wall-clock deadline test.
-        execution_deadline=now + timedelta(seconds=30),
+        # This deliberately short execution deadline lets the detached worker
+        # prove the creator remains alive first, then pidfd-fence that exact
+        # process after expiry.  It is not a wall-clock startup assertion.
+        execution_deadline=now + timedelta(seconds=2),
         now=now,
     )
     journal.claim_create_for_factory(
@@ -280,8 +483,9 @@ def test_watchdog_fences_a_stalled_creator_before_cleanup(
 ) -> None:
     """The detached worker fences a blocked creator without any provider call."""
 
+    _require_linux_pidfd()
     if "fork" not in multiprocessing.get_all_start_methods():
-        pytest.skip("requires a local fork process for exact-PID fencing")
+        pytest.skip("requires a local fork process for pidfd fencing")
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     ready_marker = tmp_path / "creator-ready"
@@ -299,12 +503,17 @@ def test_watchdog_fences_a_stalled_creator_before_cleanup(
         while time.monotonic() < deadline and not ready_marker.exists():
             time.sleep(0.02)
         assert ready_marker.exists()
-        process.join(timeout=5)
+        # The creator is still alive in its pre-expiry window; the watchdog
+        # has no authority to fence early.
+        time.sleep(0.1)
+        assert process.is_alive()
+        process.join(timeout=10)
         assert process.is_alive() is False
         assert process.exitcode is not None and process.exitcode != 0
 
         store = _WatchdogStore(watchdog_root)
         record = store.read_activation("pcctl-12345678")
+        assert record.binding.creator_liveness_mode == "pidfd_pipe_bound_v1"
         states = _await_terminal(
             watchdog_root, record.binding.proposal, timeout_seconds=8
         )
@@ -956,6 +1165,35 @@ def test_activation_refuses_missing_controller_captured_intent_identity(
         )
 
 
+def test_live_google_activation_requires_pidfd_before_worker_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, startup, approval, cleanup = _fresh_inputs()
+    journal_root = _private_root(tmp_path, "journal")
+    watchdog_root = _private_root(tmp_path, "watchdog")
+    journal = GcpPrivateCampaignJournal(journal_root)
+    _append_create_intent(journal, proposal, startup)
+    monkeypatch.setattr(watchdog_v3, "_pidfd_send_available", lambda: False)
+    watchdog = GcpPrivateCampaignWatchdog(
+        watchdog_root=watchdog_root,
+        journal_root=journal_root,
+        worker_backend="google_cleanup_only_v1",
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="WATCHDOG_PIDFD_UNAVAILABLE"):
+        watchdog.activate(
+            proposal=proposal,
+            approval=approval,
+            cleanup_authorization=cleanup,
+            request=_request(proposal, startup),
+            journal_identity=journal.identity(proposal),
+            execution_deadline=journal.execution_deadline(proposal),
+            now=datetime.now(UTC),
+        )
+
+    assert list(watchdog_root.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("missing", "empty", "corrupt", "wrong_digest", "blocked", "replaced"),
@@ -963,6 +1201,7 @@ def test_activation_refuses_missing_controller_captured_intent_identity(
 def test_changed_core_create_intent_blocks_google_factory_before_sdk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
+    _require_linux_pidfd()
     proposal, startup, approval, cleanup = _fresh_inputs()
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
@@ -1047,6 +1286,7 @@ def test_changed_core_create_intent_blocks_google_factory_before_sdk(
 def test_same_content_journal_file_replacement_blocks_factory_before_sdk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _require_linux_pidfd()
     proposal, startup, approval, cleanup = _fresh_inputs()
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
@@ -1140,6 +1380,7 @@ def test_activation_rejects_a_copied_wrong_root_before_worker_ready(
 def test_same_content_journal_root_replacement_blocks_factory_before_sdk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _require_linux_pidfd()
     proposal, startup, approval, cleanup = _fresh_inputs()
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
@@ -1194,6 +1435,7 @@ def test_same_content_journal_root_replacement_blocks_factory_before_sdk(
 def test_factory_to_insert_journal_swap_blocks_the_final_create_seam(
     tmp_path: Path,
 ) -> None:
+    _require_linux_pidfd()
     proposal, startup, approval, cleanup = _fresh_inputs()
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
@@ -1237,6 +1479,7 @@ def test_factory_to_insert_journal_swap_blocks_the_final_create_seam(
 def test_capability_is_one_use_and_bound_to_the_exact_create_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _require_linux_pidfd()
     proposal, startup, approval, cleanup = _fresh_inputs()
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")

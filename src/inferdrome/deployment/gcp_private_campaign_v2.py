@@ -3853,6 +3853,22 @@ class GcpPrivateCampaignLifecycleController:
         exact_resource_binding: GcpPrivateCampaignExactResourceBinding | None = None
         try:
             try:
+                if watchdog_activation is None:
+                    # The deterministic no-watchdog fake path still models
+                    # the exact live mutation boundary: first claim the
+                    # request, then fsync CREATE_SUBMITTED before its local
+                    # create seam.  Lost responses therefore reconcile from
+                    # the same durable state as the live capability path.
+                    self._journal.claim_create_for_factory(
+                        proposal,
+                        request_digest=request.create_request_digest,
+                        occurred_at=self._clock.now(),
+                    )
+                    self._journal.begin_create_submission(
+                        proposal,
+                        request_digest=request.create_request_digest,
+                        occurred_at=self._clock.now(),
+                    )
                 # Any exception after this point is potentially post-submit.
                 # Attempt exact recovery in ``finally`` even when the adapter
                 # cannot return an operation identity.  Without both durable
@@ -3869,19 +3885,13 @@ class GcpPrivateCampaignLifecycleController:
                     kind="create",
                     request_id=proposal.request_ids.create_request_id,
                 )
-                # The live Google watchdog capability already journaled
-                # CREATE_SUBMITTED under its exact core-journal lock before
-                # reaching the provider mutation.  In-process fake transports
-                # retain the historical direct transition for isolated tests.
+                # Both paths now durably reach CREATE_SUBMITTED before the
+                # create edge: the live capability owns that claim under its
+                # watchdog gate and deterministic fakes use the local helper
+                # immediately above.  A returned response cannot retroactively
+                # create the journaled mutation boundary.
                 create_state = self._journal.load(proposal)[-1].state
-                if create_state == "CREATE_INTENT":
-                    self._journal.append(
-                        proposal,
-                        state="CREATE_SUBMITTED",
-                        occurred_at=self._clock.now(),
-                        operation_id=operation.operation_id,
-                    )
-                elif create_state != "CREATE_SUBMITTED":
+                if create_state != "CREATE_SUBMITTED":
                     raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
                 result = transport.wait_operation(
                     operation, timeout_seconds=self._operation_timeout_seconds
