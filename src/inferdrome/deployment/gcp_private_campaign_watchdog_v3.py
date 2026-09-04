@@ -1102,7 +1102,9 @@ class _FileFakeCleanupTransport:
         self._require_principal()
         state = self._state()
         proposal = request.proposal
-        disks = (self._disk(request, state),) if state.boot_disk_present else ()
+        disks: tuple[Any, ...] = (
+            (self._disk(request, state),) if state.boot_disk_present else ()
+        )
         if state.ambiguous_residuals and disks:
             disks = (*disks, disks[0])
         return GcpPrivateCampaignOwnedResidualInventory(
