@@ -97,6 +97,12 @@ The descriptor root must be separate from the source package; adding it to the
 source package would correctly make the R1 inventory verifier reject that
 package.
 
+The separate [causal qualification dashboard](ROUTING_QUALIFICATION_DASHBOARD_V1.md)
+can render the bound pair only when it receives the sealed source root,
+qualification root, and this externally retained qualification digest. It
+provides a descriptor-only download and links back to the existing full
+request-level receipt projection.
+
 Publication walks every output-path component with no-follow directory
 descriptors. It may create a fresh `0700` root beneath a system temporary
 ancestor, but treats that ancestor as untrusted; all staging and the atomic

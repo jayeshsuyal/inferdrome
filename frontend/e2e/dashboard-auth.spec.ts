@@ -18,6 +18,8 @@ interface DashboardRoots {
   readonly comparisonPlans: string;
   readonly comparisonResults: string;
   readonly routingCampaigns: string;
+  readonly routingQualifications: string;
+  readonly routingQualificationDigest: string;
 }
 
 function pythonExecutable(): string {
@@ -60,32 +62,19 @@ function prepareFixture(root: string): DashboardRoots {
   const summary = JSON.parse(result.stdout) as {
     readonly claim_boundary: string;
     readonly roots: Record<string, string>;
+    readonly routing_qualification: {
+      readonly retained_digest: string;
+    };
   };
   if (summary.claim_boundary !== "SYNTHETIC_ONLY") {
     throw new Error("authenticated dashboard fixture was not synthetic-only");
   }
-  const routingCampaigns = join(root, "routing-campaign-package");
-  const campaignRoot = join(REPOSITORY_ROOT, "campaigns", "routing-campaign-v1");
-  const campaign = spawnSync(
-    pythonExecutable(),
-    [
-      "-m", "inferdrome.routing_campaign", "run",
-      "--campaign-plan", join(campaignRoot, "stale-load-fresh-health.plan.json"),
-      "--request-trace", join(campaignRoot, "stale-load-fresh-health.trace.jsonl"),
-      "--fault-schedule", join(campaignRoot, "stale-load-fresh-health.fault-schedule.json"),
-      "--trial-plan", join(campaignRoot, "trial-plan.json"),
-      "--output", routingCampaigns,
-    ],
-    {
-      cwd: REPOSITORY_ROOT,
-      encoding: "utf8",
-      env: environment(),
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    },
-  );
-  if (campaign.status !== 0 || campaign.error || !existsSync(routingCampaigns)) {
-    throw new Error(`authenticated routing-campaign fixture failed:\n${campaign.stderr || campaign.stdout}`);
+  if (
+    !summary.roots.routing_campaign
+    || !summary.roots.routing_qualification
+    || !summary.routing_qualification?.retained_digest
+  ) {
+    throw new Error("authenticated qualification fixture is incomplete");
   }
   return {
     root,
@@ -93,7 +82,9 @@ function prepareFixture(root: string): DashboardRoots {
     trialSets: summary.roots.trial_sets,
     comparisonPlans: summary.roots.comparison_plans,
     comparisonResults: summary.roots.comparison_results,
-    routingCampaigns,
+    routingCampaigns: summary.roots.routing_campaign,
+    routingQualifications: summary.roots.routing_qualification,
+    routingQualificationDigest: summary.routing_qualification.retained_digest,
   };
 }
 
@@ -137,6 +128,8 @@ async function startServer(paths: DashboardRoots, keyring: string): Promise<{ re
       "--comparison-plans-root", paths.comparisonPlans,
       "--comparison-results-root", paths.comparisonResults,
       "--routing-campaigns-root", paths.routingCampaigns,
+      "--routing-qualification-root", paths.routingQualifications,
+      "--routing-qualification-digest", paths.routingQualificationDigest,
       "--port", String(port),
     ],
     { cwd: REPOSITORY_ROOT, env: environment(), stdio: ["ignore", "ignore", "pipe"] },
@@ -186,8 +179,17 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     const keyring = createKeyring(root);
     const started = await startServer(paths, keyring.path);
     server = started.process;
+    const qualificationPaths = [
+      "/api/v1/routing-qualifications",
+      "/api/v1/routing-qualifications/stale-telemetry-qualification-v1",
+      "/api/v1/routing-qualifications/stale-telemetry-qualification-v1/evidence",
+    ];
     const unauthenticated = await page.request.get(`${started.url}/api/v1/runs`);
     const unauthenticatedCampaigns = await page.request.get(`${started.url}/api/v1/routing-campaigns`);
+    const unauthenticatedQualifications = [];
+    for (const path of qualificationPaths) {
+      unauthenticatedQualifications.push(await page.request.get(`${started.url}${path}`));
+    }
     const health = await page.request.get(`${started.url}/api/v1/health`);
     const authenticated = await page.request.get(`${started.url}/api/v1/runs`, {
       headers: { Authorization: `Bearer ${keyring.token}` },
@@ -195,11 +197,19 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     const authenticatedCampaigns = await page.request.get(`${started.url}/api/v1/routing-campaigns`, {
       headers: { Authorization: `Bearer ${keyring.token}` },
     });
+    const authenticatedQualifications = [];
+    for (const path of qualificationPaths) {
+      authenticatedQualifications.push(await page.request.get(`${started.url}${path}`, {
+        headers: { Authorization: `Bearer ${keyring.token}` },
+      }));
+    }
     expect(unauthenticated.status()).toBe(401);
     expect(unauthenticatedCampaigns.status()).toBe(401);
+    expect(unauthenticatedQualifications.every((response) => response.status() === 401)).toBe(true);
     expect(health.status()).toBe(200);
     expect(authenticated.status()).toBe(200);
     expect(authenticatedCampaigns.status()).toBe(200);
+    expect(authenticatedQualifications.every((response) => response.status() === 200)).toBe(true);
 
     const protectedRequests: Array<{ readonly url: string; readonly authorization: string | undefined }> = [];
     const browserErrors: string[] = [];
@@ -216,6 +226,10 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     await page.getByRole("button", { name: "Unlock dashboard" }).click();
     await expect(page.getByRole("heading", { name: "Runs", level: 1 })).toBeVisible();
     await expect(page.locator(".runs-table tbody tr")).toHaveCount(4);
+    // The initial locked-page read is deliberately unauthenticated so the
+    // application can offer its unlock control. Assert the subsequent causal
+    // navigation/download traffic separately, after that expected 401 path.
+    protectedRequests.splice(0, protectedRequests.length);
 
     const runHref = await page.locator("a.latest-run-title").getAttribute("href");
     expect(runHref).toMatch(/^\/runs\/run-[0-9a-f]{32}$/);
@@ -246,6 +260,16 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     await page.locator(`a[href="${routingHref}"]`).first().click();
     await expect(page.getByRole("heading", { name: "Fault timeline", level: 2 })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Complete terminal population", level: 2 }).first()).toBeVisible();
+    await page.getByRole("link", { name: "Causal qualification", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Verified qualification descriptors", level: 2 })).toBeVisible();
+    const qualificationHref = await page.locator("a.routing-qualification-link:visible").first().getAttribute("href");
+    expect(qualificationHref).toBe("/routing-qualifications/stale-telemetry-qualification-v1");
+    await page.locator(`a[href="${qualificationHref}"]`).first().click();
+    await expect(page.getByRole("heading", { name: "What the router knew at the focal request", level: 2 })).toBeVisible();
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download verified descriptor" }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe("stale-telemetry-qualification-v1.json");
     await page.getByRole("button", { name: "Lock dashboard" }).click();
     await expect(page.getByRole("heading", { name: "Unlock evidence views" })).toBeVisible();
 
@@ -259,9 +283,15 @@ test("authenticated local server blocks evidence, unlocks, and traverses every r
     expect(browserState.local).not.toContain(keyring.token);
     expect(browserState.session).not.toContain(keyring.token);
     expect(browserState.url).not.toContain(keyring.token);
-    expect(protectedRequests.filter((request) => request.authorization).every(
+    expect(protectedRequests.length).toBeGreaterThan(0);
+    expect(protectedRequests.every(
       (request) => request.authorization === `Bearer ${keyring.token}`,
     )).toBe(true);
+    const evidenceRequests = protectedRequests.filter(
+      (request) => new URL(request.url).pathname === qualificationPaths[2],
+    );
+    expect(evidenceRequests.length).toBeGreaterThan(0);
+    expect(evidenceRequests.every((request) => new URL(request.url).search === "")).toBe(true);
     expect(browserErrors.every((message) => !message.includes(keyring.token))).toBe(true);
   } finally {
     if (server) await stopServer(server);

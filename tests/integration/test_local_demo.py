@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -64,6 +65,14 @@ def _prepare(workspace: Path) -> dict[str, object]:
     return value
 
 
+def _local_demo_module():
+    spec = importlib.util.spec_from_file_location("inferdrome_local_demo", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_local_demo_prepares_then_reuses_the_exact_verified_schedule(
     tmp_path: Path,
 ) -> None:
@@ -95,23 +104,43 @@ def test_local_demo_prepares_then_reuses_the_exact_verified_schedule(
         assert first["recording_routes"]["routing_campaign"] == (
             "/routing-campaigns/routing-campaign-v1"
         )
+        assert first["recording_routes"]["routing_qualifications"] == (
+            "/routing-qualifications"
+        )
+        assert first["recording_routes"]["routing_qualification"] == (
+            "/routing-qualifications/stale-telemetry-qualification-v1"
+        )
+        first_routing_qualification = first["routing_qualification"]
+        assert isinstance(first_routing_qualification, dict)
+        assert first_routing_qualification == {
+            "qualification_id": "stale-telemetry-qualification-v1",
+            "retained_digest": first_routing_qualification["retained_digest"],
+            "source_package_retained_digest": first_routing_campaign["retained_digest"],
+            "verified_by_source_replay": True,
+            "verified_descriptor_binding": True,
+        }
         first_roots = first["roots"]
         assert isinstance(first_roots, dict)
         routing_campaign_root = Path(first_roots["routing_campaign"])
         assert routing_campaign_root.is_dir()
+        routing_qualification_root = Path(first_roots["routing_qualification"])
+        assert routing_qualification_root.is_dir()
 
         second = _prepare(workspace)
         second_comparison = second["comparison"]
         assert isinstance(second_comparison, dict)
         assert second_comparison["executed_run_ids"] == []
         assert len(second_comparison["reused_run_ids"]) == 4
-        assert second_comparison["comparison_plan_digest"] == (
-            first_comparison["comparison_plan_digest"]
+        assert (
+            second_comparison["comparison_plan_digest"]
+            == (first_comparison["comparison_plan_digest"])
         )
-        assert second_comparison["comparison_result_digest"] == (
-            first_comparison["comparison_result_digest"]
+        assert (
+            second_comparison["comparison_result_digest"]
+            == (first_comparison["comparison_result_digest"])
         )
         assert second["routing_campaign"] == first_routing_campaign
+        assert second["routing_qualification"] == first_routing_qualification
         assert second["recording_routes"] == first["recording_routes"]
 
         state_text = (workspace / "demo-state.json").read_text(encoding="utf-8")
@@ -121,6 +150,11 @@ def test_local_demo_prepares_then_reuses_the_exact_verified_schedule(
             "campaign_id": "routing-campaign-v1",
             "package_root": "routing-campaign-v1",
             "retained_digest": first_routing_campaign["retained_digest"],
+        }
+        assert state["routing_qualification"] == {
+            "qualification_id": "stale-telemetry-qualification-v1",
+            "source_package_root": "routing-campaign-v1",
+            "retained_digest": first_routing_qualification["retained_digest"],
         }
         assert "CUSTOMER_ELIGIBLE" not in state_text
     finally:
@@ -182,3 +216,69 @@ def test_local_demo_refuses_to_guess_an_unretained_plan_digest(tmp_path: Path) -
         assert not (workspace / "demo-state.json").exists()
     finally:
         _make_tree_writable(workspace)
+
+
+def test_local_demo_launch_binds_the_verified_qualification_to_dashboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    demo = _local_demo_module()
+    invoked: dict[str, object] = {}
+
+    def capture_exec(
+        executable: str,
+        command: list[str],
+        environment: dict[str, str],
+    ) -> None:
+        invoked["executable"] = executable
+        invoked["command"] = command
+        invoked["environment"] = environment
+        raise RuntimeError("stop after command capture")
+
+    monkeypatch.setattr(demo.os, "execvpe", capture_exec)
+    summary = {
+        "roots": {
+            "runs": "/safe/runs",
+            "trial_sets": "/safe/trial-sets",
+            "comparison_plans": "/safe/comparison-plans",
+            "comparison_results": "/safe/comparison-results",
+            "routing_campaign": "/safe/routing-campaign",
+            "routing_qualification": "/safe/routing-qualification",
+        },
+        "routing_qualification": {
+            "retained_digest": f"sha256:{'a' * 64}",
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="command capture"):
+        demo._launch_dashboard(
+            python="python",
+            summary=summary,
+            port=8787,
+            open_browser=False,
+        )
+
+    assert invoked["executable"] == "python"
+    command = invoked["command"]
+    assert isinstance(command, list)
+    assert command == [
+        "python",
+        "-m",
+        "inferdrome",
+        "dashboard",
+        "--runs-root",
+        "/safe/runs",
+        "--trial-sets-root",
+        "/safe/trial-sets",
+        "--comparison-plans-root",
+        "/safe/comparison-plans",
+        "--comparison-results-root",
+        "/safe/comparison-results",
+        "--routing-campaigns-root",
+        "/safe/routing-campaign",
+        "--routing-qualification-root",
+        "/safe/routing-qualification",
+        "--routing-qualification-digest",
+        f"sha256:{'a' * 64}",
+        "--port",
+        "8787",
+    ]

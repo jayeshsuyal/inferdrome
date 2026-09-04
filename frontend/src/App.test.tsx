@@ -273,6 +273,101 @@ const routingCampaignDetail = {
   interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY" as const,
 };
 
+const routingQualificationSummary = {
+  qualification_id: "stale-telemetry-qualification-v1" as const,
+  retained_digest: `sha256:${"f".repeat(64)}`,
+  source_campaign_id: "routing-campaign-v1" as const,
+  source_package_retained_digest: routingCampaignSummary.retained_digest,
+  source_execution_mode: "SYNTHETIC_CPU_ONLY" as const,
+  repetitions_per_mode: 1 as const,
+  population_accounting: "SEPARATE_PER_TRIAL_NO_POOLING" as const,
+  verified_by_source_replay: true as const,
+  verified_descriptor_binding: true as const,
+};
+
+function qualificationTrial(
+  policyId: "fail_closed_required_load_v1" | "explicit_fail_open_stale_load_v1" | "typed_admissible_state_only_v1",
+  trialId: string,
+) {
+  const outcome = policyId === "fail_closed_required_load_v1"
+    ? [null, "REQUIRED_LOAD_STALE", "NO_SAFE_ROUTE", "REQUIRED_LOAD_STALE"] as const
+    : policyId === "explicit_fail_open_stale_load_v1"
+      ? ["endpoint-b", "STALE_LOAD_FAIL_OPEN", "TIMED_OUT", "SIMULATED_ENDPOINT_B_SATURATED"] as const
+      : ["endpoint-a", "HEALTH_ONLY_TIE_BREAK", "SUCCEEDED", "SIMULATED_ENDPOINT_A_COMPLETED"] as const;
+  const population = policyId === "fail_closed_required_load_v1"
+    ? [2, 0, 0, 0, 4]
+    : policyId === "explicit_fail_open_stale_load_v1"
+      ? [2, 4, 0, 0, 0]
+      : [6, 0, 0, 0, 0];
+  return {
+    policy_id: policyId,
+    repetition_index: 0,
+    trial_id: trialId,
+    request_denominator: 6,
+    reset: {
+      virtual_time_ms: 0,
+      endpoint_a_instance_id: `${trialId}-endpoint-a-instance-v1`,
+      endpoint_b_instance_id: `${trialId}-endpoint-b-instance-v1`,
+      observer_epochs: [1, 1, 1],
+      queue_cleared: true,
+      load_state_cleared: true,
+      kv_state_cleared: true,
+    },
+    focal_request_id: "request-002" as const,
+    focal_decision_id: `decision-${trialId}-002`,
+    focal_endpoint_states: ["endpoint-a", "endpoint-b"].map((endpointId) => ({
+      endpoint_id: endpointId,
+      health_epoch: 2,
+      health_age_ms: 0,
+      health_admissibility: "ADMISSIBLE" as const,
+      load_epoch: 1,
+      load_age_ms: 10,
+      load_admissibility: "INADMISSIBLE" as const,
+    })),
+    selected_endpoint_id: outcome[0],
+    fallback_reason: outcome[1],
+    terminal_status: outcome[2],
+    terminal_reason: outcome[3],
+    reset_receipt_sha256: `sha256:${"1".repeat(64)}`,
+    state_observations_sha256: `sha256:${"2".repeat(64)}`,
+    route_decisions_sha256: `sha256:${"3".repeat(64)}`,
+    terminal_outcomes_sha256: `sha256:${"4".repeat(64)}`,
+    terminal_population: ["SUCCEEDED", "TIMED_OUT", "FAILED", "CANCELLED", "NO_SAFE_ROUTE"].map((status) => ({
+      status,
+      count: population[["SUCCEEDED", "TIMED_OUT", "FAILED", "CANCELLED", "NO_SAFE_ROUTE"].indexOf(status)],
+    })),
+    terminal_population_total: 6,
+  };
+}
+
+const routingQualificationIndex = {
+  projection_version: "inferdrome.routing-qualification-dashboard.v1",
+  routing_qualifications: [routingQualificationSummary],
+  rejected: [],
+  page: { limit: 25, returned: 1, total: 1, has_more: false, next_cursor: null },
+};
+
+const routingQualificationDetail = {
+  projection_version: "inferdrome.routing-qualification-dashboard.v1",
+  summary: routingQualificationSummary,
+  fault_timeline: {
+    load_observer_pause_at_ms: 15,
+    health_collection_continues: true,
+    focal_decision_time_ms: 20,
+    health_age_ms: 0,
+    load_age_ms: 10,
+    freshness_bound_ms: 5,
+  },
+  trials: [
+    qualificationTrial("fail_closed_required_load_v1", "trial-fail-closed-v1"),
+    qualificationTrial("explicit_fail_open_stale_load_v1", "trial-fail-open-v1"),
+    qualificationTrial("typed_admissible_state_only_v1", "trial-typed-v1"),
+  ],
+  source_receipts_path: "/routing-campaigns/routing-campaign-v1" as const,
+  descriptor_download_path: "/api/v1/routing-qualifications/stale-telemetry-qualification-v1/evidence" as const,
+  interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY" as const,
+};
+
 function dashboardFetch(input: RequestInfo | URL): Promise<Response> {
   const path = String(input);
   if (path === "/api/v1/runs?limit=200") return Promise.resolve(response(emptyRunsIndex));
@@ -280,6 +375,8 @@ function dashboardFetch(input: RequestInfo | URL): Promise<Response> {
   if (path === `/api/v1/trial-sets/${trialSetId}`) return Promise.resolve(response(trialDetail));
   if (path === "/api/v1/routing-campaigns?limit=25") return Promise.resolve(response(routingCampaignIndex));
   if (path === "/api/v1/routing-campaigns/routing-campaign-v1") return Promise.resolve(response(routingCampaignDetail));
+  if (path === "/api/v1/routing-qualifications?limit=25") return Promise.resolve(response(routingQualificationIndex));
+  if (path === "/api/v1/routing-qualifications/stale-telemetry-qualification-v1") return Promise.resolve(response(routingQualificationDetail));
   if (path === "/api/v1/controlled-comparisons?limit=100") return Promise.resolve(response(controlledComparisonIndex));
   if (path === `/api/v1/controlled-comparisons/${comparableControlledDetail.summary.comparison_plan_id}`) {
     return Promise.resolve(response(comparableControlledDetail));
@@ -382,6 +479,44 @@ describe("Routing campaign views", () => {
     expect(screen.getAllByText("REQUIRED_LOAD_STALE").length).toBeGreaterThan(0);
     expect(screen.getAllByText("NO SAFE ROUTE").length).toBeGreaterThan(0);
     expect(screen.queryByText(/winner|promotion|pass/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("Causal qualification views", () => {
+  it("lists only replay-and-binding-verified descriptors without a verdict", async () => {
+    vi.stubGlobal("fetch", vi.fn(dashboardFetch));
+
+    render(<MemoryRouter initialEntries={["/routing-qualifications"]}><App /></MemoryRouter>);
+
+    expect(await screen.findByRole("heading", { name: "Verified qualification descriptors" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /stale-telemetry-qualification-v1/ })[0]).toHaveAttribute(
+      "href",
+      "/routing-qualifications/stale-telemetry-qualification-v1",
+    );
+    expect(screen.getByText("MEASUREMENT_EVIDENCE_ONLY")).toBeInTheDocument();
+    expect(screen.getByText(/not a winner, recommendation, or acceptance verdict/i)).toBeInTheDocument();
+  });
+
+  it("renders the fixed causal chain, separate populations, and bounded evidence actions", async () => {
+    vi.stubGlobal("fetch", vi.fn(dashboardFetch));
+
+    render(
+      <MemoryRouter initialEntries={["/routing-qualifications/stale-telemetry-qualification-v1"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "What the router knew at the focal request" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Separate terminal populations" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Cold-reset receipts" })).toBeInTheDocument();
+    expect(screen.getAllByText("REQUIRED_LOAD_STALE").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("STALE_LOAD_FAIL_OPEN").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("HEALTH_ONLY_TIE_BREAK").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Download verified descriptor" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open source receipts" })).toHaveAttribute(
+      "href",
+      "/routing-campaigns/routing-campaign-v1",
+    );
   });
 });
 

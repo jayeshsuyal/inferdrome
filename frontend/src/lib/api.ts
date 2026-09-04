@@ -14,6 +14,7 @@ import type {
   MetricView,
   RejectedControlledComparison,
   RejectedRoutingCampaign,
+  RejectedRoutingQualification,
   RejectedRun,
   RejectedTrialSet,
   RoutingCandidateView,
@@ -28,6 +29,12 @@ import type {
   RoutingTelemetryView,
   RoutingTerminalOutcomeView,
   RoutingTerminalPopulationView,
+  RoutingQualificationDetail,
+  RoutingQualificationEndpointStateView,
+  RoutingQualificationIndex,
+  RoutingQualificationPageResponse,
+  RoutingQualificationSummary,
+  RoutingQualificationTrialView,
   RunDetail,
   RunIndex,
   RunSummary,
@@ -55,6 +62,10 @@ const CONTROLLED_COMPARISON_PAGE_LIMIT = 100;
 const MAX_CONTROLLED_COMPARISON_PAGES = 4;
 const ROUTING_CAMPAIGN_PAGE_LIMIT = 25;
 const ROUTING_CAMPAIGN_PROJECTION = "inferdrome.routing-campaign-dashboard.v1";
+const ROUTING_QUALIFICATION_PAGE_LIMIT = 25;
+const ROUTING_QUALIFICATION_PROJECTION = "inferdrome.routing-qualification-dashboard.v1";
+const ROUTING_QUALIFICATION_ID = "stale-telemetry-qualification-v1";
+const ROUTING_QUALIFICATION_MAX_BYTES = 524_288;
 const ROUTING_POLICY_IDS = [
   "fail_closed_required_load_v1",
   "explicit_fail_open_stale_load_v1",
@@ -66,6 +77,32 @@ const ROUTING_TERMINAL_STATUSES = [
   "FAILED",
   "CANCELLED",
   "NO_SAFE_ROUTE",
+] as const;
+const ROUTING_QUALIFICATION_TRIALS = [
+  {
+    policyId: "fail_closed_required_load_v1",
+    trialId: "trial-fail-closed-v1",
+    selectedEndpointId: null,
+    fallbackReason: "REQUIRED_LOAD_STALE",
+    terminalStatus: "NO_SAFE_ROUTE",
+    terminalPopulation: [2, 0, 0, 0, 4],
+  },
+  {
+    policyId: "explicit_fail_open_stale_load_v1",
+    trialId: "trial-fail-open-v1",
+    selectedEndpointId: "endpoint-b",
+    fallbackReason: "STALE_LOAD_FAIL_OPEN",
+    terminalStatus: "TIMED_OUT",
+    terminalPopulation: [2, 4, 0, 0, 0],
+  },
+  {
+    policyId: "typed_admissible_state_only_v1",
+    trialId: "trial-typed-v1",
+    selectedEndpointId: "endpoint-a",
+    fallbackReason: "HEALTH_ONLY_TIE_BREAK",
+    terminalStatus: "SUCCEEDED",
+    terminalPopulation: [6, 0, 0, 0, 0],
+  },
 ] as const;
 
 const CONTROL_CHECKS: readonly ControlledComparisonCheckId[] = [
@@ -1097,6 +1134,335 @@ function parseRoutingCampaignDetail(payload: unknown): RoutingCampaignDetail {
   return payload as unknown as RoutingCampaignDetail;
 }
 
+function qualificationDigest(value: unknown, context: string): string {
+  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value)) {
+    throw protocolError(`${context} must be a retained sha256 digest`);
+  }
+  return value;
+}
+
+function parseRoutingQualificationSummary(
+  value: unknown,
+  context: string,
+): RoutingQualificationSummary {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "qualification_id",
+    "retained_digest",
+    "source_campaign_id",
+    "source_package_retained_digest",
+    "source_execution_mode",
+    "repetitions_per_mode",
+    "population_accounting",
+    "verified_by_source_replay",
+    "verified_descriptor_binding",
+  ], context);
+  if (value.qualification_id !== ROUTING_QUALIFICATION_ID) {
+    throw protocolError(`${context}.qualification_id is unsupported`);
+  }
+  qualificationDigest(value.retained_digest, `${context}.retained_digest`);
+  if (
+    value.source_campaign_id !== "routing-campaign-v1"
+    || value.source_execution_mode !== "SYNTHETIC_CPU_ONLY"
+    || value.repetitions_per_mode !== 1
+    || value.population_accounting !== "SEPARATE_PER_TRIAL_NO_POOLING"
+    || value.verified_by_source_replay !== true
+    || value.verified_descriptor_binding !== true
+  ) {
+    throw protocolError(`${context} is outside the fixed causal qualification boundary`);
+  }
+  qualificationDigest(value.source_package_retained_digest, `${context}.source_package_retained_digest`);
+  return value as unknown as RoutingQualificationSummary;
+}
+
+function parseRejectedRoutingQualification(
+  value: unknown,
+  context: string,
+): RejectedRoutingQualification {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, ["entry", "status", "code", "message"], context);
+  if (
+    requiredString(value, "entry", context) !== "<configured-root>"
+    || value.status !== "REJECTED"
+    || !["CONFIGURATION_INVALID", "UNSAFE_ENTRY", "VERIFICATION_FAILED"].includes(value.code as string)
+  ) {
+    throw protocolError(`${context} is not a bounded qualification rejection`);
+  }
+  const message = requiredString(value, "message", context);
+  if (message.length === 0 || message.length > 160) {
+    throw protocolError(`${context}.message is not bounded`);
+  }
+  return value as unknown as RejectedRoutingQualification;
+}
+
+function parseRoutingQualificationPage(payload: unknown): RoutingQualificationPageResponse {
+  if (!isRecord(payload)) throw protocolError("the routing-qualification index is not an object");
+  assertRoutingKeys(payload, ["projection_version", "routing_qualifications", "rejected", "page"], "routing-qualification index");
+  if (payload.projection_version !== ROUTING_QUALIFICATION_PROJECTION) {
+    throw protocolError("the routing-qualification index projection version is unsupported");
+  }
+  if (!Array.isArray(payload.routing_qualifications) || !Array.isArray(payload.rejected)) {
+    throw protocolError("routing-qualification index entries must be arrays");
+  }
+  payload.routing_qualifications.forEach((entry, index) => (
+    parseRoutingQualificationSummary(entry, `routing_qualifications[${index}]`)
+  ));
+  payload.rejected.forEach((entry, index) => (
+    parseRejectedRoutingQualification(entry, `rejected[${index}]`)
+  ));
+  if (payload.routing_qualifications.length + payload.rejected.length > 1) {
+    throw protocolError("routing-qualification index exceeds its one-root bound");
+  }
+  if (!isRecord(payload.page)) throw protocolError("routing-qualification page metadata is missing");
+  assertRoutingKeys(payload.page, ["limit", "returned", "total", "has_more", "next_cursor"], "routing-qualification page");
+  if (
+    requiredInteger(payload.page, "limit", "routing-qualification page", 1) > ROUTING_QUALIFICATION_PAGE_LIMIT
+    || requiredInteger(payload.page, "returned", "routing-qualification page") !== payload.routing_qualifications.length + payload.rejected.length
+    || requiredInteger(payload.page, "total", "routing-qualification page") !== payload.routing_qualifications.length + payload.rejected.length
+    || payload.page.has_more !== false
+    || payload.page.next_cursor !== null
+  ) {
+    throw protocolError("routing-qualification page metadata is invalid");
+  }
+  return payload as unknown as RoutingQualificationPageResponse;
+}
+
+function parseQualificationEndpointState(
+  value: unknown,
+  context: string,
+  expectedEndpoint: RoutingEndpointId,
+): RoutingQualificationEndpointStateView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "endpoint_id",
+    "health_epoch",
+    "health_age_ms",
+    "health_admissibility",
+    "load_epoch",
+    "load_age_ms",
+    "load_admissibility",
+  ], context);
+  if (
+    routingEndpointId(value.endpoint_id, `${context}.endpoint_id`) !== expectedEndpoint
+    || requiredInteger(value, "health_epoch", context, 1) < 1
+    || requiredInteger(value, "load_epoch", context, 1) < 1
+    || value.health_age_ms !== 0
+    || value.health_admissibility !== "ADMISSIBLE"
+    || value.load_age_ms !== 10
+    || value.load_admissibility !== "INADMISSIBLE"
+  ) {
+    throw protocolError(`${context} does not describe the fixed stale-load/fresh-health state`);
+  }
+  return value as unknown as RoutingQualificationEndpointStateView;
+}
+
+function parseRoutingQualificationTrial(
+  value: unknown,
+  context: string,
+  expected: typeof ROUTING_QUALIFICATION_TRIALS[number],
+): RoutingQualificationTrialView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "policy_id",
+    "repetition_index",
+    "trial_id",
+    "request_denominator",
+    "reset",
+    "focal_request_id",
+    "focal_decision_id",
+    "focal_endpoint_states",
+    "selected_endpoint_id",
+    "fallback_reason",
+    "terminal_status",
+    "terminal_reason",
+    "reset_receipt_sha256",
+    "state_observations_sha256",
+    "route_decisions_sha256",
+    "terminal_outcomes_sha256",
+    "terminal_population",
+    "terminal_population_total",
+  ], context);
+  if (
+    value.policy_id !== expected.policyId
+    || value.repetition_index !== 0
+    || requiredString(value, "trial_id", context) !== expected.trialId
+    || value.request_denominator !== 6
+    || value.focal_request_id !== "request-002"
+    || !/^decision-[a-z0-9-]+$/.test(requiredString(value, "focal_decision_id", context))
+  ) {
+    throw protocolError(`${context} is outside the fixed qualification trial inventory`);
+  }
+  if (!isRecord(value.reset)) throw protocolError(`${context}.reset must be an object`);
+  assertRoutingKeys(value.reset, [
+    "virtual_time_ms",
+    "endpoint_a_instance_id",
+    "endpoint_b_instance_id",
+    "observer_epochs",
+    "queue_cleared",
+    "load_state_cleared",
+    "kv_state_cleared",
+  ], `${context}.reset`);
+  if (
+    value.reset.virtual_time_ms !== 0
+    || requiredString(value.reset, "endpoint_a_instance_id", `${context}.reset`) !== `${expected.trialId}-endpoint-a-instance-v1`
+    || requiredString(value.reset, "endpoint_b_instance_id", `${context}.reset`) !== `${expected.trialId}-endpoint-b-instance-v1`
+    || value.reset.endpoint_a_instance_id === value.reset.endpoint_b_instance_id
+    || value.reset.queue_cleared !== true
+    || value.reset.load_state_cleared !== true
+    || value.reset.kv_state_cleared !== true
+    || !Array.isArray(value.reset.observer_epochs)
+    || value.reset.observer_epochs.length !== 3
+  ) {
+    throw protocolError(`${context}.reset is not a complete cold-reset receipt`);
+  }
+  value.reset.observer_epochs.forEach((epoch, index) => {
+    if (typeof epoch !== "number" || !Number.isInteger(epoch) || epoch < 1) {
+      throw protocolError(`${context}.reset.observer_epochs[${index}] is invalid`);
+    }
+  });
+  if (!Array.isArray(value.focal_endpoint_states) || value.focal_endpoint_states.length !== 2) {
+    throw protocolError(`${context}.focal_endpoint_states must contain both endpoints`);
+  }
+  parseQualificationEndpointState(value.focal_endpoint_states[0], `${context}.focal_endpoint_states[0]`, "endpoint-a");
+  parseQualificationEndpointState(value.focal_endpoint_states[1], `${context}.focal_endpoint_states[1]`, "endpoint-b");
+  if (
+    value.selected_endpoint_id !== expected.selectedEndpointId
+    || value.fallback_reason !== expected.fallbackReason
+    || value.terminal_status !== expected.terminalStatus
+    || !requiredString(value, "terminal_reason", context)
+  ) {
+    throw protocolError(`${context} selection, fallback, and terminal outcome disagree`);
+  }
+  for (const key of [
+    "reset_receipt_sha256",
+    "state_observations_sha256",
+    "route_decisions_sha256",
+    "terminal_outcomes_sha256",
+  ] as const) qualificationDigest(value[key], `${context}.${key}`);
+  if (!Array.isArray(value.terminal_population) || value.terminal_population.length !== ROUTING_TERMINAL_STATUSES.length) {
+    throw protocolError(`${context}.terminal_population is incomplete`);
+  }
+  let total = 0;
+  value.terminal_population.forEach((entry, index) => {
+    if (!isRecord(entry) || entry.status !== ROUTING_TERMINAL_STATUSES[index]) {
+      throw protocolError(`${context}.terminal_population[${index}] is out of status order`);
+    }
+    const count = requiredInteger(entry, "count", `${context}.terminal_population[${index}]`);
+    if (count !== expected.terminalPopulation[index]) {
+      throw protocolError(`${context}.terminal_population disagrees with the declared mode`);
+    }
+    total += count;
+  });
+  if (value.terminal_population_total !== 6 || total !== 6) {
+    throw protocolError(`${context}.terminal_population does not close its separate trial`);
+  }
+  return value as unknown as RoutingQualificationTrialView;
+}
+
+function parseRoutingQualificationDetail(payload: unknown): RoutingQualificationDetail {
+  if (!isRecord(payload)) throw protocolError("the routing-qualification detail is not an object");
+  assertRoutingKeys(payload, [
+    "projection_version",
+    "summary",
+    "fault_timeline",
+    "trials",
+    "source_receipts_path",
+    "descriptor_download_path",
+    "interpretation_boundary",
+  ], "routing-qualification detail");
+  if (payload.projection_version !== ROUTING_QUALIFICATION_PROJECTION) {
+    throw protocolError("the routing-qualification detail projection version is unsupported");
+  }
+  parseRoutingQualificationSummary(payload.summary, "routing-qualification summary");
+  if (!isRecord(payload.fault_timeline)) throw protocolError("routing-qualification fault_timeline must be an object");
+  assertRoutingKeys(payload.fault_timeline, [
+    "load_observer_pause_at_ms",
+    "health_collection_continues",
+    "focal_decision_time_ms",
+    "health_age_ms",
+    "load_age_ms",
+    "freshness_bound_ms",
+  ], "routing-qualification fault_timeline");
+  if (
+    payload.fault_timeline.load_observer_pause_at_ms !== 15
+    || payload.fault_timeline.health_collection_continues !== true
+    || payload.fault_timeline.focal_decision_time_ms !== 20
+    || payload.fault_timeline.health_age_ms !== 0
+    || payload.fault_timeline.load_age_ms !== 10
+    || payload.fault_timeline.freshness_bound_ms !== 5
+  ) {
+    throw protocolError("routing-qualification fault_timeline is outside the fixed causal vector");
+  }
+  if (!Array.isArray(payload.trials) || payload.trials.length !== ROUTING_QUALIFICATION_TRIALS.length) {
+    throw protocolError("routing-qualification trials must contain the three declared modes");
+  }
+  const trials = payload.trials.map((trial, index) => (
+    parseRoutingQualificationTrial(
+      trial,
+      `routing-qualification trials[${index}]`,
+      ROUTING_QUALIFICATION_TRIALS[index]!,
+    )
+  ));
+  const trialIds = new Set(trials.map((trial) => trial.trial_id));
+  const resetInstanceIds = new Set(
+    trials.flatMap((trial) => [
+      trial.reset.endpoint_a_instance_id,
+      trial.reset.endpoint_b_instance_id,
+    ]),
+  );
+  if (trialIds.size !== trials.length || resetInstanceIds.size !== trials.length * 2) {
+    throw protocolError("routing-qualification trials do not retain separate cold-reset identities");
+  }
+  if (
+    payload.source_receipts_path !== "/routing-campaigns/routing-campaign-v1"
+    || payload.descriptor_download_path !== "/api/v1/routing-qualifications/stale-telemetry-qualification-v1/evidence"
+    || payload.interpretation_boundary !== "MEASUREMENT_EVIDENCE_ONLY"
+  ) {
+    throw protocolError("routing-qualification bounded links or interpretation boundary disagree");
+  }
+  return payload as unknown as RoutingQualificationDetail;
+}
+
+async function fetchRoutingQualificationEvidence(
+  qualificationId: string,
+  expectedDigest: string,
+  signal?: AbortSignal,
+): Promise<{ readonly content: Blob; readonly digest: string }> {
+  let response: Response;
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (dashboardToken !== null) headers.Authorization = `Bearer ${dashboardToken}`;
+    response = await fetch(
+      `${API_ROOT}/routing-qualifications/${encodeURIComponent(qualificationId)}/evidence`,
+      { method: "GET", headers, signal },
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError("The local Inferdrome dashboard service is unavailable. Start it and try again.", 0);
+  }
+  if (!response.ok) {
+    throw new ApiError(await readError(response), response.status, response.headers.get("x-request-id"));
+  }
+  if (
+    response.headers.get("content-type") !== "application/json"
+    || response.headers.get("content-disposition") !== 'attachment; filename="stale-telemetry-qualification-v1.json"'
+  ) {
+    throw protocolError("the qualification evidence download headers are unsupported");
+  }
+  const digest = qualificationDigest(
+    response.headers.get("x-inferdrome-evidence-digest"),
+    "qualification evidence digest",
+  );
+  if (digest !== expectedDigest) {
+    throw protocolError("the qualification evidence digest does not match the rendered descriptor");
+  }
+  const content = await response.blob();
+  if (content.size < 1 || content.size > ROUTING_QUALIFICATION_MAX_BYTES) {
+    throw protocolError("the qualification evidence download size is invalid");
+  }
+  return { content, digest };
+}
+
 function parseControlledSummary(
   value: unknown,
   context: string,
@@ -1929,6 +2295,52 @@ export const api = {
       throw protocolError("routing-campaign detail identity disagrees with its requested URL");
     }
     return detail;
+  },
+
+  async listRoutingQualifications(signal?: AbortSignal): Promise<RoutingQualificationIndex> {
+    const page = parseRoutingQualificationPage(
+      await fetchJson(`/routing-qualifications?limit=${ROUTING_QUALIFICATION_PAGE_LIMIT}`, signal),
+    );
+    return {
+      projection_version: ROUTING_QUALIFICATION_PROJECTION,
+      routing_qualifications: page.routing_qualifications,
+      rejected: page.rejected,
+    };
+  },
+
+  async getRoutingQualification(
+    qualificationId: string,
+    signal?: AbortSignal,
+  ): Promise<RoutingQualificationDetail> {
+    const detail = parseRoutingQualificationDetail(
+      await fetchJson(`/routing-qualifications/${encodeURIComponent(qualificationId)}`, signal),
+    );
+    if (detail.summary.qualification_id !== qualificationId) {
+      throw protocolError("routing-qualification detail identity disagrees with its requested URL");
+    }
+    return detail;
+  },
+
+  async downloadRoutingQualification(
+    qualificationId: string,
+    expectedDigest: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const evidence = await fetchRoutingQualificationEvidence(
+      qualificationId,
+      expectedDigest,
+      signal,
+    );
+    const url = URL.createObjectURL(evidence.content);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "stale-telemetry-qualification-v1.json";
+    anchor.style.display = "none";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    return evidence.digest;
   },
 
   async listControlledComparisons(signal?: AbortSignal): Promise<ControlledComparisonIndex> {

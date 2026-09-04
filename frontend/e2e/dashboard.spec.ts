@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdtempSync,
   readdirSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -26,6 +27,7 @@ const SOURCE_ROOT = join(REPOSITORY_ROOT, "src");
 const FIXTURE_PREFIX = "inferdrome-dashboard-e2e-";
 const PLAN_ID = "comparison-plan-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const ROUTING_CAMPAIGN_ID = "routing-campaign-v1";
+const ROUTING_QUALIFICATION_ID = "stale-telemetry-qualification-v1";
 
 interface LocalDemoSummary {
   readonly claim_boundary: string;
@@ -39,6 +41,7 @@ interface LocalDemoSummary {
     readonly comparison_plans: string;
     readonly comparison_results: string;
     readonly routing_campaign: string;
+    readonly routing_qualification: string;
     readonly runs: string;
     readonly trial_sets: string;
   };
@@ -47,6 +50,13 @@ interface LocalDemoSummary {
     readonly execution_mode: string;
     readonly retained_digest: string;
     readonly verified_by_replay: boolean;
+  };
+  readonly routing_qualification: {
+    readonly qualification_id: string;
+    readonly retained_digest: string;
+    readonly source_package_retained_digest: string;
+    readonly verified_by_source_replay: boolean;
+    readonly verified_descriptor_binding: boolean;
   };
 }
 
@@ -57,6 +67,8 @@ interface FixturePaths {
   readonly comparisonPlans: string;
   readonly comparisonResults: string;
   readonly routingCampaigns: string;
+  readonly routingQualifications: string;
+  readonly routingQualificationDigest: string;
 }
 
 let fixture: FixturePaths | undefined;
@@ -117,7 +129,10 @@ function prepareLocalDemoFixture(root: string): LocalDemoSummary {
 }
 
 function createPopulatedFixture(): FixturePaths {
-  const root = mkdtempSync(join(tmpdir(), FIXTURE_PREFIX));
+  // Qualification publication walks no-follow descriptors from `/`. Resolve
+  // macOS's `/var` compatibility symlink before handing a temporary path to
+  // that strict reader, just as the authenticated E2E fixture does.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), FIXTURE_PREFIX)));
   const paths: FixturePaths = {
     root,
     runs: join(root, "runs"),
@@ -125,6 +140,8 @@ function createPopulatedFixture(): FixturePaths {
     comparisonPlans: join(root, "comparison-plans"),
     comparisonResults: join(root, "comparison-results"),
     routingCampaigns: join(root, "routing-campaign-v1"),
+    routingQualifications: join(root, "stale-telemetry-qualification"),
+    routingQualificationDigest: "",
   };
   try {
     const prepared = prepareLocalDemoFixture(root);
@@ -138,6 +155,11 @@ function createPopulatedFixture(): FixturePaths {
       || prepared.routing_campaign.execution_mode !== "SYNTHETIC_CPU_ONLY"
       || !prepared.routing_campaign.retained_digest
       || prepared.routing_campaign.verified_by_replay !== true
+      || prepared.routing_qualification.qualification_id !== ROUTING_QUALIFICATION_ID
+      || !prepared.routing_qualification.retained_digest
+      || prepared.routing_qualification.source_package_retained_digest !== prepared.routing_campaign.retained_digest
+      || prepared.routing_qualification.verified_by_source_replay !== true
+      || prepared.routing_qualification.verified_descriptor_binding !== true
     ) {
       throw new Error("The populated dashboard fixture did not execute all four planned runs.");
     }
@@ -148,10 +170,11 @@ function createPopulatedFixture(): FixturePaths {
       || resolve(preparedRoots.comparison_plans) !== resolve(paths.comparisonPlans)
       || resolve(preparedRoots.comparison_results) !== resolve(paths.comparisonResults)
       || resolve(preparedRoots.routing_campaign) !== resolve(paths.routingCampaigns)
+      || resolve(preparedRoots.routing_qualification) !== resolve(paths.routingQualifications)
     ) {
       throw new Error("The local demo prepared dashboard roots outside its fixture.");
     }
-    return paths;
+    return { ...paths, routingQualificationDigest: prepared.routing_qualification.retained_digest };
   } catch (error) {
     removeFixture(paths);
     throw error;
@@ -202,6 +225,10 @@ async function startDashboardServer(paths: FixturePaths): Promise<string> {
       paths.comparisonResults,
       "--routing-campaigns-root",
       paths.routingCampaigns,
+      "--routing-qualification-root",
+      paths.routingQualifications,
+      "--routing-qualification-digest",
+      paths.routingQualificationDigest,
       "--port",
       String(port),
     ],
@@ -272,7 +299,7 @@ function makeTreeWritable(path: string): void {
 function removeFixture(paths: FixturePaths | undefined): void {
   if (!paths) return;
   const resolvedRoot = resolve(paths.root);
-  const resolvedTemporaryRoot = `${resolve(tmpdir())}${sep}`;
+  const resolvedTemporaryRoot = `${realpathSync(tmpdir())}${sep}`;
   if (
     !resolvedRoot.startsWith(resolvedTemporaryRoot)
     || !resolvedRoot.split(sep).at(-1)?.startsWith(FIXTURE_PREFIX)
@@ -449,6 +476,39 @@ test.describe("populated dashboard", () => {
     await expect(page.getByText("NO SAFE ROUTE", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("endpoint-b", { exact: true }).first()).toBeVisible();
 
+    await dashboardNavigation(page).getByRole("link", { name: "Causal qualification", exact: true }).click();
+    await expectPath(page, "/routing-qualifications");
+    visitedByClick.add("/routing-qualifications");
+    await expect(page.getByRole("heading", { name: "Verified qualification descriptors", level: 2 })).toBeVisible();
+    const qualificationLink = page.locator("a.routing-qualification-link:visible").first();
+    const qualificationHref = await qualificationLink.getAttribute("href");
+    expect(qualificationHref).toBe(`/routing-qualifications/${ROUTING_QUALIFICATION_ID}`);
+    const qualificationPath = qualificationHref as string;
+    await qualificationLink.click();
+    await expectPath(page, qualificationPath);
+    visitedByClick.add(qualificationPath);
+    await expect(page.getByRole("heading", { name: "What the router knew at the focal request", level: 2 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Separate terminal populations", level: 2 })).toBeVisible();
+    await expect(page.getByText("REQUIRED_LOAD_STALE", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("STALE_LOAD_FAIL_OPEN", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("HEALTH_ONLY_TIE_BREAK", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Canonical digest matched", { exact: true })).toBeVisible();
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download verified descriptor" }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe("stale-telemetry-qualification-v1.json");
+    await page.getByRole("link", { name: "Open source receipts" }).click();
+    await expectPath(page, `/routing-campaigns/${ROUTING_CAMPAIGN_ID}`);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${baseUrl}${qualificationPath}`);
+    await expect(page.getByRole("heading", { name: ROUTING_QUALIFICATION_ID, level: 1 })).toBeVisible();
+    const responsive = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    expect(responsive.scrollWidth).toBeLessThanOrEqual(responsive.clientWidth);
+
     expect(visitedByClick).toEqual(new Set([
       "/runs",
       runPath,
@@ -460,6 +520,8 @@ test.describe("populated dashboard", () => {
       evidencePath,
       "/routing-campaigns",
       routingCampaignPath,
+      "/routing-qualifications",
+      qualificationPath,
     ]));
 
     const deepLinks = [
@@ -472,6 +534,8 @@ test.describe("populated dashboard", () => {
       ["/compare", "Compare runs"],
       ["/routing-campaigns", "Routing campaigns"],
       [routingCampaignPath, ROUTING_CAMPAIGN_ID],
+      ["/routing-qualifications", "Causal qualification"],
+      [qualificationPath, ROUTING_QUALIFICATION_ID],
       ["/evidence", "Evidence"],
       [evidencePath, "Evidence"],
     ] as const;

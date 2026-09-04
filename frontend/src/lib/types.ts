@@ -493,6 +493,131 @@ export interface RoutingCampaignIndex extends ApiObject {
   readonly rejected: readonly RejectedRoutingCampaign[];
 }
 
+/**
+ * Read-only causal qualification projection over one R1 package and its
+ * independently bound PR4 descriptor. It intentionally remains separate from
+ * the strict routing-campaign-v1 API contract above.
+ */
+export type RoutingQualificationProjectionVersion = "inferdrome.routing-qualification-dashboard.v1";
+export type RoutingQualificationId = "stale-telemetry-qualification-v1";
+export type RoutingQualificationPolicyId =
+  | "fail_closed_required_load_v1"
+  | "explicit_fail_open_stale_load_v1"
+  | "typed_admissible_state_only_v1";
+
+export interface RoutingQualificationSummary extends ApiObject {
+  readonly qualification_id: RoutingQualificationId;
+  readonly retained_digest: string;
+  readonly source_campaign_id: "routing-campaign-v1";
+  readonly source_package_retained_digest: string;
+  readonly source_execution_mode: "SYNTHETIC_CPU_ONLY";
+  readonly repetitions_per_mode: 1;
+  readonly population_accounting: "SEPARATE_PER_TRIAL_NO_POOLING";
+  readonly verified_by_source_replay: true;
+  readonly verified_descriptor_binding: true;
+}
+
+export interface RoutingQualificationFaultView extends ApiObject {
+  readonly load_observer_pause_at_ms: 15;
+  readonly health_collection_continues: true;
+  readonly focal_decision_time_ms: 20;
+  readonly health_age_ms: 0;
+  readonly load_age_ms: 10;
+  readonly freshness_bound_ms: 5;
+}
+
+export interface RoutingQualificationEndpointStateView extends ApiObject {
+  readonly endpoint_id: RoutingEndpointId;
+  readonly health_epoch: number;
+  readonly health_age_ms: 0;
+  readonly health_admissibility: "ADMISSIBLE";
+  readonly load_epoch: number;
+  readonly load_age_ms: 10;
+  readonly load_admissibility: "INADMISSIBLE";
+}
+
+export interface RoutingQualificationPopulationEntry extends ApiObject {
+  readonly status: RoutingTerminalStatus;
+  readonly count: number;
+}
+
+export interface RoutingQualificationResetView extends ApiObject {
+  readonly virtual_time_ms: 0;
+  readonly endpoint_a_instance_id: string;
+  readonly endpoint_b_instance_id: string;
+  readonly observer_epochs: readonly [number, number, number];
+  readonly queue_cleared: true;
+  readonly load_state_cleared: true;
+  readonly kv_state_cleared: true;
+}
+
+export interface RoutingQualificationTrialView extends ApiObject {
+  readonly policy_id: RoutingQualificationPolicyId;
+  readonly repetition_index: 0;
+  readonly trial_id: string;
+  readonly request_denominator: 6;
+  readonly reset: RoutingQualificationResetView;
+  readonly focal_request_id: "request-002";
+  readonly focal_decision_id: string;
+  readonly focal_endpoint_states: readonly [
+    RoutingQualificationEndpointStateView,
+    RoutingQualificationEndpointStateView,
+  ];
+  readonly selected_endpoint_id: RoutingEndpointId | null;
+  readonly fallback_reason:
+    | "REQUIRED_LOAD_STALE"
+    | "STALE_LOAD_FAIL_OPEN"
+    | "HEALTH_ONLY_TIE_BREAK";
+  readonly terminal_status: RoutingTerminalStatus;
+  readonly terminal_reason: string;
+  readonly reset_receipt_sha256: string;
+  readonly state_observations_sha256: string;
+  readonly route_decisions_sha256: string;
+  readonly terminal_outcomes_sha256: string;
+  readonly terminal_population: readonly [
+    RoutingQualificationPopulationEntry,
+    RoutingQualificationPopulationEntry,
+    RoutingQualificationPopulationEntry,
+    RoutingQualificationPopulationEntry,
+    RoutingQualificationPopulationEntry,
+  ];
+  readonly terminal_population_total: 6;
+}
+
+export interface RoutingQualificationDetail extends ApiObject {
+  readonly projection_version: RoutingQualificationProjectionVersion;
+  readonly summary: RoutingQualificationSummary;
+  readonly fault_timeline: RoutingQualificationFaultView;
+  readonly trials: readonly [
+    RoutingQualificationTrialView,
+    RoutingQualificationTrialView,
+    RoutingQualificationTrialView,
+  ];
+  readonly source_receipts_path: "/routing-campaigns/routing-campaign-v1";
+  readonly descriptor_download_path: "/api/v1/routing-qualifications/stale-telemetry-qualification-v1/evidence";
+  readonly interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY";
+}
+
+export interface RejectedRoutingQualification extends ApiObject {
+  readonly entry: string;
+  readonly status: "REJECTED";
+  readonly code: "CONFIGURATION_INVALID" | "UNSAFE_ENTRY" | "VERIFICATION_FAILED";
+  readonly message: string;
+}
+
+export interface RoutingQualificationPageResponse extends ApiObject {
+  readonly projection_version: RoutingQualificationProjectionVersion;
+  readonly routing_qualifications: readonly RoutingQualificationSummary[];
+  readonly rejected: readonly RejectedRoutingQualification[];
+  readonly page: PageView;
+}
+
+export interface RoutingQualificationIndex extends ApiObject {
+  readonly projection_version: RoutingQualificationProjectionVersion;
+  readonly routing_qualifications: readonly RoutingQualificationSummary[];
+  readonly rejected: readonly RejectedRoutingQualification[];
+}
+
 export type ControlledComparisonResultStatus =
   | "COMPARABLE"
   | "INCOMPARABLE"

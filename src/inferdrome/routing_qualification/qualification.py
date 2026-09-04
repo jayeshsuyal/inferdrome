@@ -839,6 +839,20 @@ def capture_qualification(
         raise StaleTelemetryQualificationError(
             "source routing campaign is not independently verified"
         ) from error
+    return capture_qualification_from_verified(verified)
+
+
+def capture_qualification_from_verified(
+    verified: VerifiedCampaign,
+) -> CapturedQualification:
+    """Capture the fixed overlay from one already independently verified source.
+
+    This deliberately accepts only the immutable in-memory verifier snapshot.
+    Consumers that already need source receipts (such as the local dashboard)
+    therefore do not reopen the source package between descriptor verification
+    and projection.
+    """
+
     _assert_falsifiable_scenario(verified)
     descriptor = StaleTelemetryQualification(
         schema_version="inferdrome.stale-telemetry-qualification.v1",
@@ -916,6 +930,27 @@ def verify_qualification_descriptor(
 ) -> CapturedQualification:
     """Fail closed unless canonical bytes exactly rebind the source package."""
 
+    try:
+        verified = load_verified_campaign(campaign_package, require_immutable=True)
+    except (RoutingCampaignError, VerificationError) as error:
+        raise StaleTelemetryQualificationError(
+            "source routing campaign is not independently verified"
+        ) from error
+    return verify_qualification_descriptor_against_verified(
+        content,
+        verified=verified,
+        expected_descriptor_digest=expected_descriptor_digest,
+    )
+
+
+def verify_qualification_descriptor_against_verified(
+    content: bytes,
+    *,
+    verified: VerifiedCampaign,
+    expected_descriptor_digest: str,
+) -> CapturedQualification:
+    """Verify canonical descriptor bytes against an existing verified snapshot."""
+
     _strict_json_value(content)
     try:
         descriptor = StaleTelemetryQualification.model_validate_json(content)
@@ -931,10 +966,9 @@ def verify_qualification_descriptor(
     retained_digest = qualification_digest(canonical)
     if expected_descriptor_digest != retained_digest:
         raise VerificationError("qualification descriptor digest disagrees")
-    captured = capture_qualification(
-        campaign_package,
-        expected_source_digest=descriptor.source_package_retained_digest,
-    )
+    if verified.report.retained_digest != descriptor.source_package_retained_digest:
+        raise VerificationError("qualification descriptor source digest disagrees")
+    captured = capture_qualification_from_verified(verified)
     if captured.descriptor != descriptor:
         raise VerificationError(
             "qualification descriptor disagrees with source campaign"
@@ -954,9 +988,30 @@ def verify_qualification(
 ) -> CapturedQualification:
     """Verify a published descriptor and independently replay its source package."""
 
-    return verify_qualification_descriptor(
+    try:
+        verified = load_verified_campaign(campaign_package, require_immutable=True)
+    except (RoutingCampaignError, VerificationError) as error:
+        raise StaleTelemetryQualificationError(
+            "source routing campaign is not independently verified"
+        ) from error
+    return verify_qualification_against_verified(
+        qualification_root,
+        verified=verified,
+        expected_descriptor_digest=expected_descriptor_digest,
+    )
+
+
+def verify_qualification_against_verified(
+    qualification_root: Path,
+    *,
+    verified: VerifiedCampaign,
+    expected_descriptor_digest: str,
+) -> CapturedQualification:
+    """Verify one published descriptor against a held source verifier snapshot."""
+
+    return verify_qualification_descriptor_against_verified(
         _read_published_descriptor(qualification_root),
-        campaign_package=campaign_package,
+        verified=verified,
         expected_descriptor_digest=expected_descriptor_digest,
     )
 

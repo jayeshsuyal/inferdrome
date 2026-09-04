@@ -27,6 +27,8 @@ BASELINE_TRIAL_SET_ID = "trial-set-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 CANDIDATE_TRIAL_SET_ID = "trial-set-cccccccccccccccccccccccccccccccc"
 ROUTING_CAMPAIGN_ID = "routing-campaign-v1"
 ROUTING_CAMPAIGN_ROOT_NAME = "routing-campaign-v1"
+ROUTING_QUALIFICATION_ID = "stale-telemetry-qualification-v1"
+ROUTING_QUALIFICATION_ROOT_NAME = "stale-telemetry-qualification"
 SCHEDULE_SEED = "0" * 64
 RUN_ID_PATTERN = re.compile(r"^run-[0-9a-f]{32}$")
 COMMAND_TIMEOUT_SECONDS = 300
@@ -132,9 +134,7 @@ def _run_json_module(
         ) from error
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
-        raise LocalDemoError(
-            f"Inferdrome command {command_label} failed:\n{detail}"
-        )
+        raise LocalDemoError(f"Inferdrome command {command_label} failed:\n{detail}")
     try:
         value = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -294,6 +294,27 @@ def _load_state(path: Path) -> dict[str, Any]:
         ):
             raise LocalDemoError("demo-state.json identifies an unsafe routing package")
         _required_string(routing_campaign, "retained_digest")
+    routing_qualification = value.get("routing_qualification")
+    if routing_qualification is not None:
+        if not isinstance(routing_qualification, dict):
+            raise LocalDemoError(
+                "demo-state.json routing_qualification is not an object"
+            )
+        if (
+            _required_string(routing_qualification, "qualification_id")
+            != ROUTING_QUALIFICATION_ID
+        ):
+            raise LocalDemoError(
+                "demo-state.json identifies a different routing qualification"
+            )
+        if (
+            _required_string(routing_qualification, "source_package_root")
+            != ROUTING_CAMPAIGN_ROOT_NAME
+        ):
+            raise LocalDemoError(
+                "demo-state.json identifies an unsafe qualification source"
+            )
+        _required_string(routing_qualification, "retained_digest")
     return value
 
 
@@ -347,6 +368,7 @@ def _roots(workspace: Path) -> dict[str, Path]:
         "comparison_plans": workspace / "comparison-plans",
         "comparison_results": workspace / "comparison-results",
         "routing_campaign": workspace / ROUTING_CAMPAIGN_ROOT_NAME,
+        "routing_qualification": workspace / ROUTING_QUALIFICATION_ROOT_NAME,
         "runs": workspace / "runs",
         "trial_sets": workspace / "trial-sets",
     }
@@ -428,6 +450,99 @@ def _prepare_routing_campaign(
         or _required_string(verified, "retained_digest") != retained_digest
     ):
         raise LocalDemoError("retained routing campaign did not reverify exactly")
+    return retained_digest
+
+
+def _routing_qualification_metadata(
+    state: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    value = state.get("routing_qualification")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise LocalDemoError("demo-state.json routing_qualification is not an object")
+    if _required_string(value, "qualification_id") != ROUTING_QUALIFICATION_ID:
+        raise LocalDemoError(
+            "demo-state.json identifies a different routing qualification"
+        )
+    if _required_string(value, "source_package_root") != ROUTING_CAMPAIGN_ROOT_NAME:
+        raise LocalDemoError(
+            "demo-state.json identifies an unsafe qualification source"
+        )
+    _required_string(value, "retained_digest")
+    return value
+
+
+def _prepare_routing_qualification(
+    python: str,
+    workspace: Path,
+    roots: Mapping[str, Path],
+    state: dict[str, Any],
+    *,
+    source_digest: str,
+) -> str:
+    """Capture and reverify the additive descriptor against the sealed R1 source."""
+
+    qualification_root = roots["routing_qualification"]
+    retained = _routing_qualification_metadata(state)
+    if retained is None:
+        if qualification_root.exists() or qualification_root.is_symlink():
+            raise LocalDemoError(
+                "a routing qualification exists without its retained digest; choose a "
+                "fresh --workspace because Inferdrome will not guess its digest"
+            )
+        created = _run_json_module(
+            python,
+            "inferdrome.routing_qualification",
+            [
+                "capture",
+                "--campaign-package",
+                str(roots["routing_campaign"]),
+                "--expected-source-digest",
+                source_digest,
+                "--qualification-output-root",
+                str(qualification_root),
+            ],
+        )
+        reported_directory = Path(
+            _required_string(created, "qualification_directory")
+        ).absolute()
+        expected_directory = qualification_root / ROUTING_QUALIFICATION_ID
+        if reported_directory != expected_directory.absolute():
+            raise LocalDemoError(
+                "new routing qualification reported an unexpected package path"
+            )
+        retained_digest = _required_string(created, "qualification_retained_digest")
+        state["routing_qualification"] = {
+            "qualification_id": ROUTING_QUALIFICATION_ID,
+            "source_package_root": ROUTING_CAMPAIGN_ROOT_NAME,
+            "retained_digest": retained_digest,
+        }
+        _write_state(workspace / "demo-state.json", state)
+    else:
+        retained_digest = _required_string(retained, "retained_digest")
+
+    verified = _run_json_module(
+        python,
+        "inferdrome.routing_qualification",
+        [
+            "verify",
+            "--campaign-package",
+            str(roots["routing_campaign"]),
+            "--qualification-root",
+            str(qualification_root),
+            "--expected-qualification-digest",
+            retained_digest,
+        ],
+    )
+    if (
+        _required_bool(verified, "valid") is not True
+        or _required_string(verified, "qualification_id") != ROUTING_QUALIFICATION_ID
+        or _required_string(verified, "qualification_retained_digest")
+        != retained_digest
+        or _required_string(verified, "source_package_retained_digest") != source_digest
+    ):
+        raise LocalDemoError("retained routing qualification did not reverify exactly")
     return retained_digest
 
 
@@ -569,6 +684,13 @@ def _prepare_demo(
         roots,
         state,
     )
+    routing_qualification_digest = _prepare_routing_qualification(
+        python,
+        workspace,
+        roots,
+        state,
+        source_digest=routing_campaign_digest,
+    )
     plan = _required_mapping(state, "plan")
     plan_digest = _required_string(plan, "comparison_plan_digest")
     plan_path = roots["comparison_plans"] / PLAN_ID
@@ -637,6 +759,10 @@ def _prepare_demo(
         "campaign_id": ROUTING_CAMPAIGN_ID,
         "retained_digest": routing_campaign_digest,
     }
+    state["last_verified_routing_qualification"] = {
+        "qualification_id": ROUTING_QUALIFICATION_ID,
+        "retained_digest": routing_qualification_digest,
+    }
     _write_state(workspace / "demo-state.json", state)
     return {
         "claim_boundary": CLAIM_BOUNDARY,
@@ -663,6 +789,10 @@ def _prepare_demo(
             "runs": "/runs",
             "routing_campaign": f"/routing-campaigns/{ROUTING_CAMPAIGN_ID}",
             "routing_campaigns": "/routing-campaigns",
+            "routing_qualification": (
+                f"/routing-qualifications/{ROUTING_QUALIFICATION_ID}"
+            ),
+            "routing_qualifications": "/routing-qualifications",
             "trial_set": f"/trial-sets/{CANDIDATE_TRIAL_SET_ID}",
             "trial_sets": "/trial-sets",
         },
@@ -671,6 +801,13 @@ def _prepare_demo(
             "execution_mode": "SYNTHETIC_CPU_ONLY",
             "retained_digest": routing_campaign_digest,
             "verified_by_replay": True,
+        },
+        "routing_qualification": {
+            "qualification_id": ROUTING_QUALIFICATION_ID,
+            "retained_digest": routing_qualification_digest,
+            "source_package_retained_digest": routing_campaign_digest,
+            "verified_by_source_replay": True,
+            "verified_descriptor_binding": True,
         },
         "roots": {key: str(value) for key, value in roots.items()},
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -697,6 +834,7 @@ def _require_available_port(port: int) -> None:
 def _print_handoff(summary: Mapping[str, Any]) -> None:
     comparison = _required_mapping(summary, "comparison")
     routing_campaign = _required_mapping(summary, "routing_campaign")
+    routing_qualification = _required_mapping(summary, "routing_qualification")
     executed_count = len(_required_strings(comparison, "executed_run_ids"))
     reused_count = len(_required_strings(comparison, "reused_run_ids"))
     print("\nInferdrome local product demo", flush=True)
@@ -720,6 +858,11 @@ def _print_handoff(summary: Mapping[str, Any]) -> None:
         f"package ({routing_campaign['campaign_id']}).",
         flush=True,
     )
+    print(
+        "Verified causal qualification: fresh health / stale load across three "
+        f"declared modes ({routing_qualification['qualification_id']}).",
+        flush=True,
+    )
     print(f"Workspace: {summary['workspace']}", flush=True)
     print(f"Dashboard: {summary['dashboard_url']}", flush=True)
 
@@ -732,6 +875,7 @@ def _launch_dashboard(
     open_browser: bool,
 ) -> NoReturn:
     roots = _required_mapping(summary, "roots")
+    routing_qualification = _required_mapping(summary, "routing_qualification")
     command = [
         python,
         "-m",
@@ -747,6 +891,10 @@ def _launch_dashboard(
         _required_string(roots, "comparison_results"),
         "--routing-campaigns-root",
         _required_string(roots, "routing_campaign"),
+        "--routing-qualification-root",
+        _required_string(roots, "routing_qualification"),
+        "--routing-qualification-digest",
+        _required_string(routing_qualification, "retained_digest"),
         "--port",
         str(port),
     ]
