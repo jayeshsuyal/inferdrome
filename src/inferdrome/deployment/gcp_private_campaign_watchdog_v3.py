@@ -40,6 +40,7 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignCreateRequest,
     GcpPrivateCampaignError,
     GcpPrivateCampaignJournal,
+    GcpPrivateCampaignJournalIdentity,
     GcpPrivateCampaignLifecycleController,
     GcpPrivateCampaignProposal,
     GcpPrivateCampaignWatchdogRecoveryProgress,
@@ -66,6 +67,8 @@ GCP_PRIVATE_CAMPAIGN_WATCHDOG_EVENT_SCHEMA_VERSION: Final = (
 _MAX_EVENTS: Final = 64
 _MAX_EVENT_BYTES: Final = 262_144
 _READY_TIMEOUT_SECONDS: Final = 3.0
+_CREATOR_FENCE_GRACE_SECONDS: Final = 0.2
+_CREATOR_FENCE_TIMEOUT_SECONDS: Final = 2.0
 # This is a bounded local debounce, not a provider terminal-absence claim. A
 # pre-bind crash window stays unconfirmed without an authoritative provider
 # operation identity, even after this timer elapses.
@@ -73,6 +76,7 @@ _PREBIND_SETTLEMENT_SECONDS: Final = 1.0
 _SOURCE_ROOT: Final = Path(__file__).resolve().parents[2]
 _CAPABILITY_TOKEN: Final = object()
 _WorkerBackend = Literal["google_cleanup_only_v1", "file_fake_cleanup_v1"]
+_CreatorLivenessMode = Literal["pipe_bound_v1", "pid_observation_only_v1"]
 _EventState = Literal[
     "WORKER_READY",
     "RECOVERY_ATTEMPT",
@@ -81,6 +85,44 @@ _EventState = Literal[
     "CLEANUP_UNCONFIRMED",
     "STOPPED",
 ]
+
+# The detached worker has strictly less authority than a live-create
+# capability.  It may start from any explicit, nonterminal state from which it
+# can reconcile or clean the one exact durable binding.  It can never turn
+# that readiness into create authority: the create path revalidates the much
+# narrower state set below before the optional Google SDK is reachable.
+_CLEANUP_WORKER_CORE_STATES: Final[frozenset[str]] = frozenset(
+    {
+        "CREATE_INTENT",
+        "CREATE_CLAIMED",
+        "CREATE_SUBMITTED",
+        "CREATE_FENCE_PENDING",
+        "CREATE_RECONCILING",
+        "CREATED",
+        "INSTANCE_IDENTITY_BOUND",
+        "BOOT_DISK_IDENTITY_BOUND",
+        "PROVIDER_BACKSTOP_VERIFIED",
+        "READINESS_VERIFIED",
+        "READINESS_RECEIPT_RECORDED",
+        "CAMPAIGN_HANDED_OFF",
+        "EVIDENCE_RETRIEVED",
+        "SEALED_ARTIFACT_RECEIPT_RECORDED",
+        "CLEANUP_INTENT",
+        "INSTANCE_DELETE_SUBMITTED",
+        "INSTANCE_DELETE_RECONCILING",
+        "BOOT_DISK_DELETE_INTENT",
+        "BOOT_DISK_DELETE_SUBMITTED",
+        "CLEANUP_UNCONFIRMED",
+        "EXECUTION_DEADLINE_EXCEEDED",
+        "BLOCKED",
+    }
+)
+_CREATE_AUTHORITY_CORE_STATES: Final[frozenset[str]] = frozenset(
+    {"CREATE_INTENT", "CREATE_CLAIMED"}
+)
+_CREATE_CAPABILITY_ISSUANCE_CORE_STATES: Final[frozenset[str]] = frozenset(
+    {"CREATE_INTENT"}
+)
 
 
 def _canonical(model: PrecampaignModel) -> bytes:
@@ -96,9 +138,11 @@ class GcpPrivateCampaignWatchdogBinding(PrecampaignModel):
     cleanup_authorization: GcpPrivateCampaignCleanupAuthorization
     approval_sha256: Sha256Digest
     journal_root_sha256: Sha256Digest
+    journal_identity: GcpPrivateCampaignJournalIdentity
     execution_deadline_at: GcpTimestamp
     cleanup_deadline_at: GcpTimestamp
     parent_process_id: Annotated[int, Field(ge=1, le=2_147_483_647)]
+    creator_liveness_mode: _CreatorLivenessMode
     worker_backend: _WorkerBackend
     binding_digest: Sha256Digest
 
@@ -489,9 +533,7 @@ class _WatchdogStore:
                 if descriptor is not None:
                     os.close(descriptor)
 
-    def write_auxiliary(
-        self, name: str, content: bytes, *, replace: bool
-    ) -> None:
+    def write_auxiliary(self, name: str, content: bytes, *, replace: bool) -> None:
         """Persist local fake-worker state without a pathname race.
 
         This is intentionally internal test infrastructure.  Production
@@ -534,19 +576,21 @@ def _assert_exact_durable_create_intent(
     journal_root: Path,
     allowed_terminal_states: frozenset[str] = frozenset({"CREATE_INTENT"}),
 ) -> None:
-    """Verify the core fsync journal that authorizes this one watchdog.
+    """Verify the canonical core journal bound to this one watchdog.
 
     The activation record is only a sidecar binding.  A ready worker cannot
-    grant a live create edge unless the independently read core journal still
-    has the canonical, exact request digest at its durable create-intent
-    boundary.  Later lifecycle states are intentionally rejected here: this
-    check is used only before SDK construction and immediately before insert.
+    operate unless the independently read core journal still has the canonical
+    exact request digest at its durable create-intent boundary.  Callers pass
+    an explicit finite terminal-state profile: cleanup workers may reconcile
+    an already-bound nonterminal campaign, while live-create authority accepts
+    only the pre-insert states required by the factory and insert seams.
     """
 
     try:
-        events = GcpPrivateCampaignJournal(journal_root).load(
-            record.binding.proposal
-        )
+        events = GcpPrivateCampaignJournal(
+            journal_root,
+            expected_identity=record.binding.journal_identity,
+        ).load(record.binding.proposal)
     except GcpPrivateCampaignError:
         raise GcpPrivateCampaignError("WATCHDOG_CREATE_INTENT_INVALID") from None
     if (
@@ -657,16 +701,35 @@ class GcpPrivateCampaignWatchdogCapability:
             raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REPLAYED")
         self._assert_exact_binding(request)
 
+    def assert_controller_principal(self, controller_principal: str) -> None:
+        """Bind the live Compute identity before resolver or client creation."""
+
+        if self._phase != "FACTORY_BOUND":
+            raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REPLAYED")
+        record = self._assert_exact_binding()
+        if (
+            record.binding.proposal.iap_connectivity.controller_principal
+            != controller_principal
+        ):
+            raise GcpPrivateCampaignError("WATCHDOG_CONTROLLER_PRINCIPAL_MISMATCH")
+
     @contextmanager
-    def insert_claim(
-        self, request: GcpPrivateCampaignCreateRequest
-    ) -> Iterator[None]:
+    def insert_claim(self, request: GcpPrivateCampaignCreateRequest) -> Iterator[None]:
         """Serialize the one bound provider insert against cleanup revocation."""
 
         self.assert_request(request)
-        record = self._activation._current_record()
-        with self._activation._watchdog._create_insert_claim(record):
-            self._phase = "INSERT_CONSUMED"
+        record = self._assert_exact_binding(request)
+        # Spend the opaque authority before touching the submission journal.
+        # A failed/tampered/expired first attempt is still an attempt; allowing
+        # it to retry through the same object would violate the one-use
+        # boundary even if the durable state happens to remain unchanged.
+        self._phase = "INSERT_CONSUMED"
+        with self._activation._watchdog._create_insert_claim(
+            record,
+            activation_id=self._activation._activation_id,
+            controller_id=self._activation._controller_id,
+            worker_pid=self._activation._worker_pid,
+        ):
             yield
 
 
@@ -707,6 +770,12 @@ class GcpPrivateCampaignWatchdog:
         self._handle: _WorkerHandle | None = None
         self._activation: GcpPrivateCampaignWatchdogActivation | None = None
         self._create_capability_issued = False
+        # The real controller retains only this write end.  The detached
+        # worker receives the corresponding read end and can distinguish the
+        # original creator exiting from a reused numeric PID.  Explicit test
+        # parent PIDs deliberately omit the descriptor and may never be
+        # signalled by the worker.
+        self._creator_liveness_write: int | None = None
 
     @staticmethod
     def _worker_environment() -> dict[str, str]:
@@ -742,7 +811,10 @@ class GcpPrivateCampaignWatchdog:
             process.wait(timeout=0.2)
 
     def _spawn_worker(
-        self, record: GcpPrivateCampaignWatchdogActivationRecord
+        self,
+        record: GcpPrivateCampaignWatchdogActivationRecord,
+        *,
+        creator_liveness_read: int | None = None,
     ) -> tuple[subprocess.Popen[bytes], int]:
         root: SafeDirFD | None = None
         ready_read: int | None = None
@@ -769,13 +841,17 @@ class GcpPrivateCampaignWatchdog:
                 "--poll-ms",
                 str(max(20, int(self._worker_poll_seconds * 1000))),
             ]
+            pass_fds = [root.fd, ready_write]
+            if creator_liveness_read is not None:
+                command.extend(["--creator-liveness-fd", str(creator_liveness_read)])
+                pass_fds.append(creator_liveness_read)
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
-                pass_fds=(root.fd, ready_write),
+                pass_fds=tuple(pass_fds),
                 start_new_session=True,
                 env=self._worker_environment(),
                 cwd=self._worker_cwd(),
@@ -816,6 +892,7 @@ class GcpPrivateCampaignWatchdog:
         approval: GcpPrivateCampaignApproval,
         cleanup_authorization: GcpPrivateCampaignCleanupAuthorization,
         request: GcpPrivateCampaignCreateRequest,
+        journal_identity: GcpPrivateCampaignJournalIdentity,
         execution_deadline: datetime,
         now: datetime,
     ) -> GcpPrivateCampaignWatchdogActivation:
@@ -829,10 +906,30 @@ class GcpPrivateCampaignWatchdog:
         )
         if request.proposal != proposal or now >= execution_deadline:
             raise GcpPrivateCampaignError("WATCHDOG_ACTIVATION_INVALID")
+        # The controller captured this pair while it held the descriptor that
+        # fsynced CREATE_INTENT.  Only revalidate that supplied provenance;
+        # do not rediscover a new baseline from the watchdog pathname.
+        GcpPrivateCampaignJournal(
+            self._journal_root,
+            expected_identity=journal_identity,
+        ).load(proposal)
         cleanup_deadline = execution_deadline + timedelta(
             seconds=proposal.cleanup_horizon_seconds
         )
         parent_process_id = self._parent_process_id or os.getpid()
+        creator_liveness_read: int | None = None
+        creator_liveness_write: int | None = None
+        if self._parent_process_id is None:
+            try:
+                creator_liveness_read, creator_liveness_write = os.pipe()
+                os.set_inheritable(creator_liveness_write, False)
+            except OSError:
+                raise GcpPrivateCampaignError("WATCHDOG_LIVENESS_UNAVAILABLE") from None
+        creator_liveness_mode: _CreatorLivenessMode = (
+            "pipe_bound_v1"
+            if creator_liveness_read is not None
+            else "pid_observation_only_v1"
+        )
         binding_seed = GcpPrivateCampaignWatchdogBinding.model_construct(
             schema_version=GCP_PRIVATE_CAMPAIGN_WATCHDOG_SCHEMA_VERSION,
             proposal=proposal,
@@ -842,9 +939,11 @@ class GcpPrivateCampaignWatchdog:
             journal_root_sha256=sha256_digest(
                 os.fspath(self._journal_root).encode("utf-8")
             ),
+            journal_identity=journal_identity,
             execution_deadline_at=_timestamp(execution_deadline),
             cleanup_deadline_at=_timestamp(cleanup_deadline),
             parent_process_id=parent_process_id,
+            creator_liveness_mode=creator_liveness_mode,
             worker_backend=self._worker_backend,
             binding_digest="sha256:" + ("0" * 64),
         )
@@ -871,8 +970,21 @@ class GcpPrivateCampaignWatchdog:
             }
         )
         store = _WatchdogStore(self._watchdog_root)
-        store.write_activation(record)
-        process, ready_descriptor = self._spawn_worker(record)
+        try:
+            store.write_activation(record)
+            process, ready_descriptor = self._spawn_worker(
+                record, creator_liveness_read=creator_liveness_read
+            )
+        except BaseException:
+            if creator_liveness_write is not None:
+                with suppress(OSError):
+                    os.close(creator_liveness_write)
+            raise
+        finally:
+            if creator_liveness_read is not None:
+                with suppress(OSError):
+                    os.close(creator_liveness_read)
+                creator_liveness_read = None
         accepted = False
         try:
             self._await_ready(ready_descriptor)
@@ -885,9 +997,7 @@ class GcpPrivateCampaignWatchdog:
             ):
                 raise GcpPrivateCampaignError("WATCHDOG_WORKER_UNAVAILABLE")
             controller_id = record.binding.proposal.ownership_labels.controller_id
-            self._handle = _WorkerHandle(
-                process, record.activation_id, controller_id
-            )
+            self._handle = _WorkerHandle(process, record.activation_id, controller_id)
             activation = GcpPrivateCampaignWatchdogActivation(
                 _CAPABILITY_TOKEN,
                 watchdog=self,
@@ -895,9 +1005,21 @@ class GcpPrivateCampaignWatchdog:
                 controller_id=controller_id,
                 worker_pid=process.pid,
             )
-            activation.assert_active()
+            # A detached cleanup worker may legitimately be armed against an
+            # already-created or already-cleaning campaign.  Verify that
+            # narrower cleanup readiness here; issuing a live create
+            # capability still re-enters `_assert_active()` below and accepts
+            # only the two pre-insert states.
+            self._assert_ready_worker(
+                activation_id=record.activation_id,
+                controller_id=controller_id,
+                worker_pid=process.pid,
+                allowed_core_states=_CLEANUP_WORKER_CORE_STATES,
+            )
             self._activation = activation
             self._create_capability_issued = False
+            self._creator_liveness_write = creator_liveness_write
+            creator_liveness_write = None
             accepted = True
             return activation
         finally:
@@ -905,6 +1027,9 @@ class GcpPrivateCampaignWatchdog:
                 os.close(ready_descriptor)
             if not accepted:
                 self._kill_process(process)
+                if creator_liveness_write is not None:
+                    with suppress(OSError):
+                        os.close(creator_liveness_write)
 
     def _assert_active(
         self,
@@ -913,7 +1038,27 @@ class GcpPrivateCampaignWatchdog:
         controller_id: PrecampaignControllerId,
         worker_pid: int,
     ) -> GcpPrivateCampaignWatchdogActivationRecord:
-        """Fail before SDK construction if the exact ready worker is not live."""
+        """Fail before SDK construction unless create eligibility remains live."""
+
+        record = self._assert_ready_worker(
+            activation_id=activation_id,
+            controller_id=controller_id,
+            worker_pid=worker_pid,
+            allowed_core_states=_CREATE_AUTHORITY_CORE_STATES,
+        )
+        if self._now() >= _parse_timestamp(record.binding.execution_deadline_at):
+            raise GcpPrivateCampaignError("WATCHDOG_ACTIVATION_EXPIRED")
+        return record
+
+    def _assert_ready_worker(
+        self,
+        *,
+        activation_id: Sha256Digest,
+        controller_id: PrecampaignControllerId,
+        worker_pid: int,
+        allowed_core_states: frozenset[str],
+    ) -> GcpPrivateCampaignWatchdogActivationRecord:
+        """Verify one live worker plus its canonical, profile-limited core state."""
 
         handle = self._handle
         if (
@@ -937,12 +1082,35 @@ class GcpPrivateCampaignWatchdog:
         _assert_exact_durable_create_intent(
             record,
             journal_root=self._journal_root,
-            allowed_terminal_states=frozenset({"CREATE_INTENT", "CREATE_CLAIMED"}),
+            allowed_terminal_states=allowed_core_states,
+        )
+        if handle.process.poll() is not None:
+            raise GcpPrivateCampaignError("WATCHDOG_WORKER_NOT_ACTIVE")
+        return record
+
+    def _assert_submitted_create(
+        self,
+        *,
+        activation_id: Sha256Digest,
+        controller_id: PrecampaignControllerId,
+        worker_pid: int,
+    ) -> GcpPrivateCampaignWatchdogActivationRecord:
+        """Recheck the exact live worker after durable submission.
+
+        ``CREATE_SUBMITTED`` is deliberately separate from the two states
+        that can mint create authority.  It lets the final provider seam
+        reject a concurrently fenced campaign without treating a cleanup or
+        recovery state as a capability source.
+        """
+
+        record = self._assert_ready_worker(
+            activation_id=activation_id,
+            controller_id=controller_id,
+            worker_pid=worker_pid,
+            allowed_core_states=frozenset({"CREATE_SUBMITTED"}),
         )
         if self._now() >= _parse_timestamp(record.binding.execution_deadline_at):
             raise GcpPrivateCampaignError("WATCHDOG_ACTIVATION_EXPIRED")
-        if handle.process.poll() is not None:
-            raise GcpPrivateCampaignError("WATCHDOG_WORKER_NOT_ACTIVE")
         return record
 
     def _claim_create_for_factory(
@@ -950,7 +1118,10 @@ class GcpPrivateCampaignWatchdog:
     ) -> None:
         """Claim one create under the core journal lock before SDK import."""
 
-        GcpPrivateCampaignJournal(self._journal_root).claim_create_for_factory(
+        GcpPrivateCampaignJournal(
+            self._journal_root,
+            expected_identity=record.binding.journal_identity,
+        ).claim_create_for_factory(
             record.binding.proposal,
             request_digest=record.binding.request.create_request_digest,
             occurred_at=self._now(),
@@ -958,16 +1129,37 @@ class GcpPrivateCampaignWatchdog:
 
     @contextmanager
     def _create_insert_claim(
-        self, record: GcpPrivateCampaignWatchdogActivationRecord
+        self,
+        record: GcpPrivateCampaignWatchdogActivationRecord,
+        *,
+        activation_id: Sha256Digest,
+        controller_id: PrecampaignControllerId,
+        worker_pid: int,
     ) -> Iterator[None]:
-        """Hold the exact core-journal lock through one bounded insert call."""
+        """Durably submit, then make the last non-provider fence recheck."""
 
-        with GcpPrivateCampaignJournal(self._journal_root).create_insert_claim(
+        journal = GcpPrivateCampaignJournal(
+            self._journal_root,
+            expected_identity=record.binding.journal_identity,
+        )
+        journal.begin_create_submission(
             record.binding.proposal,
             request_digest=record.binding.request.create_request_digest,
             occurred_at=self._now(),
-        ):
-            yield
+        )
+        # This occurs immediately before the provider call.  If a detached
+        # worker wrote CREATE_FENCE_PENDING between submission and this seam,
+        # it fails before any SDK client operation or insert.
+        self._assert_submitted_create(
+            activation_id=activation_id,
+            controller_id=controller_id,
+            worker_pid=worker_pid,
+        )
+        journal.assert_create_submission_live(
+            record.binding.proposal,
+            request_digest=record.binding.request.create_request_digest,
+        )
+        yield
 
     def assert_active_for_testing(self) -> None:
         """Exercise the same liveness gate without exposing capability fields."""
@@ -986,6 +1178,14 @@ class GcpPrivateCampaignWatchdog:
         if self._create_capability_issued:
             raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REPLAYED")
         record = activation._current_record()
+        # ``CREATE_CLAIMED`` remains valid only for the capability that made
+        # that durable claim: it permits its factory-to-insert recheck, not a
+        # fresh controller or cleanup activation to mint another capability.
+        _assert_exact_durable_create_intent(
+            record,
+            journal_root=self._journal_root,
+            allowed_terminal_states=_CREATE_CAPABILITY_ISSUANCE_CORE_STATES,
+        )
         self._create_capability_issued = True
         return GcpPrivateCampaignWatchdogCapability(
             _CAPABILITY_TOKEN,
@@ -1048,6 +1248,140 @@ def _pid_alive(process_id: int) -> bool:
     return True
 
 
+def _creator_liveness_status(
+    descriptor: int | None,
+) -> Literal["ACTIVE", "EOF", "INVALID", "UNAVAILABLE"]:
+    """Read only the dedicated creator-liveness descriptor.
+
+    The parent never writes to this pipe.  Its writer reaching EOF plus a
+    non-live bound PID is therefore stronger than a bare PID lookup and avoids
+    signalling a numeric PID that was recycled after the original controller
+    exited.
+    """
+
+    if descriptor is None:
+        return "UNAVAILABLE"
+    try:
+        readable, _, _ = select.select([descriptor], [], [], 0)
+        if not readable:
+            return "ACTIVE"
+        return "EOF" if os.read(descriptor, 1) == b"" else "INVALID"
+    except OSError:
+        return "INVALID"
+
+
+def _creator_is_proven_dead(
+    record: GcpPrivateCampaignWatchdogActivationRecord,
+    *,
+    creator_liveness_fd: int | None,
+) -> bool:
+    """Return true only when this worker can rule out a resumed creator."""
+
+    if record.binding.creator_liveness_mode == "pipe_bound_v1":
+        status = _creator_liveness_status(creator_liveness_fd)
+        if status == "EOF":
+            return not _pid_alive(record.binding.parent_process_id)
+        # A fresh recovery worker cannot inherit the original pipe.  It may
+        # treat that creator as dead only when the exact bound PID is already
+        # absent; it must never signal a merely matching/reused PID without
+        # the original descriptor.
+        return status == "UNAVAILABLE" and not _pid_alive(
+            record.binding.parent_process_id
+        )
+    return not _pid_alive(record.binding.parent_process_id)
+
+
+def _fence_exact_creator(
+    record: GcpPrivateCampaignWatchdogActivationRecord,
+    *,
+    creator_liveness_fd: int | None,
+    cleanup_deadline: datetime,
+    sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Fence only the original pipe-bound controller process.
+
+    An explicit testing/recovery PID has no dedicated liveness descriptor and
+    is never signalled.  It is safe only after it is already absent.  A live
+    campaign receives SIGTERM then SIGKILL for its one exact PID; the worker
+    waits for both its liveness EOF and PID disappearance before it allows
+    cleanup to reason about terminal absence.
+    """
+
+    if _creator_is_proven_dead(record, creator_liveness_fd=creator_liveness_fd):
+        return True
+    if record.binding.creator_liveness_mode != "pipe_bound_v1":
+        return False
+    if _creator_liveness_status(creator_liveness_fd) != "ACTIVE":
+        return False
+    process_id = record.binding.parent_process_id
+    if not _pid_alive(process_id):
+        # A live pipe paired with an absent PID is an identity mismatch, not
+        # permission to signal or terminally clean.
+        return False
+    try:
+        os.kill(process_id, signal.SIGTERM)
+    except OSError:
+        return False
+    deadline = min(
+        monotonic() + _CREATOR_FENCE_TIMEOUT_SECONDS,
+        monotonic()
+        + max(
+            0.0,
+            (cleanup_deadline - datetime.now(UTC)).total_seconds(),
+        ),
+    )
+    escalated = False
+    while monotonic() < deadline:
+        if _creator_is_proven_dead(record, creator_liveness_fd=creator_liveness_fd):
+            return True
+        if not escalated and monotonic() + _CREATOR_FENCE_GRACE_SECONDS <= deadline:
+            try:
+                os.kill(process_id, signal.SIGKILL)
+            except OSError:
+                return False
+            escalated = True
+        sleeper(0.02)
+    return _creator_is_proven_dead(record, creator_liveness_fd=creator_liveness_fd)
+
+
+def _fence_submitted_creator_before_cleanup(
+    record: GcpPrivateCampaignWatchdogActivationRecord,
+    *,
+    journal_root: Path,
+    creator_liveness_fd: int | None,
+    now: datetime,
+) -> bool:
+    """Durably fence a submitted create and wait until its creator is gone."""
+
+    journal = GcpPrivateCampaignJournal(
+        journal_root,
+        expected_identity=record.binding.journal_identity,
+    )
+    events = journal.load(record.binding.proposal)
+    state = events[-1].state
+    if state in {"CREATE_SUBMITTED", "CREATE_RECONCILING"}:
+        journal.fence_submitted_create(
+            record.binding.proposal,
+            request_digest=record.binding.request.create_request_digest,
+            occurred_at=now,
+        )
+        state = "CREATE_FENCE_PENDING"
+    if state != "CREATE_FENCE_PENDING":
+        return True
+    if not _fence_exact_creator(
+        record,
+        creator_liveness_fd=creator_liveness_fd,
+        cleanup_deadline=_parse_timestamp(record.binding.cleanup_deadline_at),
+    ):
+        return False
+    journal.release_fenced_create_for_cleanup(
+        record.binding.proposal,
+        occurred_at=datetime.now(UTC),
+    )
+    return True
+
+
 class GcpPrivateCampaignFileFakeWorkerState(PrecampaignModel):
     """Cross-process local fake state used only by watchdog acceptance tests."""
 
@@ -1078,7 +1412,9 @@ def _fake_state_name(controller_id: PrecampaignControllerId) -> str:
 
 
 def write_gcp_private_campaign_file_fake_worker_state(
-    *, watchdog_root: Path, controller_id: PrecampaignControllerId,
+    *,
+    watchdog_root: Path,
+    controller_id: PrecampaignControllerId,
     state: GcpPrivateCampaignFileFakeWorkerState,
 ) -> None:
     """Install a no-provider test backend before starting a fake worker."""
@@ -1283,7 +1619,11 @@ class _FileFakeCleanupTransport:
         )
 
     def delete_exact_instance(
-        self, request: Any, *, exact_resource_binding: Any, request_id: str,
+        self,
+        request: Any,
+        *,
+        exact_resource_binding: Any,
+        request_id: str,
         timeout_seconds: int,
     ) -> Any:
         del timeout_seconds
@@ -1329,8 +1669,13 @@ class _FileFakeCleanupTransport:
         return self.delete_exact_instance(*args, **kwargs)
 
     def delete_exact_owned_boot_disk(
-        self, request: Any, disk: Any, *, exact_resource_binding: Any,
-        request_id: str, timeout_seconds: int,
+        self,
+        request: Any,
+        disk: Any,
+        *,
+        exact_resource_binding: Any,
+        request_id: str,
+        timeout_seconds: int,
     ) -> Any:
         del disk, timeout_seconds
         from inferdrome.deployment.gcp_private_campaign_v2 import (
@@ -1420,7 +1765,10 @@ def _worker_recover(
 ) -> GcpPrivateCampaignWatchdogRecoveryProgress:
     factory = _worker_cleanup_factory(record, store=store)
     controller = GcpPrivateCampaignLifecycleController(
-        journal=GcpPrivateCampaignJournal(journal_root),
+        journal=GcpPrivateCampaignJournal(
+            journal_root,
+            expected_identity=record.binding.journal_identity,
+        ),
         transport_factory=lambda: _raise_watchdog_create_forbidden(),
         cleanup_transport_factory=factory,
     )
@@ -1449,9 +1797,27 @@ def _worker_main(arguments: argparse.Namespace) -> int:
             != record.binding.journal_root_sha256
         ):
             return 2
+        if (
+            record.binding.creator_liveness_mode == "pid_observation_only_v1"
+            and arguments.creator_liveness_fd is not None
+        ):
+            return 2
+        if (
+            record.binding.creator_liveness_mode == "pipe_bound_v1"
+            and arguments.creator_liveness_fd is None
+            and _pid_alive(record.binding.parent_process_id)
+        ):
+            # A recovery worker may omit the inherited descriptor only after
+            # the original creator is already absent.  Otherwise it cannot
+            # distinguish a live controller from PID reuse safely.
+            return 2
         checked_journal_root = SafeDirFD.open(journal_root)
         checked_journal_root.close()
-        _assert_exact_durable_create_intent(record, journal_root=journal_root)
+        _assert_exact_durable_create_intent(
+            record,
+            journal_root=journal_root,
+            allowed_terminal_states=_CLEANUP_WORKER_CORE_STATES,
+        )
         worker_pid = os.getpid()
         store.append_event(
             record,
@@ -1477,7 +1843,10 @@ def _worker_main(arguments: argparse.Namespace) -> int:
         recovery_announced = False
         while True:
             now = datetime.now(UTC)
-            journal = GcpPrivateCampaignJournal(journal_root)
+            journal = GcpPrivateCampaignJournal(
+                journal_root,
+                expected_identity=record.binding.journal_identity,
+            )
             try:
                 core_events = journal.load(record.binding.proposal)
             except GcpPrivateCampaignError:
@@ -1491,9 +1860,43 @@ def _worker_main(arguments: argparse.Namespace) -> int:
                     detail_code="PARENT_CLEANUP_CONFIRMED",
                 )
                 return 0
+            core_state = core_events[-1].state if core_events else None
+            creator_proven_dead = _creator_is_proven_dead(
+                record,
+                creator_liveness_fd=arguments.creator_liveness_fd,
+            )
+            submitted_create = core_state in {
+                "CREATE_SUBMITTED",
+                "CREATE_FENCE_PENDING",
+                "CREATE_RECONCILING",
+            }
             if (
-                _pid_alive(record.binding.parent_process_id)
+                submitted_create
+                and not creator_proven_dead
                 and now < _parse_timestamp(record.binding.execution_deadline_at)
+            ):
+                time.sleep(arguments.poll_ms / 1000)
+                continue
+            if submitted_create:
+                if not _fence_submitted_creator_before_cleanup(
+                    record,
+                    journal_root=journal_root,
+                    creator_liveness_fd=arguments.creator_liveness_fd,
+                    now=now,
+                ):
+                    if now >= _parse_timestamp(record.binding.cleanup_deadline_at):
+                        store.append_event(
+                            record,
+                            state="CLEANUP_UNCONFIRMED",
+                            worker_process_id=worker_pid,
+                            occurred_at=now,
+                            detail_code="CREATOR_FENCE_UNCONFIRMED",
+                        )
+                        return 2
+                    time.sleep(arguments.poll_ms / 1000)
+                    continue
+            elif not creator_proven_dead and now < _parse_timestamp(
+                record.binding.execution_deadline_at
             ):
                 time.sleep(arguments.poll_ms / 1000)
                 continue
@@ -1572,6 +1975,9 @@ def _worker_main(arguments: argparse.Namespace) -> int:
     finally:
         with suppress(OSError):
             os.close(arguments.ready_fd)
+        if arguments.creator_liveness_fd is not None:
+            with suppress(OSError):
+                os.close(arguments.creator_liveness_fd)
         if root is not None:
             root.close()
 
@@ -1584,6 +1990,7 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--journal-root", type=str, required=True)
     worker.add_argument("--controller-id", type=str, required=True)
     worker.add_argument("--ready-fd", type=int, required=True)
+    worker.add_argument("--creator-liveness-fd", type=int)
     worker.add_argument("--poll-ms", type=int, required=True)
     return parser
 

@@ -25,7 +25,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager, suppress
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -88,14 +88,6 @@ _GOOGLE_SCOPE_URLS: Final = {
 }
 
 
-class _GcpPrivateCampaignCreateAuthority(Protocol):
-    """Private insert-only authority supplied by the watchdog factory."""
-
-    def assert_request(self, request: GcpPrivateCampaignCreateRequest) -> None: ...
-
-    def insert_claim(
-        self, request: GcpPrivateCampaignCreateRequest
-    ) -> AbstractContextManager[None]: ...
 _GAUGE_RE: Final = re.compile(
     r"^vllm:num_requests_running\{(?P<labels>[^}]*)\}\s+(?P<value>[^\s#]+)(?:\s+[^\s#]+)?\s*$"
 )
@@ -1313,7 +1305,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         credential_resolver: _ComputeCredentialResolver | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
-        watchdog_create_authority: _GcpPrivateCampaignCreateAuthority | None = None,
+        watchdog_capability: GcpPrivateCampaignWatchdogCapability | None = None,
+        cleanup_only: bool = False,
     ) -> None:
         clients = (
             instances_client,
@@ -1326,6 +1319,19 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             value is not None for value in clients
         ):
             raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_INVALID")
+        if cleanup_only and watchdog_capability is not None:
+            raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
+        # A direct client-injection instance is a non-live test seam.  Any
+        # transport that can lazily resolve real credentials/construct Google
+        # clients must instead be either the exact watchdog-gated live path or
+        # the explicit cleanup-only facade below.  This keeps an arbitrary
+        # caller from reaching ADC/client construction with create authority.
+        if (
+            credential_resolver is not None
+            and watchdog_capability is None
+            and not cleanup_only
+        ):
+            raise GcpPrivateCampaignError("WATCHDOG_CREATE_AUTHORITY_REQUIRED")
         self._sdk = sdk
         self._instances = instances_client
         self._disks = disks_client
@@ -1337,7 +1343,13 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         self._iap_tunnels = iap_tunnels
         self._iap_endpoints: _IapTunnelEndpoints | None = None
         self._pre_insert_guard: Callable[[], None] | None = None
-        self._watchdog_create_authority = watchdog_create_authority
+        if (
+            watchdog_capability is not None
+            and type(watchdog_capability) is not GcpPrivateCampaignWatchdogCapability
+        ):
+            raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
+        self._watchdog_capability = watchdog_capability
+        self._cleanup_only = cleanup_only
         self._monotonic = monotonic or time.monotonic
         self._sleeper = sleeper or time.sleep
         self._operations: dict[str, object] = {}
@@ -1352,6 +1364,11 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             if self._controller_principal != controller_principal:
                 raise GcpPrivateCampaignTransportError("CONTROLLER_PRINCIPAL_MISMATCH")
             return
+        capability = self._watchdog_capability
+        if capability is not None:
+            # Do this before resolver/ADC/client construction.  A capability
+            # bound to another controller cannot reach even the client edge.
+            capability.assert_controller_principal(controller_principal)
         if self._credential_resolver is None:
             if self._instances is None or self._disks is None or self._images is None:
                 raise GcpPrivateCampaignTransportError("COMPUTE_CLIENTS_UNAVAILABLE")
@@ -1535,10 +1552,12 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         # exact local approval check and bound ``_pre_insert_guard``.  Each
         # potentially slow read is followed by the same local check so an
         # expired approval, quote, or execution horizon cannot reach insert.
-        authority = self._watchdog_create_authority
-        if authority is None:
+        if self._cleanup_only:
             raise GcpPrivateCampaignError("WATCHDOG_CREATE_AUTHORITY_REQUIRED")
-        authority.assert_request(request)
+        capability = self._watchdog_capability
+        if capability is None:
+            raise GcpPrivateCampaignError("WATCHDOG_CREATE_AUTHORITY_REQUIRED")
+        capability.assert_request(request)
         self._revalidate_before_insert()
         self._verify_boot_image_identity(request, timeout_seconds=timeout_seconds)
         self._revalidate_before_insert()
@@ -1549,11 +1568,10 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         projected = self.project_create_request(request, request_id=request_id)
         self._revalidate_before_insert()
         try:
-            # The authority advances the durable core journal under the same
-            # lock cleanup uses, then holds that lock through this one bounded
-            # provider mutation.  Cleanup cannot settle between the final
-            # recheck and the actual insert seam.
-            with authority.insert_claim(request):
+            # The opaque capability writes durable CREATE_SUBMITTED and
+            # rechecks the independently running watchdog immediately before
+            # this provider edge.  It is never a duck-typed test authority.
+            with capability.insert_claim(request):
                 result = self._bound_instances.insert(
                     request=projected, timeout=timeout_seconds
                 )
@@ -3036,7 +3054,7 @@ def create_google_private_campaign_transport(
         credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
         iap_tunnels=GcpPrivateCampaignIapTunnelSupervisor(),
         runner=IapGcpPrivateCampaignRunner(evidence_root),
-        watchdog_create_authority=watchdog_capability,
+        watchdog_capability=watchdog_capability,
     )
 
 
@@ -3050,5 +3068,6 @@ def create_google_private_campaign_cleanup_transport() -> (
             sdk=_google_sdk(),
             credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
             runner=_NoCreateRunner(),
+            cleanup_only=True,
         )
     )

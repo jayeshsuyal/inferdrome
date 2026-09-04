@@ -79,6 +79,7 @@
         "CREATE_INTENT",
         "CREATE_CLAIMED",
         "CREATE_SUBMITTED",
+        "CREATE_FENCE_PENDING",
         "CREATE_RECONCILING",
         "CREATED",
         "INSTANCE_IDENTITY_BOUND",

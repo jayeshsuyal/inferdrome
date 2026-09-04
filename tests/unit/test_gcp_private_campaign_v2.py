@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -831,10 +830,10 @@ def test_cleanup_retries_keep_provider_cleanup_callable_after_journal_budget(
     assert journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
 
 
-def test_cleanup_revokes_claim_and_cannot_interleave_after_final_insert_claim(
+def test_cleanup_revokes_claim_and_fences_a_submitted_create_before_terminal_cleanup(
     tmp_path: Path,
 ) -> None:
-    """The core lock serializes factory/cleanup/pre-insert transitions."""
+    """A wedged provider call cannot hold the lifecycle journal lock forever."""
 
     proposal, startup = _proposal()
     request = build_gcp_private_campaign_create_request(
@@ -873,8 +872,9 @@ def test_cleanup_revokes_claim_and_cannot_interleave_after_final_insert_claim(
     ):
         pytest.fail("revoked create claim reached the insert seam")
 
-    # With a fresh claim, cleanup must wait for the insertion lock.  It cannot
-    # append a cleanup intent between CREATE_SUBMITTED and the provider call.
+    # A submitted create no longer holds the journal lock through the provider
+    # call.  Ordinary cleanup must fail closed until the watchdog writes an
+    # irreversible fence and proves the creator is gone.
     concurrent = GcpPrivateCampaignJournal(_journal_root(tmp_path / "concurrent"))
     concurrent.append(
         proposal,
@@ -888,49 +888,99 @@ def test_cleanup_revokes_claim_and_cannot_interleave_after_final_insert_claim(
         request_digest=request.create_request_digest,
         occurred_at=now,
     )
-    concurrent_controller = GcpPrivateCampaignLifecycleController(
-        journal=concurrent,
-        transport_factory=FakeGcpPrivateCampaignTransport,
-        clock=_Clock(),
+    concurrent.begin_create_submission(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
     )
-    insert_entered = threading.Event()
-    release_insert = threading.Event()
-    cleanup_finished = threading.Event()
-
-    def final_insert() -> None:
-        with concurrent.create_insert_claim(
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_FENCE_REQUIRED"):
+        concurrent_controller = GcpPrivateCampaignLifecycleController(
+            journal=concurrent,
+            transport_factory=FakeGcpPrivateCampaignTransport,
+            clock=_Clock(),
+        )
+        concurrent_controller._ensure_cleanup_intent(proposal)
+    concurrent.fence_submitted_create(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_CLAIM_REVOKED"):
+        concurrent.assert_create_submission_live(
+            proposal, request_digest=request.create_request_digest
+        )
+    # A returned/lost insert response cannot revive this creator through the
+    # reconciliation edge after the watchdog has durably fenced it.
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_CLAIM_REVOKED"):
+        concurrent.begin_create_reconciliation(
             proposal,
             request_digest=request.create_request_digest,
             occurred_at=now,
-        ):
-            insert_entered.set()
-            assert release_insert.wait(timeout=2)
-
-    def cleanup() -> None:
-        assert insert_entered.wait(timeout=2)
-        concurrent_controller._ensure_cleanup_intent(proposal)
-        cleanup_finished.set()
-
-    insert_thread = threading.Thread(target=final_insert)
-    cleanup_thread = threading.Thread(target=cleanup)
-    insert_thread.start()
-    assert insert_entered.wait(timeout=2)
-    cleanup_thread.start()
-    assert cleanup_finished.wait(timeout=0.05) is False
-    release_insert.set()
-    insert_thread.join(timeout=2)
-    cleanup_thread.join(timeout=2)
-
-    assert insert_thread.is_alive() is False
-    assert cleanup_thread.is_alive() is False
-    assert cleanup_finished.is_set()
+        )
+    concurrent.release_fenced_create_for_cleanup(proposal, occurred_at=now)
     assert [event.state for event in concurrent.load(proposal)] == [
         "CREATE_INTENT_DURABLE",
         "CREATE_INTENT",
         "CREATE_CLAIMED",
         "CREATE_SUBMITTED",
+        "CREATE_FENCE_PENDING",
         "CLEANUP_INTENT",
     ]
+
+
+def test_manual_recovery_never_confirms_temporary_absence_after_submitted_create(
+    tmp_path: Path,
+) -> None:
+    """A delayed insert must not be mistaken for terminal provider absence."""
+
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
+    now = _Clock().now()
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    journal.append(proposal, state="CREATE_SUBMITTED", occurred_at=now)
+
+    class DelayedMaterialization(FakeGcpPrivateCampaignTransport):
+        remaining_invisible_reads = 1
+
+        def observe_exact_instance(self, *args: object, **kwargs: object) -> object:
+            if self.remaining_invisible_reads:
+                self.remaining_invisible_reads -= 1
+                raise campaign_v2.GcpPrivateCampaignTransportError("INSTANCE_NOT_FOUND")
+            return super().observe_exact_instance(*args, **kwargs)  # type: ignore[arg-type]
+
+    fake = DelayedMaterialization(created=True, boot_disk_present=True)
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: fake,
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
+    )
+
+    first = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=_cleanup_authorization(proposal),
+        startup_payload=startup,
+    )
+    assert first.confirmed is False
+    assert first.cleanup_error == "CREATE_SUBMISSION_UNRECONCILED"
+    assert journal.load(proposal)[-1].state == "CREATE_SUBMITTED"
+
+    second = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=_cleanup_authorization(proposal),
+        startup_payload=startup,
+    )
+    assert second.confirmed is True
+    assert fake.delete_calls == 1
+    assert journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
 
 
 @pytest.mark.parametrize("artifact_state", ("broken", "missing", "tampered"))

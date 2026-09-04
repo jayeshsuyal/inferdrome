@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -23,13 +23,27 @@ from inferdrome.deployment.gcp_private_campaign_google import (
     render_gcp_private_campaign_startup_script,
 )
 from inferdrome.deployment.gcp_private_campaign_v2 import (
+    GCP_PRIVATE_CAMPAIGN_APPROVAL_CONFIRMATION,
+    GCP_PRIVATE_CAMPAIGN_APPROVAL_SCHEMA_VERSION,
+    GCP_PRIVATE_CAMPAIGN_CLEANUP_AUTHORIZATION_SCHEMA_VERSION,
+    GCP_PRIVATE_CAMPAIGN_CLEANUP_CONFIRMATION,
     GCP_PRIVATE_CAMPAIGN_RUNNER_ATTESTATION_SCHEMA_VERSION,
+    GcpPrivateCampaignApproval,
+    GcpPrivateCampaignCleanupAuthorization,
+    GcpPrivateCampaignCreateRequest,
     GcpPrivateCampaignError,
     GcpPrivateCampaignEvidenceReceipt,
     GcpPrivateCampaignExactResourceBinding,
     GcpPrivateCampaignHandoffReceipt,
+    GcpPrivateCampaignJournal,
+    GcpPrivateCampaignProposalPayload,
     GcpPrivateCampaignRunnerAttestation,
     build_gcp_private_campaign_create_request,
+    issue_gcp_private_campaign_proposal,
+)
+from inferdrome.deployment.gcp_private_campaign_watchdog_v3 import (
+    GcpPrivateCampaignWatchdog,
+    GcpPrivateCampaignWatchdogCapability,
 )
 from inferdrome.routing_execution.canonical import sha256_digest
 from tests.unit.test_gcp_private_campaign_v2 import _proposal
@@ -79,21 +93,6 @@ class _NoCalls:
     def list(self, *, request: object, timeout: int) -> list[object]:
         del request, timeout
         raise AssertionError("provider list was not expected")
-
-
-class _TestCreateAuthority:
-    """Injected local seam; production construction requires the watchdog."""
-
-    def __init__(self) -> None:
-        self.requests: list[object] = []
-
-    def assert_request(self, request: object) -> None:
-        self.requests.append(request)
-
-    @contextmanager
-    def insert_claim(self, request: object) -> Iterator[None]:
-        self.requests.append(request)
-        yield
 
 
 class _NoImages:
@@ -442,6 +441,7 @@ def _adapter(
     sleeper: object | None = None,
     pre_insert_guard: object | None = None,
     evidence_root: Path | None = None,
+    watchdog_capability: GcpPrivateCampaignWatchdogCapability | None = None,
 ) -> GoogleGcpPrivateCampaignTransport:
     adapter = GoogleGcpPrivateCampaignTransport(
         sdk=_Sdk,
@@ -453,7 +453,7 @@ def _adapter(
         monotonic=monotonic,  # type: ignore[arg-type]
         sleeper=sleeper,  # type: ignore[arg-type]
         runner=runner or _Runner(),
-        watchdog_create_authority=_TestCreateAuthority(),
+        watchdog_capability=watchdog_capability,
     )
     adapter.bind_pre_insert_guard(
         pre_insert_guard if callable(pre_insert_guard) else lambda: None
@@ -463,11 +463,116 @@ def _adapter(
     return adapter
 
 
-def test_compute_clients_are_constructed_only_with_the_approved_identity() -> None:
-    proposal, startup = _proposal()
-    request = build_gcp_private_campaign_create_request(
-        proposal=proposal, startup_payload=startup
-    )
+@pytest.fixture
+def live_google_capability(
+    tmp_path: Path,
+) -> Iterator[
+    Callable[
+        [],
+        tuple[GcpPrivateCampaignCreateRequest, GcpPrivateCampaignWatchdogCapability],
+    ]
+]:
+    """Issue genuine opaque capabilities for fake-SDK create tests.
+
+    The production Google transport accepts only the exact watchdog capability
+    type.  These tests use a real local worker and journal rather than a
+    structurally compatible authority, while keeping all Compute clients fake.
+    """
+
+    watchdogs: list[GcpPrivateCampaignWatchdog] = []
+
+    def issue() -> tuple[
+        GcpPrivateCampaignCreateRequest, GcpPrivateCampaignWatchdogCapability
+    ]:
+        proposal, startup = _proposal()
+        now = datetime.now(UTC).replace(microsecond=0)
+        payload = proposal.model_dump(mode="python")
+        payload.pop("proposal_id")
+        payload["quote"] = proposal.quote.model_copy(
+            update={
+                "quoted_at": (now - timedelta(minutes=2))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=15))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+        )
+        fresh = issue_gcp_private_campaign_proposal(
+            GcpPrivateCampaignProposalPayload.model_validate(payload)
+        )
+        approval = GcpPrivateCampaignApproval(
+            schema_version=GCP_PRIVATE_CAMPAIGN_APPROVAL_SCHEMA_VERSION,
+            approval_kind="exact_human_campaign_approval",
+            confirmation=GCP_PRIVATE_CAMPAIGN_APPROVAL_CONFIRMATION,
+            human_approval_record_id="google-watchdog-test",
+            approved_at=(now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            expires_at=(now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            proposal=fresh,
+            proposal_digest=fresh.proposal_id,
+        )
+        cleanup = GcpPrivateCampaignCleanupAuthorization(
+            schema_version=GCP_PRIVATE_CAMPAIGN_CLEANUP_AUTHORIZATION_SCHEMA_VERSION,
+            authorization_kind="exact_cleanup_recovery",
+            confirmation=GCP_PRIVATE_CAMPAIGN_CLEANUP_CONFIRMATION,
+            cleanup_record_id="google-watchdog-cleanup-test",
+            authorized_at=(now - timedelta(minutes=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            proposal=fresh,
+            proposal_digest=fresh.proposal_id,
+            cleanup_request_id=fresh.request_ids.delete_request_id,
+        )
+        suffix = str(len(watchdogs))
+        journal_root = tmp_path / f"journal-{suffix}"
+        watchdog_root = tmp_path / f"watchdog-{suffix}"
+        journal_root.mkdir(mode=0o700)
+        watchdog_root.mkdir(mode=0o700)
+        journal = GcpPrivateCampaignJournal(journal_root)
+        request = build_gcp_private_campaign_create_request(
+            proposal=fresh, startup_payload=startup
+        )
+        journal.append(
+            fresh,
+            state="CREATE_INTENT_DURABLE",
+            occurred_at=now,
+            detail_digest=request.create_request_digest,
+        )
+        journal.append(fresh, state="CREATE_INTENT", occurred_at=now)
+        watchdog = GcpPrivateCampaignWatchdog(
+            watchdog_root=watchdog_root,
+            journal_root=journal_root,
+            worker_backend="google_cleanup_only_v1",
+        )
+        watchdog.activate(
+            proposal=fresh,
+            approval=approval,
+            cleanup_authorization=cleanup,
+            request=request,
+            journal_identity=journal.identity(fresh),
+            execution_deadline=journal.execution_deadline(fresh),
+            now=now,
+        )
+        watchdogs.append(watchdog)
+        capability = watchdog.take_create_capability()
+        capability.consume_for_factory()
+        return request, capability
+
+    yield issue
+
+    for watchdog in watchdogs:
+        if watchdog._handle is not None:
+            watchdog._kill_process(watchdog._handle.process)
+
+
+def test_compute_clients_are_constructed_only_with_the_approved_identity(
+    live_google_capability: Callable[
+        [],
+        tuple[GcpPrivateCampaignCreateRequest, GcpPrivateCampaignWatchdogCapability],
+    ],
+) -> None:
+    request, watchdog_capability = live_google_capability()
+    proposal = request.proposal
     constructors: list[tuple[str, object]] = []
 
     class _LazySdk:
@@ -499,7 +604,7 @@ def test_compute_clients_are_constructed_only_with_the_approved_identity() -> No
         credential_resolver=resolver,
         runner=_Runner(),
         iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
-        watchdog_create_authority=_TestCreateAuthority(),
+        watchdog_capability=watchdog_capability,
     )
     adapter.bind_pre_insert_guard(lambda: None)
 
@@ -551,6 +656,62 @@ def test_create_requires_watchdog_authority_before_any_provider_preflight() -> N
         )
 
 
+def test_live_transport_rejects_structural_create_authority_before_client_use() -> None:
+    with pytest.raises(GcpPrivateCampaignError, match="WATCHDOG_CAPABILITY_REQUIRED"):
+        GoogleGcpPrivateCampaignTransport(
+            sdk=_Sdk,
+            instances_client=_NoCalls(),
+            disks_client=_DiskRows(_Rows()),
+            images_client=_NoImages(),
+            firewalls_client=_NoFirewalls(),
+            runner=_Runner(),
+            watchdog_capability=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_live_resolver_surface_requires_exact_capability_before_client_use() -> None:
+    resolver = _CredentialResolver(
+        effective_principal="precampaign-controller@inferdrome-lab.iam.gserviceaccount.com"
+    )
+    with pytest.raises(
+        GcpPrivateCampaignError, match="WATCHDOG_CREATE_AUTHORITY_REQUIRED"
+    ):
+        GoogleGcpPrivateCampaignTransport(
+            sdk=object(),
+            credential_resolver=resolver,
+            runner=_Runner(),
+            iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
+        )
+    assert resolver.calls == []
+
+
+def test_capability_principal_mismatch_blocks_resolver_before_client_construction(
+    live_google_capability: Callable[
+        [],
+        tuple[GcpPrivateCampaignCreateRequest, GcpPrivateCampaignWatchdogCapability],
+    ],
+) -> None:
+    _, capability = live_google_capability()
+    resolver = _CredentialResolver(
+        effective_principal="precampaign-controller@inferdrome-lab.iam.gserviceaccount.com"
+    )
+    adapter = GoogleGcpPrivateCampaignTransport(
+        sdk=object(),
+        credential_resolver=resolver,
+        runner=_Runner(),
+        iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
+        watchdog_capability=capability,
+    )
+
+    with pytest.raises(
+        GcpPrivateCampaignError, match="WATCHDOG_CONTROLLER_PRINCIPAL_MISMATCH"
+    ):
+        adapter.bind_controller_principal(
+            "wrong-controller@inferdrome-lab.iam.gserviceaccount.com"
+        )
+    assert resolver.calls == []
+
+
 def test_controller_principal_mismatch_never_constructs_or_calls_compute_clients() -> (
     None
 ):
@@ -563,6 +724,7 @@ def test_controller_principal_mismatch_never_constructs_or_calls_compute_clients
         credential_resolver=resolver,
         runner=_Runner(),
         iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
+        cleanup_only=True,
     )
 
     with pytest.raises(GcpPrivateCampaignError, match="CONTROLLER_PRINCIPAL_MISMATCH"):
@@ -798,11 +960,14 @@ def test_rendered_startup_script_is_deterministic_and_contains_no_prompt_surface
     assert "prompt" not in script
 
 
-def test_create_checks_exact_boot_image_identity_before_insert() -> None:
-    proposal, startup = _proposal()
-    request = build_gcp_private_campaign_create_request(
-        proposal=proposal, startup_payload=startup
-    )
+def test_create_checks_exact_boot_image_identity_before_insert(
+    live_google_capability: Callable[
+        [],
+        tuple[GcpPrivateCampaignCreateRequest, GcpPrivateCampaignWatchdogCapability],
+    ],
+) -> None:
+    request, capability = live_google_capability()
+    proposal = request.proposal
     instances = _InsertCounter()
     image = _ReadyImage(
         _Record(
@@ -813,7 +978,9 @@ def test_create_checks_exact_boot_image_identity_before_insert() -> None:
             ),
         )
     )
-    adapter = _adapter(instances=instances, images=image)
+    adapter = _adapter(
+        instances=instances, images=image, watchdog_capability=capability
+    )
 
     with pytest.raises(GcpPrivateCampaignError, match="BOOT_IMAGE_IDENTITY_MISMATCH"):
         adapter.create_instance(
@@ -826,11 +993,14 @@ def test_create_checks_exact_boot_image_identity_before_insert() -> None:
     assert instances.insert_calls == 0
 
 
-def test_create_revalidates_after_slow_boot_read_and_verifies_iap_firewall() -> None:
-    proposal, startup = _proposal()
-    request = build_gcp_private_campaign_create_request(
-        proposal=proposal, startup_payload=startup
-    )
+def test_create_revalidates_after_slow_boot_read_and_verifies_iap_firewall(
+    live_google_capability: Callable[
+        [],
+        tuple[GcpPrivateCampaignCreateRequest, GcpPrivateCampaignWatchdogCapability],
+    ],
+) -> None:
+    request, capability = live_google_capability()
+    proposal = request.proposal
     image = _ReadyImage(
         _Record(
             id=proposal.boot_image.provider_image_id,
@@ -855,6 +1025,7 @@ def test_create_revalidates_after_slow_boot_read_and_verifies_iap_firewall() -> 
         images=image,
         firewalls=firewall,
         pre_insert_guard=expires_after_image_read,
+        watchdog_capability=capability,
     )
     with pytest.raises(GcpPrivateCampaignError, match="APPROVAL_EXPIRED"):
         adapter.create_instance(
@@ -866,13 +1037,16 @@ def test_create_revalidates_after_slow_boot_read_and_verifies_iap_firewall() -> 
     assert firewall.calls == 0
     assert instances.insert_calls == 0
 
+    instances = _InsertCounter()
+    request, capability = live_google_capability()
+    proposal = request.proposal
     wrong_firewall = _live_firewall(proposal)
     wrong_firewall.source_ranges = ["10.0.0.0/8"]
-    instances = _InsertCounter()
     adapter = _adapter(
         instances=instances,
         images=_ReadyImage(image.row),
         firewalls=_ReadyFirewall(wrong_firewall),
+        watchdog_capability=capability,
     )
     with pytest.raises(GcpPrivateCampaignError, match="IAP_FIREWALL_POLICY_MISMATCH"):
         adapter.create_instance(
@@ -883,11 +1057,14 @@ def test_create_revalidates_after_slow_boot_read_and_verifies_iap_firewall() -> 
     assert instances.insert_calls == 0
 
 
-def test_create_rejects_known_wrong_iap_principal_before_insert() -> None:
-    proposal, startup = _proposal()
-    request = build_gcp_private_campaign_create_request(
-        proposal=proposal, startup_payload=startup
-    )
+def test_create_rejects_known_wrong_iap_principal_before_insert(
+    live_google_capability: Callable[
+        [],
+        tuple[GcpPrivateCampaignCreateRequest, GcpPrivateCampaignWatchdogCapability],
+    ],
+) -> None:
+    request, capability = live_google_capability()
+    proposal = request.proposal
     instances = _InsertCounter()
     iap = _IapTunnels()
     iap.principal_error = GcpPrivateCampaignError("IAP_PRINCIPAL_MISMATCH")
@@ -905,6 +1082,7 @@ def test_create_rejects_known_wrong_iap_principal_before_insert() -> None:
         ),
         firewalls=_ReadyFirewall(_live_firewall(proposal)),
         iap_tunnels=iap,
+        watchdog_capability=capability,
     )
 
     with pytest.raises(GcpPrivateCampaignError, match="IAP_PRINCIPAL_MISMATCH"):
