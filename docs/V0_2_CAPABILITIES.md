@@ -24,7 +24,7 @@ python -m inferdrome capabilities
 | Local routing execution | `PROVEN_LOCAL_SOCKET_LEVEL` | The two-loopback-endpoint bridge seals and offline-replays request-level routing evidence. | This is not GPU, Docker, cloud, or production-routing operation. |
 | Historical A10 serving evidence | `PRESERVED_EXTERNAL_ONLY` | The historical Qwen3-8B A10 handoff remains preserved. | Its raw archive is `EXTERNAL_ONLY`; it is not a new v0.2 campaign or an acceptance decision. |
 | Two-A100 multi-endpoint campaign | `UNEXECUTED` | A guarded one-host/two-engine pre-campaign shape is local/fake validated. | No same-host or distributed two-A100 run has produced real evidence. |
-| GCP operation | `LOCAL_FAKE_VALIDATED` | The guarded controller is covered locally with fakes and requires separate approval. | No provider operation, billing result, GPU campaign, or real-cloud evidence is claimed. |
+| GCP operation | `LOCAL_FAKE_VALIDATED` | Offline proposal/preview and constrained cleanup diagnostics are covered locally with fakes; the create-capable `execute` command fails closed pending a reviewed two-A100 watchdog. | No provider operation, billing result, GPU campaign, real-cloud evidence, or live launch authority is claimed. |
 | Kubernetes operation | `NOT_CLAIMED` | Static and local-synthetic boundaries are inspectable. | No cluster, GPU workload, or production operation is claimed. |
 
 The contract never has authority for `PRODUCTION_ROUTING`, `POLICY_VERDICT`,
@@ -80,6 +80,7 @@ The local demo is loopback-only and has no provider, ADC, credential, SSH,
 Docker daemon, GPU, registry, bucket, or spend path. It never renders raw
 prompts, model outputs, endpoint origins, or unverified claimed receipts.
 The immutable v0.1 schemas, evidence history, review records, and
-`EXTERNAL_ONLY` archives remain frozen. A live campaign needs a separately
-authorized, exact commit-bound approval; this contract neither requests nor
-grants it.
+`EXTERNAL_ONLY` archives remain frozen. A live campaign needs both a separately
+authorized, exact commit-bound approval and a separately reviewed private
+two-A100 durable watchdog bridge; the v0.2 `execute` command intentionally
+fails closed until then. This contract neither requests nor grants either.
