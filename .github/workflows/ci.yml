@@ -145,7 +145,7 @@ jobs:
         run: ./scripts/bootstrap_ci_uv.sh --extra dev --extra dashboard
 
       - name: Install frontend dependencies
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: npm ci --prefix frontend
 
       # ubuntu-24.04 hosted runners already include Chromium's OS dependencies.
