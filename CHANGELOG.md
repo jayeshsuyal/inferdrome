@@ -1,12 +1,12 @@
 # Inferdrome changelog
 
-## 0.2.0 — release candidate (unpublished)
+## 0.2.0
 
-Status: **Prepared for review; not tagged or published**
-
-This release candidate is a package/repository identity only. It does not
-authorize an annotated `v0.2.0` tag, a GitHub Release, a provider operation, or
-evidence publication. Those remain separate exact-commit-bound human actions.
+This release records the repository and package identity for Inferdrome v0.2.0.
+Repository source never self-authorizes an annotated `v0.2.0` tag, a GitHub
+Release, a provider operation, or evidence publication. If an annotated tag or
+GitHub Release is published, its external identity is established by separately
+authorized, exact-commit-bound human release actions.
 
 ### Capability table
 
@@ -15,7 +15,7 @@ The canonical capability/limitations contract is
 Inspect its exact machine-readable form with `python -m inferdrome capabilities`.
 This changelog deliberately does not widen that contract.
 
-| Capability | Release-candidate status | Honest boundary |
+| Capability | v0.2.0 status | Honest boundary |
 | --- | --- | --- |
 | Local routing-evidence prototype | `PROVEN_LOCAL_SOCKET_LEVEL` | Two loopback endpoints, sealed package, and offline replay are proven locally. |
 | Historical Qwen3-8B A10 records | `PRESERVED_EXTERNAL_ONLY` | Privacy-safe metadata is retained; raw archives remain `EXTERNAL_ONLY`. |
@@ -26,7 +26,7 @@ This changelog deliberately does not widen that contract.
 Inferdrome remains a measurement/evidence plane. It does not provide a
 production router, policy verdict, promotion control, or acceptance authority.
 
-### Included in the candidate
+### Included in v0.2.0
 
 - The one-command, deterministic local routing-evidence walkthrough and its
   verified dashboard explanation.
@@ -37,15 +37,14 @@ production router, policy verdict, promotion control, or acceptance authority.
 
 ### Verification and release boundary
 
-From a clean candidate checkout, run:
+For repository-owned pre-tag verification, run:
 
 ```bash
 python scripts/release_preflight.py \
   --phase final-pre-tag --repository-only --require-clean
 ```
 
-This confirms repository-owned final-pre-tag conditions and reports, rather
-than satisfies, required human review/authorization inputs. It never creates a
-tag or release. The current candidate must still receive parent review, merge,
-post-merge verification, and a separate exact-commit-bound authorization before
-any annotated tag or GitHub Release is created.
+This checks repository-owned final-pre-tag conditions and reports, rather than
+satisfies, required human review/authorization inputs. It never creates a tag
+or release. Tag and GitHub Release identities, if published, remain external
+exact-commit-bound human actions; this source does not self-authorize them.

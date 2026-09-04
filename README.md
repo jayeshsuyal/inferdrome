@@ -25,8 +25,8 @@ at loopback socket level; historical A10 serving evidence is preserved as
 `EXTERNAL_ONLY`; no two-A100 multi-endpoint campaign has executed; and GCP or
 Kubernetes production operation is not claimed. Inspect the same closed claim
 boundary with `python -m inferdrome capabilities`. The
-[v0.2.0 release-candidate changelog](CHANGELOG.md) records the same boundary
-without claiming a tag or published GitHub Release.
+[v0.2.0 changelog](CHANGELOG.md) records the same boundary. Repository source
+does not itself authorize an annotated tag or GitHub Release.
 
 For an interviewable local walkthrough, run:
 
