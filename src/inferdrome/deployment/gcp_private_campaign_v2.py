@@ -1896,6 +1896,9 @@ _TRANSITIONS: Final[
         "CREATE_FENCE_PENDING",
         "CREATE_RECONCILING",
         "CREATED",
+        # Only the deterministic local fake records BLOCKED after its
+        # in-process call has returned or raised. Live cleanup still cannot
+        # advance a submitted create without the watchdog fence.
         "BLOCKED",
     },
     # A watchdog records this durable fence before it terminates the exact
@@ -1905,8 +1908,6 @@ _TRANSITIONS: Final[
     "CREATE_RECONCILING": {
         "CREATE_FENCE_PENDING",
         "CREATED",
-        "CLEANUP_INTENT",
-        "BLOCKED",
     },
     "CREATED": {"INSTANCE_IDENTITY_BOUND", "CLEANUP_INTENT", "BLOCKED"},
     "INSTANCE_IDENTITY_BOUND": {
@@ -2519,7 +2520,11 @@ class GcpPrivateCampaignJournal:
                 "CLEANUP_UNCONFIRMED",
             }:
                 return None
-            if state in {"CREATE_SUBMITTED", "CREATE_FENCE_PENDING"}:
+            if state in {
+                "CREATE_SUBMITTED",
+                "CREATE_RECONCILING",
+                "CREATE_FENCE_PENDING",
+            }:
                 # A submitted provider mutation may still materialize after a
                 # lost response.  Only the independently running watchdog can
                 # advance it through CREATE_FENCE_PENDING after it has fenced
@@ -3848,6 +3853,7 @@ class GcpPrivateCampaignLifecycleController:
                 self._close_transport(transport)
             raise
         created_or_ambiguous = False
+        local_fake_create_call_started = False
         primary_error: GcpPrivateCampaignError | None = None
         evidence: GcpPrivateCampaignEvidenceReceipt | None = None
         exact_resource_binding: GcpPrivateCampaignExactResourceBinding | None = None
@@ -3875,6 +3881,10 @@ class GcpPrivateCampaignLifecycleController:
                 # provider-ID bindings recovery can only prove absence and
                 # must remain unconfirmed otherwise.
                 created_or_ambiguous = True
+                local_fake_create_call_started = (
+                    watchdog_activation is None
+                    and isinstance(transport, FakeGcpPrivateCampaignTransport)
+                )
                 operation = transport.create_instance(
                     request,
                     request_id=proposal.request_ids.create_request_id,
@@ -4051,8 +4061,22 @@ class GcpPrivateCampaignLifecycleController:
                     detail_digest=artifact_receipt.sealed_artifact_receipt_sha256,
                 )
         except GcpPrivateCampaignError as error:
+            self._handoff_local_fake_post_dispatch_cleanup(
+                proposal=proposal,
+                request=request,
+                transport=transport,
+                watchdog_activation=watchdog_activation,
+                create_call_started=local_fake_create_call_started,
+            )
             primary_error = error
         except Exception:
+            self._handoff_local_fake_post_dispatch_cleanup(
+                proposal=proposal,
+                request=request,
+                transport=transport,
+                watchdog_activation=watchdog_activation,
+                create_call_started=local_fake_create_call_started,
+            )
             primary_error = GcpPrivateCampaignError("CAMPAIGN_OPERATION_FAILED")
         finally:
             cleanup: GcpPrivateCampaignCleanupOutcome | None = None
@@ -4269,6 +4293,38 @@ class GcpPrivateCampaignLifecycleController:
         # It can revoke a factory claim, but a watchdog-bound submitted create
         # must first pass through its irreversible creator-fence protocol.
         self._journal.revoke_create_for_cleanup(proposal, occurred_at=self._clock.now())
+
+    def _handoff_local_fake_post_dispatch_cleanup(
+        self,
+        *,
+        proposal: GcpPrivateCampaignProposal,
+        request: GcpPrivateCampaignCreateRequest,
+        transport: GcpPrivateCampaignTransport,
+        watchdog_activation: GcpPrivateCampaignWatchdogActivation | None,
+        create_call_started: bool,
+    ) -> None:
+        """Make only a deterministic fake post-call failure cleanup-eligible.
+
+        This is not a general submitted-create cleanup path. It runs only
+        after an in-process ``FakeGcpPrivateCampaignTransport`` create call
+        has returned or raised, with no watchdog activation. A live Google
+        transport remains at ``CREATE_SUBMITTED`` or ``CREATE_RECONCILING``
+        until the independent watchdog fences its exact creator.
+        """
+
+        if (
+            not create_call_started
+            or watchdog_activation is not None
+            or not isinstance(transport, FakeGcpPrivateCampaignTransport)
+            or self._journal.load(proposal)[-1].state != "CREATE_SUBMITTED"
+        ):
+            return
+        self._journal.append(
+            proposal,
+            state="BLOCKED",
+            occurred_at=self._clock.now(),
+            detail_digest=request.create_request_digest,
+        )
 
     def _cleanup_resume_phase(
         self, proposal: GcpPrivateCampaignProposal

@@ -404,6 +404,7 @@ def test_fake_lifecycle_handoffs_only_after_two_endpoint_readiness_and_cleans(
     assert [event.state for event in events] == [
         "CREATE_INTENT_DURABLE",
         "CREATE_INTENT",
+        "CREATE_CLAIMED",
         "CREATE_SUBMITTED",
         "CREATED",
         "INSTANCE_IDENTITY_BOUND",
@@ -902,6 +903,27 @@ def test_cleanup_revokes_claim_and_fences_a_submitted_create_before_terminal_cle
             clock=_Clock(),
         )
         concurrent_controller._ensure_cleanup_intent(proposal)
+    concurrent.begin_create_reconciliation(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    # Reconciliation remains a submitted create. Ordinary cleanup cannot use
+    # it as a shortcut around the independent watchdog fence.
+    with pytest.raises(GcpPrivateCampaignError, match="JOURNAL_TRANSITION_INVALID"):
+        concurrent.append(
+            proposal,
+            state="CLEANUP_INTENT",
+            occurred_at=now,
+        )
+    with pytest.raises(GcpPrivateCampaignError, match="JOURNAL_TRANSITION_INVALID"):
+        concurrent.append(
+            proposal,
+            state="BLOCKED",
+            occurred_at=now,
+        )
+    with pytest.raises(GcpPrivateCampaignError, match="CREATE_FENCE_REQUIRED"):
+        concurrent_controller._ensure_cleanup_intent(proposal)
     concurrent.fence_submitted_create(
         proposal,
         request_digest=request.create_request_digest,
@@ -925,6 +947,7 @@ def test_cleanup_revokes_claim_and_fences_a_submitted_create_before_terminal_cle
         "CREATE_INTENT",
         "CREATE_CLAIMED",
         "CREATE_SUBMITTED",
+        "CREATE_RECONCILING",
         "CREATE_FENCE_PENDING",
         "CLEANUP_INTENT",
     ]
@@ -1356,7 +1379,9 @@ def test_recovery_without_durable_identity_binds_and_deletes_exact_observation(
     # separate conservative-unconfirmed regressions.
     assert outcome.confirmed
     assert fake.delete_calls == 1
-    assert fake.boot_disk_delete_calls == 1
+    # The deterministic fake models the ordinary instance-delete behavior:
+    # its non-retained boot disk disappears with the exact instance deletion.
+    assert fake.boot_disk_delete_calls == 0
     states = [event.state for event in journal.load(proposal)]
     assert "INSTANCE_IDENTITY_BOUND" in states
     assert "BOOT_DISK_IDENTITY_BOUND" in states
@@ -1615,6 +1640,13 @@ def test_post_dispatch_create_failures_attempt_exact_cleanup(
         )
 
     states = [event.state for event in controller._journal.load(proposal)]
+    assert states[:5] == [
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_CLAIMED",
+        "CREATE_SUBMITTED",
+        "BLOCKED",
+    ]
     assert "CLEANUP_INTENT" in states
     assert states[-1] == "CLEANUP_UNCONFIRMED"
     assert fake.delete_calls == 0

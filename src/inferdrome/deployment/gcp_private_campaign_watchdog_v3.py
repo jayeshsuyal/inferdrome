@@ -1448,10 +1448,10 @@ def _fence_exact_creator(
             (cleanup_deadline - datetime.now(UTC)).total_seconds(),
         ),
     )
-    grace_deadline = min(
-        fence_started_at + _CREATOR_FENCE_GRACE_SECONDS,
-        deadline,
-    )
+    # The SIGTERM grace is a full lower bound, never a value clipped to the
+    # enclosing cleanup deadline. If that deadline arrives first, return
+    # unconfirmed rather than escalating early with SIGKILL.
+    grace_deadline = fence_started_at + _CREATOR_FENCE_GRACE_SECONDS
     escalated = False
     while monotonic() < deadline:
         if _creator_is_proven_dead(

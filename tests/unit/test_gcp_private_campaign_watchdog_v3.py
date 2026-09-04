@@ -384,6 +384,37 @@ def test_pidfd_fence_waits_for_sigterm_grace_before_sigkill(
     assert sent[1][0] >= watchdog_v3._CREATOR_FENCE_GRACE_SECONDS
 
 
+def test_pidfd_fence_never_shortens_sigterm_grace_for_a_near_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _pidfd_fence_record(tmp_path)
+    clock = {"seconds": 0.0}
+    sent: list[tuple[float, int]] = []
+
+    monkeypatch.setattr(watchdog_v3, "_pidfd_status", lambda _: "ACTIVE")
+    monkeypatch.setattr(watchdog_v3, "_creator_liveness_status", lambda _: "ACTIVE")
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pid_alive",
+        lambda _: pytest.fail("pidfd-bound fence must not inspect numeric PID"),
+    )
+    monkeypatch.setattr(
+        watchdog_v3,
+        "_pidfd_send_signal",
+        lambda _, number: sent.append((clock["seconds"], number)) or True,
+    )
+
+    assert not watchdog_v3._fence_exact_creator(
+        record,
+        creator_liveness_fd=101,
+        creator_pidfd=102,
+        cleanup_deadline=datetime.now(UTC) + timedelta(milliseconds=120),
+        sleeper=lambda _: clock.__setitem__("seconds", clock["seconds"] + 0.02),
+        monotonic=lambda: clock["seconds"],
+    )
+    assert sent == [(0.0, signal.SIGTERM)]
+
+
 def test_pidfd_fence_survives_post_sigterm_numeric_pid_reuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
