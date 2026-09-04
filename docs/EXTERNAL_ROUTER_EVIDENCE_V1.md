@@ -39,7 +39,7 @@ payload.
 
 Every retained operator-supplied identifier is a simple pseudonymous alias:
 letters, digits, `_`, and `-` only. The contract rejects address syntax
-(including IP, hostname, and host:port forms), URL/path/email delimiters, and
+(including IP, dotted-hostname/address, and host:port forms), URL/path/email delimiters, and
 representative credential or token prefixes. This is data minimization, not
 proof of provenance or perfect secret detection; operators remain responsible
 for supplying aliases rather than origins, credentials, or secret-bearing IDs.
