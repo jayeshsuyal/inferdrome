@@ -25,7 +25,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -86,6 +86,16 @@ _GOOGLE_SCOPE_URLS: Final = {
     "logging.write": "https://www.googleapis.com/auth/logging.write",
     "monitoring.write": "https://www.googleapis.com/auth/monitoring.write",
 }
+
+
+class _GcpPrivateCampaignCreateAuthority(Protocol):
+    """Private insert-only authority supplied by the watchdog factory."""
+
+    def assert_request(self, request: GcpPrivateCampaignCreateRequest) -> None: ...
+
+    def insert_claim(
+        self, request: GcpPrivateCampaignCreateRequest
+    ) -> AbstractContextManager[None]: ...
 _GAUGE_RE: Final = re.compile(
     r"^vllm:num_requests_running\{(?P<labels>[^}]*)\}\s+(?P<value>[^\s#]+)(?:\s+[^\s#]+)?\s*$"
 )
@@ -1303,6 +1313,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         credential_resolver: _ComputeCredentialResolver | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
+        watchdog_create_authority: _GcpPrivateCampaignCreateAuthority | None = None,
     ) -> None:
         clients = (
             instances_client,
@@ -1326,6 +1337,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         self._iap_tunnels = iap_tunnels
         self._iap_endpoints: _IapTunnelEndpoints | None = None
         self._pre_insert_guard: Callable[[], None] | None = None
+        self._watchdog_create_authority = watchdog_create_authority
         self._monotonic = monotonic or time.monotonic
         self._sleeper = sleeper or time.sleep
         self._operations: dict[str, object] = {}
@@ -1523,6 +1535,10 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         # exact local approval check and bound ``_pre_insert_guard``.  Each
         # potentially slow read is followed by the same local check so an
         # expired approval, quote, or execution horizon cannot reach insert.
+        authority = self._watchdog_create_authority
+        if authority is None:
+            raise GcpPrivateCampaignError("WATCHDOG_CREATE_AUTHORITY_REQUIRED")
+        authority.assert_request(request)
         self._revalidate_before_insert()
         self._verify_boot_image_identity(request, timeout_seconds=timeout_seconds)
         self._revalidate_before_insert()
@@ -1533,9 +1549,14 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
         projected = self.project_create_request(request, request_id=request_id)
         self._revalidate_before_insert()
         try:
-            result = self._bound_instances.insert(
-                request=projected, timeout=timeout_seconds
-            )
+            # The authority advances the durable core journal under the same
+            # lock cleanup uses, then holds that lock through this one bounded
+            # provider mutation.  Cleanup cannot settle between the final
+            # recheck and the actual insert seam.
+            with authority.insert_claim(request):
+                result = self._bound_instances.insert(
+                    request=projected, timeout=timeout_seconds
+                )
             operation = _operation(result, kind="create", request_id=request_id)
             with self._lock:
                 self._operations[operation.operation_id] = result
@@ -3008,13 +3029,14 @@ def create_google_private_campaign_transport(
 
     if type(watchdog_capability) is not GcpPrivateCampaignWatchdogCapability:
         raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
-    watchdog_capability.assert_active()
+    watchdog_capability.consume_for_factory()
 
     return GoogleGcpPrivateCampaignTransport(
         sdk=_google_sdk(),
         credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
         iap_tunnels=GcpPrivateCampaignIapTunnelSupervisor(),
         runner=IapGcpPrivateCampaignRunner(evidence_root),
+        watchdog_create_authority=watchdog_capability,
     )
 
 

@@ -98,10 +98,17 @@ def _private_root(tmp_path: Path, name: str) -> Path:
 
 
 def _append_create_intent(
-    journal: GcpPrivateCampaignJournal, proposal: GcpPrivateCampaignProposal
+    journal: GcpPrivateCampaignJournal,
+    proposal: GcpPrivateCampaignProposal,
+    startup: object,
 ) -> None:
     now = datetime.now(UTC)
-    journal.append(proposal, state="CREATE_INTENT_DURABLE", occurred_at=now)
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=_request(proposal, startup).create_request_digest,
+    )
     journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
 
 
@@ -152,6 +159,25 @@ def _await_terminal(
     pytest.fail("watchdog worker did not reach a terminal local state")
 
 
+def _await_state(
+    root: Path,
+    proposal: GcpPrivateCampaignProposal,
+    state: str,
+    *,
+    timeout_seconds: float = 3.0,
+) -> tuple[str, ...]:
+    store = _WatchdogStore(root)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        record = store.read_activation(proposal.ownership_labels.controller_id)
+        events = store.load_events(record)
+        states = tuple(event.state for event in events)
+        if state in states:
+            return states
+        time.sleep(0.05)
+    pytest.fail(f"watchdog worker did not record {state}")
+
+
 def _request(
     proposal: GcpPrivateCampaignProposal, startup: object
 ) -> GcpPrivateCampaignCreateRequest:
@@ -163,9 +189,15 @@ def _request(
 def _append_exact_binding(
     journal: GcpPrivateCampaignJournal,
     proposal: GcpPrivateCampaignProposal,
+    startup: object,
 ) -> None:
     now = datetime.now(UTC)
-    journal.append(proposal, state="CREATE_INTENT_DURABLE", occurred_at=now)
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=_request(proposal, startup).create_request_digest,
+    )
     journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
     journal.append(proposal, state="CREATE_RECONCILING", occurred_at=now)
     journal.append(proposal, state="CREATED", occurred_at=now)
@@ -196,7 +228,7 @@ def test_watchdog_worker_recovers_post_insert_before_identity_binding(
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root, proposal, instance_present=True, boot_disk_present=True
     )
@@ -231,12 +263,14 @@ def test_watchdog_worker_recovers_post_insert_before_identity_binding(
     assert journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
 
 
-def test_watchdog_requires_two_exact_absence_observations(tmp_path: Path) -> None:
+def test_prebind_absence_stays_unconfirmed_without_authoritative_create_record(
+    tmp_path: Path,
+) -> None:
     proposal, startup, approval, cleanup = _fresh_inputs()
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root, proposal, instance_present=False, boot_disk_present=False
     )
@@ -257,18 +291,24 @@ def test_watchdog_requires_two_exact_absence_observations(tmp_path: Path) -> Non
         now=datetime.now(UTC),
     )
 
-    states = _await_terminal(watchdog_root, proposal)
-    assert states[-1] == "CLEANUP_CONFIRMED"
+    states = _await_state(watchdog_root, proposal, "PREBIND_ABSENCE_PENDING")
     assert states.count("PREBIND_ABSENCE_PENDING") == 1
-    assert journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
+    time.sleep(1.2)
+    events = journal.load(proposal)
+    assert events[-1].state == "CLEANUP_INTENT"
+    assert all(event.state != "CLEANUP_CONFIRMED" for event in events)
+    assert watchdog._handle is not None
+    watchdog._kill_process(watchdog._handle.process)
 
 
-def test_hung_parent_deadline_and_cleanup_retry_are_reconciled(tmp_path: Path) -> None:
+def test_dead_parent_cleanup_retry_is_reconciled_without_wall_clock_deadline_race(
+    tmp_path: Path,
+) -> None:
     proposal, startup, approval, cleanup = _fresh_inputs()
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root,
         proposal,
@@ -280,9 +320,10 @@ def test_hung_parent_deadline_and_cleanup_retry_are_reconciled(tmp_path: Path) -
         watchdog_root=watchdog_root,
         journal_root=journal_root,
         worker_backend="file_fake_cleanup_v1",
+        _parent_process_id=2_000_000_000,
     )
     now = datetime.now(UTC)
-    deadline = now + timedelta(seconds=1)
+    deadline = now + timedelta(seconds=60)
 
     watchdog.activate(
         proposal=proposal,
@@ -311,13 +352,16 @@ def test_false_absence_never_settles_a_real_instance(tmp_path: Path) -> None:
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root,
         proposal,
         instance_present=True,
         boot_disk_present=True,
-        invisible_observations_remaining=1,
+        # Both the direct observation and the immediately following absence
+        # confirmation report not-found once.  The later visible resource
+        # must be reconciled/deleted rather than terminal-confirmed early.
+        invisible_observations_remaining=2,
     )
     watchdog = GcpPrivateCampaignWatchdog(
         watchdog_root=watchdog_root,
@@ -341,7 +385,7 @@ def test_false_absence_never_settles_a_real_instance(tmp_path: Path) -> None:
         controller_id=proposal.ownership_labels.controller_id,
     )
     assert states.count("RECOVERY_ATTEMPT") == 1
-    assert "PREBIND_ABSENCE_PENDING" not in states
+    assert states.count("PREBIND_ABSENCE_PENDING") == 1
     assert state.invisible_observations_remaining == 0
     assert state.delete_attempts == 1
     assert state.delete_calls == 1
@@ -355,7 +399,7 @@ def test_prebind_same_name_replacement_without_request_anchor_never_deletes(
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root,
         proposal,
@@ -407,7 +451,7 @@ def test_watchdog_journal_restart_resumes_only_after_parent_death(
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root, proposal, instance_present=False, boot_disk_present=False
     )
@@ -460,7 +504,7 @@ def test_replacement_or_ambiguous_owned_resource_is_never_deleted(
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_exact_binding(journal, proposal)
+    _append_exact_binding(journal, proposal, startup)
     _write_fake_state(
         watchdog_root,
         proposal,
@@ -515,7 +559,7 @@ def test_dead_worker_blocks_google_factory_before_sdk_initialization(
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root, proposal, instance_present=False, boot_disk_present=False
     )
@@ -533,6 +577,7 @@ def test_dead_worker_blocks_google_factory_before_sdk_initialization(
         execution_deadline=journal.execution_deadline(proposal),
         now=datetime.now(UTC),
     )
+    capability = watchdog.take_create_capability()
     assert watchdog._handle is not None
     watchdog._kill_process(watchdog._handle.process)
     sdk_calls = 0
@@ -561,7 +606,7 @@ def test_missing_or_tampered_activation_blocks_sdk_initialization(
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root, proposal, instance_present=False, boot_disk_present=False
     )
@@ -570,7 +615,7 @@ def test_missing_or_tampered_activation_blocks_sdk_initialization(
         journal_root=journal_root,
         worker_backend="file_fake_cleanup_v1",
     )
-    capability = watchdog.activate(
+    watchdog.activate(
         proposal=proposal,
         approval=approval,
         cleanup_authorization=cleanup,
@@ -578,6 +623,7 @@ def test_missing_or_tampered_activation_blocks_sdk_initialization(
         execution_deadline=journal.execution_deadline(proposal),
         now=datetime.now(UTC),
     )
+    capability = watchdog.take_create_capability()
     activation = watchdog_root / (
         f"{proposal.ownership_labels.controller_id}."
         "gcp-private-watchdog-v3.activation.json"
@@ -613,7 +659,7 @@ def test_stale_activation_blocks_sdk_initialization(
     journal_root = _private_root(tmp_path, "journal")
     watchdog_root = _private_root(tmp_path, "watchdog")
     journal = GcpPrivateCampaignJournal(journal_root)
-    _append_create_intent(journal, proposal)
+    _append_create_intent(journal, proposal, startup)
     _write_fake_state(
         watchdog_root, proposal, instance_present=False, boot_disk_present=False
     )
@@ -629,7 +675,7 @@ def test_stale_activation_blocks_sdk_initialization(
         worker_backend="file_fake_cleanup_v1",
         _now=fake_now,
     )
-    capability = watchdog.activate(
+    watchdog.activate(
         proposal=proposal,
         approval=approval,
         cleanup_authorization=cleanup,
@@ -637,6 +683,7 @@ def test_stale_activation_blocks_sdk_initialization(
         execution_deadline=now + timedelta(seconds=5),
         now=now,
     )
+    capability = watchdog.take_create_capability()
     clock_now = now + timedelta(seconds=6)
     sdk_calls = 0
 
@@ -677,6 +724,217 @@ def test_missing_capability_blocks_sdk_initialization(
             watchdog_capability=object(),  # type: ignore[arg-type]
         )
     assert sdk_calls == 0
+
+
+def test_worker_refuses_to_acknowledge_ready_without_durable_create_intent(
+    tmp_path: Path,
+) -> None:
+    proposal, startup, approval, cleanup = _fresh_inputs()
+    journal_root = _private_root(tmp_path, "journal")
+    watchdog_root = _private_root(tmp_path, "watchdog")
+    watchdog = GcpPrivateCampaignWatchdog(
+        watchdog_root=watchdog_root,
+        journal_root=journal_root,
+        worker_backend="file_fake_cleanup_v1",
+    )
+
+    with pytest.raises(GcpPrivateCampaignError, match="WATCHDOG_WORKER_UNAVAILABLE"):
+        watchdog.activate(
+            proposal=proposal,
+            approval=approval,
+            cleanup_authorization=cleanup,
+            request=_request(proposal, startup),
+            execution_deadline=datetime.now(UTC) + timedelta(seconds=60),
+            now=datetime.now(UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "empty", "corrupt", "wrong_digest", "blocked", "replaced"),
+)
+def test_changed_core_create_intent_blocks_google_factory_before_sdk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    proposal, startup, approval, cleanup = _fresh_inputs()
+    journal_root = _private_root(tmp_path, "journal")
+    watchdog_root = _private_root(tmp_path, "watchdog")
+    journal = GcpPrivateCampaignJournal(journal_root)
+    _append_create_intent(journal, proposal, startup)
+    request = _request(proposal, startup)
+    watchdog = GcpPrivateCampaignWatchdog(
+        watchdog_root=watchdog_root,
+        journal_root=journal_root,
+        worker_backend="google_cleanup_only_v1",
+    )
+    watchdog.activate(
+        proposal=proposal,
+        approval=approval,
+        cleanup_authorization=cleanup,
+        request=request,
+        execution_deadline=journal.execution_deadline(proposal),
+        now=datetime.now(UTC),
+    )
+    capability = watchdog.take_create_capability()
+    history = journal_root / (
+        f"{proposal.ownership_labels.controller_id}."
+        "gcp-private-campaign-v2.events.jsonl"
+    )
+    if mutation == "missing":
+        history.unlink()
+    elif mutation == "empty":
+        history.write_bytes(b"")
+    elif mutation == "corrupt":
+        history.write_bytes(b"{}\n")
+    elif mutation == "wrong_digest":
+        wrong_root = _private_root(tmp_path, "wrong-digest")
+        wrong_journal = GcpPrivateCampaignJournal(wrong_root)
+        wrong_journal.append(
+            proposal,
+            state="CREATE_INTENT_DURABLE",
+            occurred_at=datetime.now(UTC),
+            detail_digest="sha256:" + ("f" * 64),
+        )
+        wrong_journal.append(
+            proposal, state="CREATE_INTENT", occurred_at=datetime.now(UTC)
+        )
+        history.write_bytes((wrong_root / history.name).read_bytes())
+    elif mutation == "blocked":
+        journal.append(proposal, state="BLOCKED", occurred_at=datetime.now(UTC))
+    else:
+        replacement_root = _private_root(tmp_path, "replacement")
+        payload = proposal.model_dump(mode="python")
+        payload.pop("proposal_id")
+        payload["quote"] = proposal.quote.model_copy(
+            update={"quote_id": "quote-87654321"}
+        )
+        replacement = issue_gcp_private_campaign_proposal(
+            GcpPrivateCampaignProposalPayload.model_validate(payload)
+        )
+        replacement_journal = GcpPrivateCampaignJournal(replacement_root)
+        _append_create_intent(replacement_journal, replacement, startup)
+        replacement_history = replacement_root / history.name
+        history.write_bytes(replacement_history.read_bytes())
+
+    sdk_calls = 0
+
+    def forbidden_sdk() -> object:
+        nonlocal sdk_calls
+        sdk_calls += 1
+        raise AssertionError("SDK import must stay behind the core journal check")
+
+    monkeypatch.setattr(
+        "inferdrome.deployment.gcp_private_campaign_google._google_sdk", forbidden_sdk
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="WATCHDOG_CREATE_INTENT_INVALID"):
+        create_google_private_campaign_transport(
+            evidence_root=_private_root(tmp_path, f"evidence-{mutation}"),
+            watchdog_capability=capability,
+        )
+    assert sdk_calls == 0
+    assert watchdog._handle is not None
+    watchdog._kill_process(watchdog._handle.process)
+
+
+def test_capability_is_one_use_and_bound_to_the_exact_create_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, startup, approval, cleanup = _fresh_inputs()
+    journal_root = _private_root(tmp_path, "journal")
+    watchdog_root = _private_root(tmp_path, "watchdog")
+    journal = GcpPrivateCampaignJournal(journal_root)
+    _append_create_intent(journal, proposal, startup)
+    request = _request(proposal, startup)
+    watchdog = GcpPrivateCampaignWatchdog(
+        watchdog_root=watchdog_root,
+        journal_root=journal_root,
+        worker_backend="google_cleanup_only_v1",
+    )
+    watchdog.activate(
+        proposal=proposal,
+        approval=approval,
+        cleanup_authorization=cleanup,
+        request=request,
+        execution_deadline=journal.execution_deadline(proposal),
+        now=datetime.now(UTC),
+    )
+    capability = watchdog.take_create_capability()
+    sdk_calls = 0
+
+    def fake_sdk() -> object:
+        nonlocal sdk_calls
+        sdk_calls += 1
+        return object()
+
+    monkeypatch.setattr(
+        "inferdrome.deployment.gcp_private_campaign_google._google_sdk", fake_sdk
+    )
+    create_google_private_campaign_transport(
+        evidence_root=_private_root(tmp_path, "evidence"),
+        watchdog_capability=capability,
+    )
+    assert sdk_calls == 1
+    with pytest.raises(GcpPrivateCampaignError, match="WATCHDOG_CAPABILITY_REPLAYED"):
+        create_google_private_campaign_transport(
+            evidence_root=_private_root(tmp_path, "evidence-replay"),
+            watchdog_capability=capability,
+        )
+    mismatched = request.model_copy(
+        update={"create_request_digest": "sha256:" + ("f" * 64)}
+    )
+    with (
+        pytest.raises(
+            GcpPrivateCampaignError, match="WATCHDOG_CAPABILITY_BINDING_MISMATCH"
+        ),
+        capability.insert_claim(mismatched),
+    ):
+        pytest.fail("mismatched request reached the insert seam")
+    assert sdk_calls == 1
+    assert watchdog._handle is not None
+    watchdog._kill_process(watchdog._handle.process)
+
+
+def test_file_fake_watchdog_never_authorizes_google_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, startup, approval, cleanup = _fresh_inputs()
+    journal_root = _private_root(tmp_path, "journal")
+    watchdog_root = _private_root(tmp_path, "watchdog")
+    journal = GcpPrivateCampaignJournal(journal_root)
+    _append_create_intent(journal, proposal, startup)
+    request = _request(proposal, startup)
+    watchdog = GcpPrivateCampaignWatchdog(
+        watchdog_root=watchdog_root,
+        journal_root=journal_root,
+        worker_backend="file_fake_cleanup_v1",
+    )
+    watchdog.activate(
+        proposal=proposal,
+        approval=approval,
+        cleanup_authorization=cleanup,
+        request=request,
+        execution_deadline=journal.execution_deadline(proposal),
+        now=datetime.now(UTC),
+    )
+    capability = watchdog.take_create_capability()
+    sdk_calls = 0
+
+    def forbidden_sdk() -> object:
+        nonlocal sdk_calls
+        sdk_calls += 1
+        raise AssertionError("file fake must not reach the Google SDK")
+
+    monkeypatch.setattr(
+        "inferdrome.deployment.gcp_private_campaign_google._google_sdk", forbidden_sdk
+    )
+    with pytest.raises(GcpPrivateCampaignError, match="WATCHDOG_LIVE_BACKEND_REQUIRED"):
+        create_google_private_campaign_transport(
+            evidence_root=_private_root(tmp_path, "evidence"),
+            watchdog_capability=capability,
+        )
+    assert sdk_calls == 0
+    assert watchdog._handle is not None
+    watchdog._kill_process(watchdog._handle.process)
 
 
 def test_watchdog_death_after_factory_stops_the_preinsert_guard(

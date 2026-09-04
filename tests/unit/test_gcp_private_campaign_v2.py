@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GCP_PRIVATE_CAMPAIGN_APPROVAL_SCHEMA_VERSION,
     GCP_PRIVATE_CAMPAIGN_CLEANUP_AUTHORIZATION_SCHEMA_VERSION,
     GCP_PRIVATE_CAMPAIGN_CLEANUP_CONFIRMATION,
+    GCP_PRIVATE_CAMPAIGN_MAX_EVENTS,
     GCP_PRIVATE_CAMPAIGN_PROPOSAL_SCHEMA_VERSION,
     GCP_PRIVATE_CAMPAIGN_TOPOLOGY_SCHEMA_VERSION,
     FakeGcpPrivateCampaignTransport,
@@ -34,6 +36,7 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     GcpPrivateCampaignRoutingBinding,
     GcpPrivateCampaignTopology,
     _CleanupTransportFacade,
+    build_gcp_private_campaign_create_request,
     gcp_private_campaign_boot_image_identity,
     gcp_private_campaign_proposal_id,
     issue_gcp_private_campaign_proposal,
@@ -217,6 +220,47 @@ def _proposal() -> tuple[GcpPrivateCampaignProposal, object]:
         ),
     )
     return issue_gcp_private_campaign_proposal(payload), startup
+
+
+def _seed_exact_cleanup_journal(
+    journal: GcpPrivateCampaignJournal,
+    proposal: GcpPrivateCampaignProposal,
+    startup: object,
+) -> object:
+    """Create the smallest durable post-create history for cleanup tests."""
+
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    now = _Clock().now()
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    journal.append(proposal, state="CREATE_SUBMITTED", occurred_at=now)
+    journal.append(proposal, state="CREATED", occurred_at=now)
+    journal.append(
+        proposal,
+        state="INSTANCE_IDENTITY_BOUND",
+        occurred_at=now,
+        detail_digest=sha256_digest(b"123456789"),
+    )
+    journal.append(
+        proposal,
+        state="BOOT_DISK_IDENTITY_BOUND",
+        occurred_at=now,
+        detail_digest=sha256_digest(b"246813579"),
+    )
+    journal.append(
+        proposal,
+        state="PROVIDER_BACKSTOP_VERIFIED",
+        occurred_at=now,
+        detail_digest="sha256:" + ("c" * 64),
+    )
+    return request
 
 
 def test_startup_rejects_an_image_identity_shared_by_runner_and_engines() -> None:
@@ -737,6 +781,156 @@ def test_cleanup_recovery_is_valid_after_launch_approval_expiry(tmp_path: Path) 
     assert outcome.confirmed
     assert fake.create_calls == 0
     assert fake.delete_calls == 1
+
+
+def test_cleanup_retries_keep_provider_cleanup_callable_after_journal_budget(
+    tmp_path: Path,
+) -> None:
+    """A transient failure cannot spend the finite journal before cleanup."""
+
+    proposal, startup = _proposal()
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path))
+    _seed_exact_cleanup_journal(journal, proposal, startup)
+
+    class EventuallyDeleting(FakeGcpPrivateCampaignTransport):
+        attempts: int = 0
+
+        def delete_exact_instance(self, *args: object, **kwargs: object) -> object:
+            self.attempts += 1
+            if self.attempts <= GCP_PRIVATE_CAMPAIGN_MAX_EVENTS + 8:
+                raise GcpPrivateCampaignError("TRANSIENT_DELETE_FAILURE")
+            return super().delete_exact_instance(*args, **kwargs)  # type: ignore[arg-type]
+
+    fake = EventuallyDeleting(created=True, boot_disk_present=True)
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=lambda: fake,
+        clock=_Clock(instant=datetime(2026, 9, 2, 0, 31, tzinfo=UTC)),
+    )
+    authorization = _cleanup_authorization(proposal)
+
+    for _ in range(GCP_PRIVATE_CAMPAIGN_MAX_EVENTS + 8):
+        outcome = controller.recover_exact_cleanup(
+            proposal=proposal,
+            authorization=authorization,
+            startup_payload=startup,
+        )
+        assert outcome.confirmed is False
+        assert journal.load(proposal)[-1].state == "CLEANUP_UNCONFIRMED"
+
+    outcome = controller.recover_exact_cleanup(
+        proposal=proposal,
+        authorization=authorization,
+        startup_payload=startup,
+    )
+
+    assert outcome.confirmed is True
+    assert fake.attempts == GCP_PRIVATE_CAMPAIGN_MAX_EVENTS + 9
+    assert fake.delete_calls == 1
+    assert len(journal.load(proposal)) < GCP_PRIVATE_CAMPAIGN_MAX_EVENTS
+    assert journal.load(proposal)[-1].state == "CLEANUP_CONFIRMED"
+
+
+def test_cleanup_revokes_claim_and_cannot_interleave_after_final_insert_claim(
+    tmp_path: Path,
+) -> None:
+    """The core lock serializes factory/cleanup/pre-insert transitions."""
+
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    journal = GcpPrivateCampaignJournal(_journal_root(tmp_path / "revoked"))
+    now = _Clock().now()
+    journal.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    journal.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    journal.claim_create_for_factory(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    controller = GcpPrivateCampaignLifecycleController(
+        journal=journal,
+        transport_factory=FakeGcpPrivateCampaignTransport,
+        clock=_Clock(),
+    )
+
+    # A cleanup intent observed after the factory claim revokes the remaining
+    # create authority before the final insert seam can take its lock.
+    controller._ensure_cleanup_intent(proposal)
+    with (
+        pytest.raises(GcpPrivateCampaignError, match="CREATE_CLAIM_REVOKED"),
+        journal.create_insert_claim(
+            proposal,
+            request_digest=request.create_request_digest,
+            occurred_at=now,
+        ),
+    ):
+        pytest.fail("revoked create claim reached the insert seam")
+
+    # With a fresh claim, cleanup must wait for the insertion lock.  It cannot
+    # append a cleanup intent between CREATE_SUBMITTED and the provider call.
+    concurrent = GcpPrivateCampaignJournal(_journal_root(tmp_path / "concurrent"))
+    concurrent.append(
+        proposal,
+        state="CREATE_INTENT_DURABLE",
+        occurred_at=now,
+        detail_digest=request.create_request_digest,
+    )
+    concurrent.append(proposal, state="CREATE_INTENT", occurred_at=now)
+    concurrent.claim_create_for_factory(
+        proposal,
+        request_digest=request.create_request_digest,
+        occurred_at=now,
+    )
+    concurrent_controller = GcpPrivateCampaignLifecycleController(
+        journal=concurrent,
+        transport_factory=FakeGcpPrivateCampaignTransport,
+        clock=_Clock(),
+    )
+    insert_entered = threading.Event()
+    release_insert = threading.Event()
+    cleanup_finished = threading.Event()
+
+    def final_insert() -> None:
+        with concurrent.create_insert_claim(
+            proposal,
+            request_digest=request.create_request_digest,
+            occurred_at=now,
+        ):
+            insert_entered.set()
+            assert release_insert.wait(timeout=2)
+
+    def cleanup() -> None:
+        assert insert_entered.wait(timeout=2)
+        concurrent_controller._ensure_cleanup_intent(proposal)
+        cleanup_finished.set()
+
+    insert_thread = threading.Thread(target=final_insert)
+    cleanup_thread = threading.Thread(target=cleanup)
+    insert_thread.start()
+    assert insert_entered.wait(timeout=2)
+    cleanup_thread.start()
+    assert cleanup_finished.wait(timeout=0.05) is False
+    release_insert.set()
+    insert_thread.join(timeout=2)
+    cleanup_thread.join(timeout=2)
+
+    assert insert_thread.is_alive() is False
+    assert cleanup_thread.is_alive() is False
+    assert cleanup_finished.is_set()
+    assert [event.state for event in concurrent.load(proposal)] == [
+        "CREATE_INTENT_DURABLE",
+        "CREATE_INTENT",
+        "CREATE_CLAIMED",
+        "CREATE_SUBMITTED",
+        "CLEANUP_INTENT",
+    ]
 
 
 @pytest.mark.parametrize("artifact_state", ("broken", "missing", "tampered"))

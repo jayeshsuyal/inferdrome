@@ -188,7 +188,7 @@ def _controller(arguments: argparse.Namespace) -> GcpPrivateCampaignLifecycleCon
             raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
         return create_google_private_campaign_transport(
             evidence_root=evidence_root,
-            watchdog_capability=watchdog.live_capability(),
+            watchdog_capability=watchdog.take_create_capability(),
         )
 
     # This lambda is intentionally inert until the controller has completed

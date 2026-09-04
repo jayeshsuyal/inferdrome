@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,6 +79,21 @@ class _NoCalls:
     def list(self, *, request: object, timeout: int) -> list[object]:
         del request, timeout
         raise AssertionError("provider list was not expected")
+
+
+class _TestCreateAuthority:
+    """Injected local seam; production construction requires the watchdog."""
+
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def assert_request(self, request: object) -> None:
+        self.requests.append(request)
+
+    @contextmanager
+    def insert_claim(self, request: object) -> Iterator[None]:
+        self.requests.append(request)
+        yield
 
 
 class _NoImages:
@@ -436,6 +453,7 @@ def _adapter(
         monotonic=monotonic,  # type: ignore[arg-type]
         sleeper=sleeper,  # type: ignore[arg-type]
         runner=runner or _Runner(),
+        watchdog_create_authority=_TestCreateAuthority(),
     )
     adapter.bind_pre_insert_guard(
         pre_insert_guard if callable(pre_insert_guard) else lambda: None
@@ -481,6 +499,7 @@ def test_compute_clients_are_constructed_only_with_the_approved_identity() -> No
         credential_resolver=resolver,
         runner=_Runner(),
         iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
+        watchdog_create_authority=_TestCreateAuthority(),
     )
     adapter.bind_pre_insert_guard(lambda: None)
 
@@ -503,6 +522,33 @@ def test_compute_clients_are_constructed_only_with_the_approved_identity() -> No
         "firewalls",
     ]
     assert all(credential is resolver.credential for _, credential in constructors)
+
+
+def test_create_requires_watchdog_authority_before_any_provider_preflight() -> None:
+    proposal, startup = _proposal()
+    request = build_gcp_private_campaign_create_request(
+        proposal=proposal, startup_payload=startup
+    )
+    adapter = GoogleGcpPrivateCampaignTransport(
+        sdk=_Sdk,
+        instances_client=_NoCalls(),
+        disks_client=_DiskRows(_Rows()),
+        images_client=_NoImages(),
+        firewalls_client=_NoFirewalls(),
+        iap_tunnels=_IapTunnels(),  # type: ignore[arg-type]
+        runner=_Runner(),
+    )
+    adapter.bind_pre_insert_guard(lambda: None)
+    adapter.bind_controller_principal(proposal.iap_connectivity.controller_principal)
+
+    with pytest.raises(
+        GcpPrivateCampaignError, match="WATCHDOG_CREATE_AUTHORITY_REQUIRED"
+    ):
+        adapter.create_instance(
+            request,
+            request_id=proposal.request_ids.create_request_id,
+            timeout_seconds=1,
+        )
 
 
 def test_controller_principal_mismatch_never_constructs_or_calls_compute_clients() -> (

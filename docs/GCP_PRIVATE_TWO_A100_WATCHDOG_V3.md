@@ -22,7 +22,10 @@ durable CREATE_INTENT_DURABLE / CREATE_INTENT
 fsync activation record -> detached cleanup-only worker -> READY receipt
                     |
                     v
-fresh capability check -> optional Google SDK/client -> exact insert
+one-use exact-request capability + durable CREATE_CLAIMED
+                    |
+                    v
+fresh capability recheck -> optional Google SDK/client -> locked exact insert
 ```
 
 The activation record binds the exact proposal, create request and startup
@@ -31,10 +34,12 @@ labels, two-engine topology, approval digest, cleanup authorization, execution
 deadline, cleanup horizon, and journal-root identity. It is content-addressed
 local state, not a signature or evidence of human authorship.
 
-The Google create factory accepts only the opaque capability that the ready
-worker issued. It rechecks the worker before importing the optional Google SDK.
-The controller repeats that check immediately before `InstancesClient.insert`.
-Missing, stale, mismatched, tampered, or dead-worker state fails closed before
+The Google create factory accepts only the opaque, one-use capability that the
+ready worker issued. It binds that capability to the exact proposal and create
+request under the core journal lock before importing the optional Google SDK.
+The same lock is held across the final `InstancesClient.insert`, so cleanup
+cannot revoke an unclaimed create edge and then race a later insert. Missing,
+stale, mismatched, replayed, tampered, or dead-worker state fails closed before
 the SDK/client/create edge.
 
 ## Worker behavior
@@ -42,8 +47,10 @@ the SDK/client/create edge.
 The worker runs in a new session with a minimal environment and no approval,
 credential, proxy, or payload environment values. It receives a verified
 watchdog directory descriptor; its durable record contains no secret. Google
-imports and ADC resolution occur only in the cleanup-only worker after it has
-observed controller death or the execution deadline.
+imports and ADC resolution for normal creation occur only after the parent has
+verified the exact ready activation and consumed its one-use capability. The
+cleanup-only worker independently imports the cleanup adapter only after it
+observes controller death or the execution deadline.
 
 The worker reads only the exact request's predetermined resource identity. It
 never selects a hostname, scans an account, or creates a resource. The create
@@ -53,12 +60,16 @@ worker requires that metadata plus a fresh full topology/label readback before
 binding the hashes used by the exact delete path. A same-name replacement,
 request-digest mismatch, or ambiguous ownership never reaches a delete seam.
 
-One apparent absence is a retry, not cleanup confirmation. The worker requires
-two exact absence observations before recording pre-bind cleanup confirmation.
-Known instance and disk identities use the existing exact delete/reconcile and
+A pre-bind absence is a retry, not cleanup confirmation. Because this narrow
+profile has no independently durable provider create-operation identity, even
+repeated name/label absence cannot prove that a delayed insert will never
+materialize. The worker therefore continues bounded reconciliation and ends as
+`CLEANUP_UNCONFIRMED` if authoritative absence cannot be established. Known
+instance and disk identities use the existing exact delete/reconcile and
 absence-verification path. A failed delete keeps retrying through the frozen
-cleanup horizon. A restart can resume the durable cleanup-only record only
-after the original parent PID is gone; it cannot reissue a create capability.
+cleanup horizon without growing the finite core journal for every transient
+failure. A restart can resume the durable cleanup-only record only after the
+original parent PID is gone; it cannot reissue a create capability.
 
 Provider `maxRunDuration` with `DELETE` remains a provider-side backstop. It
 is not a watchdog substitute, an invoice limit, or proof that billing stopped.

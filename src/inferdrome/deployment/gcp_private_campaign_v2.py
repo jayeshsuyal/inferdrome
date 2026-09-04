@@ -1794,6 +1794,7 @@ def issue_gcp_private_campaign_sealed_artifact_receipt(
 GcpPrivateCampaignJournalState = Literal[
     "CREATE_INTENT_DURABLE",
     "CREATE_INTENT",
+    "CREATE_CLAIMED",
     "CREATE_SUBMITTED",
     "CREATE_RECONCILING",
     "CREATED",
@@ -1860,10 +1861,19 @@ _TRANSITIONS: Final[
 ] = {
     "CREATE_INTENT_DURABLE": {"CREATE_INTENT", "CLEANUP_INTENT", "BLOCKED"},
     "CREATE_INTENT": {
+        "CREATE_CLAIMED",
         "CREATE_SUBMITTED",
         "CREATE_RECONCILING",
         "CLEANUP_INTENT",
         "EXECUTION_DEADLINE_EXCEEDED",
+        "BLOCKED",
+    },
+    # A live Google factory holds this one-use claim between construction and
+    # the final provider insert.  Exact cleanup may revoke it, but no other
+    # path may advance it to a provider submission.
+    "CREATE_CLAIMED": {
+        "CREATE_SUBMITTED",
+        "CLEANUP_INTENT",
         "BLOCKED",
     },
     "CREATE_SUBMITTED": {"CREATE_RECONCILING", "CREATED", "CLEANUP_INTENT", "BLOCKED"},
@@ -1959,6 +1969,7 @@ _TRANSITIONS: Final[
     "CLEANUP_UNCONFIRMED": {
         "CREATE_RECONCILING",
         "CLEANUP_INTENT",
+        "CLEANUP_CONFIRMED",
         "CLEANUP_UNCONFIRMED",
         "BLOCKED",
     },
@@ -2109,6 +2120,62 @@ class GcpPrivateCampaignJournal:
             ):
                 raise GcpPrivateCampaignError("JOURNAL_TIME_REGRESSED")
 
+    def _append_locked(
+        self,
+        root: SafeDirFD,
+        proposal: GcpPrivateCampaignProposal,
+        events: tuple[GcpPrivateCampaignJournalEvent, ...],
+        *,
+        state: GcpPrivateCampaignJournalState,
+        occurred_at: datetime,
+        operation_id: str | None = None,
+        detail_digest: str | None = None,
+    ) -> GcpPrivateCampaignJournalEvent:
+        """Append one transition while the caller owns the durable journal lock."""
+
+        if not events and state != "CREATE_INTENT_DURABLE":
+            raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
+        if events and state not in _TRANSITIONS[events[-1].state]:
+            raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
+        payload = GcpPrivateCampaignJournalEventPayload(
+            schema_version=GCP_PRIVATE_CAMPAIGN_EVENT_SCHEMA_VERSION,
+            proposal_id=proposal.proposal_id,
+            proposal_digest=proposal.proposal_id,
+            sequence=len(events),
+            state=state,
+            occurred_at=_timestamp(occurred_at),
+            previous_event_digest=events[-1].event_digest if events else None,
+            operation_id=operation_id,
+            detail_digest=detail_digest,
+        )
+        event = GcpPrivateCampaignJournalEvent(
+            **_model_value(payload),
+            event_digest=gcp_private_campaign_journal_event_digest(payload),
+        )
+        descriptor: int | None = None
+        name = self._name(proposal)
+        try:
+            descriptor = root.open_child(
+                name, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600
+            )
+            root.validated_regular_child(name, descriptor=descriptor)
+            self._write_all(
+                descriptor, canonical_json_bytes(_model_value(event)) + b"\n"
+            )
+            os.fsync(descriptor)
+            root.validated_regular_child(name, descriptor=descriptor)
+            root.fsync()
+        except GcpPrivateCampaignError:
+            raise
+        except (OSError, SafeDirFSError):
+            raise GcpPrivateCampaignError("JOURNAL_UNAVAILABLE") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        if self._crash_hook is not None:
+            self._crash_hook(f"after-{state.lower()}")
+        return event
+
     def append(
         self,
         proposal: GcpPrivateCampaignProposal,
@@ -2122,48 +2189,96 @@ class GcpPrivateCampaignJournal:
 
         with self._exclusive(proposal) as root:
             events = self._read_locked(root, proposal, missing_ok=True)
-            if not events and state != "CREATE_INTENT_DURABLE":
-                raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
-            if events and state not in _TRANSITIONS[events[-1].state]:
-                raise GcpPrivateCampaignError("JOURNAL_TRANSITION_INVALID")
-            payload = GcpPrivateCampaignJournalEventPayload(
-                schema_version=GCP_PRIVATE_CAMPAIGN_EVENT_SCHEMA_VERSION,
-                proposal_id=proposal.proposal_id,
-                proposal_digest=proposal.proposal_id,
-                sequence=len(events),
+            return self._append_locked(
+                root,
+                proposal,
+                events,
                 state=state,
-                occurred_at=_timestamp(occurred_at),
-                previous_event_digest=events[-1].event_digest if events else None,
+                occurred_at=occurred_at,
                 operation_id=operation_id,
                 detail_digest=detail_digest,
             )
-            event = GcpPrivateCampaignJournalEvent(
-                **_model_value(payload),
-                event_digest=gcp_private_campaign_journal_event_digest(payload),
+
+    @staticmethod
+    def _assert_create_intent_binding(
+        events: tuple[GcpPrivateCampaignJournalEvent, ...],
+        *,
+        request_digest: Sha256Digest,
+        expected_state: GcpPrivateCampaignJournalState,
+    ) -> None:
+        if (
+            len(events) < 2
+            or events[0].state != "CREATE_INTENT_DURABLE"
+            or events[0].detail_digest != request_digest
+            or events[1].state != "CREATE_INTENT"
+            or events[-1].state != expected_state
+        ):
+            raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+
+    def claim_create_for_factory(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+        occurred_at: datetime,
+    ) -> GcpPrivateCampaignJournalEvent:
+        """Durably claim exactly one live create before SDK construction.
+
+        Cleanup uses the same lock and may advance ``CREATE_CLAIMED`` only to
+        ``CLEANUP_INTENT``.  A later factory or insert call then fails closed.
+        """
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state="CREATE_INTENT",
             )
-            descriptor: int | None = None
-            name = self._name(proposal)
-            try:
-                descriptor = root.open_child(
-                    name, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600
-                )
-                root.validated_regular_child(name, descriptor=descriptor)
-                self._write_all(
-                    descriptor, canonical_json_bytes(_model_value(event)) + b"\n"
-                )
-                os.fsync(descriptor)
-                root.validated_regular_child(name, descriptor=descriptor)
-                root.fsync()
-            except GcpPrivateCampaignError:
-                raise
-            except (OSError, SafeDirFSError):
-                raise GcpPrivateCampaignError("JOURNAL_UNAVAILABLE") from None
-            finally:
-                if descriptor is not None:
-                    os.close(descriptor)
-            if self._crash_hook is not None:
-                self._crash_hook(f"after-{state.lower()}")
-            return event
+            return self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CREATE_CLAIMED",
+                occurred_at=occurred_at,
+                detail_digest=request_digest,
+            )
+
+    @contextmanager
+    def create_insert_claim(
+        self,
+        proposal: GcpPrivateCampaignProposal,
+        *,
+        request_digest: Sha256Digest,
+        occurred_at: datetime,
+    ) -> Iterator[None]:
+        """Serialize one provider insert against exact cleanup revocation.
+
+        The short-lived journal lock is intentionally held through the one
+        bounded ``InstancesClient.insert`` call.  Cleanup cannot turn the
+        campaign terminal between the final capability recheck and that
+        mutation; after release it sees ``CREATE_SUBMITTED`` and must
+        reconcile rather than claiming pre-bind absence.
+        """
+
+        with self._exclusive(proposal) as root:
+            events = self._read_locked(root, proposal, missing_ok=False)
+            self._assert_create_intent_binding(
+                events,
+                request_digest=request_digest,
+                expected_state="CREATE_CLAIMED",
+            )
+            if events[-1].detail_digest != request_digest:
+                raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
+            self._append_locked(
+                root,
+                proposal,
+                events,
+                state="CREATE_SUBMITTED",
+                occurred_at=occurred_at,
+                detail_digest=request_digest,
+            )
+            yield
 
     def load(
         self, proposal: GcpPrivateCampaignProposal
@@ -2880,9 +2995,10 @@ class GcpPrivateCampaignWatchdogRecoveryProgress:
     """One bounded recovery observation made by the independent watchdog.
 
     ``RETRY`` intentionally makes no claim about provider absence.  The
-    watchdog must observe a second exact absence before it can settle a
-    pre-bind create window as cleaned, and it keeps retrying ordinary cleanup
-    failures through the separately frozen cleanup horizon.
+    watchdog never treats a pre-bind absence as terminal proof without an
+    authoritative create-operation identity.  It keeps reconciling ordinary
+    cleanup failures through the separately frozen cleanup horizon, then
+    reports ``CLEANUP_UNCONFIRMED`` rather than claiming absence.
     """
 
     disposition: Literal["RETRY", "CLEANUP_CONFIRMED"]
@@ -3415,12 +3531,20 @@ class GcpPrivateCampaignLifecycleController:
                     kind="create",
                     request_id=proposal.request_ids.create_request_id,
                 )
-                self._journal.append(
-                    proposal,
-                    state="CREATE_SUBMITTED",
-                    occurred_at=self._clock.now(),
-                    operation_id=operation.operation_id,
-                )
+                # The live Google watchdog capability already journaled
+                # CREATE_SUBMITTED under its exact core-journal lock before
+                # reaching the provider mutation.  In-process fake transports
+                # retain the historical direct transition for isolated tests.
+                create_state = self._journal.load(proposal)[-1].state
+                if create_state == "CREATE_INTENT":
+                    self._journal.append(
+                        proposal,
+                        state="CREATE_SUBMITTED",
+                        occurred_at=self._clock.now(),
+                        operation_id=operation.operation_id,
+                    )
+                elif create_state != "CREATE_SUBMITTED":
+                    raise GcpPrivateCampaignError("CREATE_CLAIM_REVOKED")
                 result = transport.wait_operation(
                     operation, timeout_seconds=self._operation_timeout_seconds
                 )
@@ -3621,6 +3745,15 @@ class GcpPrivateCampaignLifecycleController:
             )
         try:
             self._ensure_cleanup_intent(proposal)
+            # A transient provider failure is retained once as
+            # CLEANUP_UNCONFIRMED.  Repeating an intent/submission pair for
+            # every retry would exhaust the deliberately finite journal and
+            # could make exact cleanup impossible.  The stable request IDs,
+            # exact immutable-ID binding, and retained unconfirmed state let
+            # us retry the provider operation without appending a new event.
+            retry_without_new_event = (
+                self._journal.load(proposal)[-1].state == "CLEANUP_UNCONFIRMED"
+            )
             if exact_resource_binding is None:
                 raise GcpPrivateCampaignError("EXACT_RESOURCE_BINDING_MISSING")
             inventory = transport.list_exact_owned_residuals(
@@ -3637,7 +3770,8 @@ class GcpPrivateCampaignLifecycleController:
                     "INSTANCE_DELETE_SUBMITTED",
                     "INSTANCE_DELETE_RECONCILING",
                 }:
-                    self._append_instance_reconciling_if_needed(proposal)
+                    if not retry_without_new_event:
+                        self._append_instance_reconciling_if_needed(proposal)
                     result = transport.reconcile_delete_instance(
                         request,
                         exact_resource_binding=exact_resource_binding,
@@ -3665,12 +3799,13 @@ class GcpPrivateCampaignLifecycleController:
                         )
                         operation = result.operation
                     else:
-                        self._journal.append(
-                            proposal,
-                            state="INSTANCE_DELETE_SUBMITTED",
-                            occurred_at=self._clock.now(),
-                            operation_id=operation.operation_id,
-                        )
+                        if not retry_without_new_event:
+                            self._journal.append(
+                                proposal,
+                                state="INSTANCE_DELETE_SUBMITTED",
+                                occurred_at=self._clock.now(),
+                                operation_id=operation.operation_id,
+                            )
                         result = transport.wait_operation(
                             operation, timeout_seconds=self._operation_timeout_seconds
                         )
@@ -3709,11 +3844,12 @@ class GcpPrivateCampaignLifecycleController:
                     )
                     disk_operation = disk_result.operation
                 else:
-                    self._journal.append(
-                        proposal,
-                        state="BOOT_DISK_DELETE_INTENT",
-                        occurred_at=self._clock.now(),
-                    )
+                    if not retry_without_new_event:
+                        self._journal.append(
+                            proposal,
+                            state="BOOT_DISK_DELETE_INTENT",
+                            occurred_at=self._clock.now(),
+                        )
                     disk_operation = transport.delete_exact_owned_boot_disk(
                         request,
                         disk,
@@ -3721,12 +3857,13 @@ class GcpPrivateCampaignLifecycleController:
                         request_id=proposal.request_ids.boot_disk_delete_request_id,
                         timeout_seconds=self._operation_timeout_seconds,
                     )
-                    self._journal.append(
-                        proposal,
-                        state="BOOT_DISK_DELETE_SUBMITTED",
-                        occurred_at=self._clock.now(),
-                        operation_id=disk_operation.operation_id,
-                    )
+                    if not retry_without_new_event:
+                        self._journal.append(
+                            proposal,
+                            state="BOOT_DISK_DELETE_SUBMITTED",
+                            occurred_at=self._clock.now(),
+                            operation_id=disk_operation.operation_id,
+                        )
                     disk_result = transport.wait_operation(
                         disk_operation, timeout_seconds=self._operation_timeout_seconds
                     )
@@ -3772,6 +3909,11 @@ class GcpPrivateCampaignLifecycleController:
             "INSTANCE_DELETE_RECONCILING",
             "BOOT_DISK_DELETE_INTENT",
             "BOOT_DISK_DELETE_SUBMITTED",
+            # Do not append a fresh intent after a transient cleanup failure:
+            # the retained unconfirmed state is sufficient durable evidence
+            # to retry exact provider cleanup, and avoids exhausting the
+            # finite journal before cleanup can be retried.
+            "CLEANUP_UNCONFIRMED",
         }:
             return
         self._journal.append(
@@ -4082,12 +4224,14 @@ class GcpPrivateCampaignLifecycleController:
     ) -> GcpPrivateCampaignWatchdogRecoveryProgress:
         """Let a cleanup-only worker settle one post-intent crash window.
 
-        A first absence is deliberately a retry, not a deletion or a success:
-        Compute's eventual consistency must not turn one false absence into a
-        cleanup claim.  A second independently read exact absence is required
-        before the watchdog records ``CLEANUP_CONFIRMED`` without provider-ID
-        binding.  If a resource is observable, full topology validation binds
-        its IDs before any delete seam is reachable.
+        A pre-bind absence is never terminal proof: without the provider
+        create-operation identity, a delayed successful insert can materialize
+        after an otherwise clean name/label read.  The worker records a
+        bounded settlement vote and keeps reconciling through its cleanup
+        horizon.  If authoritative terminal absence never becomes available,
+        it fails closed as ``CLEANUP_UNCONFIRMED`` rather than claiming success.
+        If a resource is observable, full topology validation binds its IDs
+        before any delete seam is reachable.
         """
 
         verify_gcp_private_campaign_cleanup_authorization(
@@ -4108,6 +4252,10 @@ class GcpPrivateCampaignLifecycleController:
             self._bind_controller_principal(transport, proposal=proposal)
             exact_resource_binding = self._journal.exact_resource_binding(proposal)
             if exact_resource_binding is None:
+                # This lock-backed transition revokes any still-viable live
+                # create claim before recovery reads provider state.  A final
+                # insert can therefore never follow cleanup intent.
+                self._ensure_cleanup_intent(proposal)
                 try:
                     observed = transport.observe_exact_instance(
                         request, timeout_seconds=self._operation_timeout_seconds
@@ -4136,17 +4284,8 @@ class GcpPrivateCampaignLifecycleController:
                         return GcpPrivateCampaignWatchdogRecoveryProgress(
                             "RETRY", retry_code="PREBIND_ABSENCE_PENDING"
                         )
-                    self._ensure_cleanup_intent(proposal)
-                    self._journal.append(
-                        proposal,
-                        state="CLEANUP_CONFIRMED",
-                        occurred_at=self._clock.now(),
-                    )
-                    outcome = GcpPrivateCampaignCleanupOutcome(
-                        True, "CLEANUP_CONFIRMED"
-                    )
                     return GcpPrivateCampaignWatchdogRecoveryProgress(
-                        "CLEANUP_CONFIRMED", outcome
+                        "RETRY", retry_code="PREBIND_ABSENCE_UNCONFIRMED"
                     )
 
             outcome = self._cleanup_after_transport(
@@ -4215,6 +4354,7 @@ class GcpPrivateCampaignLifecycleController:
             transport = self._cleanup_transport_after_authority()
             try:
                 self._bind_controller_principal(transport, proposal=proposal)
+                self._ensure_cleanup_intent(proposal)
                 absence = transport.confirm_exact_absence(
                     request, timeout_seconds=self._operation_timeout_seconds
                 )
