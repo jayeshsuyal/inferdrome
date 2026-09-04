@@ -25,6 +25,8 @@ PLAN_ID = "comparison-plan-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 RESULT_ID = "comparison-result-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 BASELINE_TRIAL_SET_ID = "trial-set-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 CANDIDATE_TRIAL_SET_ID = "trial-set-cccccccccccccccccccccccccccccccc"
+ROUTING_CAMPAIGN_ID = "routing-campaign-v1"
+ROUTING_CAMPAIGN_ROOT_NAME = "routing-campaign-v1"
 SCHEDULE_SEED = "0" * 64
 RUN_ID_PATTERN = re.compile(r"^run-[0-9a-f]{32}$")
 COMMAND_TIMEOUT_SECONDS = 300
@@ -108,13 +110,15 @@ def _inferdrome_environment() -> dict[str, str]:
     return environment
 
 
-def _run_inferdrome_json(
+def _run_json_module(
     python: str,
+    module: str,
     arguments: Sequence[str],
 ) -> dict[str, Any]:
+    command_label = " ".join((module, *arguments[:2]))
     try:
         completed = subprocess.run(
-            [python, "-m", "inferdrome", *arguments],
+            [python, "-m", module, *arguments],
             cwd=REPOSITORY_ROOT,
             env=_inferdrome_environment(),
             text=True,
@@ -124,22 +128,29 @@ def _run_inferdrome_json(
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise LocalDemoError(
-            f"could not run Inferdrome command {' '.join(arguments[:2])}: {error}"
+            f"could not run Inferdrome command {command_label}: {error}"
         ) from error
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise LocalDemoError(
-            f"Inferdrome command {' '.join(arguments[:2])} failed:\n{detail}"
+            f"Inferdrome command {command_label} failed:\n{detail}"
         )
     try:
         value = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise LocalDemoError(
-            f"Inferdrome command {' '.join(arguments[:2])} returned invalid JSON"
+            f"Inferdrome command {command_label} returned invalid JSON"
         ) from error
     if not isinstance(value, dict):
         raise LocalDemoError("Inferdrome command returned a non-object JSON value")
     return value
+
+
+def _run_inferdrome_json(
+    python: str,
+    arguments: Sequence[str],
+) -> dict[str, Any]:
+    return _run_json_module(python, "inferdrome", arguments)
 
 
 def _require_dashboard_runtime(python: str) -> None:
@@ -269,6 +280,20 @@ def _load_state(path: Path) -> dict[str, Any]:
     )
     if set(baseline_run_ids) & set(candidate_run_ids):
         raise LocalDemoError("demo-state.json reuses a run ID across comparison arms")
+    routing_campaign = value.get("routing_campaign")
+    if routing_campaign is not None:
+        if not isinstance(routing_campaign, dict):
+            raise LocalDemoError("demo-state.json routing_campaign is not an object")
+        if _required_string(routing_campaign, "campaign_id") != ROUTING_CAMPAIGN_ID:
+            raise LocalDemoError(
+                "demo-state.json identifies a different routing campaign"
+            )
+        if (
+            _required_string(routing_campaign, "package_root")
+            != ROUTING_CAMPAIGN_ROOT_NAME
+        ):
+            raise LocalDemoError("demo-state.json identifies an unsafe routing package")
+        _required_string(routing_campaign, "retained_digest")
     return value
 
 
@@ -321,9 +346,89 @@ def _roots(workspace: Path) -> dict[str, Path]:
     return {
         "comparison_plans": workspace / "comparison-plans",
         "comparison_results": workspace / "comparison-results",
+        "routing_campaign": workspace / ROUTING_CAMPAIGN_ROOT_NAME,
         "runs": workspace / "runs",
         "trial_sets": workspace / "trial-sets",
     }
+
+
+def _routing_campaign_metadata(state: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    value = state.get("routing_campaign")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise LocalDemoError("demo-state.json routing_campaign is not an object")
+    if _required_string(value, "campaign_id") != ROUTING_CAMPAIGN_ID:
+        raise LocalDemoError("demo-state.json identifies a different routing campaign")
+    if _required_string(value, "package_root") != ROUTING_CAMPAIGN_ROOT_NAME:
+        raise LocalDemoError("demo-state.json identifies an unsafe routing package")
+    _required_string(value, "retained_digest")
+    return value
+
+
+def _prepare_routing_campaign(
+    python: str,
+    workspace: Path,
+    roots: Mapping[str, Path],
+    state: dict[str, Any],
+) -> str:
+    package_root = roots["routing_campaign"]
+    retained = _routing_campaign_metadata(state)
+    if retained is None:
+        if package_root.exists() or package_root.is_symlink():
+            raise LocalDemoError(
+                "a routing campaign exists without its retained digest; choose a "
+                "fresh --workspace because Inferdrome will not guess its digest"
+            )
+        campaign_source = REPOSITORY_ROOT / "campaigns" / ROUTING_CAMPAIGN_ID
+        created = _run_json_module(
+            python,
+            "inferdrome.routing_campaign",
+            [
+                "run",
+                "--campaign-plan",
+                str(campaign_source / "stale-load-fresh-health.plan.json"),
+                "--request-trace",
+                str(campaign_source / "stale-load-fresh-health.trace.jsonl"),
+                "--fault-schedule",
+                str(campaign_source / "stale-load-fresh-health.fault-schedule.json"),
+                "--trial-plan",
+                str(campaign_source / "trial-plan.json"),
+                "--output",
+                str(package_root),
+            ],
+        )
+        reported_root = Path(_required_string(created, "package_path")).absolute()
+        if reported_root != package_root.absolute():
+            raise LocalDemoError(
+                "new routing campaign reported an unexpected package path"
+            )
+        retained_digest = _required_string(created, "retained_digest")
+        state["routing_campaign"] = {
+            "campaign_id": ROUTING_CAMPAIGN_ID,
+            "package_root": ROUTING_CAMPAIGN_ROOT_NAME,
+            "retained_digest": retained_digest,
+        }
+        _write_state(workspace / "demo-state.json", state)
+    else:
+        retained_digest = _required_string(retained, "retained_digest")
+
+    verified = _run_json_module(
+        python,
+        "inferdrome.routing_campaign",
+        [
+            "verify",
+            str(package_root),
+            "--expected-digest",
+            retained_digest,
+        ],
+    )
+    if (
+        _required_bool(verified, "valid") is not True
+        or _required_string(verified, "retained_digest") != retained_digest
+    ):
+        raise LocalDemoError("retained routing campaign did not reverify exactly")
+    return retained_digest
 
 
 def _prepare_plan(
@@ -458,6 +563,12 @@ def _prepare_demo(
         raise LocalDemoError("demo workspace is not a directory")
     roots = _roots(workspace)
     state = _prepare_plan(python, workspace, roots)
+    routing_campaign_digest = _prepare_routing_campaign(
+        python,
+        workspace,
+        roots,
+        state,
+    )
     plan = _required_mapping(state, "plan")
     plan_digest = _required_string(plan, "comparison_plan_digest")
     plan_path = roots["comparison_plans"] / PLAN_ID
@@ -522,6 +633,10 @@ def _prepare_demo(
         "status": "INCOMPARABLE",
         "unsatisfied_controls": list(EXPECTED_UNSATISFIED_CONTROLS),
     }
+    state["last_verified_routing_campaign"] = {
+        "campaign_id": ROUTING_CAMPAIGN_ID,
+        "retained_digest": routing_campaign_digest,
+    }
     _write_state(workspace / "demo-state.json", state)
     return {
         "claim_boundary": CLAIM_BOUNDARY,
@@ -546,8 +661,16 @@ def _prepare_demo(
             "evidence": f"/evidence/{featured_candidate}",
             "run": f"/runs/{featured_candidate}",
             "runs": "/runs",
+            "routing_campaign": f"/routing-campaigns/{ROUTING_CAMPAIGN_ID}",
+            "routing_campaigns": "/routing-campaigns",
             "trial_set": f"/trial-sets/{CANDIDATE_TRIAL_SET_ID}",
             "trial_sets": "/trial-sets",
+        },
+        "routing_campaign": {
+            "campaign_id": ROUTING_CAMPAIGN_ID,
+            "execution_mode": "SYNTHETIC_CPU_ONLY",
+            "retained_digest": routing_campaign_digest,
+            "verified_by_replay": True,
         },
         "roots": {key: str(value) for key, value in roots.items()},
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -573,6 +696,7 @@ def _require_available_port(port: int) -> None:
 
 def _print_handoff(summary: Mapping[str, Any]) -> None:
     comparison = _required_mapping(summary, "comparison")
+    routing_campaign = _required_mapping(summary, "routing_campaign")
     executed_count = len(_required_strings(comparison, "executed_run_ids"))
     reused_count = len(_required_strings(comparison, "reused_run_ids"))
     print("\nInferdrome local product demo", flush=True)
@@ -589,6 +713,11 @@ def _print_handoff(summary: Mapping[str, Any]) -> None:
     print(
         "Expected withheld controls: "
         "COMPLETE_EQUAL_OBSERVED_ENVIRONMENT, OUTCOME_COVERAGE_AND_SEMANTICS",
+        flush=True,
+    )
+    print(
+        "Verified routing evidence: two synthetic endpoints, one sealed replay "
+        f"package ({routing_campaign['campaign_id']}).",
         flush=True,
     )
     print(f"Workspace: {summary['workspace']}", flush=True)
@@ -616,6 +745,8 @@ def _launch_dashboard(
         _required_string(roots, "comparison_plans"),
         "--comparison-results-root",
         _required_string(roots, "comparison_results"),
+        "--routing-campaigns-root",
+        _required_string(roots, "routing_campaign"),
         "--port",
         str(port),
     ]

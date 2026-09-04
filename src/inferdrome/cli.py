@@ -1,4 +1,4 @@
-"""Command-line interface for the frozen Inferdrome v0.1 workflow."""
+"""Command-line interface for Inferdrome evidence workflows."""
 
 import argparse
 import json
@@ -696,6 +696,15 @@ def _command_dashboard(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def _command_capabilities(_: argparse.Namespace) -> int:
+    """Render the closed v0.2 capability and limitations contract."""
+
+    from inferdrome.v0_2_capabilities import V0_2_CAPABILITY_CONTRACT
+
+    _json_output(V0_2_CAPABILITY_CONTRACT.model_dump(mode="json"))
+    return 0
+
+
 def _keyring_path(namespace: argparse.Namespace) -> Path:
     return _path(namespace, "keyring")
 
@@ -782,6 +791,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
+
+    capabilities = commands.add_parser(
+        "capabilities",
+        help="print the active v0.2 capability and limitations contract",
+    )
+    capabilities.set_defaults(handler=_command_capabilities)
 
     validate = commands.add_parser("validate", help="validate without executing")
     _add_resolution_options(validate)

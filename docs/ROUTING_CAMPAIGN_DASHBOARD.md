@@ -22,7 +22,14 @@ and all five terminal-population buckets for every trial.
 
 ## Local use
 
-First create a sealed R1 package at a new location:
+The one-command local product demo creates, retains, verifies, and projects
+this exact fixed package:
+
+```bash
+./scripts/run_local_demo.py
+```
+
+For a standalone package, first create a sealed R1 package at a new location:
 
 ```bash
 PYTHONPATH=src python -m inferdrome.routing_campaign run \
@@ -111,9 +118,10 @@ during a verified read. The response does not expose raw package paths,
 artifacts, verifier diagnostics, prompts, endpoint URLs, credentials, or any
 unverified claimed receipt.
 
-This is not a routing data plane, production router, real endpoint adapter,
-vLLM/GPU collector, cloud provider client, Docker/GCP/Kubernetes execution
-path, policy recommendation, statistical result, or PASS/FAIL/NOT_PROVEN
-authority. It has no provider, ADC, SSH, credential, GPU, cloud, or spend
-surface. Real endpoint and GPU evidence remain for PR B and the separately
-approved campaign.
+This is not a routing data plane, production router, vLLM/GPU collector, cloud
+provider client, Docker/GCP/Kubernetes execution path, policy recommendation,
+statistical result, or PASS/FAIL/NOT_PROVEN authority. It has no provider,
+ADC, SSH, credential, GPU, cloud, or spend surface. The separate
+`routing-execution-v1` local socket bridge is sealed and verified through its
+own offline verifier; this intentionally narrow R1 projection does not relabel
+that package as synthetic CPU evidence or claim a real cloud/GPU campaign.

@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPOSITORY_ROOT / "scripts" / "run_local_demo.py"
 
@@ -22,6 +24,16 @@ def _make_tree_writable(root: Path) -> None:
         for directory_name in directory_names:
             (current / directory_name).chmod(0o700)
         current.chmod(0o700)
+
+
+def _make_tree_read_only(root: Path) -> None:
+    for directory, directory_names, filenames in os.walk(root, topdown=False):
+        current = Path(directory)
+        for filename in filenames:
+            (current / filename).chmod(0o400)
+        for directory_name in directory_names:
+            (current / directory_name).chmod(0o500)
+        current.chmod(0o500)
 
 
 def _prepare(workspace: Path) -> dict[str, object]:
@@ -70,6 +82,23 @@ def test_local_demo_prepares_then_reuses_the_exact_verified_schedule(
         assert first_comparison["planned_run_count"] == 4
         assert len(first_comparison["executed_run_ids"]) == 4
         assert first_comparison["reused_run_ids"] == []
+        first_routing_campaign = first["routing_campaign"]
+        assert isinstance(first_routing_campaign, dict)
+        assert first_routing_campaign == {
+            "campaign_id": "routing-campaign-v1",
+            "execution_mode": "SYNTHETIC_CPU_ONLY",
+            "retained_digest": first_routing_campaign["retained_digest"],
+            "verified_by_replay": True,
+        }
+        assert isinstance(first_routing_campaign["retained_digest"], str)
+        assert first["recording_routes"]["routing_campaigns"] == "/routing-campaigns"
+        assert first["recording_routes"]["routing_campaign"] == (
+            "/routing-campaigns/routing-campaign-v1"
+        )
+        first_roots = first["roots"]
+        assert isinstance(first_roots, dict)
+        routing_campaign_root = Path(first_roots["routing_campaign"])
+        assert routing_campaign_root.is_dir()
 
         second = _prepare(workspace)
         second_comparison = second["comparison"]
@@ -82,12 +111,41 @@ def test_local_demo_prepares_then_reuses_the_exact_verified_schedule(
         assert second_comparison["comparison_result_digest"] == (
             first_comparison["comparison_result_digest"]
         )
+        assert second["routing_campaign"] == first_routing_campaign
         assert second["recording_routes"] == first["recording_routes"]
 
         state_text = (workspace / "demo-state.json").read_text(encoding="utf-8")
         state = json.loads(state_text)
         assert state["claim_boundary"] == "SYNTHETIC_ONLY"
+        assert state["routing_campaign"] == {
+            "campaign_id": "routing-campaign-v1",
+            "package_root": "routing-campaign-v1",
+            "retained_digest": first_routing_campaign["retained_digest"],
+        }
         assert "CUSTOMER_ELIGIBLE" not in state_text
+    finally:
+        _make_tree_writable(workspace)
+
+
+def test_local_demo_refuses_a_tampered_retained_routing_campaign(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "tampered-routing-demo"
+    try:
+        summary = _prepare(workspace)
+        roots = summary["roots"]
+        assert isinstance(roots, dict)
+        package_root = Path(roots["routing_campaign"])
+        _make_tree_writable(package_root)
+        plan = package_root / "campaign-plan.json"
+        plan.write_text('{"tampered":true}\n', encoding="utf-8")
+        _make_tree_read_only(package_root)
+
+        with pytest.raises(
+            AssertionError,
+            match="routing plan violates its strict contract",
+        ):
+            _prepare(workspace)
     finally:
         _make_tree_writable(workspace)
 

@@ -82,11 +82,14 @@ ports. GCP mode accepts only literal RFC1918 targets; `.internal` DNS is
 deliberately deferred until a resolver-and-connection-pinning boundary exists.
 It does not perform DNS or any provider action.
 
-The current PR-A profile is one `NVIDIA A100-SXM4-40GB` with
-`accelerator_count=1`. Because this contract names two independent serving
-engines, that configuration is rejected before transport construction. PR B
-does not choose an alternative topology; a future real campaign needs the
-separately approved provider/topology decision.
+The guarded pre-campaign shape is exactly one ephemeral
+`a2-highgpu-2g` host with two `NVIDIA A100-SXM4-40GB` devices and two
+independently addressed engine containers. It is a same-host two-engine
+benchmark topology, not host-failure independence. Its controller, startup
+projection, and cleanup behavior are local/fake validated only: no two-A100
+campaign has executed and no GCP operation is claimed. A future real campaign
+still needs separately approved, exact provider/topology/runtime/cost authority
+before any provider action.
 
 ## Campaign behavior
 
