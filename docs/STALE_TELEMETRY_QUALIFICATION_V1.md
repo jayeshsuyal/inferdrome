@@ -43,6 +43,19 @@ The policy names are declared treatment labels, not an evaluation or a winner.
 The descriptor does not aggregate terminal populations across policies: each
 trial retains all five terminal status keys and must total exactly six.
 
+## Schema and runtime-verifier boundary
+
+The generated `schemas/routing-qualification/v1` JSON Schema is deliberately
+structural. It closes the five terminal-status keys, limits each count to
+`0..6`, and fixes the three ordered policy/trial pairs. Its conspicuous
+`STRUCTURAL-ONLY LIMIT` comment records the one relevant boundary: standard
+JSON Schema has no general cross-property arithmetic keyword, so it does not
+express the five-count sum itself. The strict Python contract and offline
+source replay verifier still require every separate terminal population to
+total exactly six, along with canonical bytes, digests, receipt identities,
+cold-reset facts, and source-package binding. JSON Schema success alone never
+waives those runtime checks.
+
 At the stale request, the fixed source package records these three observable
 outcomes:
 

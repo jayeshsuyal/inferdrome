@@ -386,12 +386,15 @@ def test_verification_does_not_invoke_the_producer_engine(
         output_root=tmp_path / "qualification",
     )
 
-    import inferdrome.routing_campaign.engine as engine
+    import inferdrome.routing_campaign.package as routing_package
+
+    def producer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("producer ran")
 
     monkeypatch.setattr(
-        engine,
+        routing_package,
         "execute_campaign",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("producer ran")),
+        producer_must_not_run,
     )
     assert verify_qualification(
         tmp_path / "qualification",
