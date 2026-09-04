@@ -313,6 +313,10 @@ def _full_instance(
                 value=proposal.startup_payload_digest,
             ),
             _Record(key="inferdrome-proposal-digest", value=proposal.proposal_id),
+            _Record(
+                key="inferdrome-create-request-digest",
+                value=request.create_request_digest,
+            ),
             _Record(key="block-project-ssh-keys", value="TRUE"),
             _Record(key="enable-oslogin", value="FALSE"),
         ]

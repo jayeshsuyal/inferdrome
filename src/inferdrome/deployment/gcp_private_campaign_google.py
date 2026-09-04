@@ -1,12 +1,11 @@
-"""Official-GCE adapters for the exact two-engine pre-campaign profile.
+"""Lazy official-GCE adapter for the exact two-engine pre-campaign profile.
 
-Importing this module is inert.  v0.2 deliberately disables the create-capable
-factory because the old one-A100 watchdog worker cannot be truthfully reused
-as an independently durable two-A100 cleanup backstop.  Calling that factory
-therefore fails before an optional Google SDK import, client construction, or
-provider request.  The separate cleanup-only factory remains available only
-behind the existing exact cleanup authorization path.  Normal tests inject
-local fakes and never call a provider.
+Importing this module is inert.  The official Google SDK is imported only by
+``create_google_private_campaign_transport``; the lifecycle controller calls
+that factory only after exact local approval validation and a durable local
+create intent.  The provider-side ``maxRunDuration``/``DELETE`` backstop is
+observed and verified only after a successful create.  Normal tests inject
+local fakes and never call the factory.
 """
 
 from __future__ import annotations
@@ -62,6 +61,9 @@ from inferdrome.deployment.gcp_private_campaign_v2 import (
     PrecampaignServiceAccount,
     gcp_private_campaign_boot_image_identity,
 )
+from inferdrome.deployment.gcp_private_campaign_watchdog_v3 import (
+    GcpPrivateCampaignWatchdogCapability,
+)
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.domain.digests import canonical_json_bytes
 from inferdrome.errors import AdapterError, VerificationError
@@ -116,6 +118,7 @@ _STARTUP_SCRIPT_METADATA_KEY: Final = "startup-script"
 _STARTUP_SCRIPT_DIGEST_METADATA_KEY: Final = "inferdrome-startup-script-sha256"
 _STARTUP_PAYLOAD_METADATA_KEY: Final = "inferdrome-startup-payload-digest"
 _PROPOSAL_METADATA_KEY: Final = "inferdrome-proposal-digest"
+_CREATE_REQUEST_METADATA_KEY: Final = "inferdrome-create-request-digest"
 _IAP_PROCESS_TERMINATION_TIMEOUT_SECONDS: Final = 5
 
 
@@ -1487,6 +1490,10 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                         self._sdk.Items(
                             key=_PROPOSAL_METADATA_KEY, value=proposal.proposal_id
                         ),
+                        self._sdk.Items(
+                            key=_CREATE_REQUEST_METADATA_KEY,
+                            value=request.create_request_digest,
+                        ),
                         self._sdk.Items(key="block-project-ssh-keys", value="TRUE"),
                         self._sdk.Items(key="enable-oslogin", value="FALSE"),
                     ]
@@ -2034,6 +2041,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
                 _STARTUP_SCRIPT_DIGEST_METADATA_KEY,
                 _STARTUP_PAYLOAD_METADATA_KEY,
                 _PROPOSAL_METADATA_KEY,
+                _CREATE_REQUEST_METADATA_KEY,
                 "block-project-ssh-keys",
                 "enable-oslogin",
             }
@@ -2043,6 +2051,8 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             or metadata.get(_STARTUP_PAYLOAD_METADATA_KEY)
             != proposal.startup_payload_digest
             or metadata.get(_PROPOSAL_METADATA_KEY) != proposal.proposal_id
+            or metadata.get(_CREATE_REQUEST_METADATA_KEY)
+            != request.create_request_digest
             or metadata.get("block-project-ssh-keys") != "TRUE"
             or metadata.get("enable-oslogin") != "FALSE"
         ):
@@ -2075,6 +2085,7 @@ class GoogleGcpPrivateCampaignTransport(GcpPrivateCampaignTransport):
             max_runtime_seconds=proposal.max_runtime_seconds,
             instance_termination_action="DELETE",
             startup_payload_digest=proposal.startup_payload_digest,
+            create_request_digest=request.create_request_digest,
             startup_script_sha256=expected_script_sha256,
         )
 
@@ -2922,6 +2933,9 @@ class GoogleGcpPrivateCampaignCleanupTransport:
     def close(self) -> None:
         self._inner.close()
 
+    def observe_exact_instance(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.observe_exact_instance(*args, **kwargs)
+
     def wait_operation(
         self, operation: GcpPrivateCampaignOperation, *, timeout_seconds: int
     ) -> GcpPrivateCampaignOperationResult:
@@ -2980,20 +2994,28 @@ def _google_sdk() -> Any:
 
 
 def create_google_private_campaign_transport(
-    *, evidence_root: Path
+    *,
+    evidence_root: Path,
+    watchdog_capability: GcpPrivateCampaignWatchdogCapability,
 ) -> GoogleGcpPrivateCampaignTransport:
-    """Fail closed until a real private two-A100 watchdog is reviewed.
+    """Construct a live adapter only after an exact watchdog recheck.
 
-    Keeping the guard at the factory boundary prevents a direct module caller
-    from bypassing the CLI's disabled ``execute`` command.  The accepted
-    future design must supply a canonical, durably re-read activation receipt
-    bound to the exact private proposal/request/topology/cleanup horizon and a
-    provider-capable no-create watchdog worker; the current one-A100 fake
-    worker is intentionally not substituted here.
+    The opaque capability is issued only by the detached v3 cleanup worker.
+    Rechecking it here is intentionally before ``_google_sdk`` so a stale,
+    missing, tampered, or dead watchdog cannot even construct the optional
+    SDK/client edge.
     """
 
-    del evidence_root
-    raise GcpPrivateCampaignTransportError("LIVE_EXECUTION_WATCHDOG_UNAVAILABLE")
+    if type(watchdog_capability) is not GcpPrivateCampaignWatchdogCapability:
+        raise GcpPrivateCampaignError("WATCHDOG_CAPABILITY_REQUIRED")
+    watchdog_capability.assert_active()
+
+    return GoogleGcpPrivateCampaignTransport(
+        sdk=_google_sdk(),
+        credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
+        iap_tunnels=GcpPrivateCampaignIapTunnelSupervisor(),
+        runner=IapGcpPrivateCampaignRunner(evidence_root),
+    )
 
 
 def create_google_private_campaign_cleanup_transport() -> (
