@@ -76,16 +76,32 @@ admission.
    is a separate CPU-only container with no GPU, cloud credential, Docker
    socket, serving role, or provider mutation authority.
 
-## Future approved execution sequence
+## v0.2 live execution is unavailable
 
-Only after the separate authorization may an operator use the guarded
-`execute` command. The command validates approval locally and writes
+No v0.2 operator may use `execute` to create this VM. The command fails closed
+with `LIVE_EXECUTION_WATCHDOG_UNAVAILABLE` before an approval is parsed, a
+controller or journal is constructed, an optional Google SDK/client is
+initialized, or an insert can be attempted. Its response explicitly reports
+`provider_call_performed: false` and `cleanup_status: NOT_REQUIRED`.
+
+The existing generic `FileGcpWatchdog`/`GcpSupervisor` worker is deliberately
+not a substitute: it is reviewed for a distinct one-A100 local-fake profile,
+not a provider-capable two-A100 private-campaign cleanup worker. A future live
+enablement needs an independently reviewed private activation receipt that is
+canonical, durable, re-read and exact-binding-valid before SDK construction,
+plus a provider-capable no-create watchdog worker. It must bind the exact
+proposal, human approval, request/startup/topology, two-A100 identity,
+ownership labels, deadline, cleanup horizon, and cleanup-only authorization.
+
+The following is a deferred design sequence, not an available v0.2 command.
+Only after both that bridge and the separate authorization are reviewed could
+an operator use it. The bridge would validate approval locally and write
 `CREATE_INTENT_DURABLE` followed by `CREATE_INTENT`. `CREATE_INTENT_DURABLE` is
-only fsynced local intent, not an armed watchdog or provider backstop. It then
-constructs the optional Google adapter, preflights provider boot-image/IAP
-principal/firewall observations, and revalidates
-approval, quote expiry, and execution deadline after each potentially slow read
-and immediately before GCE insert.
+only fsynced local intent, not an armed watchdog or provider backstop. It would
+then construct the optional Google adapter, preflight provider boot-image/IAP
+principal/firewall observations, and revalidate approval, quote expiry, and
+execution deadline after each potentially slow read and immediately before GCE
+insert.
 
 The provider request uses the approved unique name, immutable labels, exclusive
 run lease, caller request IDs, private NIC, boot-disk auto-delete, exact guest

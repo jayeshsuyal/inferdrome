@@ -94,12 +94,36 @@ package locally, and the controller retrieves and verifies the fixed archive
 before exact cleanup. Any ambiguity is an explicit unconfirmed record, never a
 success or routing verdict.
 
-## Guarded lifecycle
+## Live-create boundary: deliberately unavailable in v0.2
+
+The former create-capable `execute` command now fails closed with
+`LIVE_EXECUTION_WATCHDOG_UNAVAILABLE` before it parses an approval, constructs
+a lifecycle controller, writes a create intent, imports the optional Google
+SDK, constructs a client, or can reach `InstancesClient.insert`. Its terminal
+response records `provider_call_performed: false` and
+`cleanup_status: NOT_REQUIRED`; it never calls that pre-create state confirmed
+cleanup.
+
+The existing `FileGcpWatchdog`/`GcpSupervisor` route is intentionally not
+projected onto this profile: its reviewed worker is a one-A100, local-fake
+backend and cannot truthfully be represented as a provider-capable two-A100
+controller-death cleanup mechanism. A future live bridge must introduce and
+independently review a canonical, durable, re-read activation receipt and a
+provider-capable no-create cleanup worker bound to this exact proposal,
+approval, request/startup/topology, ownership labels, deadline, cleanup
+horizon, and cleanup-only authorization. Until that work exists, the factory
+itself also fails closed.
+
+`proposal` and `preview` remain local-only. `recover-cleanup` and
+`discover-orphans` retain their separately authorized no-create surfaces for
+an exact pre-existing ownership record; they never grant a create capability.
+
+## Deferred guarded lifecycle design
 
 The pre-campaign command has separate local-only `proposal` and `preview`
 modes. They canonicalize and display a redacted, content-addressed proposal;
 they do not initialize an SDK, discover ADC, contact a provider, or construct
-a transport. The executable path is intentionally separate:
+a transport. The future executable path would remain intentionally separate:
 
 1. Build the exact two-engine proposal from pinned local inputs. It binds the
    provider, project, region/zone, machine and GPU topology, provider boot-image
@@ -118,7 +142,8 @@ a transport. The executable path is intentionally separate:
    or recovery. The sole provider backstop is observed Compute
    `maxRunDuration` plus `DELETE`, read back after create and journaled as
    `PROVIDER_BACKSTOP_VERIFIED`. It is not invoice enforcement.
-4. Construct the lazy provider transport only after local approval validation.
+4. A future reviewed bridge would construct the lazy provider transport only
+   after durable watchdog activation and local approval validation.
    It resolves the approved controller service account as the effective Compute
    API identity and constructs every Compute client with that explicit
    credential; every IAP tunnel argv explicitly selects the same identity via
@@ -203,13 +228,13 @@ loopback fixtures using the existing PR-B transport contract.
 No test, validation command, or action taken for this PR accesses Google
 credentials, ADC, provider APIs, SSH, a GPU, a registry, a bucket, Docker
 registry, or a billable resource. The reviewed `execute` command is deliberately
-present but has not been invoked: it can select the optional SDK adapter only
-  after exact local approval and evidence-destination preflight. A real campaign still
-requires a separate, exact authorization that binds the selected provider,
-project, zone, topology, preloaded images/model, workload, normal execution
-deadline, USD ceiling, observed-provider-backstop expectation, cleanup plan,
-IAP identity, and evidence destination. This PR does not grant that authority
-or publish any external artifact.
+present but fails closed before any optional SDK adapter can be selected. A
+real campaign still requires a separate, exact authorization that binds the
+selected provider, project, zone, topology, preloaded images/model, workload,
+normal execution deadline, USD ceiling, observed-provider-backstop expectation,
+cleanup plan, IAP identity, evidence destination, and a separately reviewed
+two-A100 durable watchdog bridge. This PR does not grant that authority or
+publish any external artifact.
 
 ## Operator-facing limits and non-goals
 

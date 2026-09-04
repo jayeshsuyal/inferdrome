@@ -1,11 +1,12 @@
-"""Lazy official-GCE adapter for the exact two-engine pre-campaign profile.
+"""Official-GCE adapters for the exact two-engine pre-campaign profile.
 
-Importing this module is inert.  The official Google SDK is imported only by
-``create_google_private_campaign_transport``; the lifecycle controller calls
-that factory only after exact local approval validation and a durable local
-create intent.  The provider-side ``maxRunDuration``/``DELETE`` backstop is
-observed and verified only after a successful create.  Normal tests inject
-local fakes and never call the factory.
+Importing this module is inert.  v0.2 deliberately disables the create-capable
+factory because the old one-A100 watchdog worker cannot be truthfully reused
+as an independently durable two-A100 cleanup backstop.  Calling that factory
+therefore fails before an optional Google SDK import, client construction, or
+provider request.  The separate cleanup-only factory remains available only
+behind the existing exact cleanup authorization path.  Normal tests inject
+local fakes and never call a provider.
 """
 
 from __future__ import annotations
@@ -2981,14 +2982,18 @@ def _google_sdk() -> Any:
 def create_google_private_campaign_transport(
     *, evidence_root: Path
 ) -> GoogleGcpPrivateCampaignTransport:
-    """Construct a lazy adapter; approval binds credentials before any call."""
+    """Fail closed until a real private two-A100 watchdog is reviewed.
 
-    return GoogleGcpPrivateCampaignTransport(
-        sdk=_google_sdk(),
-        credential_resolver=_GoogleImpersonatedComputeCredentialResolver(),
-        iap_tunnels=GcpPrivateCampaignIapTunnelSupervisor(),
-        runner=IapGcpPrivateCampaignRunner(evidence_root),
-    )
+    Keeping the guard at the factory boundary prevents a direct module caller
+    from bypassing the CLI's disabled ``execute`` command.  The accepted
+    future design must supply a canonical, durably re-read activation receipt
+    bound to the exact private proposal/request/topology/cleanup horizon and a
+    provider-capable no-create watchdog worker; the current one-A100 fake
+    worker is intentionally not substituted here.
+    """
+
+    del evidence_root
+    raise GcpPrivateCampaignTransportError("LIVE_EXECUTION_WATCHDOG_UNAVAILABLE")
 
 
 def create_google_private_campaign_cleanup_transport() -> (
