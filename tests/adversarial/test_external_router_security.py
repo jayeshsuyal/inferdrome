@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import stat
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
+from pydantic import TypeAdapter, ValidationError
 
 from inferdrome.errors import VerificationError
+from inferdrome.external_router.contracts import OpaqueId
 from inferdrome.external_router.llmd import (
     MAX_ATTACHED_RECORD_BYTES,
     ExternalRouterAdapterError,
     adapt_llmd_attached_record,
 )
+from inferdrome.external_router.schema import schema_bytes
 from inferdrome.external_router.verifier import verify_external_router_evidence
 from tests.external_router_support import (
     FIXTURE_ROOT,
@@ -125,6 +130,72 @@ def test_wrong_config_profile_or_unavailable_fact_shape_fails_closed() -> None:
         _adapt(partial_timing)
 
 
+@pytest.mark.parametrize(
+    "unsafe_alias",
+    (
+        "10.23.45.67:8443",
+        "2001:db8::1",
+        "router-a:8443",
+        "router.internal.example",
+        "https://router.example/v1",
+        "operator@example.test",
+        "/var/run/router.sock",
+        "sk-proj-not-a-retained-alias",
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "github_pat_abcdefghijklmnopqrstuvwxyz0123456789",
+        "AKIAIOSFODNN7EXAMPLE",
+        "hf_non_sensitive_but_token_shaped",
+        "api_key_not_an_alias",
+    ),
+)
+def test_retained_ids_reject_addresses_paths_and_token_shaped_values(
+    unsafe_alias: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        TypeAdapter(OpaqueId).validate_python(unsafe_alias)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ("endpoint-a", "observer_02", "policy-route-b", "request42"),
+)
+def test_retained_ids_accept_simple_pseudonymous_aliases(alias: str) -> None:
+    assert TypeAdapter(OpaqueId).validate_python(alias) == alias
+
+
+def test_adapter_rejects_sensitive_identifier_before_retaining_a_record() -> None:
+    record = fixture_record()
+    request = record["request"]
+    assert isinstance(request, dict)
+    request["request_id"] = "sk-proj-not-a-retained-alias"
+    with pytest.raises(ExternalRouterAdapterError):
+        _adapt(record)
+
+
+@pytest.mark.parametrize(
+    "unsafe_alias",
+    (
+        "sk-proj-not-a-retained-alias",
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "github_pat_abcdefghijklmnopqrstuvwxyz0123456789",
+        "AKIAIOSFODNN7EXAMPLE",
+        "hf_token_shaped_value",
+        "api_key_not_an_alias",
+    ),
+)
+def test_published_profile_schema_rejects_token_shaped_retained_ids(
+    unsafe_alias: str,
+) -> None:
+    record = fixture_record()
+    request = record["request"]
+    assert isinstance(request, dict)
+    request["request_id"] = unsafe_alias
+    schema = json.loads(schema_bytes()["llm-d-attached-record.schema.json"])
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid(fixture_record())
+    assert not validator.is_valid(record)
+
+
 def test_cli_inputs_reject_symlink_and_hardlink(
     tmp_path: Path,
 ) -> None:
@@ -151,6 +222,32 @@ def test_cli_input_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     assert stat.S_ISFIFO(fifo.stat().st_mode)
     with pytest.raises(_InputError):
         _read_regular_file(fifo, maximum_bytes=MAX_ATTACHED_RECORD_BYTES)
+
+
+@pytest.mark.parametrize("flag", ("O_NOFOLLOW", "O_NONBLOCK"))
+@pytest.mark.parametrize("missing", (True, False))
+def test_cli_input_requires_safe_open_flags_before_os_open(
+    flag: str, missing: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inferdrome.external_router.cli import _InputError, _read_regular_file
+
+    open_calls = 0
+
+    def forbidden_open(*args: object, **kwargs: object) -> int:
+        nonlocal open_calls
+        del args, kwargs
+        open_calls += 1
+        raise AssertionError("unsafe platform must fail before os.open")
+
+    monkeypatch.setattr(os, "open", forbidden_open)
+    if missing:
+        monkeypatch.delattr(os, flag, raising=False)
+    else:
+        monkeypatch.setattr(os, flag, 0, raising=False)
+
+    with pytest.raises(_InputError, match="required safe file-open flags"):
+        _read_regular_file(Path("unsafe-input"), maximum_bytes=1)
+    assert open_calls == 0
 
 
 def test_cli_input_rejects_same_size_in_place_rewrite(

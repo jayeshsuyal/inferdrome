@@ -37,6 +37,13 @@ selection, policy and reason, and one endpoint terminal outcome. It retains no
 endpoint origin, prompt, completion, header, token, credential, or raw router
 payload.
 
+Every retained operator-supplied identifier is a simple pseudonymous alias:
+letters, digits, `_`, and `-` only. The contract rejects address syntax
+(including IP, hostname, and host:port forms), URL/path/email delimiters, and
+representative credential or token prefixes. This is data minimization, not
+proof of provenance or perfect secret detection; operators remain responsible
+for supplying aliases rather than origins, credentials, or secret-bearing IDs.
+
 Each candidate has independent `HEALTH` and `LOAD` observation records. A
 record binds observation and observer IDs, a common monotonic clock domain and
 epoch, sample and decision timestamps, exact age, and freshness bound. A stale

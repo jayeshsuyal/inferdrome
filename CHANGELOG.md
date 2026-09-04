@@ -31,7 +31,9 @@ authorized, exact-commit-bound human release actions.
 
 The canonical capability/limitations contract is
 [the v0.2 capability and limitations contract](docs/V0_2_CAPABILITIES.md).
-Inspect its exact machine-readable form with `python -m inferdrome capabilities`.
+The active `python -m inferdrome capabilities` command now renders the v0.3
+development contract. Inspect the retained v0.2 machine-readable form with
+`python -c 'from inferdrome.v0_2_capabilities import V0_2_CAPABILITY_CONTRACT; print(V0_2_CAPABILITY_CONTRACT.model_dump_json())'`.
 This changelog deliberately does not widen that contract.
 
 | Capability | v0.2.0 status | Honest boundary |
@@ -49,8 +51,9 @@ production router, policy verdict, promotion control, or acceptance authority.
 
 - The one-command, deterministic local routing-evidence walkthrough and its
   verified dashboard explanation.
-- A closed capability/limitations contract exposed through
-  `python -m inferdrome capabilities`.
+- The retained v0.2 capability/limitations contract; after the v0.3 CLI
+  transition, access it directly through `inferdrome.v0_2_capabilities` rather
+  than the active `python -m inferdrome capabilities` command.
 - Final `0.2.0` Python, lockfile, and runner-image default identities, plus
   isolated wheel install/import/CLI validation.
 

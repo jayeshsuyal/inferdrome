@@ -8,9 +8,16 @@ any router behaviour.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from inferdrome.domain.base import FrozenModel
 from inferdrome.external_router.canonical import (
@@ -20,13 +27,87 @@ from inferdrome.external_router.canonical import (
 )
 
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+
+_SENSITIVE_ALIAS_PREFIXES = (
+    "rk-",
+    "rk_",
+    "sk-",
+    "sk_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "hf_",
+)
+_SENSITIVE_ALIAS_WORD_PREFIX = re.compile(
+    r"^(?:api[-_]?key|bearer|credential|password|passwd|private[-_]?key|secret|token)[_-]",
+    re.IGNORECASE,
+)
+_AWS_ACCESS_KEY_SHAPE = re.compile(r"^(?:AKIA|ASIA)[A-Z0-9]{16}$")
+_GOOGLE_API_KEY_SHAPE = re.compile(r"^AIza[A-Za-z0-9_-]{35}$")
+_SCHEMA_SENSITIVE_ALIAS_PATTERNS = (
+    r"[rR][kK][_-]",
+    r"[sS][kK][_-]",
+    r"[gG][hH][pP]_",
+    r"[gG][hH][oO]_",
+    r"[gG][hH][uU]_",
+    r"[gG][hH][sS]_",
+    r"[gG][hH][rR]_",
+    r"[gG][iI][tT][hH][uU][bB]_[pP][aA][tT]_",
+    r"[gG][lL][pP][aA][tT]-",
+    r"[xX][oO][xX][bB]-",
+    r"[xX][oO][xX][pP]-",
+    r"[xX][oO][xX][aA]-",
+    r"[xX][oO][xX][rR]-",
+    r"[hH][fF]_",
+    r"(?:[aA][pP][iI][_-]?[kK][eE][yY]|[bB][eE][aA][rR][eE][rR]|"
+    r"[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[pP][aA][sS][sS][wW][oO][rR][dD]|"
+    r"[pP][aA][sS][sS][wW][dD]|[pP][rR][iI][vV][aA][tT][eE][_-]?[kK][eE][yY]|"
+    r"[sS][eE][cC][rR][eE][tT]|[tT][oO][kK][eE][nN])[_-]",
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}$",
+    r"AIza[A-Za-z0-9_-]{35}$",
+)
+_SCHEMA_SENSITIVE_ALIAS_PATTERN = (
+    r"^(?:" + "|".join(_SCHEMA_SENSITIVE_ALIAS_PATTERNS) + r")"
+)
+
+
+def _validate_non_sensitive_alias(value: str) -> str:
+    """Reject values that look like retained origins or common credentials.
+
+    This is deliberately a small data-minimization boundary, not provenance
+    proof or a general secret scanner.  Operators must provide pseudonymous
+    aliases for every retained external-router identifier.
+    """
+
+    if (
+        value.lower().startswith(_SENSITIVE_ALIAS_PREFIXES)
+        or _SENSITIVE_ALIAS_WORD_PREFIX.match(value) is not None
+        or _AWS_ACCESS_KEY_SHAPE.fullmatch(value) is not None
+        or _GOOGLE_API_KEY_SHAPE.fullmatch(value) is not None
+    ):
+        raise ValueError("identifier must be a non-sensitive operator alias")
+    return value
+
+
 OpaqueId = Annotated[
     str,
-    Field(
+    StringConstraints(
         min_length=1,
         max_length=128,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        # Deliberately omit dots, colons, slashes, and at-signs so a retained
+        # ID cannot be an address, host:port, URL, path, or email spelling.
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
     ),
+    Field(json_schema_extra={"not": {"pattern": _SCHEMA_SENSITIVE_ALIAS_PATTERN}}),
+    AfterValidator(_validate_non_sensitive_alias),
 ]
 Version = Annotated[
     str,

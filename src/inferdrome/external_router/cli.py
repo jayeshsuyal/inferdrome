@@ -25,12 +25,23 @@ class _InputError(ValueError):
     """A local CLI input cannot be safely read as one regular file snapshot."""
 
 
+def _required_safe_open_flag(name: str) -> int:
+    """Return one required safe-open flag or fail before opening a path."""
+
+    value = getattr(os, name, None)
+    if type(value) is not int or value <= 0:
+        raise _InputError("required safe file-open flags are unavailable")
+    return value
+
+
 def _read_regular_file(path: Path, *, maximum_bytes: int) -> bytes:
+    no_follow = _required_safe_open_flag("O_NOFOLLOW")
+    non_block = _required_safe_open_flag("O_NONBLOCK")
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
+        | no_follow
+        | non_block
     )
     try:
         descriptor = os.open(path, flags)
