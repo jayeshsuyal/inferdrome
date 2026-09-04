@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Smoke-test dashboard resources from the imported Inferdrome installation."""
+"""Smoke-test dashboard resources and the CLI from an Inferdrome install."""
 
 import argparse
 import hashlib
+import json
+import os
 import re
+import subprocess
+import sys
 import tempfile
 from importlib.metadata import distribution
 from importlib.resources import files
@@ -84,6 +88,62 @@ def _verify_distribution_metadata(expected_package_root: Path) -> None:
             )
 
 
+def _verify_installed_cli(package_root: Path, expected_version: str) -> None:
+    """Exercise the installed module from an empty directory, never source tree."""
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONPATH": str(package_root.resolve()),
+        }
+    )
+    with tempfile.TemporaryDirectory(prefix="inferdrome-installed-cli-") as root:
+        version = subprocess.run(
+            [sys.executable, "-m", "inferdrome", "--version"],
+            cwd=root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if version.returncode != 0 or version.stdout.strip() != expected_version:
+            raise AssertionError(
+                "installed Inferdrome CLI version smoke failed: "
+                f"returncode={version.returncode}, stdout={version.stdout!r}, "
+                f"stderr={version.stderr!r}"
+            )
+        capabilities = subprocess.run(
+            [sys.executable, "-m", "inferdrome", "capabilities"],
+            cwd=root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    if capabilities.returncode != 0:
+        raise AssertionError(
+            "installed Inferdrome capabilities smoke failed: "
+            f"returncode={capabilities.returncode}, stderr={capabilities.stderr!r}"
+        )
+    try:
+        capability_contract = json.loads(capabilities.stdout)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            "installed Inferdrome capabilities output is not JSON"
+        ) from error
+    if not isinstance(capability_contract, dict):
+        raise AssertionError(
+            "installed Inferdrome capabilities output is not an object"
+        )
+    if capability_contract.get("schema_version") != "inferdrome.v0_2_capabilities.v1":
+        raise AssertionError(
+            "installed Inferdrome capabilities contract is unavailable"
+        )
+    if capability_contract.get("product_role") != "MEASUREMENT_EVIDENCE_ONLY":
+        raise AssertionError("installed Inferdrome capabilities role is incorrect")
+
+
 def verify_install(expected_package_root: Path | None = None) -> None:
     from fastapi.testclient import TestClient
 
@@ -103,6 +163,12 @@ def verify_install(expected_package_root: Path | None = None) -> None:
         )
     if expected_package_root is not None:
         _verify_distribution_metadata(expected_package_root)
+        installed = distribution("inferdrome")
+        if inferdrome.__version__ != installed.version:
+            raise AssertionError(
+                "installed Inferdrome package and distribution versions disagree"
+            )
+        _verify_installed_cli(expected_package_root, installed.version)
 
     static_root = files("inferdrome.dashboard").joinpath("static")
     index = static_root.joinpath("index.html")
@@ -187,6 +253,8 @@ def main() -> None:
     arguments = parser.parse_args()
     verify_install(arguments.expected_package_root)
     print("dashboard installed-wheel smoke: ok")
+    if arguments.expected_package_root is not None:
+        print("release installed-wheel CLI smoke: ok")
 
 
 if __name__ == "__main__":
