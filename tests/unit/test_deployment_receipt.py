@@ -102,7 +102,7 @@ def _receipt():
     return spec, outcome, receipt
 
 
-def _expected(spec, outcome, *, version: str = "0.2.0.dev0") -> dict[str, Any]:
+def _expected(spec, outcome, *, version: str = "0.2.0") -> dict[str, Any]:
     return {
         "expected_spec": spec,
         "expected_outcome": outcome,
@@ -167,7 +167,7 @@ def test_deterministic_v2_synthetic_vector_and_identity_rules() -> None:
     assert parse_deployment_receipt_json(fixture_bytes) == receipt
     assert receipt.receipt_id == deployment_receipt_id(receipt)
     assert sha256_digest(fixture_bytes) == (
-        "sha256:6864fce81ca9331442c2597d6898474a0311048a007232e25f8a8b21dbc4e7ff"
+        "sha256:8d1e1605f59dadbdc133ea970e25476076ffb3c648c745a8cdaeac0ce712da4b"
     )
     assert deployment_receipt_sha256(receipt) == sha256_digest(
         canonical_deployment_receipt_bytes(receipt)

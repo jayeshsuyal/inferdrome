@@ -24,7 +24,9 @@ is deliberately explicit: local two-endpoint routing execution is proven only
 at loopback socket level; historical A10 serving evidence is preserved as
 `EXTERNAL_ONLY`; no two-A100 multi-endpoint campaign has executed; and GCP or
 Kubernetes production operation is not claimed. Inspect the same closed claim
-boundary with `python -m inferdrome capabilities`.
+boundary with `python -m inferdrome capabilities`. The
+[v0.2.0 changelog](CHANGELOG.md) records the same boundary. Repository source
+does not itself authorize an annotated tag or GitHub Release.
 
 For an interviewable local walkthrough, run:
 
@@ -194,12 +196,12 @@ uv sync --frozen --extra dev --extra dashboard
 ```
 
 The offline candidate preflight checks repository-owned release inputs and
-reports the manual release blockers without treating them as proven. Normal CI
-uses the `auto` phase, which selects candidate only when both version
-locations are exactly `0.1.0.dev0`; for exact `0.1.0`, it selects
-`final-pre-tag` only while `v0.1.0` is absent, selects `post-tag` when that tag
-resolves to `HEAD`, and fails closed if the tag resolves elsewhere. Run it from
-a clean checkout when checking a development candidate commit:
+reports manual release blockers without treating them as proven. Normal CI uses
+the `auto` phase: it selects candidate only when both version locations are
+exactly `0.2.0.dev0`; for exact `0.2.0`, it selects `final-pre-tag` only while
+`v0.2.0` is absent, selects `post-tag` when that tag resolves to `HEAD`, and
+fails closed if the tag resolves elsewhere. Run it from a clean checkout when
+checking a development candidate commit:
 
 ```bash
 .venv/bin/python scripts/release_preflight.py \
@@ -209,7 +211,7 @@ a clean checkout when checking a development candidate commit:
 The final release-closure mode additionally delegates to the existing
 engineering and dashboard gates and fails closed while manual or external
 checklist inputs remain open. It is run only on a deliberate final release
-commit after both version locations have been changed to `0.1.0`:
+candidate commit after both version locations have been changed to `0.2.0`:
 
 ```bash
 .venv/bin/python scripts/release_preflight.py \
@@ -217,8 +219,9 @@ commit after both version locations have been changed to `0.1.0`:
 ```
 
 It performs no cloud/provider operation, GPU launch, deployment, publication,
-tagging, or merge. The exact final release procedure is recorded in the
-[v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md).
+tagging, or merge. The v0.2.0 candidate is not an authorization to create a
+tag or GitHub Release; the exact final release procedure is recorded in the
+[v0.2 release checklist](docs/V0_2_RELEASE_CHECKLIST.md).
 
 For the specifically authorized producer-side `v0.1.0` release, CI uses the
 repository-only preflight so the still-pending ExitSpec inputs are reported,

@@ -97,3 +97,4 @@ def test_uv_native_package_gate_runs_with_pipless_python(
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "dashboard installed-wheel smoke: ok" in completed.stdout
+    assert "release installed-wheel CLI smoke: ok" in completed.stdout
