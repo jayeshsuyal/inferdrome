@@ -23,19 +23,23 @@ from inferdrome.routing_execution.canonical import (
 from inferdrome.routing_execution.contracts import (
     CandidateState,
     EndpointId,
-    ExecutedManifest,
     FaultReceipt,
     InputTransferReceipt,
     ProducerReceipt,
     ResetReceipt,
     RouteDecisionReceipt,
-    RoutingExecutionConfig,
     TelemetryObservation,
     TerminalOutcomeReceipt,
     TerminalStatus,
     TrialSummary,
     fixed_policy_ids,
     fixed_request_ids,
+)
+from inferdrome.routing_execution.manual_host_contracts import (
+    CONFIG_ADAPTER,
+    MANIFEST_ADAPTER,
+    ExecutionConfig,
+    ExecutionManifest,
 )
 from inferdrome.routing_execution.package import (
     EvidenceReservation,
@@ -194,14 +198,14 @@ def _strict_json(content: bytes, *, label: str) -> object:
         raise ExecutionError(f"{label} is not valid JSON") from None
 
 
-def load_config_bytes(content: bytes) -> RoutingExecutionConfig:
+def load_config_bytes(content: bytes) -> ExecutionConfig:
     """Validate canonical execution configuration already held in memory."""
 
     if not 1 <= len(content) <= _MAX_CONFIG_BYTES:
         raise ExecutionError("execution configuration is unsafe")
     _strict_json(content, label="execution configuration")
     try:
-        config = RoutingExecutionConfig.model_validate_json(content)
+        config = CONFIG_ADAPTER.validate_json(content)
     except ValidationError:
         raise ExecutionError("execution configuration violates its contract") from None
     if canonical_json_bytes(config.model_dump(mode="json")) != content:
@@ -209,7 +213,7 @@ def load_config_bytes(content: bytes) -> RoutingExecutionConfig:
     return config
 
 
-def load_config(path: Path) -> tuple[RoutingExecutionConfig, bytes]:
+def load_config(path: Path) -> tuple[ExecutionConfig, bytes]:
     """Load canonical, source-only execution configuration without a transport."""
 
     content = _read_source(
@@ -265,7 +269,7 @@ def load_workload(
     return load_workload_bytes(content, expected_sha256=expected_sha256), content
 
 
-def declared_input_transfer_digest(config: RoutingExecutionConfig) -> str:
+def declared_input_transfer_digest(config: ExecutionConfig) -> str:
     """Calculate the non-self-referential configuration transfer declaration."""
 
     projection = config.model_dump(mode="json")
@@ -303,7 +307,7 @@ def _model_ready(
         return False
 
 
-def _request_body(config: RoutingExecutionConfig, request: WorkloadRequest) -> bytes:
+def _request_body(config: ExecutionConfig, request: WorkloadRequest) -> bytes:
     """Construct the only raw prompt-containing artifact; never serialize it later."""
 
     return canonical_json_bytes(
@@ -350,7 +354,7 @@ def _terminal(
     endpoint: AdmittedEndpoint | None,
     request: WorkloadRequest,
     decision: RouteDecisionReceipt,
-    config: RoutingExecutionConfig,
+    config: ExecutionConfig,
     clock: MonotonicClock,
     cancel_requested: Callable[[], bool],
 ) -> TerminalOutcomeReceipt:
@@ -740,11 +744,15 @@ def _build_manifest(
     *,
     config_bytes: bytes,
     input_transfer: InputTransferReceipt,
-) -> ExecutedManifest:
+) -> ExecutionManifest:
     config = topology.config
     transfer_bytes = canonical_json_bytes(input_transfer.model_dump(mode="json"))
-    return ExecutedManifest(
-        schema_version="inferdrome.routing-executed-manifest.v1",
+    value = dict(
+        schema_version=(
+            "inferdrome.routing-executed-manifest.v2"
+            if config.mode == "LAMBDA_MANUAL_HOST"
+            else "inferdrome.routing-executed-manifest.v1"
+        ),
         execution_id=config.execution_id,
         mode=config.mode,
         source_commit=config.source_commit,
@@ -765,6 +773,9 @@ def _build_manifest(
         planned_terminal_denominator=18,
         no_retry=True,
     )
+    # The discriminated adapter preserves v1 serialization and admits v2
+    # without widening any v1 model literals.
+    return MANIFEST_ADAPTER.validate_python(value)
 
 
 def run_execution(

@@ -14,7 +14,6 @@ from typing import NoReturn, cast
 from inferdrome.routing_execution.contracts import (
     CandidateState,
     EndpointId,
-    ExecutedManifest,
     ProducerReceipt,
     RouteDecisionReceipt,
     Signal,
@@ -23,6 +22,7 @@ from inferdrome.routing_execution.contracts import (
     fixed_policy_ids,
     fixed_request_ids,
 )
+from inferdrome.routing_execution.manual_host_contracts import ExecutionManifest
 from inferdrome.routing_execution.policy import decide
 
 
@@ -168,7 +168,7 @@ def _verify_candidate_observations(
     decision: RouteDecisionReceipt,
     telemetry: Mapping[TelemetryKey, TelemetryObservation],
     *,
-    manifest: ExecutedManifest,
+    manifest: ExecutionManifest,
     prior_load: Mapping[str, TelemetryObservation] | None,
 ) -> None:
     expected_bounds = {
@@ -248,7 +248,7 @@ def _verify_candidate_observations(
             _fail("candidate eligibility disagrees with policy contract")
 
 
-def verify_replay(manifest: ExecutedManifest, receipt: ProducerReceipt) -> None:
+def verify_replay(manifest: ExecutionManifest, receipt: ProducerReceipt) -> None:
     """Replay all bounded receipt decisions using only sealed package records."""
 
     policies = fixed_policy_ids()
