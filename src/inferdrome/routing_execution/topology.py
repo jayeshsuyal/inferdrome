@@ -17,8 +17,8 @@ from inferdrome.routing_execution.contracts import (
     EndpointDeclaration,
     EndpointId,
     PublishedEndpointIdentity,
-    RoutingExecutionConfig,
 )
+from inferdrome.routing_execution.manual_host_contracts import ExecutionConfig
 
 
 class TopologyAdmissionError(ValueError):
@@ -38,7 +38,7 @@ class AdmittedEndpoint:
 class AdmittedTopology:
     """The only endpoint material passed to the execution transport layer."""
 
-    config: RoutingExecutionConfig
+    config: ExecutionConfig
     endpoints: tuple[AdmittedEndpoint, AdmittedEndpoint]
 
 
@@ -90,7 +90,7 @@ def _canonical_origin(value: str) -> tuple[str, str, int]:
     return f"{parsed.scheme}://{host}:{selected_port}", host, selected_port
 
 
-def _admit_origin(config: RoutingExecutionConfig, endpoint: EndpointDeclaration) -> str:
+def _admit_origin(config: ExecutionConfig, endpoint: EndpointDeclaration) -> str:
     canonical, host, port = _canonical_origin(endpoint.origin)
     if config.mode == "LOCAL_LOOPBACK":
         if host != "127.0.0.1" or port in {80, 443}:
@@ -106,7 +106,7 @@ def _admit_origin(config: RoutingExecutionConfig, endpoint: EndpointDeclaration)
     # admission-before-transport rule.
     if _rfc1918(host):
         return canonical
-    raise TopologyAdmissionError("GCP topology requires a literal private target")
+    raise TopologyAdmissionError("deployment requires a literal private target")
 
 
 def _published_identity(
@@ -120,7 +120,7 @@ def _published_identity(
     )
 
 
-def admit_topology(config: RoutingExecutionConfig) -> AdmittedTopology:
+def admit_topology(config: ExecutionConfig) -> AdmittedTopology:
     """Return an admitted exactly-two-endpoint topology without external I/O.
 
     The GCP branch deliberately rejects PR A's current single-A100 profile:

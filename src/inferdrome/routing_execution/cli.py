@@ -286,7 +286,9 @@ def _run_from_stdin(arguments: argparse.Namespace) -> SealedRoutingExecution:
         raise ExecutionError("runtime input bundle arguments are exclusive")
     bundle = RuntimeInputBundle.decode(_read_runtime_input_bundle())
     config = load_config_bytes(bundle.config_bytes)
-    if config.mode != "GCP_PRIVATE" or bundle.iap_transport_map_bytes is None:
+    if not isinstance(config, RoutingExecutionConfig) or (
+        config.mode != "GCP_PRIVATE" or bundle.iap_transport_map_bytes is None
+    ):
         raise ExecutionError("runtime input bundle is not an admitted GCP input")
     transport_map = IapTunnelTransportMap.load_bytes(
         bundle.iap_transport_map_bytes, config=config
@@ -300,12 +302,12 @@ def _run_from_stdin(arguments: argparse.Namespace) -> SealedRoutingExecution:
 
 
 def _run_from_files(arguments: argparse.Namespace) -> SealedRoutingExecution:
-    """Keep explicit file inputs limited to the existing local loopback path."""
+    """Admit local or manual-host files; GCP still requires its stdin boundary."""
 
     if arguments.deployment_config is None or arguments.workload is None:
         raise ExecutionError("execution config and workload are required")
     config, _ = load_config(arguments.deployment_config)
-    if config.mode != "LOCAL_LOOPBACK" or arguments.iap_transport_map is not None:
+    if config.mode == "GCP_PRIVATE" or arguments.iap_transport_map is not None:
         raise ExecutionError("GCP_PRIVATE execution requires the runner stdin input")
     return run_execution(
         arguments.deployment_config,

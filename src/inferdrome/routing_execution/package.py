@@ -27,12 +27,15 @@ from inferdrome.routing_execution.canonical import (
 )
 from inferdrome.routing_execution.contracts import (
     ArtifactHashEntry,
-    ExecutedManifest,
     ExecutionId,
     InputTransferReceipt,
     IntegrityManifest,
     ProducerReceipt,
     TerminalStatus,
+)
+from inferdrome.routing_execution.manual_host_contracts import (
+    MANIFEST_ADAPTER,
+    ExecutionManifest,
 )
 from inferdrome.routing_execution.replay import ReplayVerificationError, verify_replay
 
@@ -175,7 +178,7 @@ class VerifiedExecutionPackage:
 
     report: VerificationReport
     input_transfer: InputTransferReceipt
-    executed_manifest: ExecutedManifest
+    executed_manifest: ExecutionManifest
     producer_receipt: ProducerReceipt
 
 
@@ -554,7 +557,7 @@ def _terminal_population(
 
 def _verify_semantics(
     input_transfer: InputTransferReceipt,
-    manifest: ExecutedManifest,
+    manifest: ExecutionManifest,
     receipt: ProducerReceipt,
     *,
     manifest_bytes: bytes,
@@ -662,11 +665,14 @@ def verify_execution_package(
             InputTransferReceipt,
             label="routing execution input transfer receipt",
         )
-        manifest = _parse(
-            content["executed-manifest.json"],
-            ExecutedManifest,
-            label="routing execution executed manifest",
-        )
+        manifest_content = content["executed-manifest.json"]
+        _json_value(manifest_content, label="routing execution executed manifest")
+        try:
+            manifest = MANIFEST_ADAPTER.validate_json(manifest_content)
+        except ValidationError:
+            raise VerificationError("executed manifest violates its contract") from None
+        if canonical_json_bytes(manifest.model_dump(mode="json")) != manifest_content:
+            raise VerificationError("executed manifest is not canonical JSON")
         receipt = _parse(
             content["producer-receipt.json"],
             ProducerReceipt,
