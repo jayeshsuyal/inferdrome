@@ -146,7 +146,7 @@ def test_host_checks_are_injectable_and_do_not_adopt_existing_containers() -> No
         calls.append(argv)
         if argv[0] == "nvidia-smi":
             return inventory()
-        if argv[1:3] == ["image", "inspect"]:
+        if argv[5:7] == ["image", "inspect"]:
             role = (
                 "private-engine"
                 if argv[-1] == parsed().serving_image.reference

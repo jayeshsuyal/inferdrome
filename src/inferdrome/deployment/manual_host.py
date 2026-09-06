@@ -21,6 +21,13 @@ import yaml
 from pydantic import Field, model_validator
 
 from inferdrome.deployment.gcp_securefs import SafeDirFD
+from inferdrome.deployment.manual_host_docker import (
+    DOCKER_CONFIG_FILE,
+    EMPTY_DOCKER_CONFIG,
+    LOCAL_DOCKER_HOST,
+    docker_argv,
+    docker_target,
+)
 from inferdrome.qwen3_campaign import (
     QWEN3_8B_REVISION,
     qwen3_expected_snapshot_sha256,
@@ -453,14 +460,14 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
     engine = yaml.safe_load(template)["services"]["vllm-engine"]
     config = routing_config(spec)
     compose = compose_plan(spec, engine)
-    prefix = [
-        "docker",
+    prefix = docker_argv(
+        spec.preparation_path,
         "compose",
         "--project-name",
         spec.compose_project,
         "--file",
         f"{spec.preparation_path}/compose.manual-host.json",
-    ]
+    )
     commands = {
         "start": [
             *prefix,
@@ -508,6 +515,7 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
         "execute_authority": "NONE",
         "declaration_sha256": config.topology.declaration_sha256,
         "profile_id": PROFILE_ID,
+        "docker_target": docker_target(spec.preparation_path),
         "compose_template_sha256": sha256_digest(template),
         "compose_template_source_commit": spec.source_commit,
         "availability_observation": None,
@@ -518,6 +526,7 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
             "Separate execution authority and explicit manual lifecycle-risk decision.",
             "Exact-ID cleanup duty accepted; deadline is NOT an enforced TTL.",
             "Linux x86_64, Docker Compose and NVIDIA toolkit checked.",
+            "Only the reviewed local /var/run/docker.sock daemon is supported.",
             "Exactly two A100 PCIe 40 GB; distinct UUIDs and MIG disabled.",
             "Container allocation matches UUIDs; one GPU per engine and TP=1.",
             "Preloaded distinct OCI role digests and source revision labels checked.",
@@ -534,6 +543,7 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
         "qualification": "NOT_STALE_TELEMETRY_QUALIFICATION_V1",
     }
     artifacts = {
+        DOCKER_CONFIG_FILE: EMPTY_DOCKER_CONFIG,
         "operator-input.json": canonical_json_bytes(spec.model_dump(mode="json")),
         "deployment-config.json": canonical_json_bytes(config.model_dump(mode="json")),
         "selected-workload.jsonl": fixed_selected_workload_bytes(),
@@ -565,6 +575,14 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
         "  echo 'Exact plan/operator control and manual risk decision required' >&2",
         "  exit 78",
         "fi",
+        # Clear selectors before preflight and every lifecycle edge. Child
+        # commands cannot alter this parent shell environment during cleanup.
+        "for routing_variable in ${!DOCKER_@} ${!COMPOSE_@}; do",
+        '  unset "$routing_variable"',
+        "done",
+        f"export DOCKER_HOST={shlex.quote(LOCAL_DOCKER_HOST)}",
+        f"export DOCKER_CONFIG={shlex.quote(spec.preparation_path)}",
+        "export COMPOSE_DISABLE_ENV_FILE=1",
         "cleanup() {",
         "  result=$?",
         f"  {shlex.join(commands['stop_containers_only'])} || result=74",
