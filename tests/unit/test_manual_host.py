@@ -103,7 +103,7 @@ def test_deterministic_plan_has_exact_allocation_and_existing_benchmark_command(
     spec = parsed()
     first = prepare_artifacts(spec, ROOT)
     assert first == prepare_artifacts(spec, ROOT)
-    assert len(first) == 8
+    assert len(first) == 9
     assert first["selected-workload.jsonl"] == fixed_selected_workload_bytes()
     config = load_config_bytes(first["deployment-config.json"])
     assert (

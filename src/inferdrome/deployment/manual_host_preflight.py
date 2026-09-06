@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from inferdrome.deployment.manual_host import ManualHostInput, _read_input
+from inferdrome.deployment.manual_host_docker import (
+    DOCKER_CONFIG_FILE,
+    EMPTY_DOCKER_CONFIG,
+    LOCAL_DOCKER_HOST,
+    docker_argv,
+    docker_environment,
+    docker_target,
+)
 from inferdrome.routing_execution.canonical import sha256_digest
 from inferdrome.routing_execution.executor import _read_source, _strict_json
 
@@ -25,11 +33,22 @@ Run = Callable[[list[str]], bytes]
 
 
 def _run(argv: list[str]) -> bytes:
+    environment = None
+    if argv and argv[0] == "docker":
+        if len(argv) < 6 or argv[:4] != [
+            "docker",
+            "--host",
+            LOCAL_DOCKER_HOST,
+            "--config",
+        ]:
+            raise ValueError("Docker command lacks the explicit local binding")
+        environment = docker_environment(argv[4])
     return subprocess.run(
         argv,
         check=True,
         capture_output=True,
         timeout=20,
+        env=environment,
     ).stdout
 
 
@@ -122,21 +141,21 @@ def check_host(
             ]
         ),
     )
-    run(["docker", "compose", "version"])
+    run(docker_argv(spec.preparation_path, "compose", "version"))
     image_ids = [
         check_image(
             spec,
             image.reference,
             role,
             run(
-                [
-                    "docker",
+                docker_argv(
+                    spec.preparation_path,
                     "image",
                     "inspect",
                     "--format",
                     "{{json .}}",
                     image.reference,
-                ]
+                )
             ),
         )
         for image, role in (
@@ -146,14 +165,14 @@ def check_host(
     ]
     if image_ids[0] == image_ids[1]:
         raise ValueError("observed role image content is not distinct")
-    prefix = [
-        "docker",
+    prefix = docker_argv(
+        spec.preparation_path,
         "compose",
         "--project-name",
         spec.compose_project,
         "--file",
         f"{spec.preparation_path}/compose.manual-host.json",
-    ]
+    )
     if running:
         for index, endpoint in enumerate(("endpoint-a", "endpoint-b")):
             container_id = run([*prefix, "ps", "--quiet", endpoint]).decode().strip()
@@ -166,14 +185,14 @@ def check_host(
                 index,
                 image_ids[1],
                 run(
-                    [
-                        "docker",
+                    docker_argv(
+                        spec.preparation_path,
                         "container",
                         "inspect",
                         "--format",
                         "{{json .}}",
                         container_id,
-                    ]
+                    )
                 ),
             )
     elif run([*prefix, "ps", "--all", "--quiet"]).strip():
@@ -188,6 +207,7 @@ def verify_preparation(directory: Path, expected_plan_digest: str) -> ManualHost
     if not isinstance(plan, dict) or not isinstance(plan.get("input_files"), dict):
         raise ValueError("plan inventory is invalid")
     expected = {
+        DOCKER_CONFIG_FILE,
         "operator-input.json",
         "deployment-config.json",
         "selected-workload.jsonl",
@@ -205,6 +225,17 @@ def verify_preparation(directory: Path, expected_plan_digest: str) -> ManualHost
         ):
             raise ValueError("prepared file differs from approved plan")
     spec = _read_input(directory / "operator-input.json")
+    if plan.get("docker_target") != docker_target(spec.preparation_path):
+        raise ValueError("plan lacks the reviewed local Docker target")
+    if (
+        _read_source(
+            directory / DOCKER_CONFIG_FILE,
+            label="Docker config",
+            maximum=65_536,
+        )
+        != EMPTY_DOCKER_CONFIG
+    ):
+        raise ValueError("manual host Docker configuration must be empty")
     if str(directory) != spec.preparation_path:
         raise ValueError("prepared host directory differs from declared path")
     if datetime.now(UTC) >= datetime.strptime(

@@ -23,9 +23,10 @@ approval records. All required declarations must be supplied before preparation
 succeeds. Errors are sanitized; the output directory is private and create-only.
 An interrupted partial preparation is not success and is never overwritten.
 
-The output is eight files: `operator-input.json`, `deployment-config.json`,
+The output is nine files: `operator-input.json`, `deployment-config.json`,
 `selected-workload.jsonl`, `compose.manual-host.json`, `cleanup-handoff.json`,
-`plan.json`, `startup.sh`, and `preparation-integrity.json`. They are invocation
+`plan.json`, `startup.sh`, `config.json` (empty Docker configuration), and
+`preparation-integrity.json`. They are invocation
 inputs and a deterministic startup plan, **not execution evidence**. They include
 private operator/host paths and IDs; do not publish them as redacted evidence.
 Preparation reads local input, the existing Compose template, and its Git blob;
@@ -102,6 +103,20 @@ empty evidence directories accessible to the declared UID/GID, and run
 `--accept-manual-cleanup-risk`. Missing/wrong arguments stop before host commands.
 This is an explicit intent guard, not an approval-signature or authorization
 service. Do not run it merely because preparation succeeded.
+
+All Docker reads and lifecycle commands are bound to the single reviewed local
+Linux daemon at `unix:///var/run/docker.sock`, with explicit `--host` and
+`--config` arguments. Startup clears ambient `DOCKER_*` and `COMPOSE_*` variables
+before preflight, pins the child host/config environment to the same values,
+and disables Compose `.env` loading. Standalone preflight applies the same
+environment policy to every Docker child. The plan binds the empty `config.json`
+and the exact local-target metadata; old preparations without this binding must
+be regenerated. Ambient `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, or a
+config-selected context cannot select another daemon, including for failure
+cleanup. Remote and rootless Docker targets are not supported. The socket and
+installed Docker/Compose executables remain trusted host prerequisites; this
+does not attest daemon identity or protect against a replaced local socket.
+The first actual plan must use **UID 2000** with the existing role images.
 
 The script verifies plan/input hashes, checks the deadline, Linux/Python/UID,
 two exact GPU UUIDs, PCIe device names and 40 GB-class usable driver memory,
