@@ -618,6 +618,257 @@ export interface RoutingQualificationIndex extends ApiObject {
   readonly rejected: readonly RejectedRoutingQualification[];
 }
 
+/**
+ * A deliberately separate reader contract for the sealed real-endpoint bridge.
+ * It is not interchangeable with the synthetic routing-campaign projection.
+ */
+export type RoutingExecutionProjectionVersion = "inferdrome.routing-execution-dashboard.v1";
+export type RoutingExecutionMode = "LOCAL_LOOPBACK" | "GCP_PRIVATE" | "LAMBDA_MANUAL_HOST";
+export type RoutingExecutionTerminalStatus =
+  | "SUCCEEDED"
+  | "TIMED_OUT"
+  | "FAILED"
+  | "CANCELLED"
+  | "NO_SAFE_ROUTE";
+export type RoutingExecutionSignal = "HEALTH" | "LOAD" | "GPU_DCGM" | "KV_CACHE";
+export type RoutingExecutionAdmissibility = "ADMISSIBLE" | "INADMISSIBLE";
+export type RoutingExecutionObservationState = "AVAILABLE" | "STALE" | "UNAVAILABLE";
+export type RoutingExecutionFallbackReason =
+  | "NONE"
+  | "REQUIRED_LOAD_STALE"
+  | "REQUIRED_LOAD_UNAVAILABLE"
+  | "STALE_LOAD_FAIL_OPEN"
+  | "HEALTH_ONLY_TIE_BREAK"
+  | "HEALTH_NOT_ADMISSIBLE";
+
+export interface RoutingExecutionModelView extends ApiObject {
+  readonly model_id: "Qwen/Qwen3-8B";
+  readonly model_revision: string;
+  readonly tokenizer_revision: string;
+}
+
+export interface RoutingExecutionRuntimeView extends ApiObject {
+  readonly runtime_name: "vllm";
+  readonly runtime_version: string;
+  readonly adapter_id: string;
+  readonly adapter_version: string;
+}
+
+export interface RoutingExecutionTopologyView extends ApiObject {
+  readonly accelerator_model: string;
+  readonly accelerator_count: number;
+  readonly runner_separate_from_serving: true;
+  readonly serving_engine_count: 2;
+  readonly one_engine_per_endpoint: true;
+  readonly declared_provider: "LAMBDA" | null;
+  readonly declared_provisioning: "OPERATOR_SUPPLIED_VM" | null;
+  readonly identity_assertion: "OPERATOR_DECLARED_NOT_OBSERVED" | "NOT_RETAINED_BY_V1";
+  readonly lifecycle_protection: "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY" | "NOT_RETAINED_BY_V1";
+}
+
+export interface RoutingExecutionSummary extends ApiObject {
+  readonly execution_id: "routing-execution-v1";
+  readonly retained_digest: string;
+  readonly mode: RoutingExecutionMode;
+  readonly source_commit: string;
+  readonly model: RoutingExecutionModelView;
+  readonly runtime: RoutingExecutionRuntimeView;
+  readonly topology: RoutingExecutionTopologyView;
+  readonly policy_ids: readonly [string, string, string];
+  readonly trial_count: 3;
+  readonly request_denominator_per_trial: 6;
+  readonly terminal_denominator: 18;
+  readonly verified_by_offline_replay: true;
+}
+
+export interface RejectedRoutingExecution extends ApiObject {
+  readonly entry: "<configured-root>";
+  readonly status: "REJECTED";
+  readonly code: "CONFIGURATION_INVALID" | "UNSAFE_ENTRY" | "VERIFICATION_FAILED";
+  readonly message: string;
+}
+
+export interface RoutingExecutionPageResponse extends ApiObject {
+  readonly projection_version: RoutingExecutionProjectionVersion;
+  readonly routing_executions: readonly RoutingExecutionSummary[];
+  readonly rejected: readonly RejectedRoutingExecution[];
+  readonly page: PageView;
+}
+
+export interface RoutingExecutionIndex extends ApiObject {
+  readonly projection_version: RoutingExecutionProjectionVersion;
+  readonly routing_executions: readonly RoutingExecutionSummary[];
+  readonly rejected: readonly RejectedRoutingExecution[];
+}
+
+export interface RoutingExecutionEndpointIdentityView extends ApiObject {
+  readonly endpoint_id: RoutingEndpointId;
+}
+
+export interface RoutingExecutionInputTransferView extends ApiObject {
+  readonly config_sha256: string;
+  readonly selected_workload_sha256: string;
+  readonly workload_size_bytes: number;
+  readonly declared_input_transfer_sha256: string;
+  readonly verified_before_transport: true;
+}
+
+export interface RoutingExecutionEvidenceView extends ApiObject {
+  readonly runner_image: string;
+  readonly serving_image: string;
+  readonly endpoints: readonly [RoutingExecutionEndpointIdentityView, RoutingExecutionEndpointIdentityView];
+  readonly input_transfer_receipt_sha256: string;
+  readonly input_transfer: RoutingExecutionInputTransferView;
+}
+
+export interface RoutingExecutionRoutingInputsView extends ApiObject {
+  readonly campaign_id: "routing-campaign-v1";
+  readonly plan_sha256: string;
+  readonly trace_sha256: string;
+  readonly fault_schedule_sha256: string;
+  readonly trial_plan_sha256: string;
+  readonly policies: readonly [string, string, string];
+}
+
+export interface RoutingExecutionWorkloadView extends ApiObject {
+  readonly workload_id: string;
+  readonly workload_sha256: string;
+  readonly selected_workload_sha256: string;
+  readonly selected_request_ids: readonly [string, string, string, string, string, string];
+  readonly request_denominator: 6;
+}
+
+export interface RoutingExecutionTelemetryPlanView extends ApiObject {
+  readonly clock_domain: "RUNNER_MONOTONIC_NS";
+  readonly health_freshness_ms: 5;
+  readonly load_freshness_ms: 5;
+  readonly gpu_freshness_ms: 5;
+  readonly load_metric_name: "vllm:num_requests_running";
+}
+
+export interface RoutingExecutionFaultPlanView extends ApiObject {
+  readonly fault_id: "stale-load-fresh-health-v1";
+  readonly load_collection_pause_after_sequence_index: 1;
+  readonly health_collection_continues: true;
+  readonly inter_request_interval_ms: number;
+}
+
+export interface RoutingExecutionCampaignView extends ApiObject {
+  readonly routing_inputs: RoutingExecutionRoutingInputsView;
+  readonly workload: RoutingExecutionWorkloadView;
+  readonly telemetry: RoutingExecutionTelemetryPlanView;
+  readonly fault: RoutingExecutionFaultPlanView;
+}
+
+export interface RoutingExecutionObserverEpochView extends ApiObject {
+  readonly signal: RoutingExecutionSignal;
+  readonly epoch: number;
+}
+
+export interface RoutingExecutionResetView extends ApiObject {
+  readonly reset_at_monotonic_ns: number;
+  readonly observer_epochs: readonly RoutingExecutionObserverEpochView[];
+  readonly runner_connection_state_cleared: true;
+  readonly runner_telemetry_state_cleared: true;
+  readonly endpoint_engine_reset_assertion: "NOT_ASSERTED_SEPARATE_SERVING_ENGINE";
+  readonly endpoint_runtime_identities: readonly [RoutingExecutionEndpointIdentityView, RoutingExecutionEndpointIdentityView];
+}
+
+export interface RoutingExecutionFaultReceiptView extends ApiObject {
+  readonly fault_id: "stale-load-fresh-health-v1";
+  readonly activated_at_sequence_index: 2;
+  readonly activated_at_monotonic_ns: number;
+  readonly load_collection_paused: true;
+  readonly health_collection_continues: true;
+}
+
+export interface RoutingExecutionTelemetryView extends ApiObject {
+  readonly signal: RoutingExecutionSignal;
+  readonly observer_id: string;
+  readonly endpoint_id: RoutingEndpointId;
+  readonly epoch: number;
+  readonly sampled_at_monotonic_ns: number;
+  readonly decision_at_monotonic_ns: number;
+  readonly age_ns: number;
+  readonly freshness_bound_ns: number;
+  readonly state: RoutingExecutionObservationState;
+  readonly admissibility: RoutingExecutionAdmissibility;
+  readonly value: string | number | null;
+  readonly source: string;
+}
+
+export interface RoutingExecutionCandidateView extends ApiObject {
+  readonly endpoint_id: RoutingEndpointId;
+  readonly eligible: boolean;
+  readonly health: RoutingExecutionTelemetryView;
+  readonly load: RoutingExecutionTelemetryView;
+  readonly gpu_dcgm: RoutingExecutionTelemetryView;
+  readonly kv_cache: RoutingExecutionTelemetryView;
+}
+
+export interface RoutingExecutionTerminalView extends ApiObject {
+  readonly terminal_outcome_id: string;
+  readonly decision_id: string;
+  readonly selected_endpoint_id: RoutingEndpointId | null;
+  readonly status: RoutingExecutionTerminalStatus;
+  readonly reason: string;
+  readonly started_at_monotonic_ns: number;
+  readonly ended_at_monotonic_ns: number;
+  readonly http_status: number | null;
+  readonly attempt_count: 0 | 1;
+}
+
+export interface RoutingExecutionRequestView extends ApiObject {
+  readonly request_id: string;
+  readonly sequence_index: number;
+  readonly decision_id: string;
+  readonly decision_at_monotonic_ns: number;
+  readonly candidates: readonly [RoutingExecutionCandidateView, RoutingExecutionCandidateView];
+  readonly selected_endpoint_id: RoutingEndpointId | null;
+  readonly claims_used: readonly string[];
+  readonly claims_permitted_stale: readonly string[];
+  readonly claims_discarded: readonly string[];
+  readonly fallback_reason: RoutingExecutionFallbackReason;
+  readonly terminal: RoutingExecutionTerminalView;
+}
+
+export interface RoutingExecutionTerminalPopulationView extends ApiObject {
+  readonly status: RoutingExecutionTerminalStatus;
+  readonly count: number;
+}
+
+export interface RoutingExecutionTrialView extends ApiObject {
+  readonly trial_id: string;
+  readonly policy_id: string;
+  readonly reset: RoutingExecutionResetView;
+  readonly fault: RoutingExecutionFaultReceiptView;
+  readonly requests: readonly [
+    RoutingExecutionRequestView,
+    RoutingExecutionRequestView,
+    RoutingExecutionRequestView,
+    RoutingExecutionRequestView,
+    RoutingExecutionRequestView,
+    RoutingExecutionRequestView,
+  ];
+  readonly terminal_population: readonly [
+    RoutingExecutionTerminalPopulationView,
+    RoutingExecutionTerminalPopulationView,
+    RoutingExecutionTerminalPopulationView,
+    RoutingExecutionTerminalPopulationView,
+    RoutingExecutionTerminalPopulationView,
+  ];
+  readonly terminal_population_total: 6;
+}
+
+export interface RoutingExecutionDetail extends ApiObject {
+  readonly projection_version: RoutingExecutionProjectionVersion;
+  readonly summary: RoutingExecutionSummary;
+  readonly evidence: RoutingExecutionEvidenceView;
+  readonly campaign: RoutingExecutionCampaignView;
+  readonly trials: readonly [RoutingExecutionTrialView, RoutingExecutionTrialView, RoutingExecutionTrialView];
+  readonly interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY";
+}
+
 export type ControlledComparisonResultStatus =
   | "COMPARABLE"
   | "INCOMPARABLE"

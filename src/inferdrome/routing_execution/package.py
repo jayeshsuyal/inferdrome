@@ -710,7 +710,7 @@ def verify_execution_package(
         )
         try:
             verify_replay(manifest, receipt)
-        except ReplayVerificationError:
+        except (AssertionError, ReplayVerificationError):
             raise VerificationError(
                 "routing execution semantic replay disagrees"
             ) from None

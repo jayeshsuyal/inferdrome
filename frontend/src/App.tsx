@@ -11,6 +11,8 @@ import { EvidenceView } from "./views/EvidenceView";
 import { RunDetailView } from "./views/RunDetailView";
 import { RoutingCampaignDetailView } from "./views/RoutingCampaignDetailView";
 import { RoutingCampaignsView } from "./views/RoutingCampaignsView";
+import { RoutingExecutionDetailView } from "./views/RoutingExecutionDetailView";
+import { RoutingExecutionsView } from "./views/RoutingExecutionsView";
 import { RoutingQualificationDetailView } from "./views/RoutingQualificationDetailView";
 import { RoutingQualificationsView } from "./views/RoutingQualificationsView";
 import { RunsView } from "./views/RunsView";
@@ -40,6 +42,8 @@ export function App() {
   else if (/^\/trial-sets\/[^/]+\/?$/.test(pathname)) view = <TrialSetDetailView />;
   else if (pathname === "/routing-campaigns" || pathname === "/routing-campaigns/") view = <RoutingCampaignsView />;
   else if (/^\/routing-campaigns\/[^/]+\/?$/.test(pathname)) view = <RoutingCampaignDetailView />;
+  else if (pathname === "/routing-executions" || pathname === "/routing-executions/") view = <RoutingExecutionsView />;
+  else if (/^\/routing-executions\/[^/]+\/?$/.test(pathname)) view = <RoutingExecutionDetailView />;
   else if (pathname === "/routing-qualifications" || pathname === "/routing-qualifications/") view = <RoutingQualificationsView />;
   else if (/^\/routing-qualifications\/[^/]+\/?$/.test(pathname)) view = <RoutingQualificationDetailView />;
   else if (pathname === "/comparisons" || pathname === "/comparisons/") view = <ControlledComparisonsView />;

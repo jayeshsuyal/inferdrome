@@ -383,6 +383,24 @@ class TelemetryObservation(ExecutionModel):
             raise ValueError("stale telemetry age is inconsistent")
         if self.state == "UNAVAILABLE" and self.value != "UNAVAILABLE":
             raise ValueError("unavailable telemetry cannot invent a value")
+        if self.signal == "HEALTH":
+            if self.source != "HTTP_HEALTH":
+                raise ValueError("health telemetry source is invalid")
+            if self.state != "UNAVAILABLE" and self.value != "HEALTHY":
+                raise ValueError("health telemetry value is invalid")
+        elif self.signal == "LOAD":
+            if self.source != "VLLM_METRICS":
+                raise ValueError("load telemetry source is invalid")
+            if self.state != "UNAVAILABLE" and (
+                type(self.value) is not int or self.value < 0
+            ):
+                raise ValueError("load telemetry must be a non-negative integer")
+        elif (
+            self.source != "UNAVAILABLE_CAPABILITY"
+            or self.state != "UNAVAILABLE"
+            or self.value != "UNAVAILABLE"
+        ):
+            raise ValueError("unsupported telemetry capability is invalid")
         return self
 
 

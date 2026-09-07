@@ -966,4 +966,24 @@ describe("dashboard API client", () => {
       message: expect.stringContaining("frozen v1 outcome semantics"),
     });
   });
+
+  it("fails closed instead of rounding an unsafe routing-execution integer", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse({
+      projection_version: "inferdrome.routing-execution-dashboard.v1",
+      routing_executions: [],
+      rejected: [],
+      page: {
+        limit: Number.MAX_SAFE_INTEGER + 1,
+        returned: 0,
+        total: 0,
+        has_more: false,
+        next_cursor: null,
+      },
+    }))));
+
+    await expect(api.listRoutingExecutions()).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("must be an integer"),
+    });
+  });
 });

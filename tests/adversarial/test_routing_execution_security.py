@@ -320,6 +320,41 @@ def test_verifier_rejects_coherently_rehashed_semantic_selection_tamper(
         verify_execution_package(copy)
 
 
+def test_verifier_rejects_coherently_rehashed_non_integer_load_value(
+    tmp_path: Path,
+) -> None:
+    package = _sealed(tmp_path)
+    copy = tmp_path / "malformed-load-copy"
+    shutil.copytree(package, copy, copy_function=shutil.copy2)
+    _writable(copy)
+    receipt = json.loads((copy / "producer-receipt.json").read_bytes())
+    load = next(
+        row
+        for row in receipt["telemetry_observations"]
+        if row["signal"] == "LOAD" and row["state"] == "AVAILABLE"
+    )
+    load["value"] = "HEALTHY"
+    decision = next(
+        row
+        for row in receipt["route_decisions"]
+        if row["trial_id"] == load["trial_id"]
+        and row["request_id"] == load["request_id"]
+        and row["sequence_index"] == load["sequence_index"]
+    )
+    candidate = next(
+        row
+        for row in decision["candidates"]
+        if row["endpoint_id"] == load["endpoint_id"]
+    )
+    candidate["load"]["value"] = "HEALTHY"
+    _replace_and_rehash(
+        copy, {"producer-receipt.json": canonical_json_bytes(receipt)}
+    )
+    _immutable(copy)
+    with pytest.raises(VerificationError):
+        verify_execution_package(copy)
+
+
 def test_verifier_rejects_coherently_rehashed_fault_and_terminal_time_tamper(
     tmp_path: Path,
 ) -> None:

@@ -143,6 +143,7 @@ function decodeRouteParam(value: string): string {
 
 export function useParams(): {
   readonly campaignId?: string;
+  readonly executionId?: string;
   readonly qualificationId?: string;
   readonly comparisonPlanId?: string;
   readonly runId?: string;
@@ -155,6 +156,8 @@ export function useParams(): {
   if (trialSetMatch) return { trialSetId: decodeRouteParam(trialSetMatch[1]) };
   const campaignMatch = pathname.match(/^\/routing-campaigns\/([^/]+)\/?$/);
   if (campaignMatch) return { campaignId: decodeRouteParam(campaignMatch[1]) };
+  const executionMatch = pathname.match(/^\/routing-executions\/([^/]+)\/?$/);
+  if (executionMatch) return { executionId: decodeRouteParam(executionMatch[1]) };
   const qualificationMatch = pathname.match(/^\/routing-qualifications\/([^/]+)\/?$/);
   if (qualificationMatch) {
     return { qualificationId: decodeRouteParam(qualificationMatch[1]) };

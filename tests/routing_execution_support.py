@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from inferdrome.routing_execution.canonical import (
     canonical_json_bytes,
@@ -17,6 +18,58 @@ from inferdrome.routing_execution.transport import (
     TransportResponse,
     TransportTimedOut,
 )
+
+
+def manual_host_fixture_input(*, source_commit: str) -> dict[str, Any]:
+    """Return a local-only declaration that can produce a v2 test package.
+
+    These values are deterministic test declarations. They are intentionally
+    not a provider plan or a host observation, and callers must use an injected
+    transport rather than Docker or a network endpoint.
+    """
+
+    from inferdrome.deployment.manual_host import input_template
+
+    value = input_template()
+    value.update(
+        {
+            "source_commit": source_commit,
+            "instance_id": "0123456789abcdef0123456789abcdef",
+            "region": "synthetic-region",
+            "instance_type": "gpu_2x_a100",
+            "gpu_uuids": [
+                "GPU-00000000-0000-0000-0000-000000000001",
+                "GPU-00000000-0000-0000-0000-000000000002",
+            ],
+            "uid": 2000,
+            "gid": 2000,
+            "runner_image": {
+                "reference": "example.invalid/test-runner@"
+                + sha256_digest(b"routing-execution-dashboard-runner")
+            },
+            "serving_image": {
+                "reference": "example.invalid/test-engine@"
+                + sha256_digest(b"routing-execution-dashboard-engine")
+            },
+            "model_path": "/srv/test-model",
+            "preparation_path": "/srv/test-inputs",
+            "evidence_path": "/srv/test-evidence",
+            "compose_project": "synthetic-campaign",
+            "container_subnet": "172.29.71.0/24",
+            "endpoint_ipv4": ["172.29.71.2", "172.29.71.3"],
+            "request_timeout_ms": 1000,
+        }
+    )
+    cleanup = value["cleanup"]
+    assert isinstance(cleanup, dict)
+    cleanup.update(
+        {
+            "instance_id": value["instance_id"],
+            "accountable_operator": "synthetic-operator",
+            "terminate_by_utc": "2030-01-01T00:00:00Z",
+        }
+    )
+    return value
 
 
 def workload_bytes() -> bytes:
@@ -67,6 +120,8 @@ class StaticEndpointTransport:
         if path == "/v1/models":
             return TransportResponse(200, b'{"data":[{"id":"Qwen/Qwen3-8B"}]}')
         if path == "/health":
+            if self.mode == "unavailable_health":
+                return TransportResponse(503, b"")
             return TransportResponse(200, b"")
         if path == "/metrics":
             if self.mode == "malformed_metrics":

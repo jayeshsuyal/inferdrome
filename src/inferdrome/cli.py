@@ -685,6 +685,10 @@ def _command_dashboard(namespace: argparse.Namespace) -> int:
         expected_routing_qualification_digest=_optional_text(
             namespace, "routing_qualification_digest"
         ),
+        routing_execution_root=_optional_path(namespace, "routing_execution_root"),
+        expected_routing_execution_digest=_optional_text(
+            namespace, "routing_execution_digest"
+        ),
         port=cast(int, namespace.port),
         open_browser=cast(bool, namespace.open_browser),
         keyring_path=_optional_path(namespace, "keyring"),
@@ -1158,6 +1162,17 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument(
         "--routing-qualification-digest",
         help="externally retained sha256 digest for the configured qualification",
+    )
+    dashboard.add_argument(
+        "--routing-execution-root",
+        help=(
+            "one sealed routing-execution-v1 package root; requires its "
+            "externally retained digest"
+        ),
+    )
+    dashboard.add_argument(
+        "--routing-execution-digest",
+        help="externally retained sha256 digest for the configured routing execution",
     )
     dashboard.add_argument(
         "--port",
