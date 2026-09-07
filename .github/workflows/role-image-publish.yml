@@ -29,9 +29,6 @@ defaults:
 
 jobs:
   publish-fixed-role-images:
-    # Any protection configured on this named environment is additional
-    # administrator defense in depth, not an independent review guarantee.
-    environment: role-image-publication
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:

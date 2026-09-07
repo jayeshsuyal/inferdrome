@@ -21,7 +21,7 @@ def test_role_image_workflow_is_manual_only_and_has_no_global_package_write() ->
         assert automatic_trigger not in workflow
     assert "permissions: {}" in workflow
     assert "packages: write" in workflow
-    assert "environment: role-image-publication" in workflow
+    assert "environment:" not in workflow
     assert "timeout-minutes: 45" in workflow
     assert "cancel-in-progress: false" in workflow
 

@@ -88,18 +88,11 @@ lowercase 40-character SHA equal to both `GITHUB_SHA` and the checked-out
 `HEAD`. A GitHub Actions workflow-dispatch ref is a branch or tag name, not a
 raw commit SHA; this workflow requires `main` and never needs a release tag.
 
-The workflow's `role-image-publication` environment reference is only optional
-defense in depth when an administrator has configured it. This document does
-not claim it independently enforces required reviewers for a private personal
-repository. The explicit owner and commit-bound dispatch approval remains the
-authorization boundary.
-
-**Current status:** the checked-in environment reference is an unresolved
-operator/security approval gate. This repository does not claim that the
-environment is configured, that it has reviewers, or that a read-only absence
-response proves dispatch eligibility. A manual dispatch remains prohibited
-until an owner separately confirms the relevant GitHub-side policy and the
-commit-bound approval.
+This workflow does not claim GitHub environment protection, required reviewers,
+or any GitHub-side approval mechanism. The explicit owner and commit-bound
+dispatch approval is the authorization boundary. A manual dispatch remains
+prohibited until an owner gives that separate approval for the exact source
+commit and the two fixed repositories.
 
 The job builds both fixed `linux/amd64` roles from the reviewed release wrapper
 with immutable Dockerfile base inputs, validates their normalized identity
