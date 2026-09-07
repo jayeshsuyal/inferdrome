@@ -36,6 +36,8 @@ function selectedRunFromPath(pathname: string): string | null {
 }
 
 function pathLabel(pathname: string): string {
+  if (/^\/routing-executions\/.+/.test(pathname)) return "Evidence / Routing execution detail";
+  if (pathname.startsWith("/routing-executions")) return "Evidence / Routing executions";
   if (/^\/routing-qualifications\/.+/.test(pathname)) return "Evidence / Causal qualification detail";
   if (pathname.startsWith("/routing-qualifications")) return "Evidence / Causal qualification";
   if (/^\/routing-campaigns\/.+/.test(pathname)) return "Evidence / Routing campaign detail";
@@ -86,6 +88,7 @@ export function AppShell({ children }: PropsWithChildren) {
       { label: "Runs", to: "/runs", icon: LayoutDashboard, end: true },
       { label: "Trial sets", to: "/trial-sets", icon: Layers3 },
       { label: "Routing campaigns", to: "/routing-campaigns", icon: Route },
+      { label: "Routing executions", to: "/routing-executions", icon: Fingerprint },
       { label: "Causal qualification", to: "/routing-qualifications", icon: GitCompareArrows },
       {
         label: "Run detail",

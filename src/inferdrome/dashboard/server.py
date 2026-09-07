@@ -20,6 +20,8 @@ def run_dashboard(
     routing_campaigns_root: Path | None = None,
     routing_qualifications_root: Path | None = None,
     expected_routing_qualification_digest: str | None = None,
+    routing_execution_root: Path | None = None,
+    expected_routing_execution_digest: str | None = None,
     port: int = 8787,
     open_browser: bool = False,
     keyring_path: Path | None = None,
@@ -45,6 +47,8 @@ def run_dashboard(
         routing_campaigns_root=routing_campaigns_root,
         routing_qualifications_root=routing_qualifications_root,
         expected_routing_qualification_digest=expected_routing_qualification_digest,
+        routing_execution_root=routing_execution_root,
+        expected_routing_execution_digest=expected_routing_execution_digest,
         keyring_path=keyring_path,
     )
     url = f"http://{_LOOPBACK_HOST}:{port}"

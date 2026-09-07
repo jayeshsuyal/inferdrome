@@ -69,6 +69,14 @@ interface FixturePaths {
   readonly routingCampaigns: string;
   readonly routingQualifications: string;
   readonly routingQualificationDigest: string;
+  readonly routingExecutionRoot: string;
+  readonly routingExecutionDigest: string;
+}
+
+interface RoutingExecutionFixtureSummary {
+  readonly root: string;
+  readonly retained_digest: string;
+  readonly fixture_provenance: "FIXTURE_GENERATED_LOCAL_NOT_PROVIDER_EVIDENCE";
 }
 
 let fixture: FixturePaths | undefined;
@@ -128,6 +136,38 @@ function prepareLocalDemoFixture(root: string): LocalDemoSummary {
   }
 }
 
+function prepareRoutingExecutionFixture(root: string): RoutingExecutionFixtureSummary {
+  const result = spawnSync(
+    pythonExecutable(),
+    [
+      join(REPOSITORY_ROOT, "scripts", "create_routing_execution_dashboard_fixture.py"),
+      "--output-parent",
+      root,
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+      env: inferdromeEnvironment(),
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 90_000,
+    },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      `Routing-execution fixture preparation failed:\n${result.stderr || result.stdout}`,
+    );
+  }
+  try {
+    return JSON.parse(result.stdout) as RoutingExecutionFixtureSummary;
+  } catch (error) {
+    throw new Error(
+      `Routing-execution fixture preparation did not return JSON:\n${result.stdout}`,
+      { cause: error },
+    );
+  }
+}
+
 function createPopulatedFixture(): FixturePaths {
   // Qualification publication walks no-follow descriptors from `/`. Resolve
   // macOS's `/var` compatibility symlink before handing a temporary path to
@@ -142,6 +182,8 @@ function createPopulatedFixture(): FixturePaths {
     routingCampaigns: join(root, "routing-campaign-v1"),
     routingQualifications: join(root, "stale-telemetry-qualification"),
     routingQualificationDigest: "",
+    routingExecutionRoot: "",
+    routingExecutionDigest: "",
   };
   try {
     const prepared = prepareLocalDemoFixture(root);
@@ -174,7 +216,22 @@ function createPopulatedFixture(): FixturePaths {
     ) {
       throw new Error("The local demo prepared dashboard roots outside its fixture.");
     }
-    return { ...paths, routingQualificationDigest: prepared.routing_qualification.retained_digest };
+    const execution = prepareRoutingExecutionFixture(root);
+    const expectedExecutionRoot = resolve(root, "routing-execution-package");
+    if (
+      execution.fixture_provenance !== "FIXTURE_GENERATED_LOCAL_NOT_PROVIDER_EVIDENCE"
+      || resolve(execution.root) !== expectedExecutionRoot
+      || !/^sha256:[0-9a-f]{64}$/.test(execution.retained_digest)
+      || !existsSync(join(root, "fixture-provenance.json"))
+    ) {
+      throw new Error("The routing-execution fixture did not retain local-only provenance.");
+    }
+    return {
+      ...paths,
+      routingQualificationDigest: prepared.routing_qualification.retained_digest,
+      routingExecutionRoot: execution.root,
+      routingExecutionDigest: execution.retained_digest,
+    };
   } catch (error) {
     removeFixture(paths);
     throw error;
@@ -229,6 +286,10 @@ async function startDashboardServer(paths: FixturePaths): Promise<string> {
       paths.routingQualifications,
       "--routing-qualification-digest",
       paths.routingQualificationDigest,
+      "--routing-execution-root",
+      paths.routingExecutionRoot,
+      "--routing-execution-digest",
+      paths.routingExecutionDigest,
       "--port",
       String(port),
     ],
@@ -476,6 +537,24 @@ test.describe("populated dashboard", () => {
     await expect(page.getByText("NO SAFE ROUTE", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("endpoint-b", { exact: true }).first()).toBeVisible();
 
+    await dashboardNavigation(page).getByRole("link", { name: "Routing executions", exact: true }).click();
+    await expectPath(page, "/routing-executions");
+    visitedByClick.add("/routing-executions");
+    await expect(page.getByRole("heading", { name: "Routing executions", level: 1 })).toBeVisible();
+    await expect(page.getByText("3 policy trials · 6 each", { exact: true })).toBeVisible();
+    await expect(page.getByText("Manual host declaration · not provider proof", { exact: true }).first()).toBeVisible();
+    const executionLink = page.getByRole("link", { name: "routing-execution-v1" }).first();
+    await executionLink.click();
+    const executionPath = "/routing-executions/routing-execution-v1";
+    await expectPath(page, executionPath);
+    visitedByClick.add(executionPath);
+    await expect(page.getByRole("heading", { name: "routing-execution-v1", level: 1 })).toBeVisible();
+    await expect(page.getByText("Manual-host facts are operator-declared.", { exact: false })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Observed admission conditions", level: 2 })).toBeVisible();
+    await expect(page.getByText("GPU/DCGM and KV/cache retained as unavailable", { exact: true })).toBeVisible();
+    await expect(page.getByText("REQUIRED_LOAD_STALE", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("NOT_ASSERTED_SEPARATE_SERVING_ENGINE", { exact: true }).first()).toBeVisible();
+
     await dashboardNavigation(page).getByRole("link", { name: "Causal qualification", exact: true }).click();
     await expectPath(page, "/routing-qualifications");
     visitedByClick.add("/routing-qualifications");
@@ -501,8 +580,8 @@ test.describe("populated dashboard", () => {
     await expectPath(page, `/routing-campaigns/${ROUTING_CAMPAIGN_ID}`);
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`${baseUrl}${qualificationPath}`);
-    await expect(page.getByRole("heading", { name: ROUTING_QUALIFICATION_ID, level: 1 })).toBeVisible();
+    await page.goto(`${baseUrl}${executionPath}`);
+    await expect(page.getByRole("heading", { name: "routing-execution-v1", level: 1 })).toBeVisible();
     const responsive = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
       clientWidth: document.documentElement.clientWidth,
@@ -520,6 +599,8 @@ test.describe("populated dashboard", () => {
       evidencePath,
       "/routing-campaigns",
       routingCampaignPath,
+      "/routing-executions",
+      executionPath,
       "/routing-qualifications",
       qualificationPath,
     ]));
@@ -534,6 +615,8 @@ test.describe("populated dashboard", () => {
       ["/compare", "Compare runs"],
       ["/routing-campaigns", "Routing campaigns"],
       [routingCampaignPath, ROUTING_CAMPAIGN_ID],
+      ["/routing-executions", "Routing executions"],
+      [executionPath, "routing-execution-v1"],
       ["/routing-qualifications", "Causal qualification"],
       [qualificationPath, ROUTING_QUALIFICATION_ID],
       ["/evidence", "Evidence"],

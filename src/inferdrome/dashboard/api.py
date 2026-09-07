@@ -27,6 +27,11 @@ from inferdrome.dashboard.routing_campaign_models import (
     RoutingCampaignDetail,
     RoutingCampaignIndexResponse,
 )
+from inferdrome.dashboard.routing_execution import RoutingExecutionDashboardIndex
+from inferdrome.dashboard.routing_execution_models import (
+    RoutingExecutionDetail,
+    RoutingExecutionIndexResponse,
+)
 from inferdrome.dashboard.routing_qualification import (
     RoutingQualificationDashboardIndex,
 )
@@ -40,6 +45,7 @@ from inferdrome.errors import (
     DashboardError,
     DashboardPaginationError,
     DashboardRoutingCampaignNotFound,
+    DashboardRoutingExecutionNotFound,
     DashboardRoutingQualificationNotFound,
     DashboardRunNotFound,
     DashboardTrialSetNotFound,
@@ -61,6 +67,9 @@ _AUTH_FAILURE = "dashboard authentication failed"
 _AUTH_UNAVAILABLE = "dashboard authentication data unavailable"
 _ROUTING_QUALIFICATION_UNAVAILABLE = (
     "routing-qualification verification work is temporarily unavailable"
+)
+_ROUTING_EXECUTION_UNAVAILABLE = (
+    "routing-execution verification work is temporarily unavailable"
 )
 
 
@@ -115,6 +124,9 @@ def create_app(
     routing_qualification_index: RoutingQualificationDashboardIndex | None = None,
     routing_qualifications_root: Path | None = None,
     expected_routing_qualification_digest: str | None = None,
+    routing_execution_index: RoutingExecutionDashboardIndex | None = None,
+    routing_execution_root: Path | None = None,
+    expected_routing_execution_digest: str | None = None,
     static_dir: Path | None = None,
     keyring_path: Path | None = None,
 ) -> FastAPI:
@@ -143,6 +155,19 @@ def create_app(
             routing_campaigns_root=routing_campaigns_root,
             routing_qualifications_root=routing_qualifications_root,
             expected_qualification_digest=expected_routing_qualification_digest,
+        )
+    if routing_execution_index is not None and (
+        routing_execution_root is not None
+        or expected_routing_execution_digest is not None
+    ):
+        raise ValueError(
+            "create_app accepts either a routing execution index or configuration, "
+            "not both"
+        )
+    if routing_execution_index is None:
+        routing_execution_index = RoutingExecutionDashboardIndex(
+            routing_execution_root=routing_execution_root,
+            expected_execution_digest=expected_routing_execution_digest,
         )
 
     auth_store = (
@@ -374,6 +399,46 @@ def create_app(
             raise HTTPException(
                 status_code=503,
                 detail="routing-campaign verification work is temporarily unavailable",
+            ) from None
+
+    @app.get(
+        "/api/v1/routing-executions",
+        response_model=RoutingExecutionIndexResponse,
+        dependencies=protected_dependencies,
+    )
+    def list_routing_executions(
+        limit: Annotated[int, Query(ge=1, le=25)] = 25,
+    ) -> RoutingExecutionIndexResponse:
+        try:
+            return routing_execution_index.refresh(limit=limit)
+        except DashboardPaginationError:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid routing-execution page limit",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail=_ROUTING_EXECUTION_UNAVAILABLE,
+            ) from None
+
+    @app.get(
+        "/api/v1/routing-executions/{execution_id}",
+        response_model=RoutingExecutionDetail,
+        dependencies=protected_dependencies,
+    )
+    def get_routing_execution(execution_id: str) -> RoutingExecutionDetail:
+        try:
+            return routing_execution_index.get_execution(execution_id)
+        except DashboardRoutingExecutionNotFound:
+            raise HTTPException(
+                status_code=404,
+                detail="routing execution not found",
+            ) from None
+        except DashboardError:
+            raise HTTPException(
+                status_code=503,
+                detail=_ROUTING_EXECUTION_UNAVAILABLE,
             ) from None
 
     @app.get(

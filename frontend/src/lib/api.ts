@@ -15,6 +15,7 @@ import type {
   RejectedControlledComparison,
   RejectedRoutingCampaign,
   RejectedRoutingQualification,
+  RejectedRoutingExecution,
   RejectedRun,
   RejectedTrialSet,
   RoutingCandidateView,
@@ -35,6 +36,16 @@ import type {
   RoutingQualificationPageResponse,
   RoutingQualificationSummary,
   RoutingQualificationTrialView,
+  RoutingExecutionCandidateView,
+  RoutingExecutionDetail,
+  RoutingExecutionEndpointIdentityView,
+  RoutingExecutionIndex,
+  RoutingExecutionPageResponse,
+  RoutingExecutionRequestView,
+  RoutingExecutionSummary,
+  RoutingExecutionTelemetryView,
+  RoutingExecutionTerminalView,
+  RoutingExecutionTrialView,
   RunDetail,
   RunIndex,
   RunSummary,
@@ -66,6 +77,9 @@ const ROUTING_QUALIFICATION_PAGE_LIMIT = 25;
 const ROUTING_QUALIFICATION_PROJECTION = "inferdrome.routing-qualification-dashboard.v1";
 const ROUTING_QUALIFICATION_ID = "stale-telemetry-qualification-v1";
 const ROUTING_QUALIFICATION_MAX_BYTES = 524_288;
+const ROUTING_EXECUTION_PAGE_LIMIT = 25;
+const ROUTING_EXECUTION_PROJECTION = "inferdrome.routing-execution-dashboard.v1";
+const ROUTING_EXECUTION_ID = "routing-execution-v1";
 const ROUTING_POLICY_IDS = [
   "fail_closed_required_load_v1",
   "explicit_fail_open_stale_load_v1",
@@ -367,7 +381,11 @@ function requiredInteger(
   minimum = 0,
 ): number {
   const value = object[key];
-  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) {
+  if (
+    typeof value !== "number"
+    || !Number.isSafeInteger(value)
+    || value < minimum
+  ) {
     throw protocolError(`${context}.${key} must be an integer of at least ${minimum}`);
   }
   return value;
@@ -379,7 +397,14 @@ function nullableInteger(
   context: string,
 ): number | null {
   const value = object[key];
-  if (value !== null && (typeof value !== "number" || !Number.isInteger(value) || value < 0)) {
+  if (
+    value !== null
+    && (
+      typeof value !== "number"
+      || !Number.isSafeInteger(value)
+      || value < 0
+    )
+  ) {
     throw protocolError(`${context}.${key} must be a non-negative integer or null`);
   }
   return value;
@@ -1423,6 +1448,433 @@ function parseRoutingQualificationDetail(payload: unknown): RoutingQualification
   return payload as unknown as RoutingQualificationDetail;
 }
 
+function executionDigest(value: unknown, context: string): string {
+  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value)) {
+    throw protocolError(`${context} must be a retained sha256 digest`);
+  }
+  return value;
+}
+
+function parseExecutionEndpoint(
+  value: unknown,
+  context: string,
+  expectedEndpoint: RoutingEndpointId,
+): RoutingExecutionEndpointIdentityView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, ["endpoint_id"], context);
+  if (routingEndpointId(value.endpoint_id, `${context}.endpoint_id`) !== expectedEndpoint) {
+    throw protocolError(`${context}.endpoint_id is out of bounded order`);
+  }
+  return value as unknown as RoutingExecutionEndpointIdentityView;
+}
+
+function parseExecutionSummary(
+  value: unknown,
+  context: string,
+): RoutingExecutionSummary {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "execution_id",
+    "retained_digest",
+    "mode",
+    "source_commit",
+    "model",
+    "runtime",
+    "topology",
+    "policy_ids",
+    "trial_count",
+    "request_denominator_per_trial",
+    "terminal_denominator",
+    "verified_by_offline_replay",
+  ], context);
+  if (
+    value.execution_id !== ROUTING_EXECUTION_ID
+    || !["LOCAL_LOOPBACK", "GCP_PRIVATE", "LAMBDA_MANUAL_HOST"].includes(value.mode as string)
+    || !/^[0-9a-f]{40}$/.test(requiredString(value, "source_commit", context))
+    || value.trial_count !== 3
+    || value.request_denominator_per_trial !== 6
+    || value.terminal_denominator !== 18
+    || value.verified_by_offline_replay !== true
+  ) {
+    throw protocolError(`${context} is outside the bounded routing-execution contract`);
+  }
+  executionDigest(value.retained_digest, `${context}.retained_digest`);
+  if (!isRecord(value.model)) throw protocolError(`${context}.model must be an object`);
+  assertRoutingKeys(value.model, ["model_id", "model_revision", "tokenizer_revision"], `${context}.model`);
+  if (
+    value.model.model_id !== "Qwen/Qwen3-8B"
+    || !/^[0-9a-f]{40}$/.test(requiredString(value.model, "model_revision", `${context}.model`))
+    || value.model.tokenizer_revision !== value.model.model_revision
+  ) {
+    throw protocolError(`${context}.model is not the pinned Qwen3 identity`);
+  }
+  if (!isRecord(value.runtime)) throw protocolError(`${context}.runtime must be an object`);
+  assertRoutingKeys(value.runtime, ["runtime_name", "runtime_version", "adapter_id", "adapter_version"], `${context}.runtime`);
+  if (
+    value.runtime.runtime_name !== "vllm"
+    || requiredString(value.runtime, "runtime_version", `${context}.runtime`) !== "0.26.0"
+    || !requiredString(value.runtime, "adapter_id", `${context}.runtime`)
+    || !requiredString(value.runtime, "adapter_version", `${context}.runtime`)
+  ) {
+    throw protocolError(`${context}.runtime is unsupported`);
+  }
+  if (!isRecord(value.topology)) throw protocolError(`${context}.topology must be an object`);
+  assertRoutingKeys(value.topology, [
+    "accelerator_model", "accelerator_count", "runner_separate_from_serving",
+    "serving_engine_count", "one_engine_per_endpoint", "declared_provider",
+    "declared_provisioning", "identity_assertion", "lifecycle_protection",
+  ], `${context}.topology`);
+  const acceleratorModel = requiredString(value.topology, "accelerator_model", `${context}.topology`);
+  if (
+    requiredInteger(value.topology, "accelerator_count", `${context}.topology`) < 0
+    || value.topology.runner_separate_from_serving !== true
+    || value.topology.serving_engine_count !== 2
+    || value.topology.one_engine_per_endpoint !== true
+    || !acceleratorModel
+  ) {
+    throw protocolError(`${context}.topology disagrees with the two-engine boundary`);
+  }
+  const manual = value.mode === "LAMBDA_MANUAL_HOST";
+  if (
+    (manual && (
+      value.topology.accelerator_model !== "NVIDIA A100-PCIE-40GB"
+      || value.topology.accelerator_count !== 2
+      || value.topology.declared_provider !== "LAMBDA"
+      || value.topology.declared_provisioning !== "OPERATOR_SUPPLIED_VM"
+      || value.topology.identity_assertion !== "OPERATOR_DECLARED_NOT_OBSERVED"
+      || value.topology.lifecycle_protection !== "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY"
+    ))
+    || (!manual && (
+      value.topology.declared_provider !== null
+      || value.topology.declared_provisioning !== null
+      || value.topology.identity_assertion !== "NOT_RETAINED_BY_V1"
+      || value.topology.lifecycle_protection !== "NOT_RETAINED_BY_V1"
+    ))
+  ) {
+    throw protocolError(`${context}.topology provider claim is unsupported`);
+  }
+  const policies = stringArray(value, "policy_ids", context);
+  if (
+    policies.length !== ROUTING_POLICY_IDS.length
+    || policies.some((policy, index) => policy !== ROUTING_POLICY_IDS[index])
+  ) {
+    throw protocolError(`${context}.policy_ids are not the fixed R1 order`);
+  }
+  return value as unknown as RoutingExecutionSummary;
+}
+
+function parseRejectedExecution(value: unknown, context: string): RejectedRoutingExecution {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, ["entry", "status", "code", "message"], context);
+  const message = requiredString(value, "message", context);
+  if (
+    value.entry !== "<configured-root>"
+    || value.status !== "REJECTED"
+    || !["CONFIGURATION_INVALID", "UNSAFE_ENTRY", "VERIFICATION_FAILED"].includes(value.code as string)
+    || message.length < 1
+    || message.length > 160
+  ) {
+    throw protocolError(`${context} is not a bounded routing-execution rejection`);
+  }
+  return value as unknown as RejectedRoutingExecution;
+}
+
+function parseRoutingExecutionPage(payload: unknown): RoutingExecutionPageResponse {
+  if (!isRecord(payload)) throw protocolError("the routing-execution index is not an object");
+  assertRoutingKeys(payload, ["projection_version", "routing_executions", "rejected", "page"], "routing-execution index");
+  if (
+    payload.projection_version !== ROUTING_EXECUTION_PROJECTION
+    || !Array.isArray(payload.routing_executions)
+    || !Array.isArray(payload.rejected)
+    || payload.routing_executions.length + payload.rejected.length > 1
+  ) {
+    throw protocolError("routing-execution index is outside the one-root boundary");
+  }
+  payload.routing_executions.forEach((entry, index) => parseExecutionSummary(entry, `routing_executions[${index}]`));
+  payload.rejected.forEach((entry, index) => parseRejectedExecution(entry, `rejected[${index}]`));
+  if (!isRecord(payload.page)) throw protocolError("routing-execution page metadata is missing");
+  assertRoutingKeys(payload.page, ["limit", "returned", "total", "has_more", "next_cursor"], "routing-execution page");
+  if (
+    requiredInteger(payload.page, "limit", "routing-execution page", 1) > ROUTING_EXECUTION_PAGE_LIMIT
+    || requiredInteger(payload.page, "returned", "routing-execution page") !== payload.routing_executions.length + payload.rejected.length
+    || requiredInteger(payload.page, "total", "routing-execution page") !== payload.routing_executions.length + payload.rejected.length
+    || payload.page.has_more !== false
+    || payload.page.next_cursor !== null
+  ) {
+    throw protocolError("routing-execution page metadata is invalid");
+  }
+  return payload as unknown as RoutingExecutionPageResponse;
+}
+
+function parseExecutionTelemetry(
+  value: unknown,
+  context: string,
+  expectedSignal: "HEALTH" | "LOAD" | "GPU_DCGM" | "KV_CACHE",
+  expectedEndpoint: RoutingEndpointId,
+  expectedDecisionAt: number,
+): RoutingExecutionTelemetryView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "signal", "observer_id", "endpoint_id", "epoch", "sampled_at_monotonic_ns",
+    "decision_at_monotonic_ns", "age_ns", "freshness_bound_ns", "state",
+    "admissibility", "value", "source",
+  ], context);
+  const sampledAt = requiredInteger(value, "sampled_at_monotonic_ns", context);
+  const decisionAt = requiredInteger(value, "decision_at_monotonic_ns", context);
+  const age = requiredInteger(value, "age_ns", context);
+  const bound = requiredInteger(value, "freshness_bound_ns", context);
+  if (
+    value.signal !== expectedSignal
+    || routingEndpointId(value.endpoint_id, `${context}.endpoint_id`) !== expectedEndpoint
+    || !requiredString(value, "observer_id", context)
+    || requiredInteger(value, "epoch", context) < 0
+    || decisionAt !== expectedDecisionAt
+    || decisionAt < sampledAt
+    || age !== decisionAt - sampledAt
+    || !["AVAILABLE", "STALE", "UNAVAILABLE"].includes(value.state as string)
+    || !["ADMISSIBLE", "INADMISSIBLE"].includes(value.admissibility as string)
+    || !["HTTP_HEALTH", "VLLM_METRICS", "UNAVAILABLE_CAPABILITY"].includes(value.source as string)
+  ) {
+    throw protocolError(`${context} is not a complete bound telemetry receipt`);
+  }
+  if (value.state === "AVAILABLE" && (value.admissibility !== "ADMISSIBLE" || age > bound)) {
+    throw protocolError(`${context} available telemetry freshness disagrees`);
+  }
+  if (value.state === "STALE" && (value.admissibility !== "INADMISSIBLE" || age <= bound)) {
+    throw protocolError(`${context} stale telemetry freshness disagrees`);
+  }
+  if (
+    value.state === "UNAVAILABLE"
+    && (value.admissibility !== "INADMISSIBLE" || value.value !== "UNAVAILABLE")
+  ) {
+    throw protocolError(`${context} unavailable telemetry was fabricated`);
+  }
+  const expectedSource = expectedSignal === "HEALTH"
+    ? "HTTP_HEALTH"
+    : expectedSignal === "LOAD"
+      ? "VLLM_METRICS"
+      : "UNAVAILABLE_CAPABILITY";
+  if (value.source !== expectedSource) {
+    throw protocolError(`${context} telemetry source is not bound to its signal`);
+  }
+  if (
+    typeof value.value !== "number"
+    && value.value !== "HEALTHY"
+    && value.value !== "UNAVAILABLE"
+  ) {
+    throw protocolError(`${context}.value is unsupported`);
+  }
+  if (
+    typeof value.value === "number"
+    && (!Number.isSafeInteger(value.value) || value.value < 0)
+  ) {
+    throw protocolError(`${context}.value is not a precise non-negative integer`);
+  }
+  return value as unknown as RoutingExecutionTelemetryView;
+}
+
+function parseExecutionCandidate(
+  value: unknown,
+  context: string,
+  expectedEndpoint: RoutingEndpointId,
+  decisionAt: number,
+): RoutingExecutionCandidateView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, ["endpoint_id", "eligible", "health", "load", "gpu_dcgm", "kv_cache"], context);
+  if (routingEndpointId(value.endpoint_id, `${context}.endpoint_id`) !== expectedEndpoint || typeof value.eligible !== "boolean") {
+    throw protocolError(`${context} candidate identity is invalid`);
+  }
+  parseExecutionTelemetry(value.health, `${context}.health`, "HEALTH", expectedEndpoint, decisionAt);
+  parseExecutionTelemetry(value.load, `${context}.load`, "LOAD", expectedEndpoint, decisionAt);
+  parseExecutionTelemetry(value.gpu_dcgm, `${context}.gpu_dcgm`, "GPU_DCGM", expectedEndpoint, decisionAt);
+  parseExecutionTelemetry(value.kv_cache, `${context}.kv_cache`, "KV_CACHE", expectedEndpoint, decisionAt);
+  return value as unknown as RoutingExecutionCandidateView;
+}
+
+function parseExecutionTerminal(
+  value: unknown,
+  context: string,
+  decisionId: string,
+  selectedEndpoint: RoutingEndpointId | null,
+): RoutingExecutionTerminalView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, [
+    "terminal_outcome_id", "decision_id", "selected_endpoint_id", "status", "reason",
+    "started_at_monotonic_ns", "ended_at_monotonic_ns", "http_status", "attempt_count",
+  ], context);
+  const status = value.status;
+  const started = requiredInteger(value, "started_at_monotonic_ns", context);
+  const ended = requiredInteger(value, "ended_at_monotonic_ns", context);
+  const httpStatus = nullableInteger(value, "http_status", context);
+  if (
+    !requiredString(value, "terminal_outcome_id", context)
+    || value.decision_id !== decisionId
+    || value.selected_endpoint_id !== selectedEndpoint
+    || !ROUTING_TERMINAL_STATUSES.includes(status as typeof ROUTING_TERMINAL_STATUSES[number])
+    || !requiredString(value, "reason", context)
+    || ended < started
+    || (value.attempt_count !== 0 && value.attempt_count !== 1)
+    || (status === "NO_SAFE_ROUTE" && (selectedEndpoint !== null || value.attempt_count !== 0 || httpStatus !== null))
+    || (status !== "NO_SAFE_ROUTE" && selectedEndpoint === null)
+    || (value.attempt_count === 0 && status !== "CANCELLED" && status !== "NO_SAFE_ROUTE")
+    || (value.attempt_count === 0 && httpStatus !== null)
+  ) {
+    throw protocolError(`${context} terminal closure is invalid`);
+  }
+  return value as unknown as RoutingExecutionTerminalView;
+}
+
+function parseExecutionTrial(
+  value: unknown,
+  context: string,
+  expectedPolicy: string,
+): RoutingExecutionTrialView {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  assertRoutingKeys(value, ["trial_id", "policy_id", "reset", "fault", "requests", "terminal_population", "terminal_population_total"], context);
+  if (value.policy_id !== expectedPolicy || !requiredString(value, "trial_id", context)) {
+    throw protocolError(`${context} policy trial identity is invalid`);
+  }
+  if (!isRecord(value.reset)) throw protocolError(`${context}.reset must be an object`);
+  assertRoutingKeys(value.reset, [
+    "reset_at_monotonic_ns", "observer_epochs", "runner_connection_state_cleared",
+    "runner_telemetry_state_cleared", "endpoint_engine_reset_assertion", "endpoint_runtime_identities",
+  ], `${context}.reset`);
+  if (
+    requiredInteger(value.reset, "reset_at_monotonic_ns", `${context}.reset`) < 0
+    || value.reset.runner_connection_state_cleared !== true
+    || value.reset.runner_telemetry_state_cleared !== true
+    || value.reset.endpoint_engine_reset_assertion !== "NOT_ASSERTED_SEPARATE_SERVING_ENGINE"
+    || !Array.isArray(value.reset.observer_epochs)
+    || value.reset.observer_epochs.length !== 4
+    || !Array.isArray(value.reset.endpoint_runtime_identities)
+    || value.reset.endpoint_runtime_identities.length !== 2
+  ) {
+    throw protocolError(`${context}.reset is not the bounded runner-only reset receipt`);
+  }
+  const signals = ["GPU_DCGM", "HEALTH", "KV_CACHE", "LOAD"] as const;
+  value.reset.observer_epochs.forEach((entry, index) => {
+    if (!isRecord(entry) || entry.signal !== signals[index] || requiredInteger(entry, "epoch", `${context}.reset.observer_epochs[${index}]`) < 0) {
+      throw protocolError(`${context}.reset observer epoch inventory is invalid`);
+    }
+  });
+  parseExecutionEndpoint(value.reset.endpoint_runtime_identities[0], `${context}.reset.endpoint_runtime_identities[0]`, "endpoint-a");
+  parseExecutionEndpoint(value.reset.endpoint_runtime_identities[1], `${context}.reset.endpoint_runtime_identities[1]`, "endpoint-b");
+  if (!isRecord(value.fault)) throw protocolError(`${context}.fault must be an object`);
+  assertRoutingKeys(value.fault, ["fault_id", "activated_at_sequence_index", "activated_at_monotonic_ns", "load_collection_paused", "health_collection_continues"], `${context}.fault`);
+  if (
+    value.fault.fault_id !== "stale-load-fresh-health-v1"
+    || value.fault.activated_at_sequence_index !== 2
+    || requiredInteger(value.fault, "activated_at_monotonic_ns", `${context}.fault`) < 0
+    || value.fault.load_collection_paused !== true
+    || value.fault.health_collection_continues !== true
+  ) {
+    throw protocolError(`${context}.fault is outside the stale-load/fresh-health boundary`);
+  }
+  if (!Array.isArray(value.requests) || value.requests.length !== 6) {
+    throw protocolError(`${context}.requests do not close the six-request trace`);
+  }
+  const requests = value.requests.map((request, index) => {
+    const requestContext = `${context}.requests[${index}]`;
+    if (!isRecord(request)) throw protocolError(`${requestContext} must be an object`);
+    assertRoutingKeys(request, [
+      "request_id", "sequence_index", "decision_id", "decision_at_monotonic_ns", "candidates",
+      "selected_endpoint_id", "claims_used", "claims_permitted_stale", "claims_discarded",
+      "fallback_reason", "terminal",
+    ], requestContext);
+    const decisionId = requiredString(request, "decision_id", requestContext);
+    const selected = request.selected_endpoint_id === null
+      ? null
+      : routingEndpointId(request.selected_endpoint_id, `${requestContext}.selected_endpoint_id`);
+    const decisionAt = requiredInteger(request, "decision_at_monotonic_ns", requestContext);
+    if (
+      request.request_id !== `request-${String(index).padStart(3, "0")}`
+      || request.sequence_index !== index
+      || !decisionId
+      || !Array.isArray(request.candidates)
+      || request.candidates.length !== 2
+      || !["NONE", "REQUIRED_LOAD_STALE", "REQUIRED_LOAD_UNAVAILABLE", "STALE_LOAD_FAIL_OPEN", "HEALTH_ONLY_TIE_BREAK", "HEALTH_NOT_ADMISSIBLE"].includes(request.fallback_reason as string)
+    ) {
+      throw protocolError(`${requestContext} is outside the fixed request trace`);
+    }
+    parseExecutionCandidate(request.candidates[0], `${requestContext}.candidates[0]`, "endpoint-a", decisionAt);
+    parseExecutionCandidate(request.candidates[1], `${requestContext}.candidates[1]`, "endpoint-b", decisionAt);
+    for (const key of ["claims_used", "claims_permitted_stale", "claims_discarded"] as const) {
+      const claims = stringArray(request, key, requestContext);
+      if (claims.length > 3 || new Set(claims).size !== claims.length) {
+        throw protocolError(`${requestContext}.${key} exceeds its bounded claim inventory`);
+      }
+    }
+    parseExecutionTerminal(request.terminal, `${requestContext}.terminal`, decisionId, selected);
+    return request as unknown as RoutingExecutionRequestView;
+  });
+  if (!Array.isArray(value.terminal_population) || value.terminal_population.length !== ROUTING_TERMINAL_STATUSES.length) {
+    throw protocolError(`${context}.terminal_population is incomplete`);
+  }
+  let total = 0;
+  value.terminal_population.forEach((entry, index) => {
+    if (!isRecord(entry) || entry.status !== ROUTING_TERMINAL_STATUSES[index]) {
+      throw protocolError(`${context}.terminal_population status order is invalid`);
+    }
+    total += requiredInteger(entry, "count", `${context}.terminal_population[${index}]`);
+  });
+  if (value.terminal_population_total !== 6 || total !== 6 || new Set(requests.map((request) => request.decision_id)).size !== 6) {
+    throw protocolError(`${context}.terminal population or decision closure is invalid`);
+  }
+  return value as unknown as RoutingExecutionTrialView;
+}
+
+function parseRoutingExecutionDetail(payload: unknown): RoutingExecutionDetail {
+  if (!isRecord(payload)) throw protocolError("the routing-execution detail is not an object");
+  assertRoutingKeys(payload, ["projection_version", "summary", "evidence", "campaign", "trials", "interpretation_boundary"], "routing-execution detail");
+  if (payload.projection_version !== ROUTING_EXECUTION_PROJECTION || payload.interpretation_boundary !== "MEASUREMENT_EVIDENCE_ONLY") {
+    throw protocolError("routing-execution detail projection or boundary is unsupported");
+  }
+  const summary = parseExecutionSummary(payload.summary, "routing-execution summary");
+  if (!isRecord(payload.evidence)) throw protocolError("routing-execution evidence must be an object");
+  assertRoutingKeys(payload.evidence, ["runner_image", "serving_image", "endpoints", "input_transfer_receipt_sha256", "input_transfer"], "routing-execution evidence");
+  for (const key of ["runner_image", "serving_image"] as const) {
+    const reference = requiredString(payload.evidence, key, "routing-execution evidence");
+    if (!/^[-a-z0-9./]+@sha256:[0-9a-f]{64}$/.test(reference)) {
+      throw protocolError(`routing-execution evidence.${key} must be an immutable OCI reference`);
+    }
+  }
+  if (!Array.isArray(payload.evidence.endpoints) || payload.evidence.endpoints.length !== 2) {
+    throw protocolError("routing-execution evidence endpoint inventory is invalid");
+  }
+  parseExecutionEndpoint(payload.evidence.endpoints[0], "routing-execution evidence.endpoints[0]", "endpoint-a");
+  parseExecutionEndpoint(payload.evidence.endpoints[1], "routing-execution evidence.endpoints[1]", "endpoint-b");
+  executionDigest(payload.evidence.input_transfer_receipt_sha256, "routing-execution evidence.input_transfer_receipt_sha256");
+  if (!isRecord(payload.evidence.input_transfer)) throw protocolError("routing-execution input transfer must be an object");
+  assertRoutingKeys(payload.evidence.input_transfer, ["config_sha256", "selected_workload_sha256", "workload_size_bytes", "declared_input_transfer_sha256", "verified_before_transport"], "routing-execution input transfer");
+  for (const key of ["config_sha256", "selected_workload_sha256", "declared_input_transfer_sha256"] as const) executionDigest(payload.evidence.input_transfer[key], `routing-execution input transfer.${key}`);
+  if (requiredInteger(payload.evidence.input_transfer, "workload_size_bytes", "routing-execution input transfer", 1) < 1 || payload.evidence.input_transfer.verified_before_transport !== true) {
+    throw protocolError("routing-execution input transfer is not verified before transport");
+  }
+  if (!isRecord(payload.campaign)) throw protocolError("routing-execution campaign must be an object");
+  assertRoutingKeys(payload.campaign, ["routing_inputs", "workload", "telemetry", "fault"], "routing-execution campaign");
+  if (!isRecord(payload.campaign.routing_inputs) || !isRecord(payload.campaign.workload) || !isRecord(payload.campaign.telemetry) || !isRecord(payload.campaign.fault)) {
+    throw protocolError("routing-execution campaign records are invalid");
+  }
+  assertRoutingKeys(payload.campaign.routing_inputs, ["campaign_id", "plan_sha256", "trace_sha256", "fault_schedule_sha256", "trial_plan_sha256", "policies"], "routing-execution routing inputs");
+  if (payload.campaign.routing_inputs.campaign_id !== "routing-campaign-v1") throw protocolError("routing-execution campaign identity is invalid");
+  for (const key of ["plan_sha256", "trace_sha256", "fault_schedule_sha256", "trial_plan_sha256"] as const) executionDigest(payload.campaign.routing_inputs[key], `routing-execution routing inputs.${key}`);
+  const policies = stringArray(payload.campaign.routing_inputs, "policies", "routing-execution routing inputs");
+  if (policies.length !== 3 || policies.some((policy, index) => policy !== summary.policy_ids[index])) throw protocolError("routing-execution policy binding is invalid");
+  assertRoutingKeys(payload.campaign.workload, ["workload_id", "workload_sha256", "selected_workload_sha256", "selected_request_ids", "request_denominator"], "routing-execution workload");
+  for (const key of ["workload_id"] as const) requiredString(payload.campaign.workload, key, "routing-execution workload");
+  for (const key of ["workload_sha256", "selected_workload_sha256"] as const) executionDigest(payload.campaign.workload[key], `routing-execution workload.${key}`);
+  const selectedRequestIds = stringArray(payload.campaign.workload, "selected_request_ids", "routing-execution workload");
+  if (selectedRequestIds.length !== 6 || selectedRequestIds.some((value, index) => value !== `request-${String(index).padStart(3, "0")}`) || payload.campaign.workload.request_denominator !== 6) throw protocolError("routing-execution workload trace is invalid");
+  assertRoutingKeys(payload.campaign.telemetry, ["clock_domain", "health_freshness_ms", "load_freshness_ms", "gpu_freshness_ms", "load_metric_name"], "routing-execution telemetry");
+  if (payload.campaign.telemetry.clock_domain !== "RUNNER_MONOTONIC_NS" || payload.campaign.telemetry.health_freshness_ms !== 5 || payload.campaign.telemetry.load_freshness_ms !== 5 || payload.campaign.telemetry.gpu_freshness_ms !== 5 || payload.campaign.telemetry.load_metric_name !== "vllm:num_requests_running") throw protocolError("routing-execution telemetry contract is invalid");
+  assertRoutingKeys(payload.campaign.fault, ["fault_id", "load_collection_pause_after_sequence_index", "health_collection_continues", "inter_request_interval_ms"], "routing-execution fault");
+  if (payload.campaign.fault.fault_id !== "stale-load-fresh-health-v1" || payload.campaign.fault.load_collection_pause_after_sequence_index !== 1 || payload.campaign.fault.health_collection_continues !== true || requiredInteger(payload.campaign.fault, "inter_request_interval_ms", "routing-execution fault", 1) < 1) throw protocolError("routing-execution fault contract is invalid");
+  if (!Array.isArray(payload.trials) || payload.trials.length !== 3) throw protocolError("routing-execution trial inventory is invalid");
+  const trials = payload.trials.map((trial, index) => parseExecutionTrial(trial, `routing-execution trials[${index}]`, summary.policy_ids[index]!));
+  if (new Set(trials.map((trial) => trial.trial_id)).size !== 3) throw protocolError("routing-execution trials repeat an identity");
+  return payload as unknown as RoutingExecutionDetail;
+}
+
 async function fetchRoutingQualificationEvidence(
   qualificationId: string,
   expectedDigest: string,
@@ -2293,6 +2745,30 @@ export const api = {
     );
     if (detail.summary.campaign_id !== campaignId) {
       throw protocolError("routing-campaign detail identity disagrees with its requested URL");
+    }
+    return detail;
+  },
+
+  async listRoutingExecutions(signal?: AbortSignal): Promise<RoutingExecutionIndex> {
+    const page = parseRoutingExecutionPage(
+      await fetchJson(`/routing-executions?limit=${ROUTING_EXECUTION_PAGE_LIMIT}`, signal),
+    );
+    return {
+      projection_version: ROUTING_EXECUTION_PROJECTION,
+      routing_executions: page.routing_executions,
+      rejected: page.rejected,
+    };
+  },
+
+  async getRoutingExecution(
+    executionId: string,
+    signal?: AbortSignal,
+  ): Promise<RoutingExecutionDetail> {
+    const detail = parseRoutingExecutionDetail(
+      await fetchJson(`/routing-executions/${encodeURIComponent(executionId)}`, signal),
+    );
+    if (detail.summary.execution_id !== executionId) {
+      throw protocolError("routing-execution detail identity disagrees with its requested URL");
     }
     return detail;
   },

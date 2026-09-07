@@ -81,6 +81,10 @@ class DashboardRoutingQualificationNotFound(DashboardError):
     """A routing qualification was not present in the verified dashboard index."""
 
 
+class DashboardRoutingExecutionNotFound(DashboardError):
+    """A routing execution was not present in the verified dashboard index."""
+
+
 class DashboardPaginationError(DashboardError):
     """A dashboard collection cursor or page bound was invalid."""
 
