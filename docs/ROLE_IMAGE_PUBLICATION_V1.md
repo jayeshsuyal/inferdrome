@@ -1,9 +1,14 @@
 # Fixed role-image publication preparation v1
 
-Status: **local preparation only.** This repository currently has no checked-in
-registry-publishing workflow, no published role-image receipt, and no claim
-that a serving image, runner image, boot image, or model snapshot exists in an
-external registry or provider environment.
+Status: **manual publication workflow available; no publication asserted.**
+`.github/workflows/role-image-publish.yml` is an opt-in `workflow_dispatch`
+workflow for exactly the two fixed GHCR repositories below. It has no
+push/pull-request/tag/schedule trigger, requires the dispatch confirmation and
+an exact checked-out source SHA, and grants `packages: write` only to its one
+publication job. Checking in that workflow does not dispatch it,
+publish an image, create a receipt, or claim that a serving image, runner
+image, boot image, or model snapshot exists in an external registry or
+provider environment.
 
 The narrow preparation contract keeps a future manual operation inspectable
 without granting publication authority to normal CI, a pull request, or local
@@ -17,10 +22,10 @@ fixed role + source identity
 pure local plan -> normalized local inspection
           |
           v
-separate exact approval for any registry-capable workflow
+owner-approved, manually confirmed build + CPU-only smoke
           |
           v
-future returned repository@sha256 receipt -> paired-digest validation
+returned repository@sha256 outputs -> paired-digest validation
 ```
 
 ## Fixed roles and identities
@@ -72,17 +77,62 @@ an externally observed registry receipt after a successful push and returned
 registry digest. `validate-digest-pair` then requires two local validation
 records to share one source identity and have different content digests.
 
-## Required future approval boundary
+## Manual publication boundary
 
-Adding or dispatching a GitHub workflow that can authenticate to GHCR, build
-images, or write packages is a distinct external-publication capability. It
-requires an exact owner/user authorization covering the source commit, the two
-fixed repositories, manual confirmation/protected environment, use of the
-ephemeral GitHub token over stdin only, image/runtime/model inputs, and the
-expected receipt handling. That future operation must remain manual-only and
-must run both non-GPU adapter `--help` smokes before either image is pushed.
+The checked-in workflow is a *capability*, not dispatch authorization. Before
+an owner dispatches it, the owner must separately approve the exact source
+commit and the two fixed repositories. The operator dispatches the reviewed
+`main` branch ref that resolves to that approved commit and provides the exact
+SHA as the `source_commit` input. The job rejects anything other than a full
+lowercase 40-character SHA equal to both `GITHUB_SHA` and the checked-out
+`HEAD`. A GitHub Actions workflow-dispatch ref is a branch or tag name, not a
+raw commit SHA; this workflow requires `main` and never needs a release tag.
 
-Until that exact authorization is granted and a genuine returned digest is
-recorded, deployment and campaign inputs remain unresolved. A local plan,
-label check, tag, Docker image ID, or build log is never a registry identity,
-serving proof, provider fact, or evidence-package receipt.
+The workflow's `role-image-publication` environment reference is only optional
+defense in depth when an administrator has configured it. This document does
+not claim it independently enforces required reviewers for a private personal
+repository. The explicit owner and commit-bound dispatch approval remains the
+authorization boundary.
+
+**Current status:** the checked-in environment reference is an unresolved
+operator/security approval gate. This repository does not claim that the
+environment is configured, that it has reviewers, or that a read-only absence
+response proves dispatch eligibility. A manual dispatch remains prohibited
+until an owner separately confirms the relevant GitHub-side policy and the
+commit-bound approval.
+
+The job builds both fixed `linux/amd64` roles from the reviewed release wrapper
+with immutable Dockerfile base inputs, validates their normalized identity
+labels, and runs a no-network, read-only, CPU-only Python/import plus adapter
+`--help` smoke *before either push*. Only then does the publication job receive
+its ephemeral job-scoped `GITHUB_TOKEN` through stdin for GHCR login. It pushes
+only the two fixed repositories, requires a returned
+`repository@sha256:<digest>` for each, rejects a digest collapse, and exposes
+the two immutable references plus the canonical paired-record SHA-256 as job
+outputs and in the job summary. The engine role probes only the private-engine
+adapter `--help`; the CPU runner/observer probes only its separate runner
+adapter `--help`.
+
+The workflow cannot make a pair of pushes atomic: a later registry failure may
+leave an earlier role published, in which case it emits no validated pair
+output and the owner must inspect or clean up under a separate authorization.
+The CPU smoke proves only the packaged Inferdrome Python/adapter import path;
+it neither starts vLLM nor proves GPU, serving, model, registry, provider, or
+campaign readiness.
+
+After both returned digests have passed paired validation, the workflow retains
+only the validator-produced canonical `digest-pair.json` as a pinned-action
+artifact alongside its SHA-256 job output. It does not retain Docker
+configuration, login material, raw Docker inspection output, tokens,
+credentials, plans, or labels. The SHA-256 is calculated over the exact
+retained file bytes, including its canonical final newline; it is not a
+substitute for inspecting the pair record itself.
+
+Until a genuine manual run returns and records both distinct digests,
+deployment and campaign inputs remain unresolved. A local plan, label check,
+tag, Docker image ID, or build log is never a registry identity, serving proof,
+provider fact, or evidence-package receipt.
+
+For the required source/image/model/rehearsal/authorization sequence and the
+minimal separately approved artifact-operation request, see
+[`PRE_GPU_READY_CHECKLIST_V1.md`](PRE_GPU_READY_CHECKLIST_V1.md).

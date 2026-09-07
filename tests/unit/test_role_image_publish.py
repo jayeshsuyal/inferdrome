@@ -112,6 +112,7 @@ def test_registry_digest_binding_requires_the_fixed_repository_and_digest() -> N
     assert receipt["validation_scope"] == "LOCAL_FORMAT_AND_ROLE_BINDING_ONLY"
     assert receipt["immutable_image"] == _image(plan, "b")
     for malformed in (
+        "sha256:" + "a" * 64,
         "ghcr.io/jayeshsuyal/inferdrome-private-engine:mutable-tag",
         "ghcr.io/jayeshsuyal/other@sha256:" + "c" * 64,
         _image(plan, "B"),
@@ -140,6 +141,21 @@ def test_digest_pair_requires_two_distinct_role_content_digests() -> None:
     )
     with pytest.raises(publication.RoleImagePublicationError, match="content digests"):
         publication.validate_publication_pair(engine, collapsed)
+
+
+def test_digest_pair_rejects_a_bare_digest_with_a_controlled_error() -> None:
+    engine_plan = _plan("private-engine")
+    runner_plan = _plan("cpu-runner-observer")
+    engine = publication.record_registry_digest(
+        engine_plan, immutable_image=_image(engine_plan, "d")
+    )
+    runner = publication.record_registry_digest(
+        runner_plan, immutable_image=_image(runner_plan, "e")
+    )
+    malformed_engine = {**engine, "immutable_image": "sha256:" + "d" * 64}
+
+    with pytest.raises(publication.RoleImagePublicationError):
+        publication.validate_publication_pair(malformed_engine, runner)
 
 
 def test_cli_is_canonical_create_no_replace_and_never_needs_docker(

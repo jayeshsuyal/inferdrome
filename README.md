@@ -389,6 +389,7 @@ provider-neutral.
 - [Deployment receipt v1](docs/DEPLOYMENT_RECEIPT_V1.md)
 - [Reproducible runner image v1](docs/RUNNER_IMAGE_V1.md)
 - [Fixed role-image publication preparation v1](docs/ROLE_IMAGE_PUBLICATION_V1.md)
+- [Pre-GPU readiness checklist v1](docs/PRE_GPU_READY_CHECKLIST_V1.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [v0.1 definition of done](docs/V0_1_DEFINITION_OF_DONE.md)
 - [v0.1 release checklist](docs/V0_1_RELEASE_CHECKLIST.md)

@@ -228,8 +228,10 @@ def record_registry_digest(
     image = _required_string(immutable_image, field="immutable image")
     repository = _required_string(plan["repository"], field="plan repository")
     prefix = f"{repository}@"
-    digest = image.removeprefix(prefix)
-    if image == prefix or _DIGEST.fullmatch(digest) is None:
+    if not image.startswith(prefix):
+        _fail("registry digest does not match the fixed role repository")
+    digest = image[len(prefix) :]
+    if _DIGEST.fullmatch(digest) is None:
         _fail("registry digest does not match the fixed role repository")
     return {
         "schema_version": "inferdrome.role-image-digest-binding.v1",

@@ -1,0 +1,253 @@
+name: Publish fixed role images
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact lowercase 40-character source commit selected for this manual run.
+        required: true
+        type: string
+      confirmation:
+        description: Explicit confirmation for the two fixed GHCR role repositories.
+        required: true
+        type: choice
+        options:
+          - PUBLISH_FIXED_ROLE_IMAGES
+
+# The workflow itself has no ambient write scope. Only the one intentionally
+# scoped, manually dispatched job receives the ephemeral package token needed
+# for GHCR.
+permissions: {}
+
+concurrency:
+  group: inferdrome-fixed-role-image-publication-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish-fixed-role-images:
+    # Any protection configured on this named environment is additional
+    # administrator defense in depth, not an independent review guarantee.
+    environment: role-image-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      source_commit: ${{ steps.publish.outputs.source_commit }}
+      private_engine_image: ${{ steps.publish.outputs.private_engine_image }}
+      cpu_runner_observer_image: ${{ steps.publish.outputs.cpu_runner_observer_image }}
+      publication_pair_sha256: ${{ steps.publish.outputs.publication_pair_sha256 }}
+    steps:
+      - name: Check out the exact selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate manual confirmation and exact source identity
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          PUBLISH_CONFIRMATION: ${{ inputs.confirmation }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$PUBLISH_CONFIRMATION" == "PUBLISH_FIXED_ROLE_IMAGES" ]]
+          [[ "$GITHUB_REPOSITORY" == "jayeshsuyal/inferdrome" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          [[ -z "$(git status --porcelain)" ]]
+
+      - name: Build and CPU-smoke both fixed roles before any push
+        id: build
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          work_root="$RUNNER_TEMP/inferdrome-role-image-publication"
+          mkdir -p -- "$work_root"
+
+          normalize_labels() {
+            local plan_path="$1"
+            local observed_path="$2"
+            local normalized_path="$3"
+            python - "$plan_path" "$observed_path" "$normalized_path" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          observed = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          required = plan["required_labels"]
+          if not isinstance(observed, dict) or not all(
+              isinstance(key, str) and isinstance(value, str)
+              for key, value in observed.items()
+          ):
+              raise SystemExit("image labels are not a string mapping")
+          normalized = {key: observed.get(key) for key in required}
+          if normalized != required:
+              raise SystemExit("image labels do not contain the fixed role identity")
+          Path(sys.argv[3]).write_text(
+              json.dumps(normalized, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          }
+
+          run_cpu_smoke() {
+            local tag="$1"
+            local observed_version="$2"
+            local adapter_module="$3"
+            [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$tag")" == "linux/amd64" ]]
+            docker run --rm --network none --read-only --user 2000:0 \
+              --cap-drop=ALL --security-opt=no-new-privileges \
+              --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+              --tmpfs /home/vllm:rw,noexec,nosuid,size=64m \
+              --entrypoint /opt/inferdrome-runtime/bin/python "$tag" \
+              -c "from inferdrome import __version__; assert __version__ == '$observed_version'"
+            docker run --rm --network none --read-only --user 2000:0 \
+              --cap-drop=ALL --security-opt=no-new-privileges \
+              --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+              --tmpfs /home/vllm:rw,noexec,nosuid,size=64m \
+              --entrypoint /opt/inferdrome-runtime/bin/python "$tag" \
+              -m "$adapter_module" --help >/dev/null
+          }
+
+          for role in private-engine cpu-runner-observer; do
+            case "$role" in
+              private-engine)
+                repository="ghcr.io/jayeshsuyal/inferdrome-private-engine"
+                adapter_module="inferdrome.deployment.gcp_private_engine_adapter"
+                ;;
+              cpu-runner-observer)
+                repository="ghcr.io/jayeshsuyal/inferdrome-cpu-runner-observer"
+                adapter_module="inferdrome.deployment.gcp_private_runner_adapter"
+                ;;
+              *) exit 1 ;;
+            esac
+            tag="$repository:publication-${SOURCE_COMMIT:0:12}-${GITHUB_RUN_ID}"
+            plan="$work_root/$role.plan.json"
+            full_labels="$work_root/$role.full-labels.json"
+            labels="$work_root/$role.labels.json"
+            printf '%s\n' "$repository" > "$work_root/$role.repository"
+            printf '%s\n' "$tag" > "$work_root/$role.tag"
+            python scripts/role_image_publish.py plan \
+              --role "$role" \
+              --source-commit "$SOURCE_COMMIT" \
+              --version "$version" \
+              --workflow-run-id "$GITHUB_RUN_ID" \
+              --output "$plan"
+            python scripts/build_runner_image.py \
+              --flavor release \
+              --platform linux/amd64 \
+              --image-kind vllm-benchmark-runner \
+              --runtime-role "$role" \
+              --tag "$tag"
+            docker image inspect --format '{{json .Config.Labels}}' "$tag" > "$full_labels"
+            normalize_labels "$plan" "$full_labels" "$labels"
+            python scripts/role_image_publish.py verify-local-inspection \
+              --plan "$plan" \
+              --labels-json "$labels" \
+              --platform "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$tag")" \
+              --user "$(docker image inspect --format '{{.Config.User}}' "$tag")"
+            run_cpu_smoke "$tag" "$version" "$adapter_module"
+          done
+
+      - name: Push both role images and emit immutable digest outputs
+        id: publish
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          work_root="$RUNNER_TEMP/inferdrome-role-image-publication"
+          export DOCKER_CONFIG="$work_root/docker-config"
+          mkdir -p -- "$DOCKER_CONFIG"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+          immutable_image_for_tag() {
+            local repository="$1"
+            local tag="$2"
+            local candidate digest matched=""
+            while IFS= read -r candidate; do
+              if [[ "$candidate" == "$repository@"* ]]; then
+                digest="${candidate#"$repository@"}"
+                if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  if [[ -n "$matched" && "$matched" != "$candidate" ]]; then
+                    exit 1
+                  fi
+                  matched="$candidate"
+                fi
+              fi
+            done < <(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag")
+            [[ -n "$matched" ]]
+            printf '%s\n' "$matched"
+          }
+
+          for role in private-engine cpu-runner-observer; do
+            repository="$(cat "$work_root/$role.repository")"
+            tag="$(cat "$work_root/$role.tag")"
+            docker push "$tag"
+            immutable_image="$(immutable_image_for_tag "$repository" "$tag")"
+            python scripts/role_image_publish.py validate-registry-digest \
+              --plan "$work_root/$role.plan.json" \
+              --immutable-image "$immutable_image" \
+              --output "$work_root/$role.digest-binding.json"
+          done
+
+          python scripts/role_image_publish.py validate-digest-pair \
+            --private-engine-receipt "$work_root/private-engine.digest-binding.json" \
+            --cpu-runner-observer-receipt "$work_root/cpu-runner-observer.digest-binding.json" \
+            --output "$work_root/digest-pair.json"
+          python - "$work_root/digest-pair.json" "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          pair = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          digest = "sha256:" + __import__("hashlib").sha256(
+              Path(sys.argv[1]).read_bytes()
+          ).hexdigest()
+          with Path(sys.argv[2]).open("a", encoding="utf-8") as output:
+              output.write(f"source_commit={pair['source_commit']}\n")
+              output.write(f"private_engine_image={pair['private_engine_image']}\n")
+              output.write(
+                  f"cpu_runner_observer_image={pair['cpu_runner_observer_image']}\n"
+              )
+              output.write(f"publication_pair_sha256={digest}\n")
+          with Path(sys.argv[3]).open("a", encoding="utf-8") as summary:
+              summary.write("## Fixed role-image publication\n\n")
+              summary.write(f"- Source: `{pair['source_commit']}`\n")
+              summary.write(
+                  f"- Private engine: `{pair['private_engine_image']}`\n"
+              )
+              summary.write(
+                  "- CPU runner/observer: "
+                  f"`{pair['cpu_runner_observer_image']}`\n"
+              )
+              summary.write(f"- Validated pair: `{digest}`\n")
+          PY
+
+      - name: Retain the canonical paired-digest record
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inferdrome-role-image-digest-pair-${{ github.run_id }}
+          path: ${{ runner.temp }}/inferdrome-role-image-publication/digest-pair.json
+          if-no-files-found: error
+          retention-days: 14
