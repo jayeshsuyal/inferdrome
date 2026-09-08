@@ -106,6 +106,28 @@ outputs and in the job summary. The engine role probes only the private-engine
 adapter `--help`; the CPU runner/observer probes only its separate runner
 adapter `--help`.
 
+Before the vLLM base extraction begins, the workflow writes the available-byte
+counts for the runner root filesystem, Docker's `DockerRootDir` filesystem, and
+the actual `RUNNER_TEMP` filesystem, plus the Docker root path and Docker's
+storage report, to the job log and summary. A missing mandatory observation
+stops the job before the build. On a GitHub-hosted Linux runner only, it then
+checks the actual host platform as well as the runner context, and validates
+every component and canonical identity of the one disposable path
+`/usr/local/lib/android/sdk`; a missing path is a disclosed no-op, while a
+symlink, non-directory, unsafe context, or failed removal stops the job before
+the build. The removal command is no-shell and limited to that one directory's
+filesystem. It does not prune Docker or any other runner content. These context
+checks constrain the one deletion; they are not an attestation of the runner or
+host's broader state.
+
+If the build step itself fails, a separate diagnostic-only step recollects the
+same capacity observations after the failure. It cannot reclaim the SDK, is
+allowed to fail without replacing the original build failure, and runs before
+the default failure handling leaves the GHCR login/push step skipped. Every
+available-byte delta after SDK reclamation is an observation, not a guaranteed
+reclaimed-byte count under concurrent runner writes; neither observation nor
+reclamation establishes that either image build will fit.
+
 The workflow cannot make a pair of pushes atomic: a later registry failure may
 leave an earlier role published, in which case it emits no validated pair
 output and the owner must inspect or clean up under a separate authorization.

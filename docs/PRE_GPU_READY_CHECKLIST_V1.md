@@ -19,6 +19,17 @@ No GPU campaign is ready until gates 1–3 have real, independently checkable
 artifacts. Gate 4 establishes reproducibility of the controlled path; gate 5
 is a pre-launch procedure review, not a claim that a host already exists.
 
+For a future manual role-image publication, retain its logged pre-build root,
+Docker-root, and `RUNNER_TEMP` filesystem available-byte observations, the
+observed `DockerRootDir` path, and Docker storage report as operational
+diagnostics. A failed build has a separate observe-only post-failure diagnostic
+step; it neither retries SDK removal nor changes the failed build result. The
+fixed Android SDK reclamation records before/after free-byte deltas only; it
+does not prove available space, image-build success, or a capacity threshold,
+and it is not a readiness artifact that substitutes for gate 2's returned
+immutable image references. The host/context checks gate that deletion only;
+they are not runner or host attestation.
+
 ## Fixed local facts for later review
 
 - The active path is one operator-supplied Lambda manual host with **two

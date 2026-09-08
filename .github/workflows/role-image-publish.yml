@@ -68,6 +68,19 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
           [[ -z "$(git status --porcelain)" ]]
 
+      - name: Observe runner capacity and reclaim disposable Android SDK tooling
+        env:
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python scripts/role_image_runner_disk.py \
+            --runner-os "$RUNNER_OS" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-temp "$RUNNER_TEMP" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Build and CPU-smoke both fixed roles before any push
         id: build
         env:
@@ -163,6 +176,22 @@ jobs:
               --user "$(docker image inspect --format '{{.Config.User}}' "$tag")"
             run_cpu_smoke "$tag" "$version" "$adapter_module"
           done
+
+      - name: Diagnose capacity after a failed role-image build
+        if: ${{ failure() && steps.build.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python scripts/role_image_runner_disk.py \
+            --runner-os "$RUNNER_OS" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-temp "$RUNNER_TEMP" \
+            --diagnose-only \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Push both role images and emit immutable digest outputs
         id: publish
