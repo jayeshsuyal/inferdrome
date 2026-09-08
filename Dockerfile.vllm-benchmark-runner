@@ -31,7 +31,7 @@ RUN case "${BUILD_FLAVOR}" in \
       development) ;; \
       proof|release) \
         printf '%s' "${SOURCE_REPOSITORY_COMMIT}" | grep -Eq '^[0-9a-f]{40,64}$' || exit 1; \
-        printf '%s' "${INFERDROME_VERSION}" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$' || exit 1; \
+        printf '%s' "${INFERDROME_VERSION}" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$' || exit 1; \
         ;; \
       *) exit 1 ;; \
     esac

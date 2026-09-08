@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,6 +38,110 @@ PACKAGED_LICENSE_FILES = {
     "LICENSES/OFL-1.1-IBM-Plex-Mono.txt",
     "LICENSES/OFL-1.1-Instrument-Sans.txt",
 }
+IDENTITY_GUARD_DOCKERFILES = (
+    "Dockerfile",
+    "Dockerfile.vllm-benchmark-runner",
+)
+
+
+def _checked_in_identity_guard(filename: str) -> str:
+    dockerfile = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
+    start = dockerfile.index('RUN case "${BUILD_FLAVOR}" in')
+    end = dockerfile.index("\n    esac", start) + len("\n    esac")
+    return dockerfile[start + len("RUN ") : end]
+
+
+def _run_checked_in_identity_guard(
+    filename: str,
+    *,
+    build_flavor: str,
+    version: str,
+    source_commit: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/sh", "-c", _checked_in_identity_guard(filename)],
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "BUILD_FLAVOR": build_flavor,
+            "INFERDROME_VERSION": version,
+            "SOURCE_REPOSITORY_COMMIT": source_commit,
+        },
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("filename", IDENTITY_GUARD_DOCKERFILES)
+@pytest.mark.parametrize("build_flavor", ("proof", "release"))
+@pytest.mark.parametrize("version", (__version__, "0.3.0", "0.3.0+build.1"))
+def test_checked_in_identity_guards_accept_supported_proof_versions(
+    filename: str,
+    build_flavor: str,
+    version: str,
+) -> None:
+    completed = _run_checked_in_identity_guard(
+        filename,
+        build_flavor=build_flavor,
+        version=version,
+        source_commit="a" * 40,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("filename", IDENTITY_GUARD_DOCKERFILES)
+@pytest.mark.parametrize("version", ("0.3", "0.3.0/invalid", "0.3.0 dev0"))
+def test_checked_in_identity_guards_reject_malformed_single_line_versions(
+    filename: str,
+    version: str,
+) -> None:
+    completed = _run_checked_in_identity_guard(
+        filename,
+        build_flavor="proof",
+        version=version,
+        source_commit="a" * 40,
+    )
+
+    assert completed.returncode != 0
+
+
+@pytest.mark.parametrize("filename", IDENTITY_GUARD_DOCKERFILES)
+def test_checked_in_identity_guards_reject_invalid_source_commits(
+    filename: str,
+) -> None:
+    completed = _run_checked_in_identity_guard(
+        filename,
+        build_flavor="release",
+        version=__version__,
+        source_commit="g" * 40,
+    )
+
+    assert completed.returncode != 0
+
+
+@pytest.mark.parametrize("filename", IDENTITY_GUARD_DOCKERFILES)
+def test_checked_in_identity_guards_reject_unknown_flavors(filename: str) -> None:
+    completed = _run_checked_in_identity_guard(
+        filename,
+        build_flavor="candidate",
+        version=__version__,
+        source_commit="a" * 40,
+    )
+
+    assert completed.returncode != 0
+
+
+@pytest.mark.parametrize("filename", IDENTITY_GUARD_DOCKERFILES)
+def test_checked_in_identity_guards_keep_development_bypass(filename: str) -> None:
+    completed = _run_checked_in_identity_guard(
+        filename,
+        build_flavor="development",
+        version="not-a-proof-version",
+        source_commit="not-a-source-commit",
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_runner_dockerfile_has_pinned_base_non_root_and_locked_install() -> None:
