@@ -44,6 +44,51 @@ def test_role_image_workflow_pins_actions_and_exact_source_identity() -> None:
     assert '[[ -z "$(git status --porcelain)" ]]' in workflow
 
 
+def test_role_image_workflow_observes_capacity_before_vllm_build_downloads() -> None:
+    workflow = _workflow_text()
+
+    assert "runs-on: ubuntu-24.04" in workflow
+    assert "timeout-minutes: 45" in workflow
+    assert "RUNNER_OS: ${{ runner.os }}" in workflow
+    assert "RUNNER_ENVIRONMENT: ${{ runner.environment }}" in workflow
+    assert "RUNNER_TEMP: ${{ runner.temp }}" in workflow
+    assert "scripts/role_image_runner_disk.py" in workflow
+    assert "--runner-os \"$RUNNER_OS\"" in workflow
+    assert "--runner-environment \"$RUNNER_ENVIRONMENT\"" in workflow
+    assert "--runner-temp \"$RUNNER_TEMP\"" in workflow
+    assert '| tee -a "$GITHUB_STEP_SUMMARY"' in workflow
+    assert "docker system prune" not in workflow
+    assert "docker builder prune" not in workflow
+    source_check = "Validate manual confirmation and exact source identity"
+    capacity_check = (
+        "Observe runner capacity and reclaim disposable Android SDK tooling"
+    )
+    build = "Build and CPU-smoke both fixed roles before any push"
+    assert (
+        workflow.index(source_check)
+        < workflow.index(capacity_check)
+        < workflow.index(build)
+    )
+
+
+def test_role_image_workflow_diagnoses_a_failed_build_without_retrying_cleanup(
+) -> None:
+    workflow = _workflow_text()
+
+    build = "Build and CPU-smoke both fixed roles before any push"
+    diagnosis = "Diagnose capacity after a failed role-image build"
+    publish = "Push both role images and emit immutable digest outputs"
+    after_diagnosis = workflow.split(diagnosis, maxsplit=1)[1]
+    diagnostic_step = after_diagnosis.split(publish, maxsplit=1)[0]
+
+    assert "if: ${{ failure() && steps.build.outcome == 'failure' }}" in diagnostic_step
+    assert "continue-on-error: true" in diagnostic_step
+    assert "--diagnose-only" in diagnostic_step
+    assert "--runner-temp \"$RUNNER_TEMP\"" in diagnostic_step
+    assert "rm -rf" not in diagnostic_step
+    assert workflow.index(build) < workflow.index(diagnosis) < workflow.index(publish)
+
+
 def test_role_image_workflow_is_fixed_role_cpu_smoked_and_digest_bound() -> None:
     workflow = _workflow_text()
 
