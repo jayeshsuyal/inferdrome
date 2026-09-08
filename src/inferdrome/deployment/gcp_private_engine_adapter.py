@@ -12,11 +12,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.client
-import importlib.metadata
 import os
 import stat
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +44,7 @@ _PROXIED_GET_PATHS: Final = frozenset({"/health", "/metrics", "/v1/models"})
 _PROXIED_POST_PATHS: Final = frozenset({"/v1/chat/completions"})
 _ATTESTATION_PATH: Final = "/inferdrome/v2/engine-attestation"
 _EXPECTED_VLLM_VERSION: Final = "0.26.0"
+_VLLM_CLI: Final = Path("/usr/local/bin/vllm")
 
 
 class EngineAdapterError(ValueError):
@@ -197,11 +197,47 @@ def verify_preloaded_snapshot(arguments: EngineAdapterArguments) -> None:
             raise EngineAdapterError("ENGINE_ADAPTER_MODEL_SNAPSHOT_INVALID")
 
 
-def vllm_child_argv(arguments: EngineAdapterArguments) -> tuple[str, ...]:
+def _vllm_python() -> str:
+    """Read the pinned image's direct console-script interpreter binding."""
+
+    try:
+        with _VLLM_CLI.open(encoding="utf-8") as script:
+            shebang = script.readline(1024).rstrip("\n")
+        python = shebang.removeprefix("#!")
+        if (
+            not shebang.startswith("#!/")
+            or any(character.isspace() for character in python)
+            or not os.access(python, os.X_OK)
+            or not os.access(_VLLM_CLI, os.X_OK)
+        ):
+            raise ValueError
+    except (OSError, UnicodeError, ValueError):
+        raise EngineAdapterError("ENGINE_ADAPTER_RUNTIME_UNAVAILABLE") from None
+    # Keep the path as written: resolving a venv symlink loses its environment.
+    return python
+
+
+def _vllm_environment(python: str) -> dict[str, str]:
+    environment = dict(os.environ)
+    for name in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PATH"] = (
+        f"{Path(python).parent}:/usr/local/bin:/usr/local/cuda/bin:"
+        "/usr/local/nvidia/bin:/usr/bin:/bin"
+    )
+    return environment
+
+
+def vllm_child_argv(
+    arguments: EngineAdapterArguments, *, python: str | None = None
+) -> tuple[str, ...]:
     """Render the one and only vLLM command owned by this adapter."""
 
     return (
-        "vllm",
+        python if python is not None else _vllm_python(),
+        "-I",
+        str(_VLLM_CLI),
         "serve",
         str(arguments.model_snapshot_path),
         "--served-model-name",
@@ -217,13 +253,28 @@ def vllm_child_argv(arguments: EngineAdapterArguments) -> tuple[str, ...]:
 
 
 def observed_vllm_version(
-    version_lookup: Callable[[str], str] = importlib.metadata.version,
+    *, python: str | None = None, environment: Mapping[str, str] | None = None
 ) -> str:
-    """Read the installed vLLM distribution before it can begin serving."""
+    """Read exact metadata in the serving CLI's Python without importing vLLM."""
 
+    python = python if python is not None else _vllm_python()
     try:
-        observed = version_lookup("vllm")
-    except Exception:
+        observed = subprocess.run(
+            (
+                python,
+                "-I",
+                "-c",
+                "import importlib.metadata; "
+                "print(importlib.metadata.version('vllm'), end='')",
+            ),
+            env=environment if environment is not None else _vllm_environment(python),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
         raise EngineAdapterError("ENGINE_ADAPTER_RUNTIME_VERSION_UNAVAILABLE") from None
     if observed != _EXPECTED_VLLM_VERSION:
         raise EngineAdapterError("ENGINE_ADAPTER_RUNTIME_VERSION_MISMATCH")
@@ -360,8 +411,12 @@ def serve(arguments: EngineAdapterArguments) -> None:
         or os.environ.get("TRANSFORMERS_OFFLINE") != "1"
     ):
         raise EngineAdapterError("ENGINE_ADAPTER_OFFLINE_MODE_REQUIRED")
-    runtime_version = observed_vllm_version()
-    child = subprocess.Popen(vllm_child_argv(arguments))
+    python = _vllm_python()
+    environment = _vllm_environment(python)
+    runtime_version = observed_vllm_version(python=python, environment=environment)
+    child = subprocess.Popen(
+        vllm_child_argv(arguments, python=python), env=environment
+    )
     server = _PrivateServer(
         ("0.0.0.0", arguments.private_port),
         child=child,

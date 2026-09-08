@@ -1,10 +1,16 @@
-FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c AS inferdrome-dependencies
+# A venv retains its base interpreter/stdlib paths. Construct it on the exact
+# serving base used below, without installing Inferdrome into vLLM's environment.
+FROM vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52 AS inferdrome-dependencies
 
+USER root
 WORKDIR /build
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime
+    UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime \
+    VIRTUAL_ENV="" \
+    PYTHONHOME="" \
+    PYTHONPATH=""
 
 COPY pyproject.toml uv.lock README.md ./
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
@@ -16,9 +22,11 @@ COPY src ./src
 ADD --checksum=sha256:920cbcaad514cc185634f6f0dcd71df5e8f4ee4456d440a22e0f8c0f142a8203 \
     https://github.com/astral-sh/uv/releases/download/0.8.17/uv-x86_64-unknown-linux-gnu.tar.gz \
     /tmp/uv.tar.gz
+RUN /usr/bin/python3.12 -I -m venv --without-pip /opt/inferdrome-runtime
 RUN tar -xzf /tmp/uv.tar.gz --strip-components=1 -C /usr/local/bin \
     && rm /tmp/uv.tar.gz \
-    && /usr/local/bin/uv sync --frozen --no-dev --no-editable
+    && /usr/local/bin/uv sync --frozen --no-dev --no-editable \
+         --python /opt/inferdrome-runtime/bin/python --no-python-downloads
 
 FROM vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52
 
@@ -56,11 +64,7 @@ USER root
 COPY --from=inferdrome-dependencies --chown=2000:0 /opt/inferdrome-runtime /opt/inferdrome-runtime
 COPY --from=inferdrome-dependencies /build/LICENSE /build/THIRD_PARTY_NOTICES.md /usr/share/licenses/inferdrome/
 COPY --from=inferdrome-dependencies /build/LICENSES /usr/share/licenses/inferdrome/LICENSES
-RUN test "$(/opt/inferdrome-runtime/bin/python -c 'from inferdrome import __version__; print(__version__)')" = "${INFERDROME_VERSION}" \
-    && /opt/inferdrome-runtime/bin/python -c 'import jsonschema, pydantic, yaml, rfc8785' \
-    && test "$(python -c 'import vllm; print(vllm.__version__.split("+")[0])')" = "0.26.0" \
-    && test "$(/opt/inferdrome-runtime/bin/inferdrome --version)" = "${INFERDROME_VERSION}" \
-    && install -d --owner=2000 --group=0 --mode=0700 /home/vllm /workspace \
+RUN install -d --owner=2000 --group=0 --mode=0700 /home/vllm /workspace \
     && rm -rf /root/.cache/pip /opt/inferdrome-source /build
 
 LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome" \
@@ -74,8 +78,23 @@ LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome
 
 USER 2000:0
 ENV HOME="/home/vllm" \
-    PATH="/opt/inferdrome-runtime/bin:/usr/local/bin:/usr/bin:/bin" \
+    PATH="/opt/inferdrome-runtime/bin:${PATH}" \
+    VIRTUAL_ENV="" \
+    PYTHONHOME="" \
+    PYTHONPATH="" \
+    PYTHONNOUSERSITE="1" \
     PYTHONDONTWRITEBYTECODE="1" \
     PYTHONUNBUFFERED="1"
 WORKDIR /workspace
+# Exercise the final UID, environment and console shebangs using CPU-only checks.
+# Distribution metadata is read through the serving CLI's Python, never by
+# importing CUDA-serving code into the isolated Inferdrome environment.
+RUN test "$(/opt/inferdrome-runtime/bin/python -c 'from inferdrome import __version__; print(__version__)')" = "${INFERDROME_VERSION}" \
+    && /opt/inferdrome-runtime/bin/python -c 'import jsonschema, pydantic, yaml, rfc8785; import sys, importlib.util; assert sys.version_info[:2] == (3, 12); assert sys.prefix == "/opt/inferdrome-runtime"; assert importlib.util.find_spec("vllm") is None' \
+    && test "$(/opt/inferdrome-runtime/bin/inferdrome --version)" = "${INFERDROME_VERSION}" \
+    && python -c 'import urllib.request, ssl' \
+    && /opt/inferdrome-runtime/bin/python -m inferdrome.routing_execution --help >/dev/null \
+    && /opt/inferdrome-runtime/bin/python -m inferdrome.deployment.gcp_private_engine_adapter --help >/dev/null \
+    && /opt/inferdrome-runtime/bin/python -m inferdrome.deployment.gcp_private_runner_adapter --help >/dev/null \
+    && /opt/inferdrome-runtime/bin/python -c 'from inferdrome.deployment.gcp_private_engine_adapter import observed_vllm_version; observed_vllm_version()'
 ENTRYPOINT ["inferdrome"]
