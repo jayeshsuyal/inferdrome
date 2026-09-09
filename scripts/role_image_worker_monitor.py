@@ -29,6 +29,8 @@ _RUNNER_ALIAS = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
 _STORAGE_DRIVER = re.compile(r"^[A-Za-z0-9_.+-]{1,128}$")
 _MAX_CAPTURE_BYTES = 4_096
 _MAX_DURING_SAMPLES = 180
+_OBSERVATION_TIMEOUT_SECONDS = 10
+_TIMEOUT_EXIT_CODE = 124
 _DOCKER_VERSION = ("docker", "version", "--format", "{{.Server.Version}}")
 _BUILDX_VERSION = ("docker", "buildx", "version")
 _DOCKER_INFO = ("docker", "info", "--format", "{{.Driver}}\t{{.DockerRootDir}}")
@@ -121,12 +123,16 @@ def _bounded_report(value: str, *, field: str) -> str:
 
 
 def _capture_subprocess(command: Sequence[str]) -> str:
-    completed = subprocess.run(
-        list(command),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            list(command),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_OBSERVATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        _fail(f"required worker observation timed out: {' '.join(command[:2])}")
     if completed.returncode:
         _fail(f"required worker observation failed: {' '.join(command[:2])}")
     return completed.stdout
@@ -382,15 +388,15 @@ def run_observed_build(
         remaining = deadline - monotonic()
         if process.poll() is None and remaining > 0:
             try:
-                returncode = process.wait(timeout=remaining)
+                child_returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
-                returncode = _terminate_and_wait(process)
+                child_returncode = _terminate_and_wait(process)
                 timed_out = True
         elif process.poll() is None:
-            returncode = _terminate_and_wait(process)
+            child_returncode = _terminate_and_wait(process)
             timed_out = True
         else:
-            returncode = process.wait(timeout=0)
+            child_returncode = process.wait(timeout=0)
         after = collect_worker_observation(
             runner_temp=runner_temp,
             workspace=workspace,
@@ -403,10 +409,12 @@ def run_observed_build(
 
     _assert_same_filesystems(before, after)
     samples.append({"filesystems": after["filesystems"], "phase": "after"})
+    monitor_returncode = _TIMEOUT_EXIT_CODE if timed_out else child_returncode
     return (
         {
-            "build_exit_code": returncode,
+            "build_exit_code": child_returncode,
             "build_timed_out": timed_out,
+            "monitor_exit_code": monitor_returncode,
             "build_deadline_seconds": build_deadline_seconds,
             "during_sample_limit": max_during_samples,
             "execution": {
@@ -427,7 +435,7 @@ def run_observed_build(
             "sampled_minimum_available": _sampled_minima(samples),
             "schema_version": _SCHEMA_VERSION,
         },
-        returncode,
+        monitor_returncode,
     )
 
 
@@ -500,7 +508,8 @@ def _append_summary(path: Path, record: Mapping[str, object]) -> None:
         )
     lines.extend(
         [
-            f"- Build exit code: `{record['build_exit_code']}`.",
+            f"- Observed child build exit code: `{record['build_exit_code']}`.",
+            f"- Monitor exit code: `{record['monitor_exit_code']}`.",
             "- This worker monitor did not delete host content, prune Docker, "
             "authenticate, or publish.",
             "",

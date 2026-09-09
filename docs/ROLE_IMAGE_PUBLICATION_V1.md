@@ -100,8 +100,9 @@ The dispatch guard runs on a standard hosted runner and rejects a wrong mode,
 confirmation, repository, reviewed-main ref, source SHA, dirty checkout, or
 malformed non-sensitive worker alias. Exactly one subsequent job is selected:
 `BUILD_AND_SMOKE_ONLY` has `contents: read` only and contains no GHCR login or
-push; `PUBLISH_FIXED_ROLE_IMAGES` alone receives a job-scoped
-`GITHUB_TOKEN` with `packages: write` after its build and smokes succeed. Normal
+push; `PUBLISH_FIXED_ROLE_IMAGES` alone receives a job-scoped `GITHUB_TOKEN`
+with `packages: write` throughout that selected job. Its GHCR login and push
+commands run only after the same job's build and smokes succeed. Normal
 engineering, dashboard, and synthetic/mock CI remain on GitHub-hosted runners.
 
 Both selected jobs require the fixed `self-hosted`, `Linux`, `X64`, and
@@ -123,9 +124,11 @@ canonical paired-record SHA-256 as job outputs and in the job summary.
 The dedicated-worker monitor is observation-only. Before, during, and after the
 child build it records Docker Server and Buildx versions, storage driver and
 root, filesystem mapping, free bytes, and free inodes. During samples and the
-child deadline are bounded; monitor failure terminates an unfinished child, and
-a failed build still records its before/during/after observation before
-returning its nonzero status. The recorded minima are samples, not an exact
+child deadline are bounded; each Docker observation command has a 10-second
+limit. Monitor failure terminates an unfinished child, and a failed build still
+records its before/during/after observation before returning its nonzero status.
+A monitor-enforced timeout returns a nonzero monitor result even if its child
+exits cleanly after termination. The recorded minima are samples, not an exact
 peak, capacity admission threshold, or a promise that an image will fit. This
 worker does not invoke the GitHub-hosted Android SDK helper, delete SDK files,
 prune Docker, or perform any broad host cleanup.

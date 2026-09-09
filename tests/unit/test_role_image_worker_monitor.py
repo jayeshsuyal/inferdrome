@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -145,6 +146,7 @@ def test_build_failure_keeps_bounded_before_during_after_observations(
     assert returncode == 19
     assert record["build_exit_code"] == 19
     assert record["build_timed_out"] is False
+    assert record["monitor_exit_code"] == 19
     assert record["sample_count"] == 3
     assert record["during_sample_limit"] == 2
     assert len(record["observations"]["during"]) == 1
@@ -156,11 +158,11 @@ def test_build_failure_keeps_bounded_before_during_after_observations(
     assert process.terminated is False
 
 
-def test_build_deadline_terminates_the_child_and_reports_timeout(
+def test_deadline_expiry_fails_closed_when_the_terminated_child_exits_cleanly(
     tmp_path: Path,
 ) -> None:
     inputs = _inputs(tmp_path)
-    process = _Process(returncode=143, complete_after_polls=100)
+    process = _Process(returncode=0, complete_after_polls=100)
     clock = iter((0.0, 2.0, 2.0))
 
     record, returncode = monitor.run_observed_build(
@@ -173,9 +175,63 @@ def test_build_deadline_terminates_the_child_and_reports_timeout(
         monotonic=lambda: next(clock),
     )
 
-    assert returncode == 143
+    assert returncode == monitor._TIMEOUT_EXIT_CODE
+    assert record["build_exit_code"] == 0
     assert record["build_timed_out"] is True
+    assert record["monitor_exit_code"] == monitor._TIMEOUT_EXIT_CODE
     assert process.terminated is True
+
+
+class _WaitTimeoutProcess(_Process):
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits += 1
+        if not self.terminated and timeout is not None:
+            raise subprocess.TimeoutExpired("fake-build", timeout)
+        return self.returncode
+
+
+def test_wait_timeout_fails_closed_when_the_terminated_child_exits_cleanly(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    inputs["max_during_samples"] = 1
+    process = _WaitTimeoutProcess(returncode=0, complete_after_polls=100)
+    clock = iter((0.0, 1.0, 2.0))
+
+    record, returncode = monitor.run_observed_build(
+        **inputs,
+        build_deadline_seconds=10,
+        capture_command=_capture([]),
+        filesystem_usage=_filesystem_usage(),
+        popen_command=lambda _command: process,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: next(clock),
+    )
+
+    assert returncode == monitor._TIMEOUT_EXIT_CODE
+    assert record["build_exit_code"] == 0
+    assert record["build_timed_out"] is True
+    assert record["monitor_exit_code"] == monitor._TIMEOUT_EXIT_CODE
+    assert process.terminated is True
+
+
+def test_worker_observation_command_has_a_finite_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[int] = []
+
+    def times_out(*_args: object, **kwargs: object) -> object:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, int)
+        timeouts.append(timeout)
+        raise subprocess.TimeoutExpired("docker", timeout)
+
+    monkeypatch.setattr(monitor.subprocess, "run", times_out)
+
+    with pytest.raises(monitor.RoleImageWorkerMonitorError, match="timed out"):
+        monitor._capture_subprocess(monitor._DOCKER_VERSION)
+
+    assert timeouts == [monitor._OBSERVATION_TIMEOUT_SECONDS]
 
 
 def test_observation_failure_terminates_an_unfinished_build(tmp_path: Path) -> None:
@@ -239,6 +295,7 @@ def test_main_seals_a_failed_build_observation_without_rewriting_output(
         "build_exit_code": 23,
         "build_deadline_seconds": 2550,
         "build_timed_out": False,
+        "monitor_exit_code": 23,
         "during_sample_limit": 2,
         "execution": {
             "mode": "BUILD_AND_SMOKE_ONLY",
@@ -298,4 +355,84 @@ def test_main_seals_a_failed_build_observation_without_rewriting_output(
         == 23
     )
     assert json.loads(output.read_text(encoding="utf-8"))["build_exit_code"] == 23
-    assert "Build exit code: `23`" in summary.read_text(encoding="utf-8")
+    assert "Observed child build exit code: `23`" in summary.read_text(
+        encoding="utf-8"
+    )
+    assert "Monitor exit code: `23`" in summary.read_text(encoding="utf-8")
+
+
+def test_main_returns_nonzero_for_a_sealed_timeout_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "timeout-record.json"
+    summary = tmp_path / "timeout-summary.md"
+    record = {
+        "build_exit_code": 0,
+        "build_deadline_seconds": 1,
+        "build_timed_out": True,
+        "during_sample_limit": 1,
+        "execution": {
+            "mode": "PUBLISH_FIXED_ROLE_IMAGES",
+            "runner_alias": "role-image-cpu-01",
+            "source_commit": _SOURCE_COMMIT,
+        },
+        "monitor_exit_code": monitor._TIMEOUT_EXIT_CODE,
+        "observations": {
+            "before": {
+                "docker": {
+                    "buildx_version": "v0.37.0",
+                    "server_version": "28.0.4",
+                    "storage_driver": "overlay2",
+                }
+            },
+            "during": [],
+        },
+        "sample_count": 2,
+        "sampled_minimum_available": {},
+    }
+    monkeypatch.setattr(
+        monitor,
+        "run_observed_build",
+        lambda **_kwargs: (record, monitor._TIMEOUT_EXIT_CODE),
+    )
+
+    assert (
+        monitor.main(
+            [
+                "--mode",
+                "PUBLISH_FIXED_ROLE_IMAGES",
+                "--source-commit",
+                _SOURCE_COMMIT,
+                "--github-repository",
+                "jayeshsuyal/inferdrome",
+                "--github-ref",
+                "refs/heads/main",
+                "--github-sha",
+                _SOURCE_COMMIT,
+                "--runner-os",
+                "Linux",
+                "--runner-arch",
+                "X64",
+                "--runner-environment",
+                "self-hosted",
+                "--runner-name",
+                "role-image-cpu-01",
+                "--expected-runner-name",
+                "role-image-cpu-01",
+                "--runner-temp",
+                str(tmp_path),
+                "--workspace",
+                str(tmp_path),
+                "--output",
+                str(output),
+                "--summary",
+                str(summary),
+                "--",
+                "/bin/true",
+            ]
+        )
+        == monitor._TIMEOUT_EXIT_CODE
+    )
+    sealed = json.loads(output.read_text(encoding="utf-8"))
+    assert sealed["build_exit_code"] == 0
+    assert sealed["monitor_exit_code"] == monitor._TIMEOUT_EXIT_CODE

@@ -97,6 +97,7 @@ def test_publish_mode_keeps_fixed_repositories_after_smokes() -> None:
     assert "Retain the canonical paired-digest record" in publish
     assert "Retain bounded raw worker observations" in publish
     assert "capacity-observations.json" in publish
+    assert "continue-on-error" not in publish
     assert publish.index("scripts/build_role_images_and_smoke.sh") < publish.index(
         'docker push "$tag"'
     )
@@ -143,6 +144,8 @@ def test_shared_build_helper_separates_smokes_and_publication() -> None:
     assert "build_deadline_seconds: int = 2_550" in monitor
     assert "prunes Docker storage" in monitor
     assert "_terminate_and_wait" in monitor
+    assert "_OBSERVATION_TIMEOUT_SECONDS = 10" in monitor
+    assert "_TIMEOUT_EXIT_CODE = 124" in monitor
 
 
 def test_worker_runbook_states_limits_without_claiming_a_worker() -> None:
@@ -158,6 +161,10 @@ def test_worker_runbook_states_limits_without_claiming_a_worker() -> None:
     )
     assert "BUILD_AND_SMOKE_ONLY" in publication
     assert "PUBLISH_FIXED_ROLE_IMAGES" in publication
+    assert "throughout that selected job" in publication
+    assert "login and push commands run only after the same job's build and smokes" in (
+        publication
+    )
     assert "The same selected worker builds" in publication
     assert "does not invoke the GitHub-hosted Android SDK helper" in publication
     assert "provider-native maximum-runtime action" in publication
