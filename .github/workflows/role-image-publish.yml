@@ -1,22 +1,33 @@
-name: Publish fixed role images
+name: Build and optionally publish fixed role images
 
 on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact lowercase 40-character source commit selected for this manual run.
+        description: Exact lowercase 40-character reviewed-main source commit.
         required: true
         type: string
-      confirmation:
-        description: Explicit confirmation for the two fixed GHCR role repositories.
+      execution_mode:
+        description: Build/test only, or the separately approved fixed-repository publication mode.
         required: true
         type: choice
         options:
+          - BUILD_AND_SMOKE_ONLY
           - PUBLISH_FIXED_ROLE_IMAGES
+      confirmation:
+        description: Explicit confirmation matching the selected execution mode.
+        required: true
+        type: choice
+        options:
+          - BUILD_AND_SMOKE_ONLY
+          - PUBLISH_FIXED_ROLE_IMAGES
+      expected_runner_name:
+        description: Required non-sensitive alias of the one ephemeral CPU build worker.
+        required: true
+        type: string
 
-# The workflow itself has no ambient write scope. Only the one intentionally
-# scoped, manually dispatched job receives the ephemeral package token needed
-# for GHCR.
+# The workflow has no ambient write scope. Only the publication-mode worker job
+# receives the ephemeral package token needed for the two fixed GHCR targets.
 permissions: {}
 
 concurrency:
@@ -28,8 +39,113 @@ defaults:
     shell: bash
 
 jobs:
-  publish-fixed-role-images:
+  validate-dispatch:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate manual mode, source, and worker-alias inputs
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          MODE_CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "jayeshsuyal/inferdrome" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "$EXPECTED_RUNNER_NAME" =~ ^[a-z][a-z0-9-]{2,62}$ ]]
+          case "$EXECUTION_MODE:$MODE_CONFIRMATION" in
+            BUILD_AND_SMOKE_ONLY:BUILD_AND_SMOKE_ONLY|PUBLISH_FIXED_ROLE_IMAGES:PUBLISH_FIXED_ROLE_IMAGES)
+              ;;
+            *)
+              echo "execution mode and confirmation do not form an approved pair" >&2
+              exit 1
+              ;;
+          esac
+
+  build-and-smoke-only:
+    needs: validate-dispatch
+    if: ${{ inputs.execution_mode == 'BUILD_AND_SMOKE_ONLY' }}
+    runs-on: [self-hosted, Linux, X64, inferdrome-role-image-cpu]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Python on the dedicated build worker
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build and CPU-smoke both fixed roles on the dedicated worker
+        id: build
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          RUNNER_ARCH: ${{ runner.arch }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_NAME: ${{ runner.name }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          work_root="$RUNNER_TEMP/inferdrome-role-image-publication"
+          mkdir -p -- "$work_root"
+          python scripts/role_image_worker_monitor.py \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --github-repository "$GITHUB_REPOSITORY" \
+            --github-ref "$GITHUB_REF" \
+            --github-sha "$GITHUB_SHA" \
+            --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-name "$RUNNER_NAME" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --runner-temp "$RUNNER_TEMP" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --build-deadline-seconds 2550 \
+            --output "$work_root/capacity-observations.json" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            -- bash scripts/build_role_images_and_smoke.sh \
+              --source-commit "$SOURCE_COMMIT" \
+              --work-root "$work_root"
+
+      - name: Retain bounded raw worker observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inferdrome-role-image-worker-observations-${{ github.run_id }}
+          path: ${{ runner.temp }}/inferdrome-role-image-publication/capacity-observations.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish-fixed-role-images:
+    needs: validate-dispatch
+    if: ${{ inputs.execution_mode == 'PUBLISH_FIXED_ROLE_IMAGES' }}
+    runs-on: [self-hosted, Linux, X64, inferdrome-role-image-cpu]
     timeout-minutes: 45
     permissions:
       contents: read
@@ -47,157 +163,61 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up pinned Python
+      - name: Set up pinned Python on the dedicated build worker
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - name: Validate manual confirmation and exact source identity
-        env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-          PUBLISH_CONFIRMATION: ${{ inputs.confirmation }}
-          GITHUB_REF: ${{ github.ref }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          [[ "$PUBLISH_CONFIRMATION" == "PUBLISH_FIXED_ROLE_IMAGES" ]]
-          [[ "$GITHUB_REPOSITORY" == "jayeshsuyal/inferdrome" ]]
-          [[ "$GITHUB_REF" == "refs/heads/main" ]]
-          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]]
-          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
-          [[ -z "$(git status --porcelain)" ]]
-
-      - name: Observe runner capacity and reclaim disposable Android SDK tooling
-        env:
-          RUNNER_OS: ${{ runner.os }}
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          RUNNER_TEMP: ${{ runner.temp }}
-        run: |
-          set -euo pipefail
-          python scripts/role_image_runner_disk.py \
-            --runner-os "$RUNNER_OS" \
-            --runner-environment "$RUNNER_ENVIRONMENT" \
-            --runner-temp "$RUNNER_TEMP" \
-            | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Build and CPU-smoke both fixed roles before any push
+      - name: Build and CPU-smoke both fixed roles on the dedicated worker
         id: build
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -euo pipefail
-          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          work_root="$RUNNER_TEMP/inferdrome-role-image-publication"
-          mkdir -p -- "$work_root"
-
-          normalize_labels() {
-            local plan_path="$1"
-            local observed_path="$2"
-            local normalized_path="$3"
-            python - "$plan_path" "$observed_path" "$normalized_path" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          observed = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-          required = plan["required_labels"]
-          if not isinstance(observed, dict) or not all(
-              isinstance(key, str) and isinstance(value, str)
-              for key, value in observed.items()
-          ):
-              raise SystemExit("image labels are not a string mapping")
-          normalized = {key: observed.get(key) for key in required}
-          if normalized != required:
-              raise SystemExit("image labels do not contain the fixed role identity")
-          Path(sys.argv[3]).write_text(
-              json.dumps(normalized, sort_keys=True, separators=(",", ":")) + "\n",
-              encoding="utf-8",
-          )
-          PY
-          }
-
-          run_cpu_smoke() {
-            local tag="$1"
-            local observed_version="$2"
-            local adapter_module="$3"
-            [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$tag")" == "linux/amd64" ]]
-            docker run --rm --network none --read-only --user 2000:0 \
-              --cap-drop=ALL --security-opt=no-new-privileges \
-              --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-              --tmpfs /home/vllm:rw,noexec,nosuid,size=64m \
-              --entrypoint /opt/inferdrome-runtime/bin/python "$tag" \
-              -c "from inferdrome import __version__; assert __version__ == '$observed_version'"
-            docker run --rm --network none --read-only --user 2000:0 \
-              --cap-drop=ALL --security-opt=no-new-privileges \
-              --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-              --tmpfs /home/vllm:rw,noexec,nosuid,size=64m \
-              --entrypoint /opt/inferdrome-runtime/bin/python "$tag" \
-              -m "$adapter_module" --help >/dev/null
-          }
-
-          for role in private-engine cpu-runner-observer; do
-            case "$role" in
-              private-engine)
-                repository="ghcr.io/jayeshsuyal/inferdrome-private-engine"
-                adapter_module="inferdrome.deployment.gcp_private_engine_adapter"
-                ;;
-              cpu-runner-observer)
-                repository="ghcr.io/jayeshsuyal/inferdrome-cpu-runner-observer"
-                adapter_module="inferdrome.deployment.gcp_private_runner_adapter"
-                ;;
-              *) exit 1 ;;
-            esac
-            tag="$repository:publication-${SOURCE_COMMIT:0:12}-${GITHUB_RUN_ID}"
-            plan="$work_root/$role.plan.json"
-            full_labels="$work_root/$role.full-labels.json"
-            labels="$work_root/$role.labels.json"
-            printf '%s\n' "$repository" > "$work_root/$role.repository"
-            printf '%s\n' "$tag" > "$work_root/$role.tag"
-            python scripts/role_image_publish.py plan \
-              --role "$role" \
-              --source-commit "$SOURCE_COMMIT" \
-              --version "$version" \
-              --workflow-run-id "$GITHUB_RUN_ID" \
-              --output "$plan"
-            python scripts/build_runner_image.py \
-              --flavor release \
-              --platform linux/amd64 \
-              --image-kind vllm-benchmark-runner \
-              --runtime-role "$role" \
-              --tag "$tag"
-            docker image inspect --format '{{json .Config.Labels}}' "$tag" > "$full_labels"
-            normalize_labels "$plan" "$full_labels" "$labels"
-            python scripts/role_image_publish.py verify-local-inspection \
-              --plan "$plan" \
-              --labels-json "$labels" \
-              --platform "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$tag")" \
-              --user "$(docker image inspect --format '{{.Config.User}}' "$tag")"
-            run_cpu_smoke "$tag" "$version" "$adapter_module"
-          done
-
-      - name: Diagnose capacity after a failed role-image build
-        if: ${{ failure() && steps.build.outcome == 'failure' }}
-        continue-on-error: true
-        env:
-          RUNNER_OS: ${{ runner.os }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          RUNNER_ARCH: ${{ runner.arch }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_NAME: ${{ runner.name }}
+          RUNNER_OS: ${{ runner.os }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          python scripts/role_image_runner_disk.py \
+          work_root="$RUNNER_TEMP/inferdrome-role-image-publication"
+          mkdir -p -- "$work_root"
+          python scripts/role_image_worker_monitor.py \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --github-repository "$GITHUB_REPOSITORY" \
+            --github-ref "$GITHUB_REF" \
+            --github-sha "$GITHUB_SHA" \
             --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" \
             --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-name "$RUNNER_NAME" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
             --runner-temp "$RUNNER_TEMP" \
-            --diagnose-only \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+            --workspace "$GITHUB_WORKSPACE" \
+            --build-deadline-seconds 2550 \
+            --output "$work_root/capacity-observations.json" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            -- bash scripts/build_role_images_and_smoke.sh \
+              --source-commit "$SOURCE_COMMIT" \
+              --work-root "$work_root"
+
+      - name: Retain bounded raw worker observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inferdrome-role-image-worker-observations-${{ github.run_id }}
+          path: ${{ runner.temp }}/inferdrome-role-image-publication/capacity-observations.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Push both role images and emit immutable digest outputs
         id: publish
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
           work_root="$RUNNER_TEMP/inferdrome-role-image-publication"

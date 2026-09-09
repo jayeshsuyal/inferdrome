@@ -19,16 +19,14 @@ No GPU campaign is ready until gates 1–3 have real, independently checkable
 artifacts. Gate 4 establishes reproducibility of the controlled path; gate 5
 is a pre-launch procedure review, not a claim that a host already exists.
 
-For a future manual role-image publication, retain its logged pre-build root,
-Docker-root, and `RUNNER_TEMP` filesystem available-byte observations, the
-observed `DockerRootDir` path, and Docker storage report as operational
-diagnostics. A failed build has a separate observe-only post-failure diagnostic
-step; it neither retries SDK removal nor changes the failed build result. The
-fixed Android SDK reclamation records before/after free-byte deltas only; it
-does not prove available space, image-build success, or a capacity threshold,
-and it is not a readiness artifact that substitutes for gate 2's returned
-immutable image references. The host/context checks gate that deletion only;
-they are not runner or host attestation.
+For a future manual role-image publication, retain the dedicated worker's
+Docker/Buildx version, storage location, filesystem mapping, and bounded
+before/during/after byte and inode observations as diagnostics. They sample
+availability; they do not establish a build-fit threshold, an exact peak, a
+capacity reservation, worker identity, or gate 2's immutable image references.
+The worker monitor does not remove an SDK, prune Docker, or clean broad host
+paths. A monitor timeout or observation failure remains a failed operation, not
+a retry authorization.
 
 ## Fixed local facts for later review
 
@@ -49,6 +47,10 @@ they are not runner or host attestation.
   exact-instance-ID termination and independently read back termination. The
   UTC deadline is not a provider-enforced TTL, and this path does not claim an
   automatic prelaunch watchdog, hard invoice cap, or guaranteed cleanup.
+- The role-image workflow has a separate proposed temporary CPU build-worker
+  path. Its suggested Ubuntu 24.04 x64, 4 vCPU, 16 GB RAM, and 200 GB
+  disposable-disk configuration is an external starting point only—not a
+  measured minimum, capacity proof, quote, or permission to create a VM.
 
 ## Minimal separate operational request
 
@@ -61,11 +63,14 @@ bracketed external value. It is a request for authority, not a command to run.
 > create a tag for this operation. Permit only the checked-in manual workflow to build and
 > CPU-smoke `linux/amd64` images and publish them to
 > `ghcr.io/jayeshsuyal/inferdrome-private-engine` and
-> `ghcr.io/jayeshsuyal/inferdrome-cpu-runner-observer`. The workflow is bounded
-> to 45 minutes on one GitHub-hosted CPU runner and must return both distinct
-> `repository@sha256` outputs plus their paired-record SHA-256. Confirm the
-> available GHCR package-storage allowance and the maximum approved runner or
-> package cost `[currency/cap]`; the repository does not know either value.
+> `ghcr.io/jayeshsuyal/inferdrome-cpu-runner-observer`. The workflow's selected
+> one-job ephemeral CPU worker is bounded to 45 minutes and must return both
+> distinct `repository@sha256` outputs plus their paired-record SHA-256. Before
+> creation, separately approve `[project]`, `[region/zone]`, `[boot image]`,
+> `[disk]`, `[maximum VM lifetime]`, `[cost estimate/cap]`, and exact cleanup
+> verification; runner deregistration is not VM deletion. Confirm available
+> GHCR package storage and all setup, disk, network, registry, and teardown
+> costs. The repository does not know those values or guarantee an invoice cap.
 >
 > Separately authorize one pinned Qwen3-8B acquisition and staging operation
 > from the revision above into an exact private CPU/local staging destination

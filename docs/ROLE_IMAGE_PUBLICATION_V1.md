@@ -1,6 +1,6 @@
 # Fixed role-image publication preparation v1
 
-Status: **manual publication workflow available; no publication asserted.**
+Status: **manual worker workflow available; no worker or publication asserted.**
 `.github/workflows/role-image-publish.yml` is an opt-in `workflow_dispatch`
 workflow for exactly the two fixed GHCR repositories below. It has no
 push/pull-request/tag/schedule trigger, requires the dispatch confirmation and
@@ -22,7 +22,7 @@ fixed role + source identity
 pure local plan -> normalized local inspection
           |
           v
-owner-approved, manually confirmed build + CPU-only smoke
+owner-approved, manually confirmed worker build + CPU-only smoke
           |
           v
 returned repository@sha256 outputs -> paired-digest validation
@@ -94,39 +94,74 @@ dispatch approval is the authorization boundary. A manual dispatch remains
 prohibited until an owner gives that separate approval for the exact source
 commit and the two fixed repositories.
 
-The job builds both fixed `linux/amd64` roles from the reviewed release wrapper
-with immutable Dockerfile base inputs, validates their normalized identity
-labels, and runs a no-network, read-only, CPU-only Python/import plus adapter
-`--help` smoke *before either push*. Only then does the publication job receive
-its ephemeral job-scoped `GITHUB_TOKEN` through stdin for GHCR login. It pushes
-only the two fixed repositories, requires a returned
-`repository@sha256:<digest>` for each, rejects a digest collapse, and exposes
-the two immutable references plus the canonical paired-record SHA-256 as job
-outputs and in the job summary. The engine role probes only the private-engine
-adapter `--help`; the CPU runner/observer probes only its separate runner
-adapter `--help`.
+## Dedicated temporary CPU build worker
 
-Before the vLLM base extraction begins, the workflow writes the available-byte
-counts for the runner root filesystem, Docker's `DockerRootDir` filesystem, and
-the actual `RUNNER_TEMP` filesystem, plus the Docker root path and Docker's
-storage report, to the job log and summary. A missing mandatory observation
-stops the job before the build. On a GitHub-hosted Linux runner only, it then
-checks the actual host platform as well as the runner context, and validates
-every component and canonical identity of the one disposable path
-`/usr/local/lib/android/sdk`; a missing path is a disclosed no-op, while a
-symlink, non-directory, unsafe context, or failed removal stops the job before
-the build. The removal command is no-shell and limited to that one directory's
-filesystem. It does not prune Docker or any other runner content. These context
-checks constrain the one deletion; they are not an attestation of the runner or
-host's broader state.
+The dispatch guard runs on a standard hosted runner and rejects a wrong mode,
+confirmation, repository, reviewed-main ref, source SHA, dirty checkout, or
+malformed non-sensitive worker alias. Exactly one subsequent job is selected:
+`BUILD_AND_SMOKE_ONLY` has `contents: read` only and contains no GHCR login or
+push; `PUBLISH_FIXED_ROLE_IMAGES` alone receives a job-scoped `GITHUB_TOKEN`
+with `packages: write` throughout that selected job. Its GHCR login and push
+commands run only after the same job's build and smokes succeed. Normal
+engineering, dashboard, and synthetic/mock CI remain on GitHub-hosted runners.
 
-If the build step itself fails, a separate diagnostic-only step recollects the
-same capacity observations after the failure. It cannot reclaim the SDK, is
-allowed to fail without replacing the original build failure, and runs before
-the default failure handling leaves the GHCR login/push step skipped. Every
-available-byte delta after SDK reclamation is an observation, not a guaranteed
-reclaimed-byte count under concurrent runner writes; neither observation nor
-reclamation establishes that either image build will fit.
+Both selected jobs require the fixed `self-hosted`, `Linux`, `X64`, and
+`inferdrome-role-image-cpu` labels and run for at most 45 minutes. The worker's
+name must exactly equal the dispatch's restricted alias. These are routing and
+mismatch checks, not cryptographic proof of a VM, its disposable status, or an
+operator approval. The worker must accept only reviewed-main manual dispatches;
+untrusted pull-request, fork, or arbitrary workload execution is out of scope.
+
+The same selected worker builds both fixed `linux/amd64` roles and runs every
+final container smoke before either role can be pushed. Those smokes are
+non-root, read-only, no-network checks of the packaged Python version, CLI,
+role adapter help, and the PR74 serving-interpreter metadata binding. The
+publication mode then pushes those same local image tags to only the two fixed
+repositories, requires a returned `repository@sha256:<digest>` for each,
+rejects a digest collapse, and exposes the two immutable references plus the
+canonical paired-record SHA-256 as job outputs and in the job summary.
+
+The dedicated-worker monitor is observation-only. Before, during, and after the
+child build it records Docker Server and Buildx versions, storage driver and
+root, filesystem mapping, free bytes, and free inodes. During samples and the
+child deadline are bounded; each Docker observation command has a 10-second
+limit. Monitor failure terminates an unfinished child, and a failed build still
+records its before/during/after observation before returning its nonzero status.
+A monitor-enforced timeout returns a nonzero monitor result even if its child
+exits cleanly after termination. The recorded minima are samples, not an exact
+peak, capacity admission threshold, or a promise that an image will fit. This
+worker does not invoke the GitHub-hosted Android SDK helper, delete SDK files,
+prune Docker, or perform any broad host cleanup.
+
+### Operator setup and teardown runbook
+
+This is a non-executable procedure; bracketed values are unresolved external
+facts, not a launch proposal or repository defaults.
+
+1. First perform separately authorized, read-only eligibility, quota, and quote
+   checks. Record `[project]`, `[region/zone]`, `[boot-image identity]`,
+   `[network/firewall path]`, `[runner registration scope]`, and the rate/expiry
+   without placing credentials, registration tokens, or provider output in this
+   repository, workflow arguments, or job summary.
+2. Obtain a separate exact approval binding one temporary Ubuntu 24.04 Linux
+   x64 CPU VM, its image, region/zone, disk, lifetime, cost estimate, and
+   accountable operator. A suggested starting configuration of 4 vCPU, 16 GB
+   RAM, and a 200 GB disposable disk is neither a measured minimum, a fit
+   guarantee, a quota result, nor spending authorization.
+3. At creation, require the provider-native maximum-runtime action to be
+   `DELETE`, read it back, and bind the exact VM and boot-disk identity. Register
+   one repository-scoped GitHub runner for one ephemeral job with the fixed
+   labels above. The VM receives no long-lived administrator or cloud mutation
+   credential; job-scoped GHCR capability exists only in a separately approved
+   manual publication-mode job.
+4. After success, failure, or timeout, independently deregister the GitHub
+   runner and delete/reconcile the exact approved VM and all owned billable
+   disks, then verify their scoped absence. Runner deregistration and workflow
+   timeout are not VM deletion. Account for setup, teardown, disk, network, and
+   registry costs; an estimate or USD cap is not a hard invoice guarantee.
+
+No current manual dispatch, worker registration, VM, running role image, quote,
+registry image, published pair, or receipt is asserted by this source change.
 
 The workflow cannot make a pair of pushes atomic: a later registry failure may
 leave an earlier role published, in which case it emits no validated pair
