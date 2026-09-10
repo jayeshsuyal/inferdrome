@@ -243,6 +243,79 @@ def test_repository_package_version_matches_project_metadata() -> None:
     assert builder._package_version() == project["project"]["version"]
 
 
+@pytest.mark.parametrize("inherited_value", (None, "0"))
+def test_sequential_vllm_release_version_discovery_does_not_write_bytecode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    inherited_value: str | None,
+) -> None:
+    """The first role's real version probe must not taint the second role gate."""
+
+    source_commit = "c" * 40
+    repository = tmp_path / "clean-checkout"
+    package = repository / "src" / "inferdrome"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        '__version__ = "0.3.0.dev0"\n', encoding="utf-8"
+    )
+    status_checks: list[tuple[str, ...]] = []
+    contexts: list[Path] = []
+    docker_commands: list[list[str]] = []
+
+    def capture(command: tuple[str, ...]) -> str:
+        if command[0:2] == ("git", "status"):
+            status_checks.append(command)
+            assert not (package / "__pycache__").exists()
+            return ""
+        assert command == ("git", "rev-parse", "--verify", "HEAD^{commit}")
+        return source_commit
+
+    @contextmanager
+    def materialized_context(
+        _source_commit: str,
+        *,
+        archive_inputs: tuple[str, ...] | None = None,
+    ):
+        assert archive_inputs == builder.VLLM_ARCHIVE_BUILD_INPUTS
+        context = tmp_path / f"proof-context-{len(contexts)}"
+        context.mkdir()
+        (context / "Dockerfile.vllm-benchmark-runner").write_text(
+            "archived Dockerfile", encoding="utf-8"
+        )
+        contexts.append(context)
+        try:
+            yield context
+        finally:
+            (context / "Dockerfile.vllm-benchmark-runner").unlink()
+            context.rmdir()
+
+    monkeypatch.setattr(builder, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(builder, "_capture", capture)
+    monkeypatch.setattr(builder, "_materialize_proof_context", materialized_context)
+    monkeypatch.setattr(builder.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        builder, "_run_docker_build", lambda command: docker_commands.append(command)
+    )
+    # Both a clean inherited environment and a conflicting value must be safe:
+    # the child probe owns this setting rather than trusting its caller.
+    if inherited_value is None:
+        monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    else:
+        monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", inherited_value)
+
+    for role in ("private-engine", "cpu-runner-observer"):
+        builder.build_image(
+            flavor="release",
+            image_kind="vllm-benchmark-runner",
+            runtime_role=role,
+            tag=f"inferdrome-vllm-{role}:test",
+        )
+
+    assert len(status_checks) == 2
+    assert len(docker_commands) == 2
+    assert not (package / "__pycache__").exists()
+
+
 def test_wrapper_rejects_noncanonical_platform_without_docker() -> None:
     with pytest.raises(builder.RunnerImageBuildError) as exc_info:
         builder.build_image(platform="linux/arm64")
