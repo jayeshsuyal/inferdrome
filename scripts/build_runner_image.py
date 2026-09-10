@@ -247,6 +247,10 @@ def _source_commit() -> str:
 def _package_version() -> str:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(REPOSITORY_ROOT / "src")
+    # This probe reads the checked-out package before a later role build repeats
+    # the strict ignored-input gate.  Keep that read observational: bytecode in
+    # the source tree is itself a rejected proof/release input.
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         completed = subprocess.run(
             [
