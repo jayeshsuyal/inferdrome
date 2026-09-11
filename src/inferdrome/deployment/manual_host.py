@@ -28,6 +28,12 @@ from inferdrome.deployment.manual_host_docker import (
     docker_argv,
     docker_target,
 )
+from inferdrome.deployment.manual_host_profiles import (
+    A100_PCIE_40GB_PROFILE,
+    H100_SXM5_80GB_PROFILE,
+    SUPPORTED_MANUAL_HOST_PROFILES,
+    manual_host_profile,
+)
 from inferdrome.qwen3_campaign import (
     QWEN3_8B_REVISION,
     qwen3_expected_snapshot_sha256,
@@ -55,10 +61,14 @@ from inferdrome.routing_execution.contracts import (
     fixed_selected_workload_sha256,
     oci_content_digest,
 )
-from inferdrome.routing_execution.manual_host_contracts import ManualHostRoutingConfig
+from inferdrome.routing_execution.manual_host_contracts import (
+    H100ManualHostRoutingConfig,
+    ManualHostRoutingConfig,
+)
 from inferdrome.routing_execution.topology import admit_topology
 
-PROFILE_ID = "lambda-manual-two-a100-pcie-40gb-v1"
+PROFILE_ID = A100_PCIE_40GB_PROFILE.profile_id
+H100_PROFILE_ID = H100_SXM5_80GB_PROFILE.profile_id
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 InstanceId = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
 GpuUuid = Annotated[str, Field(pattern=rf"^GPU-{_UUID}$")]
@@ -176,12 +186,24 @@ class ManualHostInput(ExecutionModel):
         return self
 
 
-def input_template() -> dict[str, Any]:
+class H100ManualHostInput(ManualHostInput):
+    """Additive two-H100 SXM5 declaration; the A100 v1 input stays closed."""
+
+    schema_version: Literal["inferdrome.manual-host-input.v2"]
+    profile_id: Literal["lambda-manual-two-h100-sxm5-80gb-v1"]
+    accelerator_model: Literal["NVIDIA H100-SXM5-80GB"]
+
+
+ManualHostSpec = ManualHostInput | H100ManualHostInput
+
+
+def input_template(profile_id: str = PROFILE_ID) -> dict[str, Any]:
     """An intentionally invalid template: unknown real values are JSON null."""
+    profile = manual_host_profile(profile_id)
     r1 = fixed_r1_input_digests()
     return {
-        "schema_version": "inferdrome.manual-host-input.v1",
-        "profile_id": PROFILE_ID,
+        "schema_version": profile.input_schema_version,
+        "profile_id": profile.profile_id,
         "provider": "LAMBDA",
         "provisioning": "OPERATOR_SUPPLIED_VM",
         "source_commit": None,
@@ -190,7 +212,7 @@ def input_template() -> dict[str, Any]:
         "instance_type": None,
         "os": "Linux",
         "architecture": "x86_64",
-        "accelerator_model": "NVIDIA A100-PCIE-40GB",
+        "accelerator_model": profile.accelerator_model,
         "gpu_uuids": [None, None],
         "tensor_parallel_size": 1,
         "uid": None,
@@ -244,11 +266,14 @@ def input_template() -> dict[str, Any]:
     }
 
 
-def routing_config(spec: ManualHostInput) -> ManualHostRoutingConfig:
+def routing_config(
+    spec: ManualHostSpec,
+) -> ManualHostRoutingConfig | H100ManualHostRoutingConfig:
     """Pure bridge, with declarations explicitly distinguished from proof."""
+    profile = manual_host_profile(spec.profile_id)
     value = spec.model_dump(mode="json")
     config: dict[str, Any] = {
-        "schema_version": "inferdrome.routing-execution-config.v2",
+        "schema_version": profile.config_schema_version,
         "execution_id": "routing-execution-v1",
         "mode": "LAMBDA_MANUAL_HOST",
         **{
@@ -295,7 +320,7 @@ def routing_config(spec: ManualHostInput) -> ManualHostRoutingConfig:
             "inter_request_interval_ms": 10,
         },
         "topology": {
-            "profile_id": PROFILE_ID,
+            "profile_id": profile.profile_id,
             "provider": "LAMBDA",
             "provisioning": "OPERATOR_SUPPLIED_VM",
             "identity_assertion": "OPERATOR_DECLARED_NOT_OBSERVED",
@@ -329,13 +354,17 @@ def routing_config(spec: ManualHostInput) -> ManualHostRoutingConfig:
     # operator-supplied pin or a value emitted in a completed artifact.
     transfer = input_transfer_digest(config, spec.workload.selected_workload_sha256)
     config["evidence_destination"]["declared_input_transfer_sha256"] = transfer
-    parsed = ManualHostRoutingConfig.model_validate_json(canonical_json_bytes(config))
+    parsed = (
+        H100ManualHostRoutingConfig.model_validate_json(canonical_json_bytes(config))
+        if isinstance(spec, H100ManualHostInput)
+        else ManualHostRoutingConfig.model_validate_json(canonical_json_bytes(config))
+    )
     admit_topology(parsed)
     return parsed
 
 
 def compose_plan(
-    spec: ManualHostInput, engine_template: dict[str, Any]
+    spec: ManualHostSpec, engine_template: dict[str, Any]
 ) -> dict[str, Any]:
     """Reuse compose.gpu.yaml's pinned serving arguments and hardening."""
     services: dict[str, Any] = {}
@@ -443,7 +472,7 @@ def compose_plan(
     }
 
 
-def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, bytes]:
+def prepare_artifacts(spec: ManualHostSpec, repository: Path) -> dict[str, bytes]:
     """Return deterministic artifacts without any host/provider/runtime probe."""
     template = (repository / "compose.gpu.yaml").read_bytes()
     # Bind exactly the consumed template bytes to the operator's source commit.
@@ -514,7 +543,7 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
         "status": "LOCAL_PREPARATION_ONLY",
         "execute_authority": "NONE",
         "declaration_sha256": config.topology.declaration_sha256,
-        "profile_id": PROFILE_ID,
+        "profile_id": spec.profile_id,
         "docker_target": docker_target(spec.preparation_path),
         "compose_template_sha256": sha256_digest(template),
         "compose_template_source_commit": spec.source_commit,
@@ -527,7 +556,7 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
             "Exact-ID cleanup duty accepted; deadline is NOT an enforced TTL.",
             "Linux x86_64, Docker Compose and NVIDIA toolkit checked.",
             "Only the reviewed local /var/run/docker.sock daemon is supported.",
-            "Exactly two A100 PCIe 40 GB; distinct UUIDs and MIG disabled.",
+            manual_host_profile(spec.profile_id).preflight_requirement,
             "Container allocation matches UUIDs; one GPU per engine and TP=1.",
             "Preloaded distinct OCI role digests and source revision labels checked.",
             "Model/tokenizer bytes match frozen snapshot and manifest.",
@@ -614,13 +643,20 @@ def prepare_artifacts(spec: ManualHostInput, repository: Path) -> dict[str, byte
     return artifacts
 
 
-def _read_input(path: Path) -> ManualHostInput:
+def _read_input(path: Path) -> ManualHostSpec:
     # Reuse the runner's bounded no-follow source read and duplicate-key check.
     from inferdrome.routing_execution.executor import _read_source, _strict_json
 
     content = _read_source(path, label="manual host input", maximum=65_536)
-    _strict_json(content, label="manual host input")
-    return ManualHostInput.model_validate_json(content)
+    value = _strict_json(content, label="manual host input")
+    if not isinstance(value, dict):
+        raise ValueError("manual host input must be an object")
+    schema_version = value.get("schema_version")
+    if schema_version == A100_PCIE_40GB_PROFILE.input_schema_version:
+        return ManualHostInput.model_validate_json(content)
+    if schema_version == H100_SXM5_80GB_PROFILE.input_schema_version:
+        return H100ManualHostInput.model_validate_json(content)
+    raise ValueError("manual host input schema version is unsupported")
 
 
 def _publish(output: Path, artifacts: dict[str, bytes]) -> None:
@@ -647,7 +683,15 @@ def _publish(output: Path, artifacts: dict[str, bytes]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m inferdrome.deployment.manual_host")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("template", help="print invalid template with unresolved nulls")
+    template = commands.add_parser(
+        "template", help="print invalid template with unresolved nulls"
+    )
+    template.add_argument(
+        "--profile",
+        choices=tuple(SUPPORTED_MANUAL_HOST_PROFILES),
+        default=PROFILE_ID,
+        help="closed hardware profile; default preserves the A100 v1 template",
+    )
     prepare = commands.add_parser(
         "prepare", help="validate and render locally; never execute"
     )
@@ -656,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "template":
-            print(json.dumps(input_template(), indent=2, sort_keys=True))
+            print(json.dumps(input_template(args.profile), indent=2, sort_keys=True))
         else:
             spec = _read_input(args.input)
             artifacts = prepare_artifacts(spec, Path(__file__).resolve().parents[3])

@@ -18,12 +18,26 @@ from inferdrome.deployment.manual_host_preflight import (
     verify_preparation,
 )
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
-from tests.unit.test_manual_host import ROOT, parsed, synthetic_input
+from tests.unit.test_manual_host import (
+    ROOT,
+    h100_parsed,
+    parsed,
+    synthetic_input,
+)
 
 
 def inventory() -> bytes:
     return "\n".join(
         f"{gpu}, NVIDIA A100-PCIE-40GB, 40536, Disabled" for gpu in parsed().gpu_uuids
+    ).encode()
+
+
+def h100_inventory() -> bytes:
+    """Documented synthetic H100 contract fixture, never GPU evidence."""
+
+    return "\n".join(
+        f"{gpu}, NVIDIA H100 80GB HBM3, 81559, Disabled"
+        for gpu in h100_parsed().gpu_uuids
     ).encode()
 
 
@@ -112,6 +126,42 @@ def test_exact_gpu_inventory_and_image_observations() -> None:
             "private-engine",
             canonical_json_bytes(value),
         )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["duplicate", "mixed", "wrong_name", "wrong_memory", "mig"]
+)
+def test_h100_documented_synthetic_inventory_fails_closed(
+    mutation: str,
+) -> None:
+    value = h100_inventory()
+    if mutation == "duplicate":
+        value = value.splitlines()[0] + b"\n" + value.splitlines()[0]
+    elif mutation == "mixed":
+        value = value.replace(
+            b"NVIDIA H100 80GB HBM3, 81559",
+            b"NVIDIA A100-PCIE-40GB, 40536",
+            1,
+        )
+    elif mutation == "wrong_name":
+        value = value.replace(b"NVIDIA H100 80GB HBM3", b"NVIDIA H100 NVL")
+    elif mutation == "wrong_memory":
+        value = value.replace(b"81559", b"81560")
+    else:
+        value = value.replace(b"Disabled", b"Enabled")
+    with pytest.raises(ValueError):
+        check_gpu_inventory(h100_parsed(), value)
+
+
+def test_h100_documented_synthetic_inventory_and_single_gpu_allocation() -> None:
+    spec = h100_parsed()
+    check_gpu_inventory(spec, h100_inventory())
+    check_allocation(
+        spec,
+        0,
+        image_observation()["Id"],
+        canonical_json_bytes(container_observation()),
+    )
 
 
 @pytest.mark.parametrize(

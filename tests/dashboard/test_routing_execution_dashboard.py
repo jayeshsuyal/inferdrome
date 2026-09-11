@@ -16,7 +16,11 @@ from fastapi.testclient import TestClient
 from inferdrome.dashboard.api import create_app
 from inferdrome.dashboard.auth import DashboardKeyringStore
 from inferdrome.dashboard.index import DashboardIndex
-from inferdrome.deployment.manual_host import ManualHostInput, prepare_artifacts
+from inferdrome.deployment.manual_host import (
+    H100ManualHostInput,
+    ManualHostInput,
+    prepare_artifacts,
+)
 from inferdrome.routing_execution.canonical import canonical_json_bytes
 from inferdrome.routing_execution.executor import (
     ManualMonotonicClock,
@@ -25,6 +29,7 @@ from inferdrome.routing_execution.executor import (
 from inferdrome.routing_execution.transport import EndpointTransport
 from tests.routing_execution_support import (
     StaticEndpointTransport,
+    h100_manual_host_fixture_input,
     manual_host_fixture_input,
 )
 
@@ -60,6 +65,22 @@ def _sealed_execution(
         transport_factory=transport_factory,
         clock=ManualMonotonicClock(),
         cancel_requested=cancel_requested,
+    ).path
+
+
+def _sealed_h100_execution(output_root: Path) -> Path:
+    spec = H100ManualHostInput.model_validate_json(
+        canonical_json_bytes(
+            h100_manual_host_fixture_input(source_commit=_source_commit())
+        )
+    )
+    files = prepare_artifacts(spec, _ROOT)
+    return run_execution_from_bytes(
+        files["deployment-config.json"],
+        files["selected-workload.jsonl"],
+        output_root,
+        transport_factory=StaticEndpointTransport,
+        clock=ManualMonotonicClock(),
     ).path
 
 
@@ -206,6 +227,30 @@ def test_verified_v2_execution_index_and_detail_are_allowlisted(tmp_path: Path) 
         "evidence_destination_sha256",
     ):
         assert forbidden not in serialized
+
+
+def test_verified_v3_h100_profile_uses_the_existing_read_only_projection(
+    tmp_path: Path,
+) -> None:
+    package = _sealed_h100_execution(tmp_path / "sealed-h100-execution")
+    with _client(package, _retained_digest(package)) as client:
+        response = client.get("/api/v1/routing-executions")
+
+    assert response.status_code == 200
+    summary = response.json()["routing_executions"]
+    assert len(summary) == 1
+    assert summary[0]["mode"] == "LAMBDA_MANUAL_HOST"
+    assert summary[0]["topology"] == {
+        "accelerator_model": "NVIDIA H100-SXM5-80GB",
+        "accelerator_count": 2,
+        "runner_separate_from_serving": True,
+        "serving_engine_count": 2,
+        "one_engine_per_endpoint": True,
+        "declared_provider": "LAMBDA",
+        "declared_provisioning": "OPERATOR_SUPPLIED_VM",
+        "identity_assertion": "OPERATOR_DECLARED_NOT_OBSERVED",
+        "lifecycle_protection": "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY",
+    }
 
 
 def test_execution_id_is_only_resolved_from_verified_snapshot(tmp_path: Path) -> None:

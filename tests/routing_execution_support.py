@@ -72,6 +72,53 @@ def manual_host_fixture_input(*, source_commit: str) -> dict[str, Any]:
     return value
 
 
+def h100_manual_host_fixture_input(*, source_commit: str) -> dict[str, Any]:
+    """Return a synthetic v2 H100 declaration, never a host observation."""
+
+    from inferdrome.deployment.manual_host import H100_PROFILE_ID, input_template
+
+    value = input_template(H100_PROFILE_ID)
+    value.update(
+        {
+            "source_commit": source_commit,
+            "instance_id": "0123456789abcdef0123456789abcdef",
+            "region": "synthetic-region",
+            "instance_type": "gpu_2x_h100_sxm5",
+            "gpu_uuids": [
+                "GPU-00000000-0000-0000-0000-000000000001",
+                "GPU-00000000-0000-0000-0000-000000000002",
+            ],
+            "uid": 2000,
+            "gid": 2000,
+            "runner_image": {
+                "reference": "example.invalid/test-runner@"
+                + sha256_digest(b"routing-execution-dashboard-h100-runner")
+            },
+            "serving_image": {
+                "reference": "example.invalid/test-engine@"
+                + sha256_digest(b"routing-execution-dashboard-h100-engine")
+            },
+            "model_path": "/srv/test-model",
+            "preparation_path": "/srv/test-inputs",
+            "evidence_path": "/srv/test-evidence",
+            "compose_project": "synthetic-campaign",
+            "container_subnet": "172.29.71.0/24",
+            "endpoint_ipv4": ["172.29.71.2", "172.29.71.3"],
+            "request_timeout_ms": 1000,
+        }
+    )
+    cleanup = value["cleanup"]
+    assert isinstance(cleanup, dict)
+    cleanup.update(
+        {
+            "instance_id": value["instance_id"],
+            "accountable_operator": "synthetic-operator",
+            "terminate_by_utc": "2030-01-01T00:00:00Z",
+        }
+    )
+    return value
+
+
 def workload_bytes() -> bytes:
     return fixed_selected_workload_bytes()
 
