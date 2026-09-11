@@ -189,9 +189,11 @@ class ManualHostInput(ExecutionModel):
 class H100ManualHostInput(ManualHostInput):
     """Additive two-H100 SXM5 declaration; the A100 v1 input stays closed."""
 
-    schema_version: Literal["inferdrome.manual-host-input.v2"]
-    profile_id: Literal["lambda-manual-two-h100-sxm5-80gb-v1"]
-    accelerator_model: Literal["NVIDIA H100-SXM5-80GB"]
+    # Pydantic validates these sibling discriminators at runtime; inheritance
+    # is limited to the shared exact-input validator, never v1 admission.
+    schema_version: Literal["inferdrome.manual-host-input.v2"]  # type: ignore[assignment]
+    profile_id: Literal["lambda-manual-two-h100-sxm5-80gb-v1"]  # type: ignore[assignment]
+    accelerator_model: Literal["NVIDIA H100-SXM5-80GB"]  # type: ignore[assignment]
 
 
 ManualHostSpec = ManualHostInput | H100ManualHostInput
