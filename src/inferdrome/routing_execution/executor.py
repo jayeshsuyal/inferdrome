@@ -72,6 +72,14 @@ from inferdrome.routing_execution.transport import (
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_WORKLOAD_BYTES = 1_048_576
 _MAX_PROMPT_BYTES = 32_768
+_MANUAL_HOST_MANIFEST_SCHEMA_BY_CONFIG_SCHEMA = {
+    "inferdrome.routing-execution-config.v2": (
+        "inferdrome.routing-executed-manifest.v2"
+    ),
+    "inferdrome.routing-execution-config.v3": (
+        "inferdrome.routing-executed-manifest.v3"
+    ),
+}
 
 
 class ExecutionError(ValueError):
@@ -747,12 +755,19 @@ def _build_manifest(
 ) -> ExecutionManifest:
     config = topology.config
     transfer_bytes = canonical_json_bytes(input_transfer.model_dump(mode="json"))
+    if config.mode == "LAMBDA_MANUAL_HOST":
+        try:
+            manifest_schema_version = _MANUAL_HOST_MANIFEST_SCHEMA_BY_CONFIG_SCHEMA[
+                config.schema_version
+            ]
+        except KeyError as error:
+            raise ExecutionError(
+                "manual host configuration has no matching manifest version"
+            ) from error
+    else:
+        manifest_schema_version = "inferdrome.routing-executed-manifest.v1"
     value = dict(
-        schema_version=(
-            "inferdrome.routing-executed-manifest.v2"
-            if config.mode == "LAMBDA_MANUAL_HOST"
-            else "inferdrome.routing-executed-manifest.v1"
-        ),
+        schema_version=manifest_schema_version,
         execution_id=config.execution_id,
         mode=config.mode,
         source_commit=config.source_commit,
@@ -773,8 +788,8 @@ def _build_manifest(
         planned_terminal_denominator=18,
         no_retry=True,
     )
-    # The discriminated adapter preserves v1 serialization and admits v2
-    # without widening any v1 model literals.
+    # The discriminated adapter preserves v1/v2 serialization and admits the
+    # additive v3 profile without widening old model literals.
     return MANIFEST_ADAPTER.validate_python(value)
 
 

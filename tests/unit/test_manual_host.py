@@ -14,6 +14,8 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from inferdrome.deployment.manual_host import (
+    H100_PROFILE_ID,
+    H100ManualHostInput,
     ManualHostInput,
     input_template,
     main,
@@ -34,9 +36,13 @@ from inferdrome.routing_execution.executor import (
     load_config_bytes,
     run_execution_from_bytes,
 )
+from inferdrome.routing_execution.package import VerificationError
 from inferdrome.routing_execution.topology import TopologyAdmissionError, admit_topology
 from inferdrome.routing_execution.verifier import verify_execution_package
-from tests.routing_execution_support import StaticEndpointTransport
+from tests.routing_execution_support import (
+    StaticEndpointTransport,
+    h100_manual_host_fixture_input,
+)
 from tests.routing_execution_support import config_value as v1_config_value
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -94,6 +100,18 @@ def synthetic_input() -> dict[str, Any]:
 def parsed(value: dict[str, Any] | None = None) -> ManualHostInput:
     return ManualHostInput.model_validate_json(
         canonical_json_bytes(value or synthetic_input())
+    )
+
+
+def h100_synthetic_input() -> dict[str, Any]:
+    return h100_manual_host_fixture_input(
+        source_commit=synthetic_input()["source_commit"]
+    )
+
+
+def h100_parsed(value: dict[str, Any] | None = None) -> H100ManualHostInput:
+    return H100ManualHostInput.model_validate_json(
+        canonical_json_bytes(value or h100_synthetic_input())
     )
 
 
@@ -225,10 +243,81 @@ def test_duplicate_gpu_and_image_roles_and_wrong_cleanup_target_rejected() -> No
 def test_template_is_unresolved_and_schema_snapshots_valid() -> None:
     with pytest.raises(ValidationError):
         parsed(input_template())
+    assert input_template() == json.loads(
+        (
+            ROOT / "deployments/manual-host-v1/lambda-two-a100-pcie.input-template.json"
+        ).read_bytes()
+    )
+    assert input_template(H100_PROFILE_ID)["profile_id"] == H100_PROFILE_ID
+    with pytest.raises(ValueError, match="unsupported"):
+        input_template("unapproved-gpu-profile")
+    with pytest.raises(ValidationError):
+        h100_parsed(input_template(H100_PROFILE_ID))
     check(ROOT)
     for name, content in artifacts().items():
         if "schema.json" in name:
             Draft202012Validator.check_schema(json.loads(content))
+
+
+def test_h100_profile_is_closed_and_uses_the_shared_compose_and_prepare_flow(
+    capsys: Any,
+) -> None:
+    assert main(["template"]) == 0
+    assert json.loads(capsys.readouterr().out)["profile_id"] == (
+        "lambda-manual-two-a100-pcie-40gb-v1"
+    )
+    assert main(["template", "--profile", H100_PROFILE_ID]) == 0
+    template = json.loads(capsys.readouterr().out)
+    assert template == input_template(H100_PROFILE_ID)
+
+    spec = h100_parsed()
+    files = prepare_artifacts(spec, ROOT)
+    config = load_config_bytes(files["deployment-config.json"])
+    compose = json.loads(files["compose.manual-host.json"])
+    plan = json.loads(files["plan.json"])
+
+    assert config.schema_version == "inferdrome.routing-execution-config.v3"
+    assert config.topology.profile_id == H100_PROFILE_ID
+    assert config.topology.accelerator_model == "NVIDIA H100-SXM5-80GB"
+    assert plan["profile_id"] == H100_PROFILE_ID
+    assert plan["required_before_start"][4] == (
+        "Exactly two H100 SXM5 80 GB physical GPUs; distinct UUIDs and MIG disabled."
+    )
+    for index, endpoint in enumerate(("endpoint-a", "endpoint-b")):
+        assert compose["services"][endpoint]["deploy"]["resources"]["reservations"][
+            "devices"
+        ][0]["device_ids"] == [spec.gpu_uuids[index]]
+    assert "deploy" not in compose["services"]["runner"]
+    assert (
+        compose["services"]["runner"]["environment"]["NVIDIA_VISIBLE_DEVICES"]
+        == "void"
+    )
+
+
+def test_h100_input_and_config_reject_mixed_or_legacy_profile_forms() -> None:
+    value = h100_synthetic_input()
+    for key, replacement in (
+        ("schema_version", "inferdrome.manual-host-input.v1"),
+        ("profile_id", "lambda-manual-two-a100-pcie-40gb-v1"),
+        ("accelerator_model", "NVIDIA A100-PCIE-40GB"),
+    ):
+        candidate = deepcopy(value)
+        candidate[key] = replacement
+        with pytest.raises(ValidationError):
+            h100_parsed(candidate)
+
+    config = routing_config(h100_parsed()).model_dump(mode="json")
+    for key, replacement in (
+        ("schema_version", "inferdrome.routing-execution-config.v2"),
+        ("profile_id", "lambda-manual-two-a100-pcie-40gb-v1"),
+    ):
+        candidate = deepcopy(config)
+        if key == "profile_id":
+            candidate["topology"][key] = replacement
+        else:
+            candidate[key] = replacement
+        with pytest.raises(ExecutionError):
+            load_config_bytes(canonical_json_bytes(candidate))
 
 
 def test_v1_remains_closed_and_manual_admission_rejects_public_or_duplicate() -> None:
@@ -306,6 +395,36 @@ def test_manual_config_reuses_receipts_sealing_offline_replay_and_not_synthetic_
         "producer-receipt.json",
         "integrity-manifest.json",
     }
+
+
+def test_h100_v3_execution_seals_verifies_and_rejects_manifest_tamper(
+    tmp_path: Path,
+) -> None:
+    files = prepare_artifacts(h100_parsed(), ROOT)
+    sealed = run_execution_from_bytes(
+        files["deployment-config.json"],
+        files["selected-workload.jsonl"],
+        tmp_path / "package",
+        transport_factory=StaticEndpointTransport,
+        clock=ManualMonotonicClock(),
+    )
+    result = verify_execution_package(
+        sealed.path, expected_digest=sealed.retained_digest
+    )
+    assert result.executed_manifest.schema_version == (
+        "inferdrome.routing-executed-manifest.v3"
+    )
+    assert result.executed_manifest.topology.profile_id == H100_PROFILE_ID
+    assert len(result.producer_receipt.terminal_outcomes) == 18
+
+    manifest_path = sealed.path / "executed-manifest.json"
+    manifest_path.chmod(0o600)
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["schema_version"] = "inferdrome.routing-executed-manifest.v2"
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    manifest_path.chmod(0o400)
+    with pytest.raises(VerificationError):
+        verify_execution_package(sealed.path)
 
 
 def test_capture_failure_still_closes_denominator(tmp_path: Path) -> None:

@@ -54,6 +54,14 @@ class ManualHostTopology(ExecutionModel):
         return self
 
 
+class H100ManualHostTopology(ManualHostTopology):
+    """Additive H100 SXM5 topology; v2 A100 literals remain untouched."""
+
+    # These are Pydantic discriminator siblings, not a widening of v2.
+    profile_id: Literal["lambda-manual-two-h100-sxm5-80gb-v1"]  # type: ignore[assignment]
+    accelerator_model: Literal["NVIDIA H100-SXM5-80GB"]  # type: ignore[assignment]
+
+
 class ManualHostRoutingConfig(ExecutionModel):
     schema_version: Literal["inferdrome.routing-execution-config.v2"]
     execution_id: ExecutionId
@@ -92,6 +100,13 @@ class ManualHostRoutingConfig(ExecutionModel):
         return self
 
 
+class H100ManualHostRoutingConfig(ManualHostRoutingConfig):
+    """Versioned H100 config with unchanged routing/evidence semantics."""
+
+    schema_version: Literal["inferdrome.routing-execution-config.v3"]  # type: ignore[assignment]
+    topology: H100ManualHostTopology
+
+
 class ManualHostExecutedManifest(ExecutionModel):
     schema_version: Literal["inferdrome.routing-executed-manifest.v2"]
     execution_id: ExecutionId
@@ -128,8 +143,19 @@ class ManualHostExecutedManifest(ExecutionModel):
         return self
 
 
-ExecutionConfig = RoutingExecutionConfig | ManualHostRoutingConfig
-ExecutionManifest = ExecutedManifest | ManualHostExecutedManifest
+class H100ManualHostExecutedManifest(ManualHostExecutedManifest):
+    """Versioned H100 manifest paired only with the v3 manual-host config."""
+
+    schema_version: Literal["inferdrome.routing-executed-manifest.v3"]  # type: ignore[assignment]
+    topology: H100ManualHostTopology
+
+
+ExecutionConfig = (
+    RoutingExecutionConfig | ManualHostRoutingConfig | H100ManualHostRoutingConfig
+)
+ExecutionManifest = (
+    ExecutedManifest | ManualHostExecutedManifest | H100ManualHostExecutedManifest
+)
 CONFIG_ADAPTER: TypeAdapter[ExecutionConfig] = TypeAdapter(
     Annotated[ExecutionConfig, Field(discriminator="schema_version")]
 )

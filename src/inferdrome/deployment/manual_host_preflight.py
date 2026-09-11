@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from inferdrome.deployment.manual_host import ManualHostInput, _read_input
+from inferdrome.deployment.manual_host import ManualHostSpec, _read_input
 from inferdrome.deployment.manual_host_docker import (
     DOCKER_CONFIG_FILE,
     EMPTY_DOCKER_CONFIG,
@@ -26,6 +26,7 @@ from inferdrome.deployment.manual_host_docker import (
     docker_environment,
     docker_target,
 )
+from inferdrome.deployment.manual_host_profiles import manual_host_profile
 from inferdrome.routing_execution.canonical import sha256_digest
 from inferdrome.routing_execution.executor import _read_source, _strict_json
 
@@ -52,7 +53,7 @@ def _run(argv: list[str]) -> bytes:
     ).stdout
 
 
-def check_gpu_inventory(spec: ManualHostInput, content: bytes) -> None:
+def check_gpu_inventory(spec: ManualHostSpec, content: bytes) -> None:
     rows = [
         tuple(part.strip() for part in row.split(","))
         for row in content.decode("ascii").strip().splitlines()
@@ -61,17 +62,24 @@ def check_gpu_inventory(spec: ManualHostInput, content: bytes) -> None:
         raise ValueError("GPU inventory must contain exactly two devices")
     if {row[0] for row in rows} != set(spec.gpu_uuids):
         raise ValueError("observed GPU UUIDs disagree with the declared allocation")
+    profile = manual_host_profile(spec.profile_id)
     for _, name, memory, mig in rows:
-        # Driver-reported usable MiB can be lower than nominal 40 GB. The exact
-        # product name distinguishes PCIe from SXM4, not memory size alone.
-        if name != spec.accelerator_model or not 39_000 <= int(memory) <= 41_000:
+        # This finite profile acceptance check is not provider/driver
+        # attestation. A future host whose driver reports another product or
+        # memory total is deliberately inadmissible until separately reviewed.
+        if (
+            name != profile.runtime_gpu_name
+            or not profile.minimum_memory_mib
+            <= int(memory)
+            <= profile.maximum_memory_mib
+        ):
             raise ValueError("observed GPU variant or memory is unsupported")
         if mig != "Disabled":
             raise ValueError("manual campaign requires MIG disabled")
 
 
 def check_image(
-    spec: ManualHostInput, reference: str, role: str, content: bytes
+    spec: ManualHostSpec, reference: str, role: str, content: bytes
 ) -> str:
     image: dict[str, Any] = json.loads(content)
     labels = image["Config"]["Labels"]
@@ -88,7 +96,7 @@ def check_image(
 
 
 def check_allocation(
-    spec: ManualHostInput,
+    spec: ManualHostSpec,
     index: int,
     image_id: str,
     content: bytes,
@@ -120,7 +128,7 @@ def check_allocation(
 
 
 def check_host(
-    spec: ManualHostInput,
+    spec: ManualHostSpec,
     *,
     running: bool,
     run: Run = _run,
@@ -199,7 +207,7 @@ def check_host(
         raise ValueError("Compose project must be unused; do not adopt old containers")
 
 
-def verify_preparation(directory: Path, expected_plan_digest: str) -> ManualHostInput:
+def verify_preparation(directory: Path, expected_plan_digest: str) -> ManualHostSpec:
     content = _read_source(directory / "plan.json", label="plan", maximum=65_536)
     if sha256_digest(content) != expected_plan_digest:
         raise ValueError("exact approved plan digest disagrees")
