@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -88,7 +88,7 @@ function prepareFixture(root: string): DashboardRoots {
   };
 }
 
-function createKeyring(root: string): { readonly path: string; readonly token: string } {
+function createKeyring(root: string): { readonly path: string; readonly token: string; readonly keyId: string } {
   const path = join(root, "dashboard-keyring.json");
   const result = spawnSync(
     pythonExecutable(),
@@ -96,9 +96,9 @@ function createKeyring(root: string): { readonly path: string; readonly token: s
     { cwd: REPOSITORY_ROOT, encoding: "utf8", env: environment(), timeout: 20_000 },
   );
   if (result.status !== 0 || result.error) throw new Error("dashboard keyring creation failed");
-  const output = JSON.parse(result.stdout) as { readonly token: string };
-  if (!output.token) throw new Error("dashboard keyring creation returned no token");
-  return { path, token: output.token };
+  const output = JSON.parse(result.stdout) as { readonly token: string; readonly key_id: string };
+  if (!output.token || !output.key_id) throw new Error("dashboard keyring creation returned no token or key identity");
+  return { path, token: output.token, keyId: output.key_id };
 }
 
 async function availablePort(): Promise<number> {
@@ -168,6 +168,87 @@ function makeTreeWritable(path: string): void {
     for (const entry of readdirSync(path)) makeTreeWritable(join(path, entry));
   }
 }
+
+test("revoked descriptor download relocks immediately and a replacement key recovers exact bytes", async ({ page }) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), FIXTURE_PREFIX)));
+  let server: ChildProcess | undefined;
+  try {
+    const paths = prepareFixture(root);
+    const keyring = createKeyring(root);
+    const started = await startServer(paths, keyring.path);
+    server = started.process;
+    const detailPath = "/routing-qualifications/stale-telemetry-qualification-v1";
+    const evidencePath = `/api/v1${detailPath}/evidence`;
+    const verifiedResponse = await page.request.get(`${started.url}${evidencePath}`, {
+      headers: { Authorization: `Bearer ${keyring.token}` },
+    });
+    expect(verifiedResponse.status()).toBe(200);
+    const verifiedBytes = await verifiedResponse.body();
+    expect(verifiedResponse.headers()["x-inferdrome-evidence-digest"]).toBe(paths.routingQualificationDigest);
+    expect(verifiedBytes.equals(readFileSync(join(paths.routingQualifications, "stale-telemetry-qualification-v1", "qualification.json")))).toBe(true);
+
+    await page.goto(`${started.url}${detailPath}`);
+    await expect(page.getByRole("heading", { name: "Unlock evidence views" })).toBeVisible();
+    await page.getByLabel("Bearer token").fill(keyring.token);
+    await page.getByRole("button", { name: "Unlock dashboard" }).click();
+    const downloadButton = page.getByRole("button", { name: "Download verified descriptor" });
+    await expect(downloadButton).toBeVisible();
+
+    await page.route(`**${evidencePath}`, (route) => route.fulfill({
+      status: 500, json: { detail: "Synthetic descriptor service failure" },
+    }));
+    await downloadButton.click();
+    await expect(page.getByText("Synthetic descriptor service failure", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Unlock evidence views" })).toHaveCount(0);
+    await page.unrouteAll();
+    const initialDownload = page.waitForEvent("download");
+    await downloadButton.click();
+    const initialPath = await (await initialDownload).path();
+    if (!initialPath) throw new Error("The verified descriptor was not downloaded");
+    expect(readFileSync(initialPath).equals(verifiedBytes)).toBe(true);
+
+    const rotated = spawnSync(pythonExecutable(), [
+      "-m", "inferdrome", "dashboard-keyring", "rotate", "--keyring", keyring.path,
+      "--revoke-key-id", keyring.keyId, "--label", "playwright-replacement",
+    ], { cwd: REPOSITORY_ROOT, env: environment(), encoding: "utf8", timeout: 20_000 });
+    if (rotated.status !== 0 || rotated.error) throw new Error("Synthetic dashboard key rotation failed");
+    const replacement = JSON.parse(rotated.stdout) as { readonly token: string };
+    if (!replacement.token) throw new Error("Synthetic key rotation returned no replacement token");
+    const requestsAfterRotation: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.startsWith("/api/")) requestsAfterRotation.push(new URL(request.url()).pathname);
+    });
+    const revokedResponse = page.waitForResponse((response) =>
+      new URL(response.url()).pathname === evidencePath && response.status() === 401);
+    await downloadButton.click();
+    await revokedResponse;
+    await expect(page.getByRole("heading", { name: "Unlock evidence views" })).toBeVisible();
+    await expect(downloadButton).toHaveCount(0);
+    expect(requestsAfterRotation).toEqual([evidencePath]);
+    await expect(page).toHaveURL(`${started.url}${detailPath}`);
+
+    await page.getByLabel("Bearer token").fill(replacement.token);
+    await page.getByRole("button", { name: "Unlock dashboard" }).click();
+    await expect(downloadButton).toBeVisible();
+    const recoveredDownload = page.waitForEvent("download");
+    await downloadButton.click();
+    const downloaded = await recoveredDownload;
+    expect(downloaded.suggestedFilename()).toBe("stale-telemetry-qualification-v1.json");
+    const recoveredPath = await downloaded.path();
+    if (!recoveredPath) throw new Error("The replacement-key descriptor was not downloaded");
+    expect(readFileSync(recoveredPath).equals(verifiedBytes)).toBe(true);
+    const persisted = await page.evaluate(() => `${document.cookie}\n${JSON.stringify(localStorage)}\n${JSON.stringify(sessionStorage)}\n${location.href}`);
+    expect([keyring.token, replacement.token].some((token) => persisted.includes(token))).toBe(false);
+  } finally {
+    if (server) await stopServer(server);
+    const resolvedRoot = realpathSync(root);
+    if (!resolvedRoot.startsWith(`${realpathSync(tmpdir())}${sep}${FIXTURE_PREFIX}`)) {
+      throw new Error("refusing to remove unexpected authenticated E2E root");
+    }
+    makeTreeWritable(resolvedRoot);
+    rmSync(resolvedRoot, { force: true, maxRetries: 5, recursive: true, retryDelay: 100 });
+  }
+});
 
 test("authenticated local server blocks evidence, unlocks, and traverses every route", async ({ page }) => {
   // Dashboard keyring paths reject symlinked ancestors; use the strict path

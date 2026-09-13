@@ -46,6 +46,50 @@ const secondRunSummary = {
   ended_at: "2026-08-07T12:01:01Z",
 };
 
+const runDetail = {
+  projection_version: projectionVersion,
+  summary: runSummary,
+  hypothesis: null,
+  verification: {
+    bundle_digest: runSummary.bundle_digest, artifact_count: 4, total_bytes: 2048,
+    integrity_status: "VALID", evidence_eligibility: "SYNTHETIC_ONLY",
+    environment_completeness: "COMPLETE", replayability: "FULL",
+    verified_by_recalculation: true,
+  },
+  execution: {
+    terminal_state: "COMPLETE", started_at: runSummary.started_at, ended_at: runSummary.ended_at,
+    duration_ns: 1_000_000_000, measurement_window_ns: 1_000_000_000,
+    measurement_window_definition: "first_start_to_last_terminal_v1", traffic_kind: "closed_loop",
+    concurrency: 1, requests_per_second: null, max_concurrency: null,
+    warmup_requests: 0, measured_requests: 2, producer_exit_status: 0,
+  },
+  measurements: [],
+  distributions: [{
+    metric: "ttft_ns", label: "Time to first token", unit: "ns", sample_count: 1,
+    minimum: 10_000_000, maximum: 10_000_000,
+    bins: [{ lower_bound: 10_000_000, upper_bound: 10_000_000, count: 1 }],
+  }],
+  context: [{ key: "model", label: "Model", value: runSummary.model, group: "target" }],
+  environment: [{ name: "gpu_count", label: "GPU count", value: 0, provenance: "OBSERVED", evidence_path: null }],
+  artifacts: [{ role: "REQUEST_PLAN", path: "request-plan.json", media_type: "application/json", sensitivity: "PUBLIC", size_bytes: 256, content_exposed: false }],
+  unavailable: [{ metric: "memory_bytes", reason: "Not observed by this adapter", capability_matrix: "fake_v1" }],
+  digests: {
+    source_spec_digest: runSummary.bundle_digest, execution_fingerprint: runSummary.bundle_digest,
+    request_plan_digest: runSummary.bundle_digest, metric_definitions_digest: runSummary.bundle_digest,
+    exitspec_contract_digest: null,
+  },
+  sensitivity: {
+    prompt_content_in_request_plan: true, canonical_response_content_included: false,
+    native_response_content_present: false, secrets_permitted: false,
+  },
+  comparison_contract: {
+    execution_fingerprint: runSummary.bundle_digest, metric_definitions_digest: runSummary.bundle_digest,
+    reducer_version: "1.0.0", execution_mode: "synthetic_fixture", workload_sha256: runSummary.bundle_digest,
+    requested_output_tokens: 42, temperature: "0", seed: 0,
+    traffic_signature: "closed_loop:1", measurement_signature: "fixed_count:2",
+  },
+};
+
 const trialSetId = "trial-set-11111111111111111111111111111111";
 const trialSetSummary = {
   trial_set_id: trialSetId,
@@ -414,22 +458,6 @@ describe("dashboard API client", () => {
   });
 
   it("reads summary-nested detail and uses the exact compare query", async () => {
-    const detail = {
-      projection_version: projectionVersion,
-      summary: runSummary,
-      hypothesis: null,
-      verification: {},
-      execution: {},
-      measurements: [],
-      distributions: [],
-      context: [],
-      environment: [],
-      artifacts: [],
-      unavailable: [],
-      digests: {},
-      sensitivity: {},
-      comparison_contract: {},
-    };
     const comparison = {
       projection_version: projectionVersion,
       baseline_run_id: runSummary.run_id,
@@ -442,7 +470,7 @@ describe("dashboard API client", () => {
     };
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(detail))
+      .mockResolvedValueOnce(jsonResponse(runDetail))
       .mockResolvedValueOnce(jsonResponse(comparison));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -454,6 +482,58 @@ describe("dashboard API client", () => {
     expect(fetchMock.mock.calls[1][0]).toBe(
       `/api/v1/compare?baseline_run_id=${runSummary.run_id}&candidate_run_id=${comparison.candidate_run_id}`,
     );
+  });
+
+  it("rejects a null headline metric before the run index can render", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      projection_version: projectionVersion, generated_at: runSummary.ended_at,
+      runs: [{ ...runSummary, headline_metrics: [null] }], rejected: [],
+      page: { limit: 200, returned: 1, total: 1, has_more: false, next_cursor: null },
+    })));
+    await expect(api.listRuns()).rejects.toMatchObject({ status: 502 });
+  });
+
+  it.each([
+    ["headline metrics", { summary: { ...runSummary, headline_metrics: [null] } }],
+    ["measurements", { measurements: [null] }],
+    ["histogram bins", { distributions: [{ ...runDetail.distributions[0], bins: [null] }] }],
+    ["context values", { context: [{ ...runDetail.context[0], value: {} }] }],
+    ["environment values", { environment: [{ ...runDetail.environment[0], value: [] }] }],
+    ["artifact metadata", { artifacts: [{ ...runDetail.artifacts[0], content_exposed: true }] }],
+    ["unavailable reasons", { unavailable: [{ ...runDetail.unavailable[0], reason: {} }] }],
+    ["verification counts", { verification: { ...runDetail.verification, artifact_count: null } }],
+    ["execution counts", { execution: { ...runDetail.execution, measured_requests: "2" } }],
+    ["digests", { digests: null }],
+    ["sensitivity", { sensitivity: { ...runDetail.sensitivity, secrets_permitted: true } }],
+  ])("rejects malformed nested %s with a recoverable protocol error", async (_label, changed) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ...runDetail, ...changed })));
+    await expect(api.getRun(runSummary.run_id)).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("binds a valid run response to the requested identity", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ...runDetail, summary: secondRunSummary })));
+    await expect(api.getRun(runSummary.run_id)).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("preserves compatible additive fields and unavailable metrics", async () => {
+    const detail = {
+      ...runDetail, future_metadata: { version: 2 },
+      summary: { ...runSummary, ttft_p50_ns: null, ttft_p95_ns: null, future_summary_field: true },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(detail)));
+    await expect(api.getRun(runSummary.run_id)).resolves.toEqual(detail);
+  });
+
+  it("retains backend integer types in newly validated detail fields", async () => {
+    const detail = {
+      ...runDetail,
+      execution: { ...runDetail.execution, measurement_window_ns: 2 ** 53, max_concurrency: 2 ** 53 },
+      distributions: [{ ...runDetail.distributions[0], minimum: 2 ** 53, maximum: 2 ** 53 }],
+      environment: [{ ...runDetail.environment[0], value: 2 ** 53 }],
+      comparison_contract: { ...runDetail.comparison_contract, seed: -42 },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(detail)));
+    await expect(api.getRun(runSummary.run_id)).resolves.toEqual(detail);
   });
 
   it("follows bounded trial-set cursors and reads the descriptive detail contract", async () => {

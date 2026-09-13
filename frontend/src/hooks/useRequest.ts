@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DependencyList } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DependencyList } from "react";
 
 import { useDashboardAuth } from "../context/DashboardAuthContext";
 import { ApiError } from "../lib/api";
@@ -26,7 +26,13 @@ export function useRequest<T>(
   const authenticationBlocked = authRequired && token === null;
   const loaderRef = useRef(loader);
   const [attempt, setAttempt] = useState(0);
-  const [state, setState] = useState<Omit<RequestState<T>, "retry">>({
+  // A dependency change must hide the previous response during render, before
+  // the effect can abort it and start the next request.
+  const identity = useMemo(() => ({}), [
+    enabled, authenticationBlocked, attempt, authVersion, noteUnauthorized, ...dependencies,
+  ]);
+  const [state, setState] = useState<Omit<RequestState<T>, "retry"> & { readonly identity: object | null }>({
+    identity: null,
     data: null,
     error: null,
     status: enabled ? "loading" : "idle",
@@ -38,21 +44,22 @@ export function useRequest<T>(
 
   useEffect(() => {
     if (!enabled || authenticationBlocked) {
-      setState({ data: null, error: null, status: "idle" });
+      setState({ identity, data: null, error: null, status: "idle" });
       return;
     }
 
     const controller = new AbortController();
-    setState((current) => ({ ...current, error: null, status: "loading" }));
+    setState({ identity, data: null, error: null, status: "loading" });
 
     void loaderRef.current(controller.signal).then(
       (data) => {
-        if (!controller.signal.aborted) setState({ data, error: null, status: "success" });
+        if (!controller.signal.aborted) setState({ identity, data, error: null, status: "success" });
       },
       (error: unknown) => {
         if (controller.signal.aborted) return;
         if (error instanceof ApiError && error.status === 401) noteUnauthorized();
         setState({
+          identity,
           data: null,
           error: error instanceof Error ? error : new Error("The request failed."),
           status: "error",
@@ -63,14 +70,10 @@ export function useRequest<T>(
     return () => controller.abort();
     // The caller owns the stable dependency list; the latest loader is read through a ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    enabled,
-    authenticationBlocked,
-    attempt,
-    authVersion,
-    noteUnauthorized,
-    ...dependencies,
-  ]);
+  }, [identity]);
 
-  return { ...state, retry };
+  if (state.identity !== identity) {
+    return { data: null, error: null, status: enabled && !authenticationBlocked ? "loading" : "idle", retry };
+  }
+  return { data: state.data, error: state.error, status: state.status, retry };
 }

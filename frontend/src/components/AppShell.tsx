@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRuns } from "../context/RunsContext";
 import { useDashboardAuth } from "../context/DashboardAuthContext";
 import { formatDateTime } from "../lib/format";
-import { NavLink, useLocation } from "../lib/router";
+import { NavLink, useLocation, useParams } from "../lib/router";
 
 type Theme = "light" | "dark";
 
@@ -23,16 +23,6 @@ function initialTheme(): Theme {
   const stored = window.localStorage.getItem("inferdrome-theme");
   if (stored === "light" || stored === "dark") return stored;
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function selectedRunFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/(?:runs|evidence)\/([^/]+)$/);
-  if (!match) return null;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return match[1];
-  }
 }
 
 function pathLabel(pathname: string): string {
@@ -62,12 +52,13 @@ interface NavigationItem {
 
 export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
-  const { runs, rejected, generatedAt, status } = useRuns();
+  const { runs, rejected, generatedAt, status, refresh } = useRuns();
+  const { runId } = useParams();
   const { authRequired, token, clear } = useDashboardAuth();
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const mainRef = useRef<HTMLElement>(null);
   const previousPath = useRef(location.pathname);
-  const selectedRunId = selectedRunFromPath(location.pathname) || runs[0]?.run_id || null;
+  const selectedRunId = runId ?? runs[0]?.run_id ?? null;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -158,7 +149,7 @@ export function AppShell({ children }: PropsWithChildren) {
         <div className="sidebar-state">
           <strong>
             <span className={`index-dot index-${status}`} aria-hidden="true" />
-            {status === "success" ? "Index current" : status === "error" ? "Index unavailable" : "Indexing"}
+            {status === "success" ? "Run snapshot loaded" : status === "error" ? "Run snapshot unavailable" : "Reading run snapshot"}
           </strong>
           <span>{indexLabel}</span>
         </div>
@@ -168,7 +159,10 @@ export function AppShell({ children }: PropsWithChildren) {
         <div className="topline">
           <span className="topline-path">{pathLabel(location.pathname)}</span>
           <div className="topline-actions">
-            {generatedAt ? <span className="index-time">Indexed {formatDateTime(generatedAt)}</span> : null}
+            {generatedAt ? <span className="index-time">Runs last verified {formatDateTime(generatedAt)}</span> : null}
+            <button className="button button-secondary" type="button" onClick={refresh} disabled={status === "loading"}>
+              Refresh runs
+            </button>
             {authRequired && token !== null ? (
               <button className="button button-secondary lock-button" type="button" onClick={clear}>
                 Lock dashboard

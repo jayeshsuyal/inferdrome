@@ -285,6 +285,16 @@ function parseRuns(payload: unknown): RunsPageResponse {
   }
   if (!Array.isArray(payload.runs)) throw protocolError("runs must be an array");
   if (!Array.isArray(payload.rejected)) throw protocolError("rejected must be an array");
+  payload.runs.forEach((run, index) => parseRunSummary(run, `runs[${index}]`));
+  payload.rejected.forEach((entry, index) => {
+    const context = `rejected[${index}]`;
+    const rejected = runObject(entry, context, ["entry", "message"]);
+    if (rejected.status !== "REJECTED" || ![
+      "VERIFICATION_FAILED", "UNSAFE_ENTRY", "BUNDLE_UNAVAILABLE", "DUPLICATE_RUN_ID",
+    ].includes(requiredString(rejected, "code", context))) {
+      throw protocolError(`${context} has an unsupported rejection status or code`);
+    }
+  });
   if (typeof payload.generated_at !== "string") {
     throw protocolError("generated_at must be a string");
   }
@@ -314,19 +324,96 @@ function parseRuns(payload: unknown): RunsPageResponse {
   return payload as unknown as RunsPageResponse;
 }
 
+// Validate projected run fields without rejecting compatible additive metadata.
+function runObject(
+  value: unknown,
+  context: string,
+  strings: readonly string[] = [],
+  integers: readonly string[] = [],
+): Record<string, unknown> {
+  if (!isRecord(value)) throw protocolError(`${context} must be an object`);
+  strings.forEach((key) => requiredString(value, key, context));
+  integers.forEach((key) => {
+    if (typeof value[key] !== "number" || !Number.isInteger(value[key])) {
+      throw protocolError(`${context}.${key} must be an integer`);
+    }
+  });
+  return value;
+}
+
+function runArray(
+  object: Record<string, unknown>, key: string, context: string,
+  parse: (value: unknown, context: string) => unknown,
+): void {
+  const value = object[key];
+  if (!Array.isArray(value)) throw protocolError(`${context}.${key} must be an array`);
+  value.forEach((entry, index) => parse(entry, `${context}.${key}[${index}]`));
+}
+
 function parseRunDetail(payload: unknown): RunDetail {
   if (!isRecord(payload) || payload.projection_version !== "inferdrome.dashboard.v1") {
     throw protocolError("the run detail projection version is unsupported");
   }
-  if (!isRecord(payload.summary) || typeof payload.summary.run_id !== "string") {
-    throw protocolError("run detail is missing summary.run_id");
+  parseRunSummary(payload.summary, "summary");
+  nullableString(payload, "hypothesis", "run detail");
+  const verification = runObject(payload.verification, "verification", [
+    "bundle_digest", "evidence_eligibility", "environment_completeness", "replayability",
+  ], ["artifact_count", "total_bytes"]);
+  if (verification.integrity_status !== "VALID" || verification.verified_by_recalculation !== true) {
+    throw protocolError("verification must describe a recalculated VALID bundle");
   }
-  if (!isRecord(payload.verification) || !isRecord(payload.execution)) {
-    throw protocolError("run detail is missing verification or execution");
+  const execution = runObject(payload.execution, "execution", [
+    "started_at", "ended_at", "measurement_window_definition", "traffic_kind",
+  ], ["duration_ns", "measurement_window_ns", "warmup_requests", "measured_requests", "producer_exit_status"]);
+  if (execution.terminal_state !== "COMPLETE") throw protocolError("execution must be COMPLETE");
+  for (const key of ["concurrency", "max_concurrency"]) {
+    if (execution[key] !== null) runObject(execution, "execution", [], [key]);
   }
-  for (const key of ["measurements", "distributions", "context", "environment", "artifacts", "unavailable"] as const) {
-    if (!Array.isArray(payload[key])) throw protocolError(`${key} must be an array`);
+  nullableString(execution, "requests_per_second", "execution");
+  runArray(payload, "measurements", "run detail", parseMetric);
+  runArray(payload, "distributions", "run detail", (value, context) => {
+    const distribution = runObject(value, context, ["metric", "label", "unit"], ["sample_count"]);
+    for (const key of ["minimum", "maximum"]) {
+      if (distribution[key] !== null) runObject(distribution, context, [], [key]);
+    }
+    runArray(distribution, "bins", context, (bin, binContext) =>
+      runObject(bin, binContext, [], ["lower_bound", "upper_bound", "count"]));
+  });
+  runArray(payload, "context", "run detail", (value, context) => {
+    const field = runObject(value, context, ["key", "label"]);
+    nullableString(field, "value", context);
+    if (!["experiment", "execution", "target", "traffic", "measurement", "producer"].includes(
+      requiredString(field, "group", context),
+    )) throw protocolError(`${context}.group is unsupported`);
+  });
+  runArray(payload, "environment", "run detail", (value, context) => {
+    const field = runObject(value, context, ["name", "label", "provenance"]);
+    nullableString(field, "evidence_path", context);
+    const primitive = field.value;
+    if (primitive !== null && typeof primitive !== "string" && typeof primitive !== "boolean"
+      && !(typeof primitive === "number" && Number.isInteger(primitive))) {
+      throw protocolError(`${context}.value must be a string, integer, boolean or null`);
+    }
+  });
+  runArray(payload, "artifacts", "run detail", (value, context) => {
+    const artifact = runObject(value, context, ["role", "path", "media_type", "sensitivity"], ["size_bytes"]);
+    if (artifact.content_exposed !== false) throw protocolError(`${context}.content_exposed must be false`);
+  });
+  runArray(payload, "unavailable", "run detail", (value, context) =>
+    runObject(value, context, ["metric", "reason", "capability_matrix"]));
+  const digests = runObject(payload.digests, "digests", [
+    "source_spec_digest", "execution_fingerprint", "request_plan_digest", "metric_definitions_digest",
+  ]);
+  nullableString(digests, "exitspec_contract_digest", "digests");
+  const sensitivity = runObject(payload.sensitivity, "sensitivity");
+  for (const key of ["prompt_content_in_request_plan", "canonical_response_content_included", "native_response_content_present"]) {
+    if (typeof sensitivity[key] !== "boolean") throw protocolError(`sensitivity.${key} must be a boolean`);
   }
+  if (sensitivity.secrets_permitted !== false) throw protocolError("sensitivity.secrets_permitted must be false");
+  runObject(payload.comparison_contract, "comparison_contract", [
+    "execution_fingerprint", "metric_definitions_digest", "reducer_version", "execution_mode", "workload_sha256",
+    "temperature", "traffic_signature", "measurement_signature",
+  ], ["requested_output_tokens", "seed"]);
   return payload as unknown as RunDetail;
 }
 
@@ -2650,7 +2737,11 @@ export const api = {
   },
 
   async getRun(runId: string, signal?: AbortSignal): Promise<RunDetail> {
-    return parseRunDetail(await fetchJson(`/runs/${encodeURIComponent(runId)}`, signal));
+    const detail = parseRunDetail(await fetchJson(`/runs/${encodeURIComponent(runId)}`, signal));
+    if (detail.summary.run_id !== runId) {
+      throw protocolError("the run detail identity does not match the requested run");
+    }
+    return detail;
   },
 
   async compareRuns(

@@ -5,6 +5,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
+import { DashboardErrorBoundary } from "./components/DashboardErrorBoundary";
 import { DashboardAuthProvider } from "./context/DashboardAuthContext";
 import { BrowserRouter } from "./lib/router";
 import "./styles.css";
@@ -16,7 +17,9 @@ createRoot(root).render(
   <StrictMode>
     <DashboardAuthProvider>
       <BrowserRouter>
-        <App />
+        <DashboardErrorBoundary>
+          <App />
+        </DashboardErrorBoundary>
       </BrowserRouter>
     </DashboardAuthProvider>
   </StrictMode>,
