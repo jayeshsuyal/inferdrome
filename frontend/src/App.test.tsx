@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -385,6 +385,54 @@ function dashboardFetch(input: RequestInfo | URL): Promise<Response> {
 }
 
 describe("Runs view", () => {
+  it("explains missing table and mobile metrics while preserving measured zero", async () => {
+    const run = {
+      ...firstRun,
+      ttft_p50_ns: null,
+      ttft_p95_ns: null,
+      headline_metrics: [{
+        key: "error_rate:ratio",
+        metric: "error_rate",
+        aggregation: "ratio",
+        label: "Error rate",
+        value: "0",
+        display_value: "0%",
+        unit: "ratio",
+        population: "all_measured_requests",
+        definition_id: "measured_failure_ratio_v1",
+        quantile_method: null,
+        rounding_policy: "decimal_half_even_6_v1",
+        sample_count: 2,
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response({
+      ...emptyRunsIndex,
+      runs: [run],
+      page: { ...emptyRunsIndex.page, returned: 1, total: 1 },
+    }))));
+
+    const { container } = render(<MemoryRouter initialEntries={["/runs"]}><App /></MemoryRouter>);
+    await screen.findByRole("heading", { name: "Recent runs" });
+
+    const tableCells = container.querySelectorAll(".runs-table tbody td");
+    expect(within(tableCells[3] as HTMLElement).getByText("Not reported")).toBeInTheDocument();
+    expect(tableCells[5]).toHaveTextContent(/^0\s*%$/);
+    const mobileMetrics = container.querySelectorAll(".run-mobile-metrics dd");
+    expect(within(mobileMetrics[0] as HTMLElement).getByText("Not reported")).toBeInTheDocument();
+    expect(mobileMetrics[2]).toHaveTextContent(/^0\s*%$/);
+  });
+
+  it("labels the evidence source without claiming a configured filesystem path", async () => {
+    vi.stubGlobal("fetch", vi.fn(dashboardFetch));
+    const { container } = render(<MemoryRouter initialEntries={["/runs"]}><App /></MemoryRouter>);
+    await screen.findByText("No verified runs yet");
+
+    const sourceLabel = container.querySelector(".workspace-label");
+    expect(sourceLabel).toHaveTextContent("Evidence source");
+    expect(sourceLabel).toHaveTextContent("Local bundles");
+    expect(sourceLabel).not.toHaveTextContent("./runs");
+  });
+
   it("shows rejected bundles without exposing measurements", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({
       projection_version: "inferdrome.dashboard.v1",
@@ -414,6 +462,77 @@ describe("Runs view", () => {
 });
 
 describe("Trial sets views", () => {
+  it("shows exact point values and request samples separately from run weighting", async () => {
+    const detail = {
+      ...trialDetail,
+      variations: [{
+        ...trialDetail.variations[0],
+        points: [
+          { ...trialDetail.variations[0].points[0], value: "10000001", sample_count: 1 },
+          { ...trialDetail.variations[0].points[1], sample_count: 0 },
+        ],
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => (
+      String(input) === `/api/v1/trial-sets/${trialSetId}`
+        ? Promise.resolve(response(detail))
+        : dashboardFetch(input)
+    )));
+    const { container } = render(<MemoryRouter initialEntries={[`/trial-sets/${trialSetId}`]}><App /></MemoryRouter>);
+    await screen.findByRole("heading", { name: "Run-to-run variation" });
+
+    for (const selector of [".trial-point-row", ".trial-member-table tbody tr", ".trial-member-card"]) {
+      const rows = container.querySelectorAll(selector);
+      expect(within(rows[0] as HTMLElement).getByText("10 ms")).toBeInTheDocument();
+      expect(within(rows[0] as HTMLElement).getByText("Exact: 10000001 ns")).toBeInTheDocument();
+      expect(within(rows[0] as HTMLElement).getByText("Request samples: 1")).toBeInTheDocument();
+      expect(within(rows[1] as HTMLElement).getByText("Request samples: 0")).toBeInTheDocument();
+    }
+    expect(screen.getByText(/Each point is one verified run-level scalar with equal run weighting/)).toBeInTheDocument();
+    expect(screen.getByText(/Every member contributes at most one run-level scalar/)).toBeInTheDocument();
+  });
+
+  it("keeps unavailable point values and request samples distinct from zero", async () => {
+    const detail = {
+      ...trialDetail,
+      variations: [{
+        ...trialDetail.variations[0],
+        available_run_count: 1,
+        minimum: "10000000",
+        maximum: "10000000",
+        median: "10000000",
+        mean: "10000000",
+        span: "0",
+        minimum_display_value: "10 ms",
+        maximum_display_value: "10 ms",
+        median_display_value: "10 ms",
+        mean_display_value: "10 ms",
+        span_display_value: "0 ms",
+        sample_standard_deviation: null,
+        sample_standard_deviation_display_value: null,
+        points: [
+          trialDetail.variations[0].points[0],
+          { ...trialDetail.variations[0].points[1], value: null, display_value: null, sample_count: null },
+        ],
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => (
+      String(input) === `/api/v1/trial-sets/${trialSetId}`
+        ? Promise.resolve(response(detail))
+        : dashboardFetch(input)
+    )));
+    const { container } = render(<MemoryRouter initialEntries={[`/trial-sets/${trialSetId}`]}><App /></MemoryRouter>);
+    await screen.findByRole("heading", { name: "Run-to-run variation" });
+
+    for (const selector of [".trial-point-row", ".trial-member-table tbody tr", ".trial-member-card"]) {
+      const row = within(container.querySelectorAll(selector)[1] as HTMLElement);
+      expect(row.getByText("Unavailable")).toBeInTheDocument();
+      expect(row.getByText("Exact: Unavailable")).toBeInTheDocument();
+      expect(row.getByText("Request samples: Not reported")).toBeInTheDocument();
+      expect(row.queryByText("Request samples: 0")).not.toBeInTheDocument();
+    }
+  });
+
   it("shows verified retrospective groupings without causal or acceptance language", async () => {
     vi.stubGlobal("fetch", vi.fn(dashboardFetch));
 

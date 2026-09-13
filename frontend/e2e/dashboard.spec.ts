@@ -24,7 +24,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RunDetail, RunSummary, RunsPageResponse } from "../src/lib/types";
+import type { RunDetail, RunSummary, RunsPageResponse, TrialSetDetail, TrialSetPageResponse } from "../src/lib/types";
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const SOURCE_ROOT = join(REPOSITORY_ROOT, "src");
@@ -905,4 +905,194 @@ test.describe("populated dashboard", () => {
       expect(unsafeApiRequests).toEqual([]);
     });
   }
+
+  test.describe("navigation and metric clarity", () => {
+    for (const width of [390, 470, 600, 760, 1024, 1440]) {
+      test(`keeps every navigation link keyboard reachable at ${width}px`, async ({ page }) => {
+        if (width === 390) await page.emulateMedia({ reducedMotion: "reduce" });
+        await page.setViewportSize({ width, height: 900 });
+        const response = await page.goto(`${baseUrl}/runs`);
+        expect(response?.status()).toBe(200);
+        await expect(page.locator(".runs-table tbody tr")).toHaveCount(4);
+
+        const names = [
+          "Runs", "Trial sets", "Routing campaigns", "Routing executions",
+          "Causal qualification", "Run detail", "Comparisons", "Evidence",
+        ];
+        const navigation = dashboardNavigation(page);
+        await expect(navigation.getByRole("link")).toHaveCount(names.length);
+        await page.keyboard.press("Tab");
+        await expect(page.getByRole("link", { name: "Skip to dashboard content" })).toBeFocused();
+        await page.keyboard.press("Tab");
+        await expect(page.getByRole("link", { name: "Inferdrome runs", exact: true })).toBeFocused();
+
+        for (const name of names) {
+          await page.keyboard.press("Tab");
+          const link = navigation.getByRole("link", { name, exact: true });
+          await expect(link).toBeFocused();
+          await expect(link.locator("span")).toBeInViewport({ ratio: 1 });
+          const visibility = await link.evaluate((element) => {
+            const bounds = element.querySelector("span")!.getBoundingClientRect();
+            const nav = element.closest("nav")!;
+            const navBounds = nav.getBoundingClientRect();
+            const clipsHorizontally = ["auto", "scroll", "hidden", "clip"].includes(getComputedStyle(nav).overflowX);
+            const style = getComputedStyle(element);
+            return {
+              left: bounds.left,
+              right: bounds.right,
+              visibleLeft: clipsHorizontally ? Math.max(0, navBounds.left + nav.clientLeft) : 0,
+              visibleRight: clipsHorizontally
+                ? Math.min(innerWidth, navBounds.left + nav.clientLeft + nav.clientWidth)
+                : innerWidth,
+              focusVisible: element.matches(":focus-visible"),
+              outlineStyle: style.outlineStyle,
+              outlineWidth: Number.parseFloat(style.outlineWidth),
+              scrollWidth: document.documentElement.scrollWidth,
+              clientWidth: document.documentElement.clientWidth,
+            };
+          });
+          expect(visibility.left, `${name} label left edge at ${width}px`).toBeGreaterThanOrEqual(visibility.visibleLeft - 1);
+          expect(visibility.right, `${name} label right edge at ${width}px`).toBeLessThanOrEqual(visibility.visibleRight + 1);
+          expect(visibility.focusVisible, `${name} keyboard focus at ${width}px`).toBe(true);
+          expect(visibility.outlineStyle).not.toBe("none");
+          expect(visibility.outlineWidth).toBeGreaterThan(0);
+          expect(visibility.scrollWidth).toBeLessThanOrEqual(visibility.clientWidth);
+        }
+        await page.keyboard.press("Enter");
+        await expect(page.getByRole("heading", { name: "Offline verification" })).toBeVisible();
+        await navigation.getByRole("link", { name: "Runs", exact: true }).click();
+        await expect(page.locator(".runs-table tbody tr")).toHaveCount(4);
+      });
+    }
+
+    for (const width of [1440, 390]) {
+      test(`shows exact backend Trial Set values and request samples at ${width}px`, async ({ page }) => {
+        const indexResponse = await page.request.get(`${baseUrl}/api/v1/trial-sets?limit=100`);
+        expect(indexResponse.status()).toBe(200);
+        const index = await indexResponse.json() as TrialSetPageResponse;
+        expect(index.rejected).toEqual([]);
+        expect(index.trial_sets).toHaveLength(2);
+        const trialSetId = index.trial_sets[0].trial_set_id;
+        const detailResponse = await page.request.get(`${baseUrl}/api/v1/trial-sets/${encodeURIComponent(trialSetId)}`);
+        expect(detailResponse.status()).toBe(200);
+        const detail = await detailResponse.json() as TrialSetDetail;
+        expect(detail.summary.trial_set_id).toBe(trialSetId);
+        expect(detail.summary.evidence_eligibilities).toEqual(["SYNTHETIC_ONLY"]);
+        expect(detail.request_population_policy).toBe("separate_per_run_v1");
+
+        await page.setViewportSize({ width, height: 900 });
+        const response = await page.goto(`${baseUrl}/trial-sets/${encodeURIComponent(trialSetId)}`);
+        expect(response?.status()).toBe(200);
+        await expect(page.getByRole("heading", { name: "Run-to-run variation", level: 2 })).toBeVisible();
+        const metricSelect = page.getByRole("combobox", { name: "Metric", exact: true });
+
+        for (const key of ["ttft_ns:p50", "error_rate:ratio"]) {
+          const variation = detail.variations.find((item) => item.key === key);
+          expect(variation, `${key} remains part of the real fixture`).toBeDefined();
+          if (!variation) throw new Error(`Fixture is missing ${key}`);
+          expect(variation.weighting).toBe("equal_per_run");
+          await metricSelect.selectOption(key);
+          await expect(page.locator(".trial-summary-grid dd")).toHaveText([
+            variation.minimum_display_value ?? "Unavailable",
+            variation.median_display_value ?? "Unavailable",
+            variation.maximum_display_value ?? "Unavailable",
+            variation.span_display_value ?? "Unavailable",
+            variation.mean_display_value ?? "Unavailable",
+            variation.sample_standard_deviation_display_value ?? "Unavailable",
+          ]);
+
+          for (const point of variation.points) {
+            expect(point.value).not.toBeNull();
+            expect(point.sample_count).not.toBeNull();
+            const runLink = page.locator(`a[href="/runs/${encodeURIComponent(point.run_id)}"]`);
+            const pointRow = page.locator(".trial-point-row").filter({ has: runLink });
+            const member = page.locator(width === 390 ? ".trial-member-card" : ".trial-member-table tbody tr")
+              .filter({ has: runLink });
+            for (const row of [pointRow, member]) {
+              await expect(row).toBeVisible();
+              await expect(row.getByText(point.display_value!, { exact: true })).toBeVisible();
+              await expect(row.getByText(`Exact: ${point.value} ${variation.unit}`, { exact: true })).toBeVisible();
+              await expect(row.getByText(`Request samples: ${point.sample_count!.toLocaleString()}`, { exact: true })).toBeVisible();
+            }
+          }
+          await expect(page.getByText(/Each point is one verified run-level scalar with equal run weighting/)).toBeVisible();
+          await expect(page.getByText(/Request populations remain separate/)).toBeVisible();
+        }
+        const dimensions = await page.evaluate(() => ({
+          scrollWidth: document.documentElement.scrollWidth,
+          clientWidth: document.documentElement.clientWidth,
+        }));
+        expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+      });
+
+      test(`distinguishes missing TTFT from a measured zero at ${width}px`, async ({ page }) => {
+        const response = await page.request.get(`${baseUrl}/api/v1/runs?limit=200`);
+        expect(response.status()).toBe(200);
+        const index = await response.json() as RunsPageResponse;
+        expect(index.rejected).toEqual([]);
+        expect(index.runs).toHaveLength(4);
+        const run = index.runs.find((item) => item.headline_metrics.some((metric) => (
+          metric.key === "error_rate:ratio" && /^0(?:\.0+)?$/.test(metric.value)
+        )));
+        expect(run, "real fixture includes an observed zero error rate").toBeDefined();
+        if (!run) throw new Error("Fixture is missing a measured zero error rate");
+        const zero = run.headline_metrics.find((metric) => metric.key === "error_rate:ratio")!;
+        expect(run.headline_metrics.some((metric) => metric.metric === "ttft_ns")).toBe(true);
+        expect(run.evidence_eligibility).toBe("SYNTHETIC_ONLY");
+
+        // Retain the real response and zero measurement; only withhold TTFT.
+        const compatibleIndex = {
+          ...index,
+          runs: index.runs.map((item) => item.run_id === run.run_id ? {
+            ...item,
+            ttft_p50_ns: null,
+            ttft_p95_ns: null,
+            headline_metrics: item.headline_metrics.filter((metric) => metric.metric !== "ttft_ns"),
+          } : item),
+        };
+        await page.route("**/api/v1/runs?**", (route) => route.fulfill({
+          status: response.status(),
+          contentType: "application/json",
+          json: compatibleIndex,
+        }));
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto(`${baseUrl}/runs`);
+        await expect(page.getByRole("heading", { name: "Recent runs", level: 2 })).toBeVisible();
+        const runLink = page.locator(`a[href="/runs/${encodeURIComponent(run.run_id)}"]`);
+        const row = page.locator(width === 390 ? ".run-mobile-card" : ".runs-table tbody tr")
+          .filter({ has: runLink });
+        const metrics = row.locator(width === 390 ? ".run-mobile-metrics dd" : "td.number-cell");
+        const missing = metrics.nth(0);
+        const measuredZero = metrics.nth(2);
+        await expect(missing).toHaveText("Not reported");
+        await expect(measuredZero).not.toHaveText("Not reported");
+        expect((await measuredZero.innerText()).replace(/\s/g, "")).toBe(zero.display_value.replace(/\s/g, ""));
+        await missing.scrollIntoViewIfNeeded();
+        await expect(missing).toBeInViewport({ ratio: 1 });
+        const dimensions = await missing.evaluate((element) => ({
+          textWidth: element.scrollWidth,
+          availableWidth: element.clientWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+          clientWidth: document.documentElement.clientWidth,
+        }));
+        expect(dimensions.textWidth).toBeLessThanOrEqual(dimensions.availableWidth);
+        expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+      });
+    }
+
+    test("labels the configured local evidence source without a placeholder path", async ({ page }) => {
+      expect(fixture).toBeDefined();
+      expect(isAbsolute(fixture!.runs)).toBe(true);
+      expect(fixture!.runs).not.toBe("./runs");
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`${baseUrl}/runs`);
+      await expect(page.locator(".runs-table tbody tr")).toHaveCount(4);
+      const source = page.locator(".workspace-label");
+      await expect(source).toBeVisible();
+      await expect(source).toContainText("Evidence source");
+      await expect(source).toContainText("Local bundles");
+      await expect(source).not.toContainText("./runs");
+      await expect(source).not.toContainText(fixture!.runs);
+    });
+  });
 });

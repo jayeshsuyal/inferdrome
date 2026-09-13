@@ -33,7 +33,7 @@ function metricText(
   aggregation: string,
 ): string {
   const measurement = findMeasurement(measurements, metric, aggregation);
-  if (!measurement) return "—";
+  if (!measurement) return "Not reported";
   const formatted = formatMeasurement(measurement);
   return `${formatted.value}${formatted.unit ? ` ${formatted.unit}` : ""}`;
 }

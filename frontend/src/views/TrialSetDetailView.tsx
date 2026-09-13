@@ -39,6 +39,27 @@ function authoritativeValue(value: string | null): string {
   return value ?? "Unavailable";
 }
 
+function PointValue({
+  point,
+  unit,
+}: {
+  readonly point: TrialRunPointView | null;
+  readonly unit: string | undefined;
+}) {
+  const exactValue = point?.value == null
+    ? "Unavailable"
+    : `${point.value}${unit ? ` ${unit}` : ""}`;
+  return (
+    <span className="trial-scalar">
+      <span>{authoritativeValue(point?.display_value ?? null)}</span>
+      <span className="trial-scalar-meta">Exact: {exactValue}</span>
+      <span className="trial-scalar-meta">
+        Request samples: {point?.sample_count?.toLocaleString() ?? "Not reported"}
+      </span>
+    </span>
+  );
+}
+
 function preferredVariation(variations: readonly TrialMetricVariationView[]) {
   return variations.find((variation) => variation.metric === "ttft_ns" && variation.aggregation === "p50")
     ?? variations[0]
@@ -164,7 +185,7 @@ function VariationPlot({ variation }: { readonly variation: TrialMetricVariation
                 {position === null ? null : <span className="trial-point-marker" style={style} />}
               </div>
               <span className="trial-point-value mono">
-                {authoritativeValue(point.display_value)}
+                <PointValue point={point} unit={variation.unit} />
               </span>
             </div>
           );
@@ -280,7 +301,10 @@ function MemberCard({
       <span>{formatDateTime(member.run.started_at)} · {runTargetLabel(member.run)}</span>
       <dl>
         <div><dt>Measured requests</dt><dd>{member.run.measured_requests.toLocaleString()}</dd></div>
-        <div><dt>{variation?.label ?? "Selected metric"}</dt><dd>{authoritativeValue(point?.display_value ?? null)}</dd></div>
+        <div>
+          <dt>{variation?.label ?? "Selected metric"}</dt>
+          <dd><PointValue point={point} unit={variation?.unit} /></dd>
+        </div>
       </dl>
     </article>
   );
@@ -329,7 +353,7 @@ function MembersPanel({
                   </td>
                   <td><EvidenceBadge eligibility={member.run.evidence_eligibility} /></td>
                   <td className="number-cell mono">{member.run.measured_requests.toLocaleString()}</td>
-                  <td className="number-cell mono">{authoritativeValue(point?.display_value ?? null)}</td>
+                  <td className="number-cell mono"><PointValue point={point} unit={variation?.unit} /></td>
                 </tr>
               );
             })}
