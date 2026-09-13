@@ -5,6 +5,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from inferdrome.deployment.vast_bootstrap import (
+    Approval,
+    LaunchIntent,
+    Ready,
+    Result,
+    Stage,
+)
+from inferdrome.deployment.vast_control import ControlIntent
 from inferdrome.deployment.vast_process import (
     DestroyReadback,
     VastProcessInput,
@@ -22,6 +30,17 @@ def artifacts() -> dict[str, bytes]:
             DestroyReadback.model_json_schema()
         ),
         "deployments/vast-process-v1/input-template.json": template(),
+        **{
+            f"schemas/vast-process/v1/{name}.schema.json": model.model_json_schema()
+            for name, model in (
+                ("launch-intent", LaunchIntent),
+                ("bootstrap-ready", Ready),
+                ("bootstrap-stage", Stage),
+                ("bootstrap-approval", Approval),
+                ("bootstrap-result", Result),
+                ("control-intent", ControlIntent),
+            )
+        },
     }
     return {name: canonical_json_bytes(value) + b"\n" for name, value in values.items()}
 

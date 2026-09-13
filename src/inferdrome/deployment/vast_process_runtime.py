@@ -145,7 +145,9 @@ def spawn(argv: Sequence[str], environment: Mapping[str, str]) -> Child:
 
 @contextmanager
 def _defer_cleanup_interrupts() -> Iterator[None]:
-    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    previous = signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
+    )
     try:
         yield
     finally:
@@ -310,7 +312,18 @@ def require_process_paths(spec: VastProcessInput) -> None:
 
 def _gpu_probe(spec: VastProcessInput, environment: Mapping[str, str]) -> bytes:
     """Keep the bounded probe inside preflight's group, including on hard kill."""
-    deadline = time.monotonic() + min(20, remaining_seconds(spec))
+    return _gpu_probe_bounded(
+        Path(spec.preparation_path), environment, min(20, remaining_seconds(spec))
+    )
+
+
+def _gpu_probe_bounded(
+    directory: Path, environment: Mapping[str, str], seconds: float
+) -> bytes:
+    """Shared bounded local probe for bootstrap and execution preflight."""
+    if seconds <= 0:
+        raise RuntimeFailure("VAST_GPU_PROBE_TIMEOUT")
+    deadline = time.monotonic() + min(20, seconds)
     child = subprocess.Popen(
         (
             "/usr/bin/nvidia-smi",
@@ -318,7 +331,7 @@ def _gpu_probe(spec: VastProcessInput, environment: Mapping[str, str]) -> bytes:
             "--format=csv,noheader,nounits",
         ),
         env=dict(environment),
-        cwd=spec.preparation_path,
+        cwd=directory,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -540,6 +553,11 @@ def _interrupt(signum: int, frame: Any) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "bootstrap":
+        from inferdrome.deployment.vast_bootstrap import main as bootstrap_main
+
+        return bootstrap_main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("execute", "preflight", "probe"))
     parser.add_argument("--directory", type=Path)

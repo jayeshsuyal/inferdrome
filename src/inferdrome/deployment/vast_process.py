@@ -32,7 +32,14 @@ from inferdrome.routing_execution.contracts import (
 )
 from inferdrome.routing_execution.vast_contracts import VastRoutingConfig
 
-MODULES = ("vast_process", "vast_process_runtime", "vast_process_observer")
+MODULES = (
+    "vast_process",
+    "vast_process_runtime",
+    "vast_process_observer",
+    "vast_bootstrap",
+    "vast_control",
+    "vast_transfer",
+)
 GPUUUID = Annotated[
     str, Field(pattern=r"^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 ]

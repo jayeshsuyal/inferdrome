@@ -79,8 +79,10 @@ the operator declaration. Building, publishing, and authenticating a registry
 pull remain separate launch work.
 
 The image records `/opt/inferdrome-vast-build.json` with the source commit and
-SHA-256 digests of `vast_process`, `vast_process_runtime`, and
-`vast_process_observer`. Preflight requires exact equality between the plan, this
+SHA-256 digests of `vast_process`, `vast_process_runtime`,
+`vast_process_observer`, `vast_bootstrap`, `vast_control`, and `vast_transfer`.
+The operator workflow checks its own installed module inventory before create.
+Preflight requires exact equality between the plan, this
 marker, and the installed module bytes. The marker is an
 `OPERATOR_DECLARED_BUILD_MARKER`, not an independent assertion that an OCI image
 was built from a repository revision.
@@ -131,7 +133,7 @@ Required inputs include:
 | `gpu_uuids` | Exactly two distinct full GPU UUID strings |
 | `uid`, `gid` | Exactly 2000 and 0 |
 | `model_path`, `preparation_path`, `evidence_path`, `cache_path` | Bounded canonical absolute paths, pairwise distinct and non-overlapping |
-| `module_sha256` | Exactly the three module names printed by `module-digests` |
+| `module_sha256` | Exactly the six module names printed by `module-digests` |
 | `request_timeout_ms` | 1–60,000 |
 | `readiness_timeout_seconds` | 1–600 |
 | `campaign_timeout_seconds` | 1–1,800 |
@@ -146,6 +148,12 @@ into a Vast instance. Keep raw readbacks, credentials, UUIDs, paths, and private
 observations outside published evidence.
 
 ## Execute once and export verified evidence
+
+For a fresh Vast instance, use the implemented [bounded bootstrap and broker
+workflow](VAST_BOOTSTRAP_V1.md). It acquires the instance/GPU facts, stages and
+verifies input, obtains exact canonical plan approval, then reaches the
+supervisor described here. The direct execute form below assumes preparation
+already exists and is not the fresh-instance startup sequence.
 
 The image entrypoint is:
 
@@ -216,7 +224,10 @@ tampered packages. Synthetic test packages do not establish GPU serving.
 
 ## External destroy and absence readback
 
-The adapter has no provider client or credential handling. An external
+The guest adapter has no provider client or credential handling. The new
+[operator control interface](VAST_BOOTSTRAP_V1.md) supplies durable journals,
+bounded callbacks and a separate deadline-guard service, with live provider and
+worker-launch adapters explicitly required. An external
 accountable controller must retain the created instance's exact ID and remain
 able to act if the guest never starts or becomes unreachable. A create response
 returns `new_contract`, the instance ID; it is distinct from the accepted offer
@@ -269,12 +280,13 @@ review these concrete items:
    CPU, RAM, shared memory, and instance disk for both engines and the frozen
    model. Review current price, duration, disk charges, and spending limit.
    No availability or cost promise follows from the synthetic tests.
-3. Establish a reviewed way to stage the model, bound plan, private inputs, and
-   writable directories and to transfer evidence out under strict `args` mode,
-   UID 2000:GID 0, no public ports, and no persistent volumes. This source does
-   not supply a provider file-transfer/bootstrap mechanism. A plan already
-   requires the real instance ID and launch readback; their acquisition and
-   staging must be solved without switching to an unsupported launch mode.
+3. Satisfy the enforced prelaunch transfer gates in the implemented
+   [bootstrap/broker profile](VAST_BOOTSTRAP_V1.md): independently authenticated
+   pinned broker host-key evidence, documented exact-ID/path mapping and
+   UID2000:GID0 compatibility. No live enrollment or compatibility follows from
+   fakes. Supply reviewed live provider/guard adapters; the source does not
+   guess broker negotiation or enroll a host key. Keep strict `args`, no guest
+   public ports and no persistent volumes.
 4. Retain sanitized create and launch facts for the exact instance; verify the
    effective `args` entrypoint, `2000:0` user, requested immutable image, empty
    mapping/volume inventories, and the declared GPU UUIDs. Plan validation checks
