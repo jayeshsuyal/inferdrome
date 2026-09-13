@@ -986,4 +986,86 @@ describe("dashboard API client", () => {
       message: expect.stringContaining("must be an integer"),
     });
   });
+
+  describe("closed manual-host execution profiles", () => {
+    function executionIndex(topology: Record<string, unknown>) {
+      return {
+        projection_version: "inferdrome.routing-execution-dashboard.v1",
+        routing_executions: [{
+          execution_id: "routing-execution-v1",
+          retained_digest: `sha256:${"a".repeat(64)}`,
+          mode: "LAMBDA_MANUAL_HOST",
+          source_commit: "b".repeat(40),
+          model: {
+            model_id: "Qwen/Qwen3-8B",
+            model_revision: "c".repeat(40),
+            tokenizer_revision: "c".repeat(40),
+          },
+          runtime: {
+            runtime_name: "vllm",
+            runtime_version: "0.26.0",
+            adapter_id: "openai-compatible-routing-execution-v1",
+            adapter_version: "1.0.0",
+          },
+          topology: {
+            accelerator_model: "NVIDIA H100-SXM5-80GB",
+            accelerator_count: 2,
+            runner_separate_from_serving: true,
+            serving_engine_count: 2,
+            one_engine_per_endpoint: true,
+            declared_provider: "LAMBDA",
+            declared_provisioning: "OPERATOR_SUPPLIED_VM",
+            identity_assertion: "OPERATOR_DECLARED_NOT_OBSERVED",
+            lifecycle_protection: "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY",
+            ...topology,
+          },
+          policy_ids: [
+            "fail_closed_required_load_v1",
+            "explicit_fail_open_stale_load_v1",
+            "typed_admissible_state_only_v1",
+          ],
+          trial_count: 3,
+          request_denominator_per_trial: 6,
+          terminal_denominator: 18,
+          verified_by_offline_replay: true,
+        }],
+        rejected: [],
+        page: { limit: 25, returned: 1, total: 1, has_more: false, next_cursor: null },
+      };
+    }
+
+    it.each(["NVIDIA A100-PCIE-40GB", "NVIDIA H100-SXM5-80GB"])(
+      "accepts the reviewed two-GPU %s projection",
+      async (acceleratorModel) => {
+        vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(
+          executionIndex({ accelerator_model: acceleratorModel }),
+        ))));
+
+        const response = await api.listRoutingExecutions();
+
+        expect(response.routing_executions[0].topology.accelerator_model).toBe(acceleratorModel);
+        expect(response.routing_executions[0].topology.identity_assertion).toBe("OPERATOR_DECLARED_NOT_OBSERVED");
+      },
+    );
+
+    it.each([
+      ["unsupported model", { accelerator_model: "NVIDIA H200" }],
+      ["mixed models", { accelerator_model: "NVIDIA A100-PCIE-40GB,NVIDIA H100-SXM5-80GB" }],
+      ["wrong count", { accelerator_count: 1 }],
+      ["different provider", { declared_provider: "GCP" }],
+      ["different provisioning", { declared_provisioning: "AUTOMATIC_VM" }],
+      ["observed identity claim", { identity_assertion: "OBSERVED" }],
+      ["resolved lifecycle claim", { lifecycle_protection: "VERIFIED" }],
+      ["shared runner", { runner_separate_from_serving: false }],
+      ["wrong engine count", { serving_engine_count: 1 }],
+      ["shared endpoint engine", { one_engine_per_endpoint: false }],
+    ] satisfies [string, Record<string, unknown>][])(
+      "rejects %s while retaining the manual-host boundary",
+      async (_case, topology) => {
+        vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(executionIndex(topology)))));
+
+        await expect(api.listRoutingExecutions()).rejects.toMatchObject({ status: 502 });
+      },
+    );
+  });
 });
