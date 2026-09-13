@@ -1,4 +1,4 @@
-"""Bounded operator-side Vast control seams; no live provider/guard adapter.
+"""Bounded operator-side Vast control and durable exact-instance cleanup.
 
 A separately hosted guard and provider transport must be supplied explicitly.
 Neither a readiness record nor these local journals attest provider behavior.
@@ -150,7 +150,7 @@ class Provider(Protocol):
 
     Adapters must bound network/pagination and clean up their owned subprocesses.
     The control boundary also enforces a POSIX main-thread alarm and rejects late
-    returns. No live implementation or independent worker launcher is supplied.
+    returns. Concrete integrations live in vast_provider and vast_guard.
     """
 
     def create(self, intent: ControlIntent, *, seconds: float) -> CreateResult: ...
@@ -269,7 +269,17 @@ class ControlJournal:
     """Create-only, fsynced records held under a private directory descriptor."""
 
     def __init__(self, directory: Path) -> None:
-        self.root = SafeDirFD.open(directory)
+        self._initialize_root(SafeDirFD.open(directory))
+
+    @classmethod
+    def from_inherited_fd(cls, descriptor: int) -> ControlJournal:
+        """Reopen the lock in a worker; never share a fork-inherited flock."""
+        journal = cls.__new__(cls)
+        journal._initialize_root(SafeDirFD.from_inherited_fd(descriptor))
+        return journal
+
+    def _initialize_root(self, root: SafeDirFD) -> None:
+        self.root = root
         if os.fstat(self.root.fd).st_mode & 0o777 != 0o700:
             self.root.close()
             raise ControlFailure("VAST_CONTROL_JOURNAL_NOT_PRIVATE")
@@ -408,6 +418,35 @@ class ControlJournal:
 
     def request_cleanup(self) -> None:
         self.record_once("cleanup-requested.json", {"requested": True})
+
+    def bound_execution(
+        self, intent: ControlIntent, clock: Clock, budget: _Budget
+    ) -> None:
+        """Persist both clocks before arming; a later worker cannot renew them."""
+        with self._locked():
+            value = self._read("execution-window.json")
+            if value is None:
+                window = _CleanupWindow(
+                    intent_sha256=intent.intent_sha256,
+                    started_monotonic=clock.monotonic(),
+                    deadline_monotonic=budget.monotonic_deadline,
+                    deadline_unix=budget.deadline.timestamp(),
+                )
+                self._write("execution-window.json", window.model_dump(mode="json"))
+            else:
+                window = _CleanupWindow.model_validate_json(canonical_json_bytes(value))
+            if (
+                window.intent_sha256 != intent.intent_sha256
+                or window.deadline_monotonic < window.started_monotonic
+                or window.deadline_monotonic - window.started_monotonic > 7200
+                or window.deadline_unix
+                != parse_deadline(intent.execution_deadline_utc).timestamp()
+                or clock.monotonic() < window.started_monotonic
+            ):
+                raise ControlFailure("VAST_CONTROL_EXECUTION_WINDOW_INVALID")
+            budget.monotonic_deadline = min(
+                budget.monotonic_deadline, window.deadline_monotonic
+            )
 
     def bound_cleanup(
         self, intent: ControlIntent, clock: Clock, budget: _Budget
@@ -564,12 +603,7 @@ def _settle(
 
 
 class DeadlineGuard:
-    """Worker service for an independently hosted process, not its launcher.
-
-    Hosting, credentials, provider transport and authenticated readiness delivery
-    remain explicit production integration gates. Calling this synchronously is
-    not an independent guard and cannot satisfy execute_control's PID check.
-    """
+    """Deadline worker service, hosted independently by vast_guard.DetachedGuard."""
 
     def __init__(
         self,
@@ -585,6 +619,15 @@ class DeadlineGuard:
         self.clock = clock or SystemClock()
         self.execution = _Budget(intent.execution_deadline_utc, self.clock)
         self.cleanup = _Budget(intent.cleanup_deadline_utc, self.clock)
+        self.journal.bound_execution(self.intent, self.clock, self.execution)
+        reserve = (
+            parse_deadline(intent.cleanup_deadline_utc)
+            - parse_deadline(intent.execution_deadline_utc)
+        ).total_seconds()
+        self.cleanup.monotonic_deadline = min(
+            self.cleanup.monotonic_deadline,
+            self.execution.monotonic_deadline + reserve,
+        )
 
     def readiness(self) -> GuardReady:
         _require_alarm_support()
@@ -659,6 +702,15 @@ def execute_control(
     if not matched_workflow:
         raise ControlFailure("VAST_CONTROL_WORKFLOW_INTENT_MISMATCH")
     journal.initialize(intent)
+    journal.bound_execution(intent, selected_clock, execution)
+    cleanup.monotonic_deadline = min(
+        cleanup.monotonic_deadline,
+        execution.monotonic_deadline
+        + (
+            parse_deadline(intent.cleanup_deadline_utc)
+            - parse_deadline(intent.execution_deadline_utc)
+        ).total_seconds(),
+    )
     if journal.has("create-start.json"):
         raise ControlFailure("VAST_CONTROL_CREATE_ALREADY_ATTEMPTED")
     seconds = min(intent.operation_timeout_seconds, execution.remaining())

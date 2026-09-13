@@ -1,7 +1,8 @@
-"""Full local rehearsal; broker/provider/guard/GPU IO is explicitly fake."""
+"""Full rehearsal; detached guard is real, all network and GPU IO is fake."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,8 +12,11 @@ import pytest
 from inferdrome.deployment import vast_bootstrap as boot
 from inferdrome.deployment import vast_control as control
 from inferdrome.deployment import vast_transfer as transfer
+from inferdrome.deployment.vast_guard import DetachedGuard
+from inferdrome.deployment.vast_provider import VastProvider
 from tests.unit.test_vast_bootstrap import Rehearsal
 from tests.unit.test_vast_control import FakeClock, FakeGuard, FakeProvider
+from tests.unit.test_vast_guard import FileTransport
 from tests.unit.test_vast_transfer import gate as broker_gate  # noqa: F401
 
 
@@ -100,21 +104,44 @@ def test_empty_guest_broker_control_and_external_settlement(
         persistent_volume_ids=(),
     )
     provider.destroy_error = failure == "destroy"
+    detached = None
+    if failure is None:
+        concrete_provider = VastProvider(
+            rehearsal.intent,
+            journal=journal,
+            transport=FileTransport(directory),
+        )
+        detached = DetachedGuard(concrete_provider)
     try:
         outcome = control.execute_control(
             intent,
             journal,
             approved_intent_sha256=intent.intent_sha256,
-            provider=provider,
+            provider=concrete_provider if detached is not None else provider,
             workflow=rehearsal.workflow,
-            guard=FakeGuard(),
-            clock=clock,
+            guard=detached if detached is not None else FakeGuard(),
+            clock=None if detached is not None else clock,
         )
         assert outcome.instance_id == 101
-        assert len([call for call in provider.calls if call[0] == "create"]) == 1
-        assert all(
-            identity == 101 for kind, identity, _ in provider.calls if kind != "create"
-        )
+        if detached is not None:
+            assert detached.wait(seconds=5)
+            requests = [
+                json.loads(line)
+                for line in (directory / "requests.jsonl").read_bytes().splitlines()
+            ]
+            assert sum(item["method"] == "PUT" for item in requests) == 1
+            assert all(
+                item["path"].rstrip("/") == "/api/v0/instances/101"
+                for item in requests
+                if item["method"] == "DELETE"
+            )
+        else:
+            assert len([call for call in provider.calls if call[0] == "create"]) == 1
+            assert all(
+                identity == 101
+                for kind, identity, _ in provider.calls
+                if kind != "create"
+            )
         assert outcome.cleanup_status == (
             control.UNCONFIRMED if failure == "destroy" else control.CONFIRMED
         )
@@ -134,4 +161,7 @@ def test_empty_guest_broker_control_and_external_settlement(
         if failure == "destroy":
             assert clock.elapsed <= 61
     finally:
+        if detached is not None:
+            journal.request_cleanup()
+            detached.wait(seconds=5)
         journal.close()

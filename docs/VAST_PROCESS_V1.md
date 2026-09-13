@@ -226,8 +226,9 @@ tampered packages. Synthetic test packages do not establish GPU serving.
 
 The guest adapter has no provider client or credential handling. The new
 [operator control interface](VAST_BOOTSTRAP_V1.md) supplies durable journals,
-bounded callbacks and a separate deadline-guard service, with live provider and
-worker-launch adapters explicitly required. An external
+bounded callbacks, a concrete HTTPS provider adapter and a detached POSIX
+deadline worker. They are rehearsed with fake network responses; access and
+paid-launch approval remain separate gates. An external
 accountable controller must retain the created instance's exact ID and remain
 able to act if the guest never starts or becomes unreachable. A create response
 returns `new_contract`, the instance ID; it is distinct from the accepted offer
@@ -284,9 +285,12 @@ review these concrete items:
    [bootstrap/broker profile](VAST_BOOTSTRAP_V1.md): independently authenticated
    pinned broker host-key evidence, documented exact-ID/path mapping and
    UID2000:GID0 compatibility. No live enrollment or compatibility follows from
-   fakes. Supply reviewed live provider/guard adapters; the source does not
-   guess broker negotiation or enroll a host key. Keep strict `args`, no guest
-   public ports and no persistent volumes.
+   fakes. The concrete provider and detached guard are implemented; review
+   their exact request and deployment before use. The source does not guess
+   broker negotiation. The prospective log-derived guest SSH pin helper does
+   not activate SSH or replace this contract. Keep strict `args`, no guest
+   public ports and no persistent volumes until the separate access-policy
+   change documented in that profile is approved.
 4. Retain sanitized create and launch facts for the exact instance; verify the
    effective `args` entrypoint, `2000:0` user, requested immutable image, empty
    mapping/volume inventories, and the declared GPU UUIDs. Plan validation checks
