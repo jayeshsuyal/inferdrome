@@ -6,7 +6,9 @@ from inferdrome.dashboard.models import PageView
 from inferdrome.domain.base import FrozenModel
 
 RoutingExecutionId = Literal["routing-execution-v1"]
-RoutingExecutionMode = Literal["LOCAL_LOOPBACK", "GCP_PRIVATE", "LAMBDA_MANUAL_HOST"]
+RoutingExecutionMode = Literal[
+    "LOCAL_LOOPBACK", "GCP_PRIVATE", "LAMBDA_MANUAL_HOST", "VAST_MANUAL_CONTAINER"
+]
 RoutingTerminalStatus = Literal[
     "SUCCEEDED", "TIMED_OUT", "FAILED", "CANCELLED", "NO_SAFE_ROUTE"
 ]
@@ -44,6 +46,22 @@ class RoutingExecutionTopologyView(FrozenModel):
     ]
 
 
+class VastRoutingExecutionTopologyView(FrozenModel):
+    profile_id: Literal["vast-container-two-h100-sxm5-80gb-v1"]
+    accelerator_model: Literal["NVIDIA H100-SXM5-80GB"]
+    accelerator_count: Literal[2]
+    container_count: Literal[1]
+    serving_engine_count: Literal[2]
+    one_engine_per_endpoint: Literal[True]
+    tensor_parallel_size: Literal[1]
+    declared_provider: Literal["VAST_AI"]
+    declared_provisioning: Literal["OPERATOR_SUPPLIED_CONTAINER"]
+    identity_assertion: Literal["OPERATOR_DECLARED_NOT_OBSERVED"]
+    lifecycle_protection: Literal["UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY"]
+    isolation_boundary: Literal["SEPARATE_PROCESSES_SHARED_CONTAINER"]
+    observer_gpu_isolation: Literal["ENVIRONMENT_ONLY_NOT_HARDWARE_ENFORCED"]
+
+
 class RoutingExecutionSummary(FrozenModel):
     execution_id: RoutingExecutionId
     retained_digest: str
@@ -51,7 +69,7 @@ class RoutingExecutionSummary(FrozenModel):
     source_commit: str
     model: RoutingExecutionModelView
     runtime: RoutingExecutionRuntimeView
-    topology: RoutingExecutionTopologyView
+    topology: RoutingExecutionTopologyView | VastRoutingExecutionTopologyView
     policy_ids: tuple[str, str, str]
     trial_count: Literal[3]
     request_denominator_per_trial: Literal[6]
@@ -92,6 +110,27 @@ class RoutingExecutionInputTransferView(FrozenModel):
 class RoutingExecutionEvidenceView(FrozenModel):
     runner_image: str
     serving_image: str
+    endpoints: tuple[
+        RoutingExecutionEndpointIdentityView, RoutingExecutionEndpointIdentityView
+    ]
+    input_transfer_receipt_sha256: str
+    input_transfer: RoutingExecutionInputTransferView
+
+
+class RoutingExecutionArtifactProvenanceView(FrozenModel):
+    container_image_assertion: Literal["OPERATOR_DECLARED_NOT_OBSERVED"]
+    source_commit: str
+    observer_artifact_sha256: str
+    supervisor_artifact_sha256: str
+    model_manifest_sha256: str
+    model_snapshot_sha256: str
+    runtime_observation_sha256: str
+    runtime_assertion: Literal["LOCAL_PROCESS_OBSERVATIONS_NOT_PROVIDER_ATTESTATION"]
+
+
+class VastRoutingExecutionEvidenceView(FrozenModel):
+    container_image: str
+    artifact_provenance: RoutingExecutionArtifactProvenanceView
     endpoints: tuple[
         RoutingExecutionEndpointIdentityView, RoutingExecutionEndpointIdentityView
     ]
@@ -252,7 +291,7 @@ class RoutingExecutionDetail(FrozenModel):
         "inferdrome.routing-execution-dashboard.v1"
     )
     summary: RoutingExecutionSummary
-    evidence: RoutingExecutionEvidenceView
+    evidence: RoutingExecutionEvidenceView | VastRoutingExecutionEvidenceView
     campaign: RoutingExecutionCampaignView
     trials: tuple[
         RoutingExecutionTrialView,

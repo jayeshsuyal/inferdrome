@@ -18,6 +18,7 @@ from typing import Literal, cast
 from inferdrome.dashboard.models import PageView
 from inferdrome.dashboard.routing_execution_models import (
     RejectedRoutingExecution,
+    RoutingExecutionArtifactProvenanceView,
     RoutingExecutionCampaignView,
     RoutingExecutionCandidateView,
     RoutingExecutionDetail,
@@ -41,6 +42,8 @@ from inferdrome.dashboard.routing_execution_models import (
     RoutingExecutionTopologyView,
     RoutingExecutionTrialView,
     RoutingExecutionWorkloadView,
+    VastRoutingExecutionEvidenceView,
+    VastRoutingExecutionTopologyView,
 )
 from inferdrome.errors import (
     DashboardError,
@@ -108,7 +111,31 @@ def _endpoint(
     )
 
 
-def _topology(manifest: ExecutionManifest) -> RoutingExecutionTopologyView:
+def _topology(
+    manifest: ExecutionManifest,
+) -> RoutingExecutionTopologyView | VastRoutingExecutionTopologyView:
+    if manifest.mode == "VAST_MANUAL_CONTAINER":
+        vast_topology = manifest.topology
+        if (
+            vast_topology.provider != "VAST_AI"
+            or vast_topology.provisioning != "OPERATOR_SUPPLIED_CONTAINER"
+        ):
+            raise DashboardError("manual-container topology declaration disagrees")
+        return VastRoutingExecutionTopologyView(
+            profile_id=vast_topology.profile_id,
+            accelerator_model=vast_topology.accelerator_model,
+            accelerator_count=vast_topology.accelerator_count,
+            container_count=vast_topology.container_count,
+            serving_engine_count=vast_topology.serving_engine_count,
+            one_engine_per_endpoint=vast_topology.one_engine_per_endpoint,
+            tensor_parallel_size=vast_topology.tensor_parallel_size,
+            declared_provider="VAST_AI",
+            declared_provisioning="OPERATOR_SUPPLIED_CONTAINER",
+            identity_assertion=vast_topology.identity_assertion,
+            lifecycle_protection=vast_topology.lifecycle_protection,
+            isolation_boundary=vast_topology.isolation_boundary,
+            observer_gpu_isolation=vast_topology.observer_gpu_isolation,
+        )
     topology = manifest.topology
     if manifest.mode == "LAMBDA_MANUAL_HOST":
         provider = getattr(topology, "provider", None)
@@ -372,23 +399,45 @@ def _project(verified: VerifiedExecutionPackage) -> RoutingExecutionDetail:
     if len(trials) != 3:
         raise DashboardError("verified routing execution trial count disagrees")
     transfer = verified.input_transfer
-    return RoutingExecutionDetail(
-        summary=summary,
-        evidence=RoutingExecutionEvidenceView(
+    input_transfer = RoutingExecutionInputTransferView(
+        config_sha256=transfer.config_sha256,
+        selected_workload_sha256=transfer.selected_workload_sha256,
+        workload_size_bytes=transfer.workload_size_bytes,
+        declared_input_transfer_sha256=transfer.declared_input_transfer_sha256,
+        verified_before_transport=transfer.verified_before_transport,
+    )
+    evidence: RoutingExecutionEvidenceView | VastRoutingExecutionEvidenceView
+    if manifest.mode == "VAST_MANUAL_CONTAINER":
+        provenance = manifest.artifact_provenance
+        if provenance.source_commit != manifest.source_commit:
+            raise DashboardError("manual-container artifact provenance disagrees")
+        evidence = VastRoutingExecutionEvidenceView(
+            container_image=manifest.container_image.reference,
+            artifact_provenance=RoutingExecutionArtifactProvenanceView(
+                container_image_assertion=provenance.container_image_assertion,
+                source_commit=provenance.source_commit,
+                observer_artifact_sha256=provenance.observer_artifact_sha256,
+                supervisor_artifact_sha256=provenance.supervisor_artifact_sha256,
+                model_manifest_sha256=provenance.model_manifest_sha256,
+                model_snapshot_sha256=provenance.model_snapshot_sha256,
+                runtime_observation_sha256=provenance.runtime_observation_sha256,
+                runtime_assertion=provenance.runtime_assertion,
+            ),
+            endpoints=endpoint_views,
+            input_transfer_receipt_sha256=manifest.input_transfer_receipt_sha256,
+            input_transfer=input_transfer,
+        )
+    else:
+        evidence = RoutingExecutionEvidenceView(
             runner_image=manifest.runner_image.reference,
             serving_image=manifest.serving_image.reference,
             endpoints=endpoint_views,
             input_transfer_receipt_sha256=manifest.input_transfer_receipt_sha256,
-            input_transfer=RoutingExecutionInputTransferView(
-                config_sha256=transfer.config_sha256,
-                selected_workload_sha256=transfer.selected_workload_sha256,
-                workload_size_bytes=transfer.workload_size_bytes,
-                declared_input_transfer_sha256=(
-                    transfer.declared_input_transfer_sha256
-                ),
-                verified_before_transport=transfer.verified_before_transport,
-            ),
-        ),
+            input_transfer=input_transfer,
+        )
+    return RoutingExecutionDetail(
+        summary=summary,
+        evidence=evidence,
         campaign=RoutingExecutionCampaignView(
             routing_inputs=RoutingExecutionRoutingInputsView(
                 campaign_id=manifest.routing_inputs.campaign_id,

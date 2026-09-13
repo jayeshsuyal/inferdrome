@@ -1,0 +1,32 @@
+# Additive image definition only. No Lambda/GCP role-image contract is changed.
+# The final scratch stage copies files but deliberately drops inherited EXPOSE,
+# ENTRYPOINT, CMD, HEALTHCHECK and user metadata from the upstream serving base.
+FROM vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52 AS runtime
+USER root
+WORKDIR /build
+ENV UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/inferdrome-runtime VIRTUAL_ENV="" PYTHONHOME="" PYTHONPATH=""
+COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md ./
+COPY LICENSES ./LICENSES
+COPY src ./src
+ADD --checksum=sha256:920cbcaad514cc185634f6f0dcd71df5e8f4ee4456d440a22e0f8c0f142a8203 https://github.com/astral-sh/uv/releases/download/0.8.17/uv-x86_64-unknown-linux-gnu.tar.gz /tmp/uv.tar.gz
+RUN /usr/bin/python3.12 -I -m venv --without-pip /opt/inferdrome-runtime \
+    && tar -xzf /tmp/uv.tar.gz --strip-components=1 -C /usr/local/bin \
+    && /usr/local/bin/uv sync --frozen --no-dev --no-editable --python /opt/inferdrome-runtime/bin/python --no-python-downloads
+ARG SOURCE_REPOSITORY_COMMIT
+RUN /opt/inferdrome-runtime/bin/python -I -c 'import json,re,sys; from inferdrome.deployment.vast_process import module_digests; assert re.fullmatch("[0-9a-f]{40}",sys.argv[1]); open("/opt/inferdrome-vast-build.json","w").write(json.dumps({"source_commit":sys.argv[1],"module_sha256":module_digests()},sort_keys=True))' "$SOURCE_REPOSITORY_COMMIT" \
+    && install -d --owner=2000 --group=0 --mode=0700 /workspace /home/vllm \
+    && rm -rf /build /tmp/uv.tar.gz /root/.cache
+
+FROM scratch
+COPY --from=runtime / /
+ARG SOURCE_REPOSITORY_COMMIT
+LABEL org.opencontainers.image.revision="${SOURCE_REPOSITORY_COMMIT}" \
+      com.inferdrome.runtime-role="vast-process-campaign" \
+      com.inferdrome.vllm-version="0.26.0" \
+      com.inferdrome.isolation="separate-processes-shared-container"
+ENV HOME=/home/vllm PATH=/opt/inferdrome-runtime/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/local/nvidia/bin:/usr/bin:/bin \
+    PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
+USER 2000:0
+WORKDIR /workspace
+ENTRYPOINT ["/opt/inferdrome-runtime/bin/python", "-I", "-m", "inferdrome.deployment.vast_process_runtime"]

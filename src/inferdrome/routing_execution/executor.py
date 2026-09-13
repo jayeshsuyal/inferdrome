@@ -22,6 +22,7 @@ from inferdrome.routing_execution.canonical import (
 )
 from inferdrome.routing_execution.contracts import (
     CandidateState,
+    EndpointDeclaration,
     EndpointId,
     FaultReceipt,
     InputTransferReceipt,
@@ -68,6 +69,7 @@ from inferdrome.routing_execution.transport import (
     TransportTimedOut,
     UrllibEndpointTransport,
 )
+from inferdrome.routing_execution.vast_contracts import VastEndpointDeclaration
 
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_WORKLOAD_BYTES = 1_048_576
@@ -487,8 +489,11 @@ def _candidate_states(
     raw_health: dict[str, TelemetrySample] = {}
     raw_load: dict[str, TelemetrySample] = {}
     raw_gpu: dict[str, TelemetrySample] = {}
+    declarations: tuple[EndpointDeclaration | VastEndpointDeclaration, ...] = (
+        config.endpoints
+    )
     for declaration, admitted_endpoint in zip(
-        config.endpoints, topology.endpoints, strict=True
+        declarations, topology.endpoints, strict=True
     ):
         health_epochs[declaration.endpoint_id] += 1
         sampled_health = sample_health(
@@ -755,7 +760,9 @@ def _build_manifest(
 ) -> ExecutionManifest:
     config = topology.config
     transfer_bytes = canonical_json_bytes(input_transfer.model_dump(mode="json"))
-    if config.mode == "LAMBDA_MANUAL_HOST":
+    if config.mode == "VAST_MANUAL_CONTAINER":
+        manifest_schema_version = "inferdrome.routing-executed-manifest.v4"
+    elif config.mode == "LAMBDA_MANUAL_HOST":
         try:
             manifest_schema_version = _MANUAL_HOST_MANIFEST_SCHEMA_BY_CONFIG_SCHEMA[
                 config.schema_version
@@ -772,8 +779,6 @@ def _build_manifest(
         mode=config.mode,
         source_commit=config.source_commit,
         config_sha256=sha256_digest(config_bytes),
-        runner_image=config.runner_image,
-        serving_image=config.serving_image,
         model=config.model,
         runtime=config.runtime,
         routing_inputs=config.routing_inputs,
@@ -788,8 +793,16 @@ def _build_manifest(
         planned_terminal_denominator=18,
         no_retry=True,
     )
-    # The discriminated adapter preserves v1/v2 serialization and admits the
-    # additive v3 profile without widening old model literals.
+    if config.mode == "VAST_MANUAL_CONTAINER":
+        value.update(
+            container_image=config.container_image,
+            artifact_provenance=config.artifact_provenance,
+        )
+    else:
+        value.update(
+            runner_image=config.runner_image, serving_image=config.serving_image
+        )
+    # Preserve every old schema's serialized shape; v4 has only one image.
     return MANIFEST_ADAPTER.validate_python(value)
 
 

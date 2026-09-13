@@ -1,0 +1,3011 @@
+{
+  "campaign": {
+    "fault": {
+      "fault_id": "stale-load-fresh-health-v1",
+      "health_collection_continues": true,
+      "inter_request_interval_ms": 10,
+      "load_collection_pause_after_sequence_index": 1
+    },
+    "routing_inputs": {
+      "campaign_id": "routing-campaign-v1",
+      "fault_schedule_sha256": "sha256:1eacfd1444323022c48e649cbc8856c4513ceebac4dd337f49e3765a3d3a311a",
+      "plan_sha256": "sha256:f088a28730ee4e2ba9265f4d4309259c2c4098f267858b2b6d8ddc9b89df460a",
+      "policies": [
+        "fail_closed_required_load_v1",
+        "explicit_fail_open_stale_load_v1",
+        "typed_admissible_state_only_v1"
+      ],
+      "trace_sha256": "sha256:5697ccf98ea1ebb125e7754e93443c16e903a99ba0cd41fb796efb2a6b53438f",
+      "trial_plan_sha256": "sha256:e622a919d37c7ba5ab2deb88710cf3f2f978ea250c37d01cb729b22135d104a9"
+    },
+    "telemetry": {
+      "clock_domain": "RUNNER_MONOTONIC_NS",
+      "gpu_freshness_ms": 5,
+      "health_freshness_ms": 5,
+      "load_freshness_ms": 5,
+      "load_metric_name": "vllm:num_requests_running"
+    },
+    "workload": {
+      "request_denominator": 6,
+      "selected_request_ids": [
+        "request-000",
+        "request-001",
+        "request-002",
+        "request-003",
+        "request-004",
+        "request-005"
+      ],
+      "selected_workload_sha256": "sha256:fc94c392014e569dee90945737db2aa87cd8bf00a9980b7c9073050b9ee42b48",
+      "workload_id": "inferdrome.qwen-text-mixed-length.v1",
+      "workload_sha256": "sha256:72db7f3a4e8e70c9fb721fe5544d1d96aac37ec6baedbce99e05ad423fdb105f"
+    }
+  },
+  "evidence": {
+    "artifact_provenance": {
+      "container_image_assertion": "OPERATOR_DECLARED_NOT_OBSERVED",
+      "model_manifest_sha256": "sha256:ef291a8dd0f21604c8da3025f5112bd6641e891a3401c8550584725eaabe55cc",
+      "model_snapshot_sha256": "sha256:588d19e9e489cccdad793718d8c5efbad0738be717369f9eacb94ce514992d2c",
+      "observer_artifact_sha256": "sha256:fa82f221fc5324bb14929f9997a3a88a3e5b9a05f8fe10cda86df46f0eea2755",
+      "runtime_assertion": "LOCAL_PROCESS_OBSERVATIONS_NOT_PROVIDER_ATTESTATION",
+      "runtime_observation_sha256": "sha256:7cbfdd71a3923021ad09b36f2b26b6ef5032bc2310f488c48f474dff3b7c6983",
+      "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "supervisor_artifact_sha256": "sha256:04482adfb8ebfa35b6e52e10c165a1394ce8c7b7add7e0607b615315cb95dc31"
+    },
+    "container_image": "example.invalid/synthetic-vast@sha256:2466299c31f86a8f7201c9bafce92388eae45a9fb279f7208c60b9224e3f60da",
+    "endpoints": [
+      {
+        "endpoint_id": "endpoint-a"
+      },
+      {
+        "endpoint_id": "endpoint-b"
+      }
+    ],
+    "input_transfer": {
+      "config_sha256": "sha256:9eb1c1a5dd10718604bf587937628bf4334a4ca2ed473a8a77fc72b0f1364514",
+      "declared_input_transfer_sha256": "sha256:c8cc292698ad1da7f445b5915b3c44d8a0282c72f919bb582fdf2eb62e5169ea",
+      "selected_workload_sha256": "sha256:fc94c392014e569dee90945737db2aa87cd8bf00a9980b7c9073050b9ee42b48",
+      "verified_before_transport": true,
+      "workload_size_bytes": 4206
+    },
+    "input_transfer_receipt_sha256": "sha256:c8b42e218bc7a837332c9456ec4f8f2ade3cfc72160addb8665ba302525d36df"
+  },
+  "interpretation_boundary": "MEASUREMENT_EVIDENCE_ONLY",
+  "projection_version": "inferdrome.routing-execution-dashboard.v1",
+  "summary": {
+    "execution_id": "routing-execution-v1",
+    "mode": "VAST_MANUAL_CONTAINER",
+    "model": {
+      "model_id": "Qwen/Qwen3-8B",
+      "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "tokenizer_revision": "b968826d9c46dd6066d109eabc6255188de91218"
+    },
+    "policy_ids": [
+      "fail_closed_required_load_v1",
+      "explicit_fail_open_stale_load_v1",
+      "typed_admissible_state_only_v1"
+    ],
+    "request_denominator_per_trial": 6,
+    "retained_digest": "sha256:6fdad4673dd46d5cbe07c0b50386979fa127bdc3ce70e47f7e0ec977147bfcd2",
+    "runtime": {
+      "adapter_id": "openai-compatible-routing-execution-v1",
+      "adapter_version": "1.0.0",
+      "runtime_name": "vllm",
+      "runtime_version": "0.26.0"
+    },
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "terminal_denominator": 18,
+    "topology": {
+      "accelerator_count": 2,
+      "accelerator_model": "NVIDIA H100-SXM5-80GB",
+      "container_count": 1,
+      "declared_provider": "VAST_AI",
+      "declared_provisioning": "OPERATOR_SUPPLIED_CONTAINER",
+      "identity_assertion": "OPERATOR_DECLARED_NOT_OBSERVED",
+      "isolation_boundary": "SEPARATE_PROCESSES_SHARED_CONTAINER",
+      "lifecycle_protection": "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY",
+      "observer_gpu_isolation": "ENVIRONMENT_ONLY_NOT_HARDWARE_ENFORCED",
+      "one_engine_per_endpoint": true,
+      "profile_id": "vast-container-two-h100-sxm5-80gb-v1",
+      "serving_engine_count": 2,
+      "tensor_parallel_size": 1
+    },
+    "trial_count": 3,
+    "verified_by_offline_replay": true
+  },
+  "trials": [
+    {
+      "fault": {
+        "activated_at_monotonic_ns": 20000000,
+        "activated_at_sequence_index": 2,
+        "fault_id": "stale-load-fresh-health-v1",
+        "health_collection_continues": true,
+        "load_collection_paused": true
+      },
+      "policy_id": "fail_closed_required_load_v1",
+      "requests": [
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-a",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-a",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-b",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 0,
+                "endpoint_id": "endpoint-b",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 0,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 0,
+          "decision_id": "decision-fail-closed-000",
+          "fallback_reason": "NONE",
+          "request_id": "request-000",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 0,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-closed-000",
+            "ended_at_monotonic_ns": 0,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 0,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-closed-000"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 10000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 10000000,
+          "decision_id": "decision-fail-closed-001",
+          "fallback_reason": "NONE",
+          "request_id": "request-001",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 1,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-closed-001",
+            "ended_at_monotonic_ns": 10000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 10000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-closed-001"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 20000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 3,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 20000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 20000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 10000000,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 20000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 3,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 20000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 20000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 10000000,
+                "decision_at_monotonic_ns": 20000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 20000000,
+          "decision_id": "decision-fail-closed-002",
+          "fallback_reason": "REQUIRED_LOAD_STALE",
+          "request_id": "request-002",
+          "selected_endpoint_id": null,
+          "sequence_index": 2,
+          "terminal": {
+            "attempt_count": 0,
+            "decision_id": "decision-fail-closed-002",
+            "ended_at_monotonic_ns": 20000000,
+            "http_status": null,
+            "reason": "REQUIRED_LOAD_STALE",
+            "selected_endpoint_id": null,
+            "started_at_monotonic_ns": 20000000,
+            "status": "NO_SAFE_ROUTE",
+            "terminal_outcome_id": "terminal-fail-closed-002"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 30000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 4,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 30000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 30000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 20000000,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 30000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 4,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 30000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 30000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 20000000,
+                "decision_at_monotonic_ns": 30000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 30000000,
+          "decision_id": "decision-fail-closed-003",
+          "fallback_reason": "REQUIRED_LOAD_STALE",
+          "request_id": "request-003",
+          "selected_endpoint_id": null,
+          "sequence_index": 3,
+          "terminal": {
+            "attempt_count": 0,
+            "decision_id": "decision-fail-closed-003",
+            "ended_at_monotonic_ns": 30000000,
+            "http_status": null,
+            "reason": "REQUIRED_LOAD_STALE",
+            "selected_endpoint_id": null,
+            "started_at_monotonic_ns": 30000000,
+            "status": "NO_SAFE_ROUTE",
+            "terminal_outcome_id": "terminal-fail-closed-003"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 40000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 5,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 40000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 40000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 30000000,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 40000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 5,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 40000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 40000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 30000000,
+                "decision_at_monotonic_ns": 40000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 40000000,
+          "decision_id": "decision-fail-closed-004",
+          "fallback_reason": "REQUIRED_LOAD_STALE",
+          "request_id": "request-004",
+          "selected_endpoint_id": null,
+          "sequence_index": 4,
+          "terminal": {
+            "attempt_count": 0,
+            "decision_id": "decision-fail-closed-004",
+            "ended_at_monotonic_ns": 40000000,
+            "http_status": null,
+            "reason": "REQUIRED_LOAD_STALE",
+            "selected_endpoint_id": null,
+            "started_at_monotonic_ns": 40000000,
+            "status": "NO_SAFE_ROUTE",
+            "terminal_outcome_id": "terminal-fail-closed-004"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 6,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 40000000,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": false,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 6,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 40000000,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 10000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 50000000,
+          "decision_id": "decision-fail-closed-005",
+          "fallback_reason": "REQUIRED_LOAD_STALE",
+          "request_id": "request-005",
+          "selected_endpoint_id": null,
+          "sequence_index": 5,
+          "terminal": {
+            "attempt_count": 0,
+            "decision_id": "decision-fail-closed-005",
+            "ended_at_monotonic_ns": 50000000,
+            "http_status": null,
+            "reason": "REQUIRED_LOAD_STALE",
+            "selected_endpoint_id": null,
+            "started_at_monotonic_ns": 50000000,
+            "status": "NO_SAFE_ROUTE",
+            "terminal_outcome_id": "terminal-fail-closed-005"
+          }
+        }
+      ],
+      "reset": {
+        "endpoint_engine_reset_assertion": "NOT_ASSERTED_SEPARATE_SERVING_ENGINE",
+        "endpoint_runtime_identities": [
+          {
+            "endpoint_id": "endpoint-a"
+          },
+          {
+            "endpoint_id": "endpoint-b"
+          }
+        ],
+        "observer_epochs": [
+          {
+            "epoch": 0,
+            "signal": "GPU_DCGM"
+          },
+          {
+            "epoch": 0,
+            "signal": "HEALTH"
+          },
+          {
+            "epoch": 0,
+            "signal": "KV_CACHE"
+          },
+          {
+            "epoch": 0,
+            "signal": "LOAD"
+          }
+        ],
+        "reset_at_monotonic_ns": 0,
+        "runner_connection_state_cleared": true,
+        "runner_telemetry_state_cleared": true
+      },
+      "terminal_population": [
+        {
+          "count": 2,
+          "status": "SUCCEEDED"
+        },
+        {
+          "count": 0,
+          "status": "TIMED_OUT"
+        },
+        {
+          "count": 0,
+          "status": "FAILED"
+        },
+        {
+          "count": 0,
+          "status": "CANCELLED"
+        },
+        {
+          "count": 4,
+          "status": "NO_SAFE_ROUTE"
+        }
+      ],
+      "terminal_population_total": 6,
+      "trial_id": "trial-fail-closed-v1"
+    },
+    {
+      "fault": {
+        "activated_at_monotonic_ns": 70000000,
+        "activated_at_sequence_index": 2,
+        "fault_id": "stale-load-fresh-health-v1",
+        "health_collection_continues": true,
+        "load_collection_paused": true
+      },
+      "policy_id": "explicit_fail_open_stale_load_v1",
+      "requests": [
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 50000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 50000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 50000000,
+          "decision_id": "decision-fail-open-000",
+          "fallback_reason": "NONE",
+          "request_id": "request-000",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 0,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-open-000",
+            "ended_at_monotonic_ns": 50000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 50000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-open-000"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 60000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 60000000,
+          "decision_id": "decision-fail-open-001",
+          "fallback_reason": "NONE",
+          "request_id": "request-001",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 1,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-open-001",
+            "ended_at_monotonic_ns": 60000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 60000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-open-001"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 70000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 3,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 70000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 70000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 10000000,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 70000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 3,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 70000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 70000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 10000000,
+                "decision_at_monotonic_ns": 70000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [
+            "load"
+          ],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 70000000,
+          "decision_id": "decision-fail-open-002",
+          "fallback_reason": "STALE_LOAD_FAIL_OPEN",
+          "request_id": "request-002",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 2,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-open-002",
+            "ended_at_monotonic_ns": 70000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 70000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-open-002"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 80000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 4,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 80000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 80000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 20000000,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 80000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 4,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 80000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 80000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 20000000,
+                "decision_at_monotonic_ns": 80000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [
+            "load"
+          ],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 80000000,
+          "decision_id": "decision-fail-open-003",
+          "fallback_reason": "STALE_LOAD_FAIL_OPEN",
+          "request_id": "request-003",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 3,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-open-003",
+            "ended_at_monotonic_ns": 80000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 80000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-open-003"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 90000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 5,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 90000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 90000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 30000000,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 90000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 5,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 90000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 90000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 30000000,
+                "decision_at_monotonic_ns": 90000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [
+            "load"
+          ],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 90000000,
+          "decision_id": "decision-fail-open-004",
+          "fallback_reason": "STALE_LOAD_FAIL_OPEN",
+          "request_id": "request-004",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 4,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-open-004",
+            "ended_at_monotonic_ns": 90000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 90000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-open-004"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 6,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 40000000,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 6,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 40000000,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 60000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [
+            "load"
+          ],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 100000000,
+          "decision_id": "decision-fail-open-005",
+          "fallback_reason": "STALE_LOAD_FAIL_OPEN",
+          "request_id": "request-005",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 5,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-fail-open-005",
+            "ended_at_monotonic_ns": 100000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 100000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-fail-open-005"
+          }
+        }
+      ],
+      "reset": {
+        "endpoint_engine_reset_assertion": "NOT_ASSERTED_SEPARATE_SERVING_ENGINE",
+        "endpoint_runtime_identities": [
+          {
+            "endpoint_id": "endpoint-a"
+          },
+          {
+            "endpoint_id": "endpoint-b"
+          }
+        ],
+        "observer_epochs": [
+          {
+            "epoch": 0,
+            "signal": "GPU_DCGM"
+          },
+          {
+            "epoch": 0,
+            "signal": "HEALTH"
+          },
+          {
+            "epoch": 0,
+            "signal": "KV_CACHE"
+          },
+          {
+            "epoch": 0,
+            "signal": "LOAD"
+          }
+        ],
+        "reset_at_monotonic_ns": 50000000,
+        "runner_connection_state_cleared": true,
+        "runner_telemetry_state_cleared": true
+      },
+      "terminal_population": [
+        {
+          "count": 6,
+          "status": "SUCCEEDED"
+        },
+        {
+          "count": 0,
+          "status": "TIMED_OUT"
+        },
+        {
+          "count": 0,
+          "status": "FAILED"
+        },
+        {
+          "count": 0,
+          "status": "CANCELLED"
+        },
+        {
+          "count": 0,
+          "status": "NO_SAFE_ROUTE"
+        }
+      ],
+      "terminal_population_total": 6,
+      "trial_id": "trial-fail-open-v1"
+    },
+    {
+      "fault": {
+        "activated_at_monotonic_ns": 120000000,
+        "activated_at_sequence_index": 2,
+        "fault_id": "stale-load-fresh-health-v1",
+        "health_collection_continues": true,
+        "load_collection_paused": true
+      },
+      "policy_id": "typed_admissible_state_only_v1",
+      "requests": [
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 100000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 1,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 100000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 100000000,
+          "decision_id": "decision-typed-000",
+          "fallback_reason": "NONE",
+          "request_id": "request-000",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 0,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-typed-000",
+            "ended_at_monotonic_ns": 100000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 100000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-typed-000"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 110000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "AVAILABLE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health",
+            "load"
+          ],
+          "decision_at_monotonic_ns": 110000000,
+          "decision_id": "decision-typed-001",
+          "fallback_reason": "NONE",
+          "request_id": "request-001",
+          "selected_endpoint_id": "endpoint-b",
+          "sequence_index": 1,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-typed-001",
+            "ended_at_monotonic_ns": 110000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-b",
+            "started_at_monotonic_ns": 110000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-typed-001"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 120000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 3,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 120000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 120000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 10000000,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 120000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 3,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 120000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 120000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 10000000,
+                "decision_at_monotonic_ns": 120000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 120000000,
+          "decision_id": "decision-typed-002",
+          "fallback_reason": "HEALTH_ONLY_TIE_BREAK",
+          "request_id": "request-002",
+          "selected_endpoint_id": "endpoint-a",
+          "sequence_index": 2,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-typed-002",
+            "ended_at_monotonic_ns": 120000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-a",
+            "started_at_monotonic_ns": 120000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-typed-002"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 130000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 4,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 130000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 130000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 20000000,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 130000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 4,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 130000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 130000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 20000000,
+                "decision_at_monotonic_ns": 130000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 130000000,
+          "decision_id": "decision-typed-003",
+          "fallback_reason": "HEALTH_ONLY_TIE_BREAK",
+          "request_id": "request-003",
+          "selected_endpoint_id": "endpoint-a",
+          "sequence_index": 3,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-typed-003",
+            "ended_at_monotonic_ns": 130000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-a",
+            "started_at_monotonic_ns": 130000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-typed-003"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 140000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 5,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 140000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 140000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 30000000,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 140000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 5,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 140000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 140000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 30000000,
+                "decision_at_monotonic_ns": 140000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 140000000,
+          "decision_id": "decision-typed-004",
+          "fallback_reason": "HEALTH_ONLY_TIE_BREAK",
+          "request_id": "request-004",
+          "selected_endpoint_id": "endpoint-a",
+          "sequence_index": 4,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-typed-004",
+            "ended_at_monotonic_ns": 140000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-a",
+            "started_at_monotonic_ns": 140000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-typed-004"
+          }
+        },
+        {
+          "candidates": [
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-a",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 150000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 6,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 150000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 150000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 40000000,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-a",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 4
+              }
+            },
+            {
+              "eligible": true,
+              "endpoint_id": "endpoint-b",
+              "gpu_dcgm": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "gpu-dcgm-observer-v1",
+                "sampled_at_monotonic_ns": 150000000,
+                "signal": "GPU_DCGM",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "health": {
+                "admissibility": "ADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 6,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "health-observer-v1",
+                "sampled_at_monotonic_ns": 150000000,
+                "signal": "HEALTH",
+                "source": "HTTP_HEALTH",
+                "state": "AVAILABLE",
+                "value": "HEALTHY"
+              },
+              "kv_cache": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 0,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 0,
+                "freshness_bound_ns": 0,
+                "observer_id": "kv-cache-observer-v1",
+                "sampled_at_monotonic_ns": 150000000,
+                "signal": "KV_CACHE",
+                "source": "UNAVAILABLE_CAPABILITY",
+                "state": "UNAVAILABLE",
+                "value": "UNAVAILABLE"
+              },
+              "load": {
+                "admissibility": "INADMISSIBLE",
+                "age_ns": 40000000,
+                "decision_at_monotonic_ns": 150000000,
+                "endpoint_id": "endpoint-b",
+                "epoch": 2,
+                "freshness_bound_ns": 5000000,
+                "observer_id": "load-observer-v1",
+                "sampled_at_monotonic_ns": 110000000,
+                "signal": "LOAD",
+                "source": "VLLM_METRICS",
+                "state": "STALE",
+                "value": 1
+              }
+            }
+          ],
+          "claims_discarded": [
+            "load:stale",
+            "kv:unavailable"
+          ],
+          "claims_permitted_stale": [],
+          "claims_used": [
+            "health"
+          ],
+          "decision_at_monotonic_ns": 150000000,
+          "decision_id": "decision-typed-005",
+          "fallback_reason": "HEALTH_ONLY_TIE_BREAK",
+          "request_id": "request-005",
+          "selected_endpoint_id": "endpoint-a",
+          "sequence_index": 5,
+          "terminal": {
+            "attempt_count": 1,
+            "decision_id": "decision-typed-005",
+            "ended_at_monotonic_ns": 150000000,
+            "http_status": 200,
+            "reason": "HTTP_2XX",
+            "selected_endpoint_id": "endpoint-a",
+            "started_at_monotonic_ns": 150000000,
+            "status": "SUCCEEDED",
+            "terminal_outcome_id": "terminal-typed-005"
+          }
+        }
+      ],
+      "reset": {
+        "endpoint_engine_reset_assertion": "NOT_ASSERTED_SEPARATE_SERVING_ENGINE",
+        "endpoint_runtime_identities": [
+          {
+            "endpoint_id": "endpoint-a"
+          },
+          {
+            "endpoint_id": "endpoint-b"
+          }
+        ],
+        "observer_epochs": [
+          {
+            "epoch": 0,
+            "signal": "GPU_DCGM"
+          },
+          {
+            "epoch": 0,
+            "signal": "HEALTH"
+          },
+          {
+            "epoch": 0,
+            "signal": "KV_CACHE"
+          },
+          {
+            "epoch": 0,
+            "signal": "LOAD"
+          }
+        ],
+        "reset_at_monotonic_ns": 100000000,
+        "runner_connection_state_cleared": true,
+        "runner_telemetry_state_cleared": true
+      },
+      "terminal_population": [
+        {
+          "count": 6,
+          "status": "SUCCEEDED"
+        },
+        {
+          "count": 0,
+          "status": "TIMED_OUT"
+        },
+        {
+          "count": 0,
+          "status": "FAILED"
+        },
+        {
+          "count": 0,
+          "status": "CANCELLED"
+        },
+        {
+          "count": 0,
+          "status": "NO_SAFE_ROUTE"
+        }
+      ],
+      "terminal_population_total": 6,
+      "trial_id": "trial-typed-v1"
+    }
+  ]
+}

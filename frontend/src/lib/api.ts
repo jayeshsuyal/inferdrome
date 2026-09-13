@@ -1576,7 +1576,7 @@ function parseExecutionSummary(
   ], context);
   if (
     value.execution_id !== ROUTING_EXECUTION_ID
-    || !["LOCAL_LOOPBACK", "GCP_PRIVATE", "LAMBDA_MANUAL_HOST"].includes(value.mode as string)
+    || !["LOCAL_LOOPBACK", "GCP_PRIVATE", "LAMBDA_MANUAL_HOST", "VAST_MANUAL_CONTAINER"].includes(value.mode as string)
     || !/^[0-9a-f]{40}$/.test(requiredString(value, "source_commit", context))
     || value.trial_count !== 3
     || value.request_denominator_per_trial !== 6
@@ -1606,39 +1606,63 @@ function parseExecutionSummary(
     throw protocolError(`${context}.runtime is unsupported`);
   }
   if (!isRecord(value.topology)) throw protocolError(`${context}.topology must be an object`);
-  assertRoutingKeys(value.topology, [
-    "accelerator_model", "accelerator_count", "runner_separate_from_serving",
-    "serving_engine_count", "one_engine_per_endpoint", "declared_provider",
-    "declared_provisioning", "identity_assertion", "lifecycle_protection",
-  ], `${context}.topology`);
-  const acceleratorModel = requiredString(value.topology, "accelerator_model", `${context}.topology`);
-  if (
-    requiredInteger(value.topology, "accelerator_count", `${context}.topology`) < 0
-    || value.topology.runner_separate_from_serving !== true
-    || value.topology.serving_engine_count !== 2
-    || value.topology.one_engine_per_endpoint !== true
-    || !acceleratorModel
-  ) {
-    throw protocolError(`${context}.topology disagrees with the two-engine boundary`);
-  }
-  const manual = value.mode === "LAMBDA_MANUAL_HOST";
-  if (
-    (manual && (
-      !["NVIDIA A100-PCIE-40GB", "NVIDIA H100-SXM5-80GB"].includes(acceleratorModel)
+  if (value.mode === "VAST_MANUAL_CONTAINER") {
+    assertRoutingKeys(value.topology, [
+      "profile_id", "accelerator_model", "accelerator_count", "container_count",
+      "serving_engine_count", "one_engine_per_endpoint", "tensor_parallel_size",
+      "declared_provider", "declared_provisioning", "identity_assertion",
+      "lifecycle_protection", "isolation_boundary", "observer_gpu_isolation",
+    ], `${context}.topology`);
+    if (
+      value.topology.profile_id !== "vast-container-two-h100-sxm5-80gb-v1"
+      || value.topology.accelerator_model !== "NVIDIA H100-SXM5-80GB"
       || value.topology.accelerator_count !== 2
-      || value.topology.declared_provider !== "LAMBDA"
-      || value.topology.declared_provisioning !== "OPERATOR_SUPPLIED_VM"
+      || value.topology.container_count !== 1
+      || value.topology.serving_engine_count !== 2
+      || value.topology.one_engine_per_endpoint !== true
+      || value.topology.tensor_parallel_size !== 1
+      || value.topology.declared_provider !== "VAST_AI"
+      || value.topology.declared_provisioning !== "OPERATOR_SUPPLIED_CONTAINER"
       || value.topology.identity_assertion !== "OPERATOR_DECLARED_NOT_OBSERVED"
       || value.topology.lifecycle_protection !== "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY"
-    ))
-    || (!manual && (
-      value.topology.declared_provider !== null
-      || value.topology.declared_provisioning !== null
-      || value.topology.identity_assertion !== "NOT_RETAINED_BY_V1"
-      || value.topology.lifecycle_protection !== "NOT_RETAINED_BY_V1"
-    ))
-  ) {
-    throw protocolError(`${context}.topology provider claim is unsupported`);
+      || value.topology.isolation_boundary !== "SEPARATE_PROCESSES_SHARED_CONTAINER"
+      || value.topology.observer_gpu_isolation !== "ENVIRONMENT_ONLY_NOT_HARDWARE_ENFORCED"
+    ) throw protocolError(`${context}.topology disagrees with the shared-container H100 boundary`);
+  } else {
+    assertRoutingKeys(value.topology, [
+      "accelerator_model", "accelerator_count", "runner_separate_from_serving",
+      "serving_engine_count", "one_engine_per_endpoint", "declared_provider",
+      "declared_provisioning", "identity_assertion", "lifecycle_protection",
+    ], `${context}.topology`);
+    const acceleratorModel = requiredString(value.topology, "accelerator_model", `${context}.topology`);
+    if (
+      requiredInteger(value.topology, "accelerator_count", `${context}.topology`) < 0
+      || value.topology.runner_separate_from_serving !== true
+      || value.topology.serving_engine_count !== 2
+      || value.topology.one_engine_per_endpoint !== true
+      || !acceleratorModel
+    ) {
+      throw protocolError(`${context}.topology disagrees with the two-engine boundary`);
+    }
+    const manual = value.mode === "LAMBDA_MANUAL_HOST";
+    if (
+      (manual && (
+        !["NVIDIA A100-PCIE-40GB", "NVIDIA H100-SXM5-80GB"].includes(acceleratorModel)
+        || value.topology.accelerator_count !== 2
+        || value.topology.declared_provider !== "LAMBDA"
+        || value.topology.declared_provisioning !== "OPERATOR_SUPPLIED_VM"
+        || value.topology.identity_assertion !== "OPERATOR_DECLARED_NOT_OBSERVED"
+        || value.topology.lifecycle_protection !== "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY"
+      ))
+      || (!manual && (
+        value.topology.declared_provider !== null
+        || value.topology.declared_provisioning !== null
+        || value.topology.identity_assertion !== "NOT_RETAINED_BY_V1"
+        || value.topology.lifecycle_protection !== "NOT_RETAINED_BY_V1"
+      ))
+    ) {
+      throw protocolError(`${context}.topology provider claim is unsupported`);
+    }
   }
   const policies = stringArray(value, "policy_ids", context);
   if (
@@ -1918,12 +1942,34 @@ function parseRoutingExecutionDetail(payload: unknown): RoutingExecutionDetail {
   }
   const summary = parseExecutionSummary(payload.summary, "routing-execution summary");
   if (!isRecord(payload.evidence)) throw protocolError("routing-execution evidence must be an object");
-  assertRoutingKeys(payload.evidence, ["runner_image", "serving_image", "endpoints", "input_transfer_receipt_sha256", "input_transfer"], "routing-execution evidence");
-  for (const key of ["runner_image", "serving_image"] as const) {
+  const imageKeys = summary.mode === "VAST_MANUAL_CONTAINER"
+    ? ["container_image"] : ["runner_image", "serving_image"];
+  assertRoutingKeys(payload.evidence, [
+    ...imageKeys, ...(summary.mode === "VAST_MANUAL_CONTAINER" ? ["artifact_provenance"] : []),
+    "endpoints", "input_transfer_receipt_sha256", "input_transfer",
+  ], "routing-execution evidence");
+  for (const key of imageKeys) {
     const reference = requiredString(payload.evidence, key, "routing-execution evidence");
     if (!/^[-a-z0-9./]+@sha256:[0-9a-f]{64}$/.test(reference)) {
       throw protocolError(`routing-execution evidence.${key} must be an immutable OCI reference`);
     }
+  }
+  if (summary.mode === "VAST_MANUAL_CONTAINER") {
+    const provenance = payload.evidence.artifact_provenance;
+    if (!isRecord(provenance)) throw protocolError("routing-execution artifact provenance must be an object");
+    const digestKeys = [
+      "observer_artifact_sha256", "supervisor_artifact_sha256", "model_manifest_sha256",
+      "model_snapshot_sha256", "runtime_observation_sha256",
+    ];
+    assertRoutingKeys(provenance, [
+      "container_image_assertion", "source_commit", ...digestKeys, "runtime_assertion",
+    ], "routing-execution artifact provenance");
+    if (
+      provenance.container_image_assertion !== "OPERATOR_DECLARED_NOT_OBSERVED"
+      || provenance.source_commit !== summary.source_commit
+      || provenance.runtime_assertion !== "LOCAL_PROCESS_OBSERVATIONS_NOT_PROVIDER_ATTESTATION"
+    ) throw protocolError("routing-execution artifact provenance overstates its assertion or source binding");
+    for (const key of digestKeys) executionDigest(provenance[key], `routing-execution artifact provenance.${key}`);
   }
   if (!Array.isArray(payload.evidence.endpoints) || payload.evidence.endpoints.length !== 2) {
     throw protocolError("routing-execution evidence endpoint inventory is invalid");

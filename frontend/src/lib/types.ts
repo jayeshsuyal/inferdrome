@@ -623,7 +623,7 @@ export interface RoutingQualificationIndex extends ApiObject {
  * It is not interchangeable with the synthetic routing-campaign projection.
  */
 export type RoutingExecutionProjectionVersion = "inferdrome.routing-execution-dashboard.v1";
-export type RoutingExecutionMode = "LOCAL_LOOPBACK" | "GCP_PRIVATE" | "LAMBDA_MANUAL_HOST";
+export type RoutingExecutionMode = "LOCAL_LOOPBACK" | "GCP_PRIVATE" | "LAMBDA_MANUAL_HOST" | "VAST_MANUAL_CONTAINER";
 export type RoutingExecutionTerminalStatus =
   | "SUCCEEDED"
   | "TIMED_OUT"
@@ -666,20 +666,45 @@ export interface RoutingExecutionTopologyView extends ApiObject {
   readonly lifecycle_protection: "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY" | "NOT_RETAINED_BY_V1";
 }
 
-export interface RoutingExecutionSummary extends ApiObject {
+export interface VastRoutingExecutionTopologyView extends ApiObject {
+  readonly profile_id: "vast-container-two-h100-sxm5-80gb-v1";
+  readonly accelerator_model: "NVIDIA H100-SXM5-80GB";
+  readonly accelerator_count: 2;
+  readonly container_count: 1;
+  readonly serving_engine_count: 2;
+  readonly one_engine_per_endpoint: true;
+  readonly tensor_parallel_size: 1;
+  readonly declared_provider: "VAST_AI";
+  readonly declared_provisioning: "OPERATOR_SUPPLIED_CONTAINER";
+  readonly identity_assertion: "OPERATOR_DECLARED_NOT_OBSERVED";
+  readonly lifecycle_protection: "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY";
+  readonly isolation_boundary: "SEPARATE_PROCESSES_SHARED_CONTAINER";
+  readonly observer_gpu_isolation: "ENVIRONMENT_ONLY_NOT_HARDWARE_ENFORCED";
+}
+
+interface RoutingExecutionSummaryFields extends ApiObject {
   readonly execution_id: "routing-execution-v1";
   readonly retained_digest: string;
-  readonly mode: RoutingExecutionMode;
   readonly source_commit: string;
   readonly model: RoutingExecutionModelView;
   readonly runtime: RoutingExecutionRuntimeView;
-  readonly topology: RoutingExecutionTopologyView;
   readonly policy_ids: readonly [string, string, string];
   readonly trial_count: 3;
   readonly request_denominator_per_trial: 6;
   readonly terminal_denominator: 18;
   readonly verified_by_offline_replay: true;
 }
+
+export type RoutingExecutionSummary = RoutingExecutionSummaryFields & (
+  | {
+    readonly mode: Exclude<RoutingExecutionMode, "VAST_MANUAL_CONTAINER">;
+    readonly topology: RoutingExecutionTopologyView;
+  }
+  | {
+    readonly mode: "VAST_MANUAL_CONTAINER";
+    readonly topology: VastRoutingExecutionTopologyView;
+  }
+);
 
 export interface RejectedRoutingExecution extends ApiObject {
   readonly entry: "<configured-root>";
@@ -716,6 +741,25 @@ export interface RoutingExecutionInputTransferView extends ApiObject {
 export interface RoutingExecutionEvidenceView extends ApiObject {
   readonly runner_image: string;
   readonly serving_image: string;
+  readonly endpoints: readonly [RoutingExecutionEndpointIdentityView, RoutingExecutionEndpointIdentityView];
+  readonly input_transfer_receipt_sha256: string;
+  readonly input_transfer: RoutingExecutionInputTransferView;
+}
+
+export interface RoutingExecutionArtifactProvenanceView extends ApiObject {
+  readonly container_image_assertion: "OPERATOR_DECLARED_NOT_OBSERVED";
+  readonly source_commit: string;
+  readonly observer_artifact_sha256: string;
+  readonly supervisor_artifact_sha256: string;
+  readonly model_manifest_sha256: string;
+  readonly model_snapshot_sha256: string;
+  readonly runtime_observation_sha256: string;
+  readonly runtime_assertion: "LOCAL_PROCESS_OBSERVATIONS_NOT_PROVIDER_ATTESTATION";
+}
+
+export interface VastRoutingExecutionEvidenceView extends ApiObject {
+  readonly container_image: string;
+  readonly artifact_provenance: RoutingExecutionArtifactProvenanceView;
   readonly endpoints: readonly [RoutingExecutionEndpointIdentityView, RoutingExecutionEndpointIdentityView];
   readonly input_transfer_receipt_sha256: string;
   readonly input_transfer: RoutingExecutionInputTransferView;
@@ -863,7 +907,7 @@ export interface RoutingExecutionTrialView extends ApiObject {
 export interface RoutingExecutionDetail extends ApiObject {
   readonly projection_version: RoutingExecutionProjectionVersion;
   readonly summary: RoutingExecutionSummary;
-  readonly evidence: RoutingExecutionEvidenceView;
+  readonly evidence: RoutingExecutionEvidenceView | VastRoutingExecutionEvidenceView;
   readonly campaign: RoutingExecutionCampaignView;
   readonly trials: readonly [RoutingExecutionTrialView, RoutingExecutionTrialView, RoutingExecutionTrialView];
   readonly interpretation_boundary: "MEASUREMENT_EVIDENCE_ONLY";

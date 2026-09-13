@@ -29,6 +29,10 @@ from inferdrome.routing_execution.contracts import (
     WorkloadIdentity,
     oci_content_digest,
 )
+from inferdrome.routing_execution.vast_contracts import (
+    VastExecutedManifest,
+    VastRoutingConfig,
+)
 
 
 class ManualHostTopology(ExecutionModel):
@@ -151,10 +155,16 @@ class H100ManualHostExecutedManifest(ManualHostExecutedManifest):
 
 
 ExecutionConfig = (
-    RoutingExecutionConfig | ManualHostRoutingConfig | H100ManualHostRoutingConfig
+    RoutingExecutionConfig
+    | ManualHostRoutingConfig
+    | H100ManualHostRoutingConfig
+    | VastRoutingConfig
 )
 ExecutionManifest = (
-    ExecutedManifest | ManualHostExecutedManifest | H100ManualHostExecutedManifest
+    ExecutedManifest
+    | ManualHostExecutedManifest
+    | H100ManualHostExecutedManifest
+    | VastExecutedManifest
 )
 CONFIG_ADAPTER: TypeAdapter[ExecutionConfig] = TypeAdapter(
     Annotated[ExecutionConfig, Field(discriminator="schema_version")]

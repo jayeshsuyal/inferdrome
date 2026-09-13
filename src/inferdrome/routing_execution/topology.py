@@ -19,6 +19,7 @@ from inferdrome.routing_execution.contracts import (
     PublishedEndpointIdentity,
 )
 from inferdrome.routing_execution.manual_host_contracts import ExecutionConfig
+from inferdrome.routing_execution.vast_contracts import VastEndpointDeclaration
 
 
 class TopologyAdmissionError(ValueError):
@@ -90,8 +91,22 @@ def _canonical_origin(value: str) -> tuple[str, str, int]:
     return f"{parsed.scheme}://{host}:{selected_port}", host, selected_port
 
 
-def _admit_origin(config: ExecutionConfig, endpoint: EndpointDeclaration) -> str:
+def _admit_origin(
+    config: ExecutionConfig, endpoint: EndpointDeclaration | VastEndpointDeclaration
+) -> str:
     canonical, host, port = _canonical_origin(endpoint.origin)
+    if config.mode == "VAST_MANUAL_CONTAINER":
+        parsed = urlsplit(endpoint.origin)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.port is None
+            or port < 1024
+        ):
+            raise TopologyAdmissionError(
+                "Vast processes require explicit unprivileged HTTP loopback ports"
+            )
+        return canonical
     if config.mode == "LOCAL_LOOPBACK":
         if host != "127.0.0.1" or port in {80, 443}:
             raise TopologyAdmissionError(
@@ -110,7 +125,7 @@ def _admit_origin(config: ExecutionConfig, endpoint: EndpointDeclaration) -> str
 
 
 def _published_identity(
-    endpoint: EndpointDeclaration, canonical_origin: str
+    endpoint: EndpointDeclaration | VastEndpointDeclaration, canonical_origin: str
 ) -> PublishedEndpointIdentity:
     capabilities = endpoint.capabilities.model_dump(mode="json")
     return PublishedEndpointIdentity(
@@ -142,7 +157,10 @@ def admit_topology(config: ExecutionConfig) -> AdmittedTopology:
         raise TopologyAdmissionError(
             "two endpoint engines require two declared A100-SXM4-40GB accelerators"
         )
-    origins = tuple(_admit_origin(config, endpoint) for endpoint in config.endpoints)
+    declarations: tuple[EndpointDeclaration | VastEndpointDeclaration, ...] = (
+        config.endpoints
+    )
+    origins = tuple(_admit_origin(config, endpoint) for endpoint in declarations)
     if len(set(origins)) != 2:
         raise TopologyAdmissionError("endpoint origins are not distinct")
     admitted = tuple(
@@ -151,7 +169,7 @@ def admit_topology(config: ExecutionConfig) -> AdmittedTopology:
             canonical_origin=origin,
             published_identity=_published_identity(endpoint, origin),
         )
-        for endpoint, origin in zip(config.endpoints, origins, strict=True)
+        for endpoint, origin in zip(declarations, origins, strict=True)
     )
     first, second = admitted
     return AdmittedTopology(config=config, endpoints=(first, second))
