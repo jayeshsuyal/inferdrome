@@ -28,7 +28,7 @@ from inferdrome.deployment.gcp_private_engine_adapter import (
     observed_vllm_version,
 )
 from inferdrome.deployment.vast_process import (
-    VastProcessInput,
+    ProcessInput,
     load_plan,
     module_digests,
     parse_deadline,
@@ -43,6 +43,7 @@ from inferdrome.routing_execution.package import verify_execution_package
 from inferdrome.vllm_compose import _require_model_snapshot
 
 _BUILD_MARKER = Path("/opt/inferdrome-vast-build.json")
+_SFTP_BUILD_MARKER = Path("/opt/inferdrome-vast-build-v2.json")
 _CLEANUP_RESERVE_SECONDS = 20.0
 
 
@@ -60,9 +61,7 @@ class Child(Protocol):
 Spawn = Callable[[Sequence[str], Mapping[str, str]], Child]
 
 
-def child_environment(
-    spec: VastProcessInput, *, gpu_uuid: str | None
-) -> dict[str, str]:
+def child_environment(spec: ProcessInput, *, gpu_uuid: str | None) -> dict[str, str]:
     """Construct from a closed inventory; never inherit tokens/proxy/agent state."""
     return {
         "PATH": (
@@ -90,7 +89,7 @@ def child_environment(
     }
 
 
-def engine_argv(spec: VastProcessInput, index: int, python: str) -> tuple[str, ...]:
+def engine_argv(spec: ProcessInput, index: int, python: str) -> tuple[str, ...]:
     if index not in (0, 1):
         raise RuntimeFailure("VAST_ENGINE_INDEX_INVALID")
     return (
@@ -229,7 +228,7 @@ def supervise(
             raise RuntimeFailure("VAST_PROCESS_CLEANUP_UNCONFIRMED")
 
 
-def check_gpu_observation(spec: VastProcessInput, content: str) -> list[dict[str, str]]:
+def check_gpu_observation(spec: ProcessInput, content: str) -> list[dict[str, str]]:
     rows = [row.split(",") for row in content.strip().splitlines()]
     if len(rows) != 2 or any(len(row) != 5 for row in rows):
         raise RuntimeFailure("VAST_GPU_MISMATCH")
@@ -262,7 +261,7 @@ def check_gpu_observation(spec: VastProcessInput, content: str) -> list[dict[str
     return [observed[uuid] for uuid in spec.gpu_uuids]
 
 
-def remaining_seconds(spec: VastProcessInput) -> float:
+def remaining_seconds(spec: ProcessInput) -> float:
     remaining = (
         parse_deadline(spec.cleanup.terminate_by_utc) - datetime.now(UTC)
     ).total_seconds()
@@ -271,23 +270,24 @@ def remaining_seconds(spec: VastProcessInput) -> float:
     return remaining
 
 
-def active_seconds(spec: VastProcessInput) -> float:
+def active_seconds(spec: ProcessInput) -> float:
     remaining = remaining_seconds(spec) - _CLEANUP_RESERVE_SECONDS
     if remaining <= 0:
         raise RuntimeFailure("VAST_RUN_DEADLINE")
     return remaining
 
 
-def verify_build(spec: VastProcessInput, marker: dict[str, Any]) -> None:
+def verify_build(spec: ProcessInput, marker: dict[str, Any]) -> None:
     if (
         marker
         != {"source_commit": spec.source_commit, "module_sha256": spec.module_sha256}
-        or module_digests() != spec.module_sha256
+        or module_digests("v2" if spec.schema_version.endswith(".v2") else "v1")
+        != spec.module_sha256
     ):
         raise RuntimeFailure("VAST_INSTALLED_ARTIFACT_MISMATCH")
 
 
-def require_process_paths(spec: VastProcessInput) -> None:
+def require_process_paths(spec: ProcessInput) -> None:
     """Vast's explicit 2000:0 process identity has its own access contract."""
     for value in (
         spec.model_path,
@@ -310,7 +310,7 @@ def require_process_paths(spec: VastProcessInput) -> None:
         raise RuntimeFailure("VAST_EVIDENCE_NOT_EMPTY")
 
 
-def _gpu_probe(spec: VastProcessInput, environment: Mapping[str, str]) -> bytes:
+def _gpu_probe(spec: ProcessInput, environment: Mapping[str, str]) -> bytes:
     """Keep the bounded probe inside preflight's group, including on hard kill."""
     return _gpu_probe_bounded(
         Path(spec.preparation_path), environment, min(20, remaining_seconds(spec))
@@ -369,7 +369,7 @@ def _gpu_probe_bounded(
                 child.stdout.close()
 
 
-def preflight(spec: VastProcessInput) -> dict[str, Any]:
+def preflight(spec: ProcessInput) -> dict[str, Any]:
     remaining_seconds(spec)
     if (
         platform.system() != "Linux"
@@ -379,7 +379,10 @@ def preflight(spec: VastProcessInput) -> dict[str, Any]:
         or os.getgid() != spec.gid
     ):
         raise RuntimeFailure("VAST_HOST_IDENTITY_MISMATCH")
-    verify_build(spec, json.loads(read_private(_BUILD_MARKER)))
+    marker = (
+        _SFTP_BUILD_MARKER if spec.schema_version.endswith(".v2") else _BUILD_MARKER
+    )
+    verify_build(spec, json.loads(read_private(marker)))
     require_process_paths(spec)
     _require_model_snapshot(spec.model_path)
     environment = child_environment(spec, gpu_uuid=None)

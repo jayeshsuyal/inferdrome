@@ -1,8 +1,8 @@
 """File-driven, bounded Vast args bootstrap and operator workflow.
 
-All incoming files are untrusted. No provider client, credential, SSH daemon,
-model download, or implicit approval is supplied by the guest. The transport
-and external deadline guard are separate, explicitly gated operator interfaces.
+All incoming files are untrusted. The v2 profile admits stock SFTP uploads into
+private guest state and stages the pinned model on the guest. Provider
+credentials and the external deadline guard remain operator-side.
 """
 
 from __future__ import annotations
@@ -23,21 +23,37 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import Field, model_validator
 
-from inferdrome.deployment.gcp_securefs import SafeDirFD
+from inferdrome.deployment.gcp_securefs import (
+    SafeDirFD,
+    _open_absolute_directory,
+    _require_dirfd_primitives,
+)
 from inferdrome.deployment.vast_process import (
     GPUUUID,
     MODULES,
+    SFTP_MODULES,
+    ProcessInput,
     ProviderId,
     SafeOperator,
     VastLaunchReadback,
     VastProcessInput,
+    VastSftpLaunchReadback,
+    VastSftpProcessInput,
     export_package,
     module_digests,
     parse_deadline,
     prepare,
     read_private,
 )
-from inferdrome.deployment.vast_transfer import BrokerGate
+from inferdrome.deployment.vast_sftp import SftpGate, SftpTransfer
+from inferdrome.deployment.vast_ssh_trust import (
+    LogFetcher,
+    LogRequester,
+    SshPinJournal,
+    SshTrustFailure,
+    enroll_from_provider,
+)
+from inferdrome.deployment.vast_transfer import BrokerGate, TransferRunner
 from inferdrome.errors import InferdromeError
 from inferdrome.qwen3_campaign import qwen3_model_manifest
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
@@ -50,6 +66,8 @@ from inferdrome.routing_execution.contracts import (
 from inferdrome.routing_execution.package import verify_execution_package
 
 ROOT = Path("/workspace/vast-bootstrap")
+SFTP_ROOT = Path("/srv/inferdrome-sftp")
+_UPLOAD_UID, _UPLOAD_GID = 2001, 0
 Nonce = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
 Seconds = Annotated[int, Field(ge=1, le=1800)]
 EXPORT_FILES = (
@@ -104,15 +122,51 @@ class TransferPrerequisites(ExecutionModel):
         )
 
 
-class LaunchIntent(ExecutionModel):
-    schema_version: Literal["inferdrome.vast-launch-intent.v1"]
+class SftpPrerequisites(ExecutionModel):
+    client_public_key: str
+    host_key_source: Literal["VAST_AUTHENTICATED_EXACT_ID_LOGS"]
+    assertion: Literal["VAST_CONTROL_PLANE_LOG_BINDING_NOT_HARDWARE_ATTESTATION"]
+
+    @model_validator(mode="after")
+    def key(self) -> SftpPrerequisites:
+        from inferdrome.deployment.vast_ssh_trust import _public_key
+
+        _public_key(self.client_public_key)
+        return self
+
+
+class DiskFootprint(ExecutionModel):
+    """Explicit measured-image input; the old 80GB default is not a quote."""
+
+    requested_gb: Annotated[int, Field(ge=1, le=2000)]
+    image_unpacked_bytes: Annotated[int, Field(gt=0)]
+    runtime_headroom_bytes: Annotated[int, Field(ge=1_073_741_824)]
+    measurement_sha256: Digest
+    assertion: Literal["OPERATOR_REVIEWED_IMAGE_FOOTPRINT_NOT_PROVIDER_ATTESTED"]
+
+    @model_validator(mode="after")
+    def sufficient(self) -> DiskFootprint:
+        files = qwen3_model_manifest()["files"]
+        need = (
+            self.image_unpacked_bytes
+            + 2 * sum(item["size_bytes"] for item in files)
+            + max(item["size_bytes"] for item in files)
+            + self.runtime_headroom_bytes
+        )
+        if self.requested_gb * 1_000_000_000 < need:
+            raise ValueError("disk budget does not cover measured image and staging")
+        return self
+
+
+class _LaunchIntent(ExecutionModel):
+    schema_version: str
     run_nonce: Nonce
     source_commit: Commit
     container_image: ImageIdentity
     offer_id: ProviderId
     accountable_operator: SafeOperator
     module_sha256: dict[str, Digest]
-    transfer_prerequisites: TransferPrerequisites
+    transfer_prerequisites: TransferPrerequisites | SftpPrerequisites
     execution_deadline_utc: str
     cleanup_deadline_utc: str
     stage_timeout_seconds: Seconds
@@ -123,18 +177,48 @@ class LaunchIntent(ExecutionModel):
     campaign_timeout_seconds: Seconds
 
     @model_validator(mode="after")
-    def bindings(self) -> LaunchIntent:
+    def bindings(self) -> _LaunchIntent:
         execution = parse_deadline(self.execution_deadline_utc)
         cleanup = parse_deadline(self.cleanup_deadline_utc)
         if not 1 <= (cleanup - execution).total_seconds() <= 600:
             raise ValueError("separate finite cleanup reserve required")
-        if set(self.module_sha256) != set(MODULES):
+        if set(self.module_sha256) != set(
+            SFTP_MODULES if self.schema_version.endswith(".v2") else MODULES
+        ):
             raise ValueError("installed artifact inventory differs")
         return self
 
 
-class Ready(ExecutionModel):
-    schema_version: Literal["inferdrome.vast-bootstrap-ready.v1"]
+class LaunchIntent(_LaunchIntent):
+    schema_version: Literal["inferdrome.vast-launch-intent.v1"]
+    transfer_prerequisites: TransferPrerequisites
+
+
+class SftpLaunchIntent(_LaunchIntent):
+    schema_version: Literal["inferdrome.vast-launch-intent.v2"]
+    transfer_prerequisites: SftpPrerequisites
+    disk: DiskFootprint
+
+    @model_validator(mode="after")
+    def management_reserve(self) -> SftpLaunchIntent:
+        if (
+            parse_deadline(self.cleanup_deadline_utc)
+            - parse_deadline(self.execution_deadline_utc)
+        ).total_seconds() < 10:
+            raise ValueError("SFTP management requires a ten-second cleanup reserve")
+        return self
+
+
+type AnyLaunchIntent = LaunchIntent | SftpLaunchIntent
+
+
+def validated_intent(intent: AnyLaunchIntent) -> AnyLaunchIntent:
+    model = SftpLaunchIntent if isinstance(intent, SftpLaunchIntent) else LaunchIntent
+    return model.model_validate(intent.model_dump(mode="python"), strict=True)
+
+
+class _Ready(ExecutionModel):
+    schema_version: str
     run_nonce: Nonce
     intent_sha256: Digest
     execution_deadline_utc: str
@@ -147,22 +231,41 @@ class Ready(ExecutionModel):
     assertion: Literal["LOCAL_OBSERVATIONS_NOT_PROVIDER_ATTESTATION"]
 
     @model_validator(mode="after")
-    def bindings(self) -> Ready:
+    def bindings(self) -> _Ready:
         parse_deadline(self.execution_deadline_utc)
-        if len(set(self.gpu_uuids)) != 2 or set(self.module_sha256) != set(MODULES):
+        modules = SFTP_MODULES if self.schema_version.endswith(".v2") else MODULES
+        if len(set(self.gpu_uuids)) != 2 or set(self.module_sha256) != set(modules):
             raise ValueError("bootstrap observation inventory differs")
         return self
 
 
-class Stage(ExecutionModel):
-    schema_version: Literal["inferdrome.vast-bootstrap-stage.v1"]
+class Ready(_Ready):
+    schema_version: Literal["inferdrome.vast-bootstrap-ready.v1"]
+
+
+class SftpReady(_Ready):
+    schema_version: Literal["inferdrome.vast-bootstrap-ready.v2"]
+
+
+class _Stage(ExecutionModel):
+    schema_version: str
     run_nonce: Nonce
     intent_sha256: Digest
+    launch_readback: VastLaunchReadback | VastSftpLaunchReadback
+
+
+class Stage(_Stage):
+    schema_version: Literal["inferdrome.vast-bootstrap-stage.v1"]
     launch_readback: VastLaunchReadback
 
 
-class Approval(ExecutionModel):
-    schema_version: Literal["inferdrome.vast-bootstrap-approval.v1"]
+class SftpStage(_Stage):
+    schema_version: Literal["inferdrome.vast-bootstrap-stage.v2"]
+    launch_readback: VastSftpLaunchReadback
+
+
+class _Approval(ExecutionModel):
+    schema_version: str
     run_nonce: Nonce
     intent_sha256: Digest
     instance_id: ProviderId
@@ -172,8 +275,16 @@ class Approval(ExecutionModel):
     accept_manual_cleanup_risk: Literal[True]
 
 
-class Result(ExecutionModel):
-    schema_version: Literal["inferdrome.vast-bootstrap-result.v1"]
+class Approval(_Approval):
+    schema_version: Literal["inferdrome.vast-bootstrap-approval.v1"]
+
+
+class SftpApproval(_Approval):
+    schema_version: Literal["inferdrome.vast-bootstrap-approval.v2"]
+
+
+class _Result(ExecutionModel):
+    schema_version: str
     run_nonce: Nonce
     intent_sha256: Digest
     instance_id: ProviderId
@@ -181,6 +292,14 @@ class Result(ExecutionModel):
     retained_digest: Digest
     status: Literal["GUEST_EXPORT_VERIFIED_NOT_YET_RETRIEVED"]
     provider_cleanup: Literal["CLEANUP_UNCONFIRMED"]
+
+
+class Result(_Result):
+    schema_version: Literal["inferdrome.vast-bootstrap-result.v1"]
+
+
+class SftpResult(_Result):
+    schema_version: Literal["inferdrome.vast-bootstrap-result.v2"]
 
 
 def record_bytes(record: ExecutionModel) -> bytes:
@@ -191,13 +310,18 @@ def record_digest(record: ExecutionModel) -> str:
     return sha256_digest(record_bytes(record))
 
 
-def write_record(directory: Path, name: str, content: bytes) -> None:
+def write_record(
+    directory: Path, name: str, content: bytes, *, mode: int = 0o600
+) -> None:
     """Publish fsynced bytes without replacing any prior record."""
     root = SafeDirFD.open(directory)
     temporary = name + ".pending"
     try:
         descriptor = root.open_child(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         with os.fdopen(descriptor, "wb") as target:
+            if mode not in (0o600, 0o640):
+                raise BootstrapFailure("VAST_RECORD_MODE_INVALID")
+            os.fchmod(target.fileno(), mode)
             target.write(content)
             target.flush()
             os.fsync(target.fileno())
@@ -273,6 +397,57 @@ def read_record[Record: ExecutionModel](
     return parsed
 
 
+def _upload_bytes(directory: Path, name: str) -> bytes:
+    """Read only a stable foreign-owned SFTP slot; never bless its ownership."""
+    if name not in {"intent.json", "stage.json", "approval.json"}:
+        raise BootstrapFailure("VAST_SFTP_UPLOAD_NAME_INVALID")
+    nofollow, directory_flag = _require_dirfd_primitives()
+    parent = _open_absolute_directory(
+        directory, nofollow=nofollow, directory=directory_flag
+    )
+    fd = -1
+    try:
+        d = os.fstat(parent)
+        if (d.st_uid, d.st_gid, stat.S_IMODE(d.st_mode)) != (
+            _UPLOAD_UID,
+            _UPLOAD_GID,
+            0o750,
+        ):
+            raise BootstrapFailure("VAST_SFTP_UPLOAD_DIRECTORY_INVALID")
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or (before.st_uid, before.st_gid) != (_UPLOAD_UID, _UPLOAD_GID)
+            or stat.S_IMODE(before.st_mode) != 0o640
+            or not 0 < before.st_size <= 131_072
+        ):
+            raise BootstrapFailure("VAST_SFTP_UPLOAD_INVALID")
+        content = os.read(fd, 131_073)
+        after = os.fstat(fd)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+        )
+        if len(content) != before.st_size or any(
+            getattr(before, f) != getattr(after, f)
+            or getattr(after, f) != getattr(named, f)
+            for f in fields
+        ):
+            raise BootstrapFailure("VAST_SFTP_UPLOAD_CHANGED")
+        return content
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent)
+
+
 class Budget:
     """Neither wall clock rollback nor phase completion renews the run budget."""
 
@@ -334,7 +509,9 @@ def _private_directory(parent: Path, name: str) -> Path:
     return parent / name
 
 
-def observe_guest(root: Path, budget: Budget) -> dict[str, Any]:
+def observe_guest(
+    root: Path, budget: Budget, *, profile: Literal["v1", "v2"] = "v1"
+) -> dict[str, Any]:
     """Only local identity declarations; never access CONTAINER_API_KEY."""
     from inferdrome.deployment import vast_process_runtime as runtime
 
@@ -346,8 +523,12 @@ def observe_guest(root: Path, budget: Budget) -> dict[str, Any]:
         or os.getgid() != 0
     ):
         raise BootstrapFailure("VAST_BOOTSTRAP_HOST_IDENTITY")
-    marker = json.loads(read_private(runtime._BUILD_MARKER))
-    installed = module_digests()
+    marker = json.loads(
+        read_private(
+            runtime._SFTP_BUILD_MARKER if profile == "v2" else runtime._BUILD_MARKER
+        )
+    )
+    installed = module_digests(profile)
     if (
         set(marker) != {"source_commit", "module_sha256"}
         or marker["module_sha256"] != installed
@@ -456,8 +637,11 @@ def stage_snapshot(inbox: Path, destination: Path, budget: Budget) -> None:
 
 
 def make_plan(
-    intent: LaunchIntent, ready: Ready, launch: VastLaunchReadback, root: Path = ROOT
-) -> VastProcessInput:
+    intent: AnyLaunchIntent,
+    ready: Ready | SftpReady,
+    launch: VastLaunchReadback | VastSftpLaunchReadback,
+    root: Path = ROOT,
+) -> ProcessInput:
     if (
         ready.run_nonce != intent.run_nonce
         or ready.intent_sha256 != record_digest(intent)
@@ -468,10 +652,16 @@ def make_plan(
         or launch.requested_image != intent.container_image
     ):
         raise BootstrapFailure("VAST_BOOTSTRAP_BINDING_MISMATCH")
-    return VastProcessInput.model_validate_json(
+    model = (
+        VastSftpProcessInput
+        if isinstance(intent, SftpLaunchIntent)
+        else VastProcessInput
+    )
+    version = "v2" if isinstance(intent, SftpLaunchIntent) else "v1"
+    return model.model_validate_json(
         canonical_json_bytes(
             {
-                "schema_version": "inferdrome.vast-process-input.v1",
+                "schema_version": "inferdrome.vast-process-input." + version,
                 "provider": "VAST_AI",
                 "source_commit": intent.source_commit,
                 "instance_id": ready.instance_id,
@@ -511,6 +701,8 @@ class GuestBootstrap:
         *,
         root: Path = ROOT,
         budget: Budget | None = None,
+        profile: Literal["v1", "v2"] = "v1",
+        exchange: Path = SFTP_ROOT,
     ) -> None:
         # Validate the command binding before making any filesystem changes.
         self.binding = CommandBinding.model_validate_json(
@@ -524,21 +716,102 @@ class GuestBootstrap:
         )
         self.root, self.deadline = root, deadline
         self.budget = budget or Budget(deadline)
+        self.profile, self.exchange = profile, exchange
 
-    def initialize(self) -> Ready:
+    def _admit(self, name: str) -> None:
+        if self.profile != "v2":
+            return
+        models: dict[
+            str, type[SftpLaunchIntent] | type[SftpStage] | type[SftpApproval]
+        ] = {
+            "intent.json": SftpLaunchIntent,
+            "stage.json": SftpStage,
+            "approval.json": SftpApproval,
+        }
+        content = _upload_bytes(self.exchange / "uploads", name)
+        value = models[name].model_validate_json(content)
+        if record_bytes(value) != content or value.run_nonce != self.binding.run_nonce:
+            raise BootstrapFailure("VAST_SFTP_UPLOAD_BINDING")
+        digest = (
+            record_digest(value)
+            if isinstance(value, SftpLaunchIntent)
+            else value.intent_sha256
+        )
+        if digest != self.binding.intent_sha256:
+            raise BootstrapFailure("VAST_SFTP_UPLOAD_BINDING")
         self.budget.remaining()
+        write_record(self.root / "inbox", name, content)
+
+    def _publish_download(self, name: str) -> None:
+        if self.profile != "v2":
+            return
+        parts = name.split("/")
+        source = self.root / "outbox"
+        target = self.exchange / "downloads"
+        if len(parts) == 2 and parts[0] == "export" and parts[1] in EXPORT_FILES:
+            source, target = source / "export", target / "export"
+        elif len(parts) != 1 or name not in {"ready.json", "plan.json", "result.json"}:
+            raise BootstrapFailure("VAST_SFTP_DOWNLOAD_NAME_INVALID")
+        self.budget.remaining()
+        write_record(
+            target, parts[-1], incoming_bytes(source, parts[-1], 8_388_608), mode=0o640
+        )
+
+    def wait_upload(self, name: str, seconds: float) -> None:
+        """Observe a completed foreign upload within one finite phase budget."""
+        budget = self.budget.child(seconds)
+        while True:
+            budget.remaining()
+            try:
+                _upload_bytes(self.exchange / "uploads", name)
+                budget.remaining()
+                return
+            except FileNotFoundError:
+                time.sleep(min(0.1, budget.remaining()))
+
+    def initialize(self) -> Ready | SftpReady:
+        self.budget.remaining()
+        if self.profile == "v2":
+            from inferdrome.deployment.vast_guest_ssh import require_experiment_identity
+
+            require_experiment_identity()
         _private_directory(self.root.parent, self.root.name)
         for name in ("inbox", "outbox", "private"):
             _private_directory(self.root, name)
         _private_directory(self.root / "inbox", "model")
         for name in ("model", "evidence", "cache"):
             _private_directory(self.root / "private", name)
-        observed = observe_guest(self.root, self.budget)
-        ready = Ready.model_validate_json(
+        if self.profile == "v2":
+            observed = observe_guest(self.root, self.budget, profile="v2")
+            downloads = SafeDirFD.open(self.exchange / "downloads")
+            try:
+                if stat.S_IMODE(os.fstat(downloads.fd).st_mode) != 0o750:
+                    raise BootstrapFailure("VAST_SFTP_DOWNLOAD_DIRECTORY_INVALID")
+                os.mkdir("export", mode=0o750, dir_fd=downloads.fd)
+                export = os.open(
+                    "export",
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=downloads.fd,
+                )
+                try:
+                    metadata = os.fstat(export)
+                    if (metadata.st_uid, metadata.st_gid) != (os.getuid(), os.getgid()):
+                        raise BootstrapFailure("VAST_SFTP_DOWNLOAD_DIRECTORY_INVALID")
+                    os.fchmod(export, 0o750)
+                    os.fsync(export)
+                finally:
+                    os.close(export)
+                downloads.fsync()
+            finally:
+                downloads.close()
+        else:
+            observed = observe_guest(self.root, self.budget)
+        model = SftpReady if self.profile == "v2" else Ready
+        ready = model.model_validate_json(
             canonical_json_bytes(
                 {
                     **observed,
-                    "schema_version": "inferdrome.vast-bootstrap-ready.v1",
+                    "schema_version": "inferdrome.vast-bootstrap-ready." + self.profile,
                     "run_nonce": self.binding.run_nonce,
                     "intent_sha256": self.binding.intent_sha256,
                     "execution_deadline_utc": self.deadline,
@@ -548,13 +821,24 @@ class GuestBootstrap:
         )
         self.budget.remaining()
         write_record(self.root / "outbox", "ready.json", record_bytes(ready))
+        self._publish_download("ready.json")
         return ready
 
-    def stage(self) -> VastProcessInput:
+    def stage(self) -> ProcessInput:
         self.budget.remaining()
         inbox = self.root / "inbox"
-        intent = read_record(inbox, "intent.json", LaunchIntent)
-        stage = read_record(inbox, "stage.json", Stage)
+        if self.profile == "v2":
+            if not (inbox / "intent.json").exists():
+                self._admit("intent.json")
+            self._admit("stage.json")
+        intent = (
+            read_record(inbox, "intent.json", SftpLaunchIntent)
+            if self.profile == "v2"
+            else read_record(inbox, "intent.json", LaunchIntent)
+        )
+        stage = read_record(
+            inbox, "stage.json", SftpStage if self.profile == "v2" else Stage
+        )
         if (
             record_digest(intent) != self.binding.intent_sha256
             or intent.run_nonce != self.binding.run_nonce
@@ -563,29 +847,65 @@ class GuestBootstrap:
             or stage.run_nonce != self.binding.run_nonce
         ):
             raise BootstrapFailure("VAST_BOOTSTRAP_INTENT_MISMATCH")
-        ready = read_record(self.root / "outbox", "ready.json", Ready)
+        ready = (
+            read_record(self.root / "outbox", "ready.json", SftpReady)
+            if self.profile == "v2"
+            else read_record(self.root / "outbox", "ready.json", Ready)
+        )
         spec = make_plan(intent, ready, stage.launch_readback, self.root)
         write_record(self.root / "private", "stage-attempt.json", record_bytes(stage))
+        stage_budget = self.budget.child(intent.stage_timeout_seconds)
+        if isinstance(intent, SftpLaunchIntent):
+            from inferdrome.deployment.vast_model_stage import stage_pinned_model
+
+            stage_pinned_model(
+                inbox / "model",
+                seconds=stage_budget.remaining(),
+                headroom_bytes=intent.disk.runtime_headroom_bytes,
+            )
         stage_snapshot(
             inbox / "model",
             self.root / "private" / "model",
-            self.budget.child(intent.stage_timeout_seconds),
+            stage_budget,
         )
         prepare(spec, Path(spec.preparation_path))
         self.budget.remaining()
         write_record(self.root / "outbox", "plan.json", record_bytes(spec))
+        self._publish_download("plan.json")
         return spec
 
-    def execute_approved(self) -> Result:
+    def execute_approved(self) -> Result | SftpResult:
         from inferdrome.deployment.vast_process_runtime import execute
 
         self.budget.remaining()
-        intent = read_record(self.root / "inbox", "intent.json", LaunchIntent)
-        ready = read_record(self.root / "outbox", "ready.json", Ready)
-        stage = read_record(self.root / "inbox", "stage.json", Stage)
+        if self.profile == "v2":
+            self._admit("approval.json")
+        intent = (
+            read_record(self.root / "inbox", "intent.json", SftpLaunchIntent)
+            if self.profile == "v2"
+            else read_record(self.root / "inbox", "intent.json", LaunchIntent)
+        )
+        ready = (
+            read_record(self.root / "outbox", "ready.json", SftpReady)
+            if self.profile == "v2"
+            else read_record(self.root / "outbox", "ready.json", Ready)
+        )
+        stage = read_record(
+            self.root / "inbox",
+            "stage.json",
+            SftpStage if self.profile == "v2" else Stage,
+        )
         expected = make_plan(intent, ready, stage.launch_readback, self.root)
-        spec = read_record(self.root / "outbox", "plan.json", VastProcessInput)
-        approval = read_record(self.root / "inbox", "approval.json", Approval)
+        spec = read_record(
+            self.root / "outbox",
+            "plan.json",
+            VastSftpProcessInput if self.profile == "v2" else VastProcessInput,
+        )
+        approval = read_record(
+            self.root / "inbox",
+            "approval.json",
+            SftpApproval if self.profile == "v2" else Approval,
+        )
         if (
             record_digest(intent) != self.binding.intent_sha256
             or spec != expected
@@ -609,10 +929,12 @@ class GuestBootstrap:
             result["retained_digest"],
         )
         self.budget.remaining()
-        retained = Result.model_validate_json(
+        model = SftpResult if self.profile == "v2" else Result
+        retained = model.model_validate_json(
             canonical_json_bytes(
                 {
-                    "schema_version": "inferdrome.vast-bootstrap-result.v1",
+                    "schema_version": "inferdrome.vast-bootstrap-result."
+                    + self.profile,
                     "run_nonce": intent.run_nonce,
                     "intent_sha256": record_digest(intent),
                     "instance_id": spec.instance_id,
@@ -624,14 +946,21 @@ class GuestBootstrap:
             )
         )
         write_record(self.root / "outbox", "result.json", record_bytes(retained))
+        for name in EXPORT_FILES:
+            self._publish_download("export/" + name)
+        self._publish_download("result.json")
         return retained
 
 
-def make_approval(intent: LaunchIntent, spec: VastProcessInput) -> Approval:
-    return Approval.model_validate_json(
+def make_approval(
+    intent: AnyLaunchIntent, spec: ProcessInput
+) -> Approval | SftpApproval:
+    model = SftpApproval if isinstance(intent, SftpLaunchIntent) else Approval
+    version = "v2" if isinstance(intent, SftpLaunchIntent) else "v1"
+    return model.model_validate_json(
         canonical_json_bytes(
             {
-                "schema_version": "inferdrome.vast-bootstrap-approval.v1",
+                "schema_version": "inferdrome.vast-bootstrap-approval." + version,
                 "run_nonce": intent.run_nonce,
                 "intent_sha256": record_digest(intent),
                 "instance_id": spec.instance_id,
@@ -646,7 +975,7 @@ def make_approval(intent: LaunchIntent, spec: VastProcessInput) -> Approval:
 
 class Transfer(Protocol):
     @property
-    def gate(self) -> BrokerGate: ...
+    def gate(self) -> BrokerGate | SftpGate: ...
 
     @property
     def instance_id(self) -> int: ...
@@ -665,17 +994,22 @@ class BootstrapWorkflow:
 
     def __init__(
         self,
-        intent: LaunchIntent,
+        intent: AnyLaunchIntent,
         transfer_for: Callable[[int], Transfer],
         local: Path,
-        model: Path,
-        launch_readback: Callable[[int], VastLaunchReadback],
+        model: Path | None,
+        launch_readback: Callable[[int], VastLaunchReadback | VastSftpLaunchReadback],
         approve_plan: Callable[[bytes, float], str],
         *,
         guest_root: Path = ROOT,
     ) -> None:
-        if intent.module_sha256 != module_digests():
+        self.profile = "v2" if isinstance(intent, SftpLaunchIntent) else "v1"
+        if intent.module_sha256 != module_digests(
+            "v2" if isinstance(intent, SftpLaunchIntent) else "v1"
+        ):
             raise BootstrapFailure("VAST_OPERATOR_ARTIFACT_MISMATCH")
+        if isinstance(intent, LaunchIntent) and model is None:
+            raise BootstrapFailure("VAST_OPERATOR_MODEL_REQUIRED")
         self.intent, self.transfer_for, self.local, self.model = (
             intent,
             transfer_for,
@@ -685,9 +1019,9 @@ class BootstrapWorkflow:
         self.launch_readback, self.approve_plan = launch_readback, approve_plan
         self.guest_root = guest_root
         self.budget = Budget(intent.execution_deadline_utc)
-        self.ready_record: Ready | None = None
-        self.plan: VastProcessInput | None = None
-        self.result: Result | None = None
+        self.ready_record: Ready | SftpReady | None = None
+        self.plan: ProcessInput | None = None
+        self.result: Result | SftpResult | None = None
         self.retained_digest: str | None = None
         self._instance_id: int | None = None
         self._transfer: Transfer | None = None
@@ -711,10 +1045,25 @@ class BootstrapWorkflow:
     def _bind(self, instance_id: int) -> None:
         if self._instance_id is None:
             transfer = self.transfer_for(instance_id)
-            if (
-                transfer.instance_id != instance_id
-                or not self.intent.transfer_prerequisites.accepts(transfer.gate)
-            ):
+            if transfer.instance_id != instance_id:
+                raise BootstrapFailure("VAST_WORKFLOW_TRANSPORT_ID_MISMATCH")
+            if isinstance(self.intent, SftpLaunchIntent):
+                readback = self.launch_readback(instance_id)
+                if not isinstance(transfer, SftpTransfer) or not isinstance(
+                    readback, VastSftpLaunchReadback
+                ):
+                    raise BootstrapFailure("VAST_WORKFLOW_SFTP_REQUIRED")
+                mapping = readback.public_port_mappings[0]
+                if (
+                    transfer.run_nonce != self.intent.run_nonce
+                    or readback.instance_id != instance_id
+                    or (transfer.gate.host, transfer.gate.port)
+                    != (mapping.public_host, mapping.public_port)
+                ):
+                    raise BootstrapFailure("VAST_WORKFLOW_TRANSPORT_ID_MISMATCH")
+            elif not isinstance(
+                transfer.gate, BrokerGate
+            ) or not self.intent.transfer_prerequisites.accepts(transfer.gate):
                 raise BootstrapFailure("VAST_WORKFLOW_TRANSPORT_ID_MISMATCH")
             self._transfer = transfer
             self._instance_id = instance_id
@@ -753,7 +1102,11 @@ class BootstrapWorkflow:
     def readiness(self, instance_id: int, *, seconds: float) -> None:
         self._bind(instance_id)
         self._receive_control("ready.json", seconds)
-        ready = read_record(self.local, "ready.json", Ready)
+        ready = (
+            read_record(self.local, "ready.json", SftpReady)
+            if self.profile == "v2"
+            else read_record(self.local, "ready.json", Ready)
+        )
         make_plan(
             self.intent, ready, self.launch_readback(instance_id), self.guest_root
         )
@@ -778,14 +1131,19 @@ class BootstrapWorkflow:
 
         write_record(self.local, "intent.json", record_bytes(self.intent))
         self.transfer.send(self.local / "intent.json", "inbox/intent.json", remaining())
-        for item in qwen3_model_manifest()["files"]:
-            self.transfer.send(
-                self.model / item["path"], "inbox/model/" + item["path"], remaining()
-            )
-        stage = Stage.model_validate_json(
+        if self.profile == "v1":
+            assert self.model is not None
+            for item in qwen3_model_manifest()["files"]:
+                self.transfer.send(
+                    self.model / item["path"],
+                    "inbox/model/" + item["path"],
+                    remaining(),
+                )
+        stage_model = SftpStage if self.profile == "v2" else Stage
+        stage = stage_model.model_validate_json(
             canonical_json_bytes(
                 {
-                    "schema_version": "inferdrome.vast-bootstrap-stage.v1",
+                    "schema_version": "inferdrome.vast-bootstrap-stage." + self.profile,
                     "run_nonce": self.intent.run_nonce,
                     "intent_sha256": record_digest(self.intent),
                     "launch_readback": self.launch_readback(instance_id).model_dump(
@@ -796,6 +1154,10 @@ class BootstrapWorkflow:
         )
         write_record(self.local, "stage.json", record_bytes(stage))
         self.transfer.send(self.local / "stage.json", "inbox/stage.json", remaining())
+        if self.profile == "v2":
+            # Guest-only download/hash work belongs to staging. Retain the plan
+            # before starting the separate finite human approval window.
+            self._receive_control("plan.json", remaining())
         remaining()
 
     def approve(self, instance_id: int, *, seconds: float) -> None:
@@ -805,8 +1167,13 @@ class BootstrapWorkflow:
         end = time.monotonic() + min(
             self.intent.approval_timeout_seconds, self._seconds(seconds)
         )
-        self._receive_control("plan.json", end - time.monotonic())
-        plan = read_record(self.local, "plan.json", VastProcessInput)
+        if self.profile == "v1":
+            self._receive_control("plan.json", end - time.monotonic())
+        plan = read_record(
+            self.local,
+            "plan.json",
+            VastSftpProcessInput if self.profile == "v2" else VastProcessInput,
+        )
         expected = make_plan(
             self.intent,
             self.ready_record,
@@ -840,7 +1207,11 @@ class BootstrapWorkflow:
         if self.plan is None:
             raise BootstrapFailure("VAST_WORKFLOW_APPROVAL_REQUIRED")
         self._receive_control("result.json", seconds)
-        result = read_record(self.local, "result.json", Result)
+        result = (
+            read_record(self.local, "result.json", SftpResult)
+            if self.profile == "v2"
+            else read_record(self.local, "result.json", Result)
+        )
         if (
             result.instance_id != instance_id
             or result.run_nonce != self.intent.run_nonce
@@ -896,11 +1267,98 @@ class BootstrapWorkflow:
         self.retained_digest = verified.report.retained_digest
 
 
+def sftp_workflow(
+    intent: SftpLaunchIntent,
+    provider: LogRequester,
+    pins: SshPinJournal,
+    identity: Path,
+    local: Path,
+    launch_readback: Callable[[int], VastSftpLaunchReadback],
+    approve_plan: Callable[[bytes, float], str],
+    *,
+    guest_root: Path = ROOT,
+    runner: TransferRunner | None = None,
+    fetcher: LogFetcher | None = None,
+) -> BootstrapWorkflow:
+    """Bind owned SFTP to one retained ID, readback, nonce and authenticated pin.
+
+    Construction performs no provider request. The first controller readiness
+    phase enrolls the key through its exact-ID provider and holds one validated
+    operator readback for the whole run. Only a missing startup marker is polled;
+    stale, conflicting or malformed key evidence fails immediately. The caller
+    owns the private pin journal and original external cleanup guard.
+    """
+    held_readbacks: dict[int, VastSftpLaunchReadback] = {}
+    budget = Budget(intent.execution_deadline_utc)
+
+    def readback(instance_id: int) -> VastSftpLaunchReadback:
+        if instance_id not in held_readbacks:
+            value = VastSftpLaunchReadback.model_validate_json(
+                record_bytes(launch_readback(instance_id))
+            )
+            if (
+                value.instance_id != instance_id
+                or value.requested_image != intent.container_image
+            ):
+                raise BootstrapFailure("VAST_WORKFLOW_LAUNCH_READBACK_MISMATCH")
+            held_readbacks[instance_id] = value
+        return held_readbacks[instance_id]
+
+    def transfer_for(instance_id: int) -> SftpTransfer:
+        mapping = readback(instance_id).public_port_mappings[0]
+        end = time.monotonic() + min(
+            intent.readiness_timeout_seconds, budget.remaining()
+        )
+        while True:
+            remaining = min(end - time.monotonic(), budget.remaining())
+            if remaining <= 0:
+                raise BootstrapFailure("VAST_WORKFLOW_KEY_TIMEOUT")
+            try:
+                enroll_from_provider(
+                    provider,
+                    pins,
+                    instance_id=instance_id,
+                    run_nonce=intent.run_nonce,
+                    seconds=min(20, remaining),
+                    fetcher=fetcher,
+                )
+                break
+            except SshTrustFailure as error:
+                if str(error) != "VAST_SSH_MARKER_MISSING":
+                    raise
+                time.sleep(min(0.1, max(0, end - time.monotonic())))
+        budget.remaining()
+        return SftpTransfer(
+            SftpGate(
+                instance_id,
+                intent.run_nonce,
+                mapping.public_host,
+                mapping.public_port,
+                identity,
+            ),
+            pins,
+            runner=runner,
+        )
+
+    return BootstrapWorkflow(
+        intent,
+        transfer_for,
+        local,
+        None,
+        readback,
+        approve_plan,
+        guest_root=guest_root,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-nonce", required=True)
     parser.add_argument("--intent-sha256", required=True)
     parser.add_argument("--deadline", required=True)
+    parser.add_argument(
+        "--profile", choices=("guest-v1", "guest-sftp-v2"), default="guest-v1"
+    )
     args = parser.parse_args(argv)
 
     def interrupt(signum: int, frame: Any) -> None:
@@ -911,20 +1369,39 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, interrupt)
     signal.signal(signal.SIGALRM, interrupt)
     try:
-        guest = GuestBootstrap(args.run_nonce, args.intent_sha256, args.deadline)
+        profile: Literal["v1", "v2"] = "v2" if args.profile == "guest-sftp-v2" else "v1"
+        guest = GuestBootstrap(
+            args.run_nonce, args.intent_sha256, args.deadline, profile=profile
+        )
         signal.setitimer(signal.ITIMER_REAL, guest.budget.remaining())
         guest.initialize()
-        guest.budget.wait_for(ROOT / "inbox", "intent.json", guest.budget.remaining())
-        intent = read_record(ROOT / "inbox", "intent.json", LaunchIntent)
+        if profile == "v2":
+            guest.wait_upload("intent.json", guest.budget.remaining())
+            guest._admit("intent.json")
+        else:
+            guest.budget.wait_for(
+                ROOT / "inbox", "intent.json", guest.budget.remaining()
+            )
+        intent = read_record(
+            ROOT / "inbox",
+            "intent.json",
+            SftpLaunchIntent if profile == "v2" else LaunchIntent,
+        )
         if record_digest(intent) != args.intent_sha256:
             raise BootstrapFailure("VAST_BOOTSTRAP_INTENT_MISMATCH")
-        guest.budget.wait_for(
-            ROOT / "inbox", "stage.json", intent.stage_timeout_seconds
-        )
+        if profile == "v2":
+            guest.wait_upload("stage.json", intent.stage_timeout_seconds)
+        else:
+            guest.budget.wait_for(
+                ROOT / "inbox", "stage.json", intent.stage_timeout_seconds
+            )
         guest.stage()
-        guest.budget.wait_for(
-            ROOT / "inbox", "approval.json", intent.approval_timeout_seconds
-        )
+        if profile == "v2":
+            guest.wait_upload("approval.json", intent.approval_timeout_seconds)
+        else:
+            guest.budget.wait_for(
+                ROOT / "inbox", "approval.json", intent.approval_timeout_seconds
+            )
         guest.execute_approved()
         return 0
     except (ValueError, OSError, InferdromeError):

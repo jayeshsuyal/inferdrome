@@ -1,5 +1,9 @@
 # Vast bounded bootstrap and broker transfer v1
 
+This document preserves the legacy v1 broker contract. The replacement source
+profile is documented in [Owned stock SFTP guest profile](VAST_GUEST_SSH_PROPOSAL.md).
+Its records use v2; image wiring and live qualification remain separate gates.
+
 This is an implementation and local rehearsal of one file-driven launch
 profile. It includes a concrete HTTPS provider adapter and a detached local
 cleanup worker, tested with fake network responses. It supplies no authenticated
@@ -205,51 +209,19 @@ These fakes establish local refusal/state transitions and integrity checks.
 They do not establish actual broker enrollment, UID access, GPU serving, image
 resolution, provider cleanup, capacity or billing. No live action was performed.
 
-## Prospective guest SSH replacement: inactive
+## Stock SFTP replacement source
 
-The preferred access replacement is normal guest SSH/SCP with an immutable
-host-key pin established through Vast's authenticated exact-instance log API.
-`vast_ssh_trust` implements and tests that pinning step without starting SSH or
-changing any launch permission. The trust model explicitly trusts Vast's
-control plane and its delivery of container logs; it is not hardware
-attestation or a defense against a malicious provider.
+The separately versioned [owned stock SFTP profile](VAST_GUEST_SSH_PROPOSAL.md)
+now implements root-owned daemon startup, a UID2001 transfer chroot, UID2000
+private bootstrap admission, authenticated exact-ID log pinning, stock SFTP
+batches, guest-only pinned model staging, and the existing evidence workflow.
+Its v2 compiler requires one TCP2222 management mapping and an explicit measured
+disk budget. These facts are not encoded as v1 declarations. The original v1
+schemas and evidence remain unchanged.
 
-The documented flow is an authenticated `request_logs/{instance_id}` request
-followed by a separate fetch of its returned S3 URL. Our prospective startup
-announces only a new per-run nonce, exact `CONTAINER_ID` and the exact Ed25519
-public host key used by its daemon. A fresh nonce prevents an old run's log
-record from establishing the pin. Identical duplicate announcements are
-accepted; mismatched nonce/ID, malformed or conflicting records, and replacement
-of an existing key fail closed. The nonce is a public freshness binding, not a
-secret or proof against the trusted provider.
-[Logs API](https://docs.vast.ai/api-reference/instances/show-logs),
-[Docker environment](https://docs.vast.ai/guides/instances/docker-environment).
-
-Only the documented HTTPS S3 host and log path are admitted. The result fetch
-uses a fresh credential-free connection, no redirects, proxy, cookies, netrc,
-or API Authorization header, with a total deadline and byte limit. Treat the
-URL and all logs as public. No private keys, tokens or model contents belong in
-the announcement. The constrained execute endpoint is not used for Python,
-startup, or reading keys. The official client polling behavior is not reused.
-[Execute constraints](https://docs.vast.ai/cli/reference/execute).
-
-Activation requires a separately reviewed replacement of the current args-only
-and broker-only contracts: SSH-only startup instead of the original entrypoint,
-the direct SSH management mapping if that mode is chosen, and compatible
-startup/login user handling with the actual experiment forced to UID2000:GID0.
-The engines remain on loopback 8000/8001, with no Jupyter or inference mapping.
-Injected startup under the present numeric user, log redirection, host-key
-readiness and correspondence to the selected endpoint remain live-only checks.
-Root setup is a possible compatibility change, not an established requirement.
-No Dockerfile, active launch schema, SSH invocation or root setup is changed by
-this prospective helper.
-
-For the 16.4 GB model, the prospective SSH runner downloads only the pinned
-manifest inventory directly on the guest at the full public revision, using
-`hf_hub_download(..., revision=FULL_COMMIT, token=False, local_dir=STAGING)`.
-It must bound total time/bytes, verify every expected size and SHA-256, then
-publish ordinary inventory files into the sealed snapshot; Hugging Face cache
-metadata stays outside that snapshot. This avoids storing the model on the
-low-disk Mac. Download, startup and the SSH workflow replacement are not
-implemented or activated by this provider/guard tranche.
-[Hugging Face download API](https://huggingface.co/docs/huggingface_hub/guides/download).
+The source tests use fake IO only. Automatic approval review has blocked the
+Dockerfile wiring; the image, OpenSSH account behavior, provider mapping,
+model transfer, GPU runtime and disk footprint are not qualified by these tests.
+No build, publication or paid launch has occurred. The concrete provider and
+external guard still retain the exact created ID and attempt exact-ID destroy
+even when metadata readback fails, preserving truthful unconfirmed evidence.

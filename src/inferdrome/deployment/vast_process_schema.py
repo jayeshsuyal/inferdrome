@@ -10,12 +10,18 @@ from inferdrome.deployment.vast_bootstrap import (
     LaunchIntent,
     Ready,
     Result,
+    SftpApproval,
+    SftpLaunchIntent,
+    SftpReady,
+    SftpResult,
+    SftpStage,
     Stage,
 )
 from inferdrome.deployment.vast_control import ControlIntent
 from inferdrome.deployment.vast_process import (
     DestroyReadback,
     VastProcessInput,
+    VastSftpProcessInput,
     template,
 )
 from inferdrome.routing_execution.canonical import canonical_json_bytes
@@ -39,6 +45,17 @@ def artifacts() -> dict[str, bytes]:
                 ("bootstrap-approval", Approval),
                 ("bootstrap-result", Result),
                 ("control-intent", ControlIntent),
+            )
+        },
+        **{
+            f"schemas/vast-process/v2/{name}.schema.json": model.model_json_schema()
+            for name, model in (
+                ("input", VastSftpProcessInput),
+                ("launch-intent", SftpLaunchIntent),
+                ("bootstrap-ready", SftpReady),
+                ("bootstrap-stage", SftpStage),
+                ("bootstrap-approval", SftpApproval),
+                ("bootstrap-result", SftpResult),
             )
         },
     }

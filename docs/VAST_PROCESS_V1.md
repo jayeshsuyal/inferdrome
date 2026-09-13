@@ -1,5 +1,9 @@
 # Vast process adapter v1
 
+This document describes the preserved v1 process/broker contract. The new
+[owned stock SFTP source profile](VAST_GUEST_SSH_PROPOSAL.md) uses separate v2
+launch and bootstrap records, with the same frozen experiment evidence.
+
 This adapter runs the fixed routing experiment as two serving processes and an
 observer inside one operator-supplied Vast container. It adds execution config
 and manifest v4, mode `VAST_MANUAL_CONTAINER`, while retaining the existing
@@ -269,7 +273,7 @@ cleanup exception requiring separate exact-ID handling; it cannot be cleared
 by pretending the instance destroy covered it.
 [Storage types](https://docs.vast.ai/guides/instances/storage/types).
 
-## Remaining paid-launch gates
+## Remaining paid-launch gates for the legacy v1 profile
 
 Before accepting an offer or publishing a runnable launch request, resolve and
 review these concrete items:

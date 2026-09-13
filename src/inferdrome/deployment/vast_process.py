@@ -7,6 +7,7 @@ single image and provider readback are declarations, not OCI attestations.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -39,6 +40,15 @@ MODULES = (
     "vast_bootstrap",
     "vast_control",
     "vast_transfer",
+)
+SFTP_MODULES = (
+    *MODULES,
+    "vast_provider",
+    "vast_guard",
+    "vast_ssh_trust",
+    "vast_guest_ssh",
+    "vast_sftp",
+    "vast_model_stage",
 )
 GPUUUID = Annotated[
     str, Field(pattern=r"^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
@@ -74,14 +84,47 @@ class VastLaunchReadback(ExecutionModel):
     resolved_image_digest: None = None
 
 
-class VastProcessInput(ExecutionModel):
-    schema_version: Literal["inferdrome.vast-process-input.v1"]
+class SftpPortMapping(ExecutionModel):
+    purpose: Literal["SSH_MANAGEMENT"]
+    container_port: Literal[2222]
+    protocol: Literal["tcp"]
+    public_host: str
+    public_port: Annotated[int, Field(ge=1, le=65535)]
+
+    @model_validator(mode="after")
+    def public_address(self) -> SftpPortMapping:
+        address = ipaddress.IPv4Address(self.public_host)
+        if (
+            str(address) != self.public_host
+            or not address.is_global
+            or address.is_multicast
+            or address.is_reserved
+        ):
+            raise ValueError("a canonical globally routable IPv4 address is required")
+        return self
+
+
+class VastSftpLaunchReadback(ExecutionModel):
+    instance_id: ProviderId
+    requested_image: ImageIdentity
+    launch_mode: Literal["args"]
+    user: Literal["0:0"]
+    transfer_uid: Literal[2001]
+    transfer_gid: Literal[0]
+    public_port_mappings: tuple[SftpPortMapping]
+    persistent_volume_ids: tuple[()]
+    assertion: Literal["OPERATOR_SUPPLIED_NOT_PROVIDER_ATTESTED"]
+    resolved_image_digest: None = None
+
+
+class _VastProcessInput(ExecutionModel):
+    schema_version: str
     provider: Literal["VAST_AI"]
     source_commit: Commit
     instance_id: ProviderId
     offer_id: ProviderId
     container_image: ImageIdentity
-    launch_readback: VastLaunchReadback
+    launch_readback: VastLaunchReadback | VastSftpLaunchReadback
     gpu_uuids: tuple[GPUUUID, GPUUUID]
     uid: Literal[2000]
     gid: Literal[0]
@@ -96,14 +139,15 @@ class VastProcessInput(ExecutionModel):
     cleanup: VastCleanup
 
     @model_validator(mode="after")
-    def _bindings(self) -> VastProcessInput:
+    def _bindings(self) -> _VastProcessInput:
         if len(set(self.gpu_uuids)) != 2:
             raise ValueError("two distinct GPU UUIDs are required")
         if (
             self.instance_id != self.cleanup.instance_id
             or self.instance_id != self.launch_readback.instance_id
             or self.container_image != self.launch_readback.requested_image
-            or set(self.module_sha256) != set(MODULES)
+            or set(self.module_sha256)
+            != set(SFTP_MODULES if self.schema_version.endswith(".v2") else MODULES)
         ):
             raise ValueError("Vast input identities disagree")
         paths = [
@@ -127,6 +171,30 @@ class VastProcessInput(ExecutionModel):
         return self
 
 
+class VastProcessInput(_VastProcessInput):
+    schema_version: Literal["inferdrome.vast-process-input.v1"]
+    launch_readback: VastLaunchReadback
+
+
+class VastSftpProcessInput(_VastProcessInput):
+    schema_version: Literal["inferdrome.vast-process-input.v2"]
+    launch_readback: VastSftpLaunchReadback
+
+
+type ProcessInput = VastProcessInput | VastSftpProcessInput
+
+
+def parse_process_input(content: bytes) -> ProcessInput:
+    value = json.loads(content)
+    model = (
+        VastSftpProcessInput
+        if isinstance(value, dict)
+        and value.get("schema_version") == "inferdrome.vast-process-input.v2"
+        else VastProcessInput
+    )
+    return model.model_validate_json(content)
+
+
 def parse_deadline(value: str) -> datetime:
     parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
@@ -134,10 +202,10 @@ def parse_deadline(value: str) -> datetime:
     return parsed
 
 
-def module_digests() -> dict[str, str]:
+def module_digests(profile: Literal["v1", "v2"] = "v1") -> dict[str, str]:
     return {
         name: sha256_digest(Path(__file__).with_name(f"{name}.py").read_bytes())
-        for name in MODULES
+        for name in (SFTP_MODULES if profile == "v2" else MODULES)
     }
 
 
@@ -213,7 +281,7 @@ def write_private(path: Path, content: bytes) -> None:
         target.write(content)
 
 
-def prepare(spec: VastProcessInput, output: Path) -> str:
+def prepare(spec: ProcessInput, output: Path) -> str:
     if str(output.absolute()) != spec.preparation_path:
         raise ValueError("preparation path must match the declared destination")
     content = canonical_json_bytes(spec.model_dump(mode="json"))
@@ -223,13 +291,13 @@ def prepare(spec: VastProcessInput, output: Path) -> str:
     return digest
 
 
-def load_plan(directory: Path, expected_digest: str) -> VastProcessInput:
+def load_plan(directory: Path, expected_digest: str) -> ProcessInput:
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("preparation directory is invalid")
     content = read_private(directory / "plan.json")
     if sha256_digest(content) != expected_digest:
         raise ValueError("plan digest differs")
-    spec = VastProcessInput.model_validate_json(content)
+    spec = parse_process_input(content)
     if (
         canonical_json_bytes(spec.model_dump(mode="json")) != content
         or str(directory.absolute()) != spec.preparation_path
@@ -239,7 +307,7 @@ def load_plan(directory: Path, expected_digest: str) -> VastProcessInput:
 
 
 def routing_config(
-    spec: VastProcessInput, observation: dict[str, Any]
+    spec: ProcessInput, observation: dict[str, Any]
 ) -> VastRoutingConfig:
     """Bind sanitized local observations without upgrading OCI declarations."""
     from inferdrome.routing_execution.executor import declared_input_transfer_digest
@@ -435,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         else:
-            spec = VastProcessInput.model_validate_json(read_private(args.input))
+            spec = parse_process_input(read_private(args.input))
             print(json.dumps({"plan_sha256": prepare(spec, args.output)}))
         return 0
     except (OSError, ValueError, ValidationError, InferdromeError):

@@ -19,7 +19,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlencode, urlsplit
 
-from inferdrome.deployment.vast_bootstrap import LaunchIntent, record_digest
+from inferdrome.deployment.vast_bootstrap import (
+    AnyLaunchIntent,
+    SftpLaunchIntent,
+    record_digest,
+    validated_intent,
+)
 from inferdrome.deployment.vast_control import (
     UNCONFIRMED,
     AbsenceResult,
@@ -179,9 +184,33 @@ class VastHttpsTransport:
             raise ProviderFailure("VAST_PROVIDER_REQUEST_FAILED") from None
 
 
-def compiled_create_bytes(launch: LaunchIntent) -> bytes:
+def compiled_create_bytes(launch: AnyLaunchIntent) -> bytes:
     """Reviewable deterministic wire bytes; no constructor payload overrides."""
-    launch = LaunchIntent.model_validate(launch.model_dump(mode="python"), strict=True)
+    launch = validated_intent(launch)
+    if isinstance(launch, SftpLaunchIntent):
+        return canonical_json_bytes(
+            {
+                "image": launch.container_image.reference,
+                "disk": launch.disk.requested_gb,
+                "runtype": "args",
+                "target_state": "running",
+                "user": "0:0",
+                "env": {"-p 2222:2222": "1"},
+                "args": [
+                    "serve",
+                    "--run-nonce",
+                    launch.run_nonce,
+                    "--intent-sha256",
+                    record_digest(launch),
+                    "--execution-deadline",
+                    launch.execution_deadline_utc,
+                    "--cleanup-deadline",
+                    launch.cleanup_deadline_utc,
+                    "--client-public-key",
+                    launch.transfer_prerequisites.client_public_key,
+                ],
+            }
+        )
     return canonical_json_bytes(
         {
             "image": launch.container_image.reference,
@@ -203,7 +232,7 @@ def compiled_create_bytes(launch: LaunchIntent) -> bytes:
     )
 
 
-def compiled_create_sha256(launch: LaunchIntent) -> str:
+def compiled_create_sha256(launch: AnyLaunchIntent) -> str:
     return sha256_digest(compiled_create_bytes(launch))
 
 
@@ -242,18 +271,14 @@ def _json_reply(reply: HttpReply) -> dict[str, Any]:
 class VastProvider:
     def __init__(
         self,
-        launch: LaunchIntent | None,
+        launch: AnyLaunchIntent | None,
         *,
         journal: ControlJournal,
         api_key: str | None = None,
         transport: HttpsTransport | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._launch = (
-            LaunchIntent.model_validate(launch.model_dump(mode="python"), strict=True)
-            if launch is not None
-            else None
-        )
+        self._launch = validated_intent(launch) if launch is not None else None
         self._journal = journal
         if transport is None:
             if api_key is None:
