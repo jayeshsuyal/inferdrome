@@ -8,7 +8,7 @@ import {
   Route,
   ShieldCheck,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   EmptyState,
@@ -19,8 +19,9 @@ import {
   SectionHeading,
   StatusBadge,
 } from "../components/Primitives";
+import { useDashboardAuth } from "../context/DashboardAuthContext";
 import { useRoutingQualificationDetail } from "../hooks/useRoutingQualificationDetail";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { humanize, shortDigest } from "../lib/format";
 import { Link, useParams } from "../lib/router";
 import type {
@@ -161,20 +162,36 @@ function CausalComparison({ detail }: { readonly detail: RoutingQualificationDet
 }
 
 function RoutingQualificationDetailContent({ detail }: { readonly detail: RoutingQualificationDetail }) {
+  const { noteUnauthorized } = useDashboardAuth();
   const [downloadState, setDownloadState] = useState<"idle" | "working" | "complete" | "error">("idle");
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const downloadController = useRef<AbortController | null>(null);
+  useEffect(() => () => downloadController.current?.abort(), []);
+
   const download = async () => {
+    downloadController.current?.abort();
+    const controller = new AbortController();
+    downloadController.current = controller;
     setDownloadState("working");
     setDownloadError(null);
     try {
       await api.downloadRoutingQualification(
         detail.summary.qualification_id,
         detail.summary.retained_digest,
+        controller.signal,
       );
+      if (controller.signal.aborted || downloadController.current !== controller) return;
       setDownloadState("complete");
     } catch (error) {
+      if (controller.signal.aborted || downloadController.current !== controller) return;
+      if (error instanceof ApiError && error.status === 401) {
+        noteUnauthorized();
+        return;
+      }
       setDownloadState("error");
       setDownloadError(error instanceof Error ? error.message : "The descriptor download failed.");
+    } finally {
+      if (downloadController.current === controller) downloadController.current = null;
     }
   };
   return (

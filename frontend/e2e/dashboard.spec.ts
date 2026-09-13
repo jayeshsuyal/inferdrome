@@ -9,7 +9,9 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -22,6 +24,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { RunDetail, RunSummary, RunsPageResponse } from "../src/lib/types";
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const SOURCE_ROOT = join(REPOSITORY_ROOT, "src");
@@ -419,6 +422,152 @@ test.describe("populated dashboard", () => {
     } finally {
       removeFixture(fixture);
       fixture = undefined;
+    }
+  });
+
+  test("keeps a nonlatest selected run through trailing-slash navigation and reload", async ({ page }) => {
+    const index = await (await page.request.get(`${baseUrl}/api/v1/runs`)).json() as RunsPageResponse;
+    const run = [...index.runs].sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[1];
+    await page.goto(`${baseUrl}/runs/${run.run_id}/`);
+    await expect(page.getByRole("heading", { name: run.run_id, exact: true })).toBeVisible();
+    await dashboardNavigation(page).getByRole("link", { name: "Evidence", exact: true }).click();
+    await expectPath(page, `/evidence/${run.run_id}`);
+    await expect(page.getByRole("heading", { name: "Offline verification" })).toBeVisible();
+    await page.goto(`${baseUrl}/evidence/${run.run_id}/`);
+    await page.reload();
+    await dashboardNavigation(page).getByRole("link", { name: "Run detail", exact: true }).click();
+    await expectPath(page, `/runs/${run.run_id}`);
+    await expect(page.getByRole("heading", { name: run.run_id, exact: true })).toBeVisible();
+  });
+
+  test("recovers from nested run faults and rejects a different valid run response", async ({ page }) => {
+    const index = await (await page.request.get(`${baseUrl}/api/v1/runs`)).json() as RunsPageResponse;
+    const [selected, other] = index.runs;
+    const alternate = await (await page.request.get(`${baseUrl}/api/v1/runs/${other.run_id}`)).json() as RunDetail;
+    const browserErrors: string[] = [];
+    page.on("pageerror", (error) => browserErrors.push(error.message));
+    await page.route("**/api/v1/runs?*", (route) => route.fulfill({ json: {
+      ...index, runs: index.runs.map((run) => ({ ...run, headline_metrics: [null] })),
+    } }));
+    await page.goto(`${baseUrl}/runs`);
+    await expect(page.getByText(/headline_metrics\[0\] must be an object/)).toBeVisible();
+    await expect(dashboardNavigation(page)).toBeVisible();
+    await page.unrouteAll();
+    await page.getByRole("button", { name: "Try again" }).click();
+    await expect(page.locator(".runs-table tbody tr")).toHaveCount(4);
+
+    const pattern = `**/api/v1/runs/${selected.run_id}`;
+    await page.route(pattern, (route) => route.fulfill({ json: alternate }));
+    await page.goto(`${baseUrl}/runs/${selected.run_id}`);
+    await expect(page.getByText(/identity does not match the requested run/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: other.run_id, exact: true })).toHaveCount(0);
+    await page.unrouteAll();
+    await page.getByRole("button", { name: "Try again" }).click();
+    await expect(page.getByRole("heading", { name: selected.run_id, exact: true })).toBeVisible();
+    expect(browserErrors).toEqual([]);
+  });
+
+  for (const view of ["runs", "evidence", "compare"] as const) {
+    test(`refresh invalidates removed ${view} evidence and one retry restores it`, async ({ page }) => {
+      if (!fixture) throw new Error("The owned fixture is unavailable");
+      const index = await (await page.request.get(`${baseUrl}/api/v1/runs`)).json() as RunsPageResponse;
+      const run = [...index.runs].sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[0];
+      const path = view === "compare" ? "/compare" : `/${view}/${run.run_id}`;
+      const content = view === "compare" ? page.locator(".comparison-result")
+        : view === "evidence" ? page.getByRole("heading", { name: "Offline verification" })
+          : page.getByRole("heading", { name: "Observed distributions" });
+      await page.goto(`${baseUrl}${path}`);
+      await expect(content).toBeVisible();
+      await expect(page.getByRole("button", { name: "Refresh runs" })).toBeVisible();
+      const original = join(fixture.runs, run.run_id);
+      const moved = join(fixture.root, `removed-${run.run_id}`);
+      renameSync(original, moved);
+      let releaseIndex: (() => void) | undefined;
+      try {
+        const indexGate = new Promise<void>((resolveGate) => { releaseIndex = resolveGate; });
+        await page.route("**/api/v1/runs?*", async (route) => { await indexGate; await route.continue(); });
+        await page.getByRole("button", { name: "Refresh runs" }).click();
+        await expect(page.getByRole("button", { name: "Refresh runs" })).toBeDisabled();
+        await expect(content).toHaveCount(0);
+        releaseIndex!();
+        const unavailable = view === "compare"
+          ? page.getByText("A selected run is unavailable", { exact: true })
+          : page.getByText(/This run is not in the latest verified run snapshot/);
+        await expect(unavailable).toBeVisible();
+        await expect(page.getByText("3 verified · 0 rejected", { exact: true })).toBeVisible();
+        await expectPath(page, path);
+        if (view === "compare") {
+          await expect(page.locator(".compare-controls select").nth(1)).toHaveValue(run.run_id);
+        } else {
+          // The initial detail read must also wait for a new index on a deep reload.
+          await page.unrouteAll();
+          await page.reload();
+          await expect(unavailable).toBeVisible();
+          await expect(content).toHaveCount(0);
+        }
+        renameSync(moved, original);
+        await page.unrouteAll();
+        await page.getByRole("button", { name: "Refresh runs" }).click();
+        await expect(content).toBeVisible();
+        await dashboardNavigation(page).getByRole("link", { name: "Runs", exact: true }).click();
+        await expect(page.locator(".runs-table tbody tr")).toHaveCount(4);
+      } finally {
+        releaseIndex?.();
+        if (existsSync(moved)) renameSync(moved, original);
+        await page.unrouteAll({ behavior: "ignoreErrors" });
+      }
+    });
+  }
+
+  test("refresh binds a replacement bundle to the same selected run identity", async ({ page }) => {
+    if (!fixture) throw new Error("The owned fixture is unavailable");
+    const index = await (await page.request.get(`${baseUrl}/api/v1/runs`)).json() as RunsPageResponse;
+    const selected: RunSummary = index.runs[0];
+    const replacementRoot = join(fixture.root, "replacement-runs");
+    const prepared = spawnSync(pythonExecutable(), [
+      "-m", "inferdrome", "run", join(REPOSITORY_ROOT, "examples", "controlled-concurrency-2.yaml"),
+      "--runs-root", replacementRoot, "--run-id", selected.run_id,
+    ], { cwd: REPOSITORY_ROOT, env: inferdromeEnvironment(), encoding: "utf8", timeout: 30_000 });
+    if (prepared.error || prepared.status !== 0) throw new Error("Synthetic replacement fixture creation failed");
+    await page.goto(`${baseUrl}/evidence/${selected.run_id}`);
+    await expect(page.locator(`.verification-stats dd[title="${selected.bundle_digest}"]`)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Refresh runs" })).toBeVisible();
+    const original = join(fixture.runs, selected.run_id);
+    const saved = join(fixture.root, `original-${selected.run_id}`);
+    const replacement = join(replacementRoot, selected.run_id);
+    try {
+      renameSync(original, saved);
+      renameSync(replacement, original);
+      await page.getByRole("button", { name: "Refresh runs" }).click();
+      await expect(page.locator(`.verification-stats dd[title="${selected.bundle_digest}"]`)).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: "Offline verification" })).toBeVisible();
+      const refreshed = await (await page.request.get(`${baseUrl}/api/v1/runs/${selected.run_id}`)).json() as RunDetail;
+      expect(refreshed.summary.run_id).toBe(selected.run_id);
+      expect(refreshed.verification.bundle_digest).not.toBe(selected.bundle_digest);
+      await expect(page.locator(`.verification-stats dd[title="${refreshed.verification.bundle_digest}"]`)).toBeVisible();
+      await page.reload();
+      await expect(page.locator(`.verification-stats dd[title="${refreshed.verification.bundle_digest}"]`)).toBeVisible();
+      // Corrupt only this newly generated replacement, never the retained original.
+      const measurements = join(original, "bundle", "derived", "measurements.json");
+      const verifiedBytes = readFileSync(measurements);
+      chmodSync(measurements, 0o600);
+      writeFileSync(measurements, Buffer.concat([verifiedBytes, Buffer.from(" ")]));
+      chmodSync(measurements, 0o400);
+      await page.getByRole("button", { name: "Refresh runs" }).click();
+      await expect(page.getByText(/This run is not in the latest verified run snapshot/)).toBeVisible();
+      await expect(page.getByText("3 verified · 1 rejected", { exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Offline verification" })).toHaveCount(0);
+      chmodSync(measurements, 0o600);
+      writeFileSync(measurements, verifiedBytes);
+      chmodSync(measurements, 0o400);
+      await page.getByRole("button", { name: "Refresh runs" }).click();
+      await expect(page.locator(`.verification-stats dd[title="${refreshed.verification.bundle_digest}"]`)).toBeVisible();
+    } finally {
+      if (existsSync(saved)) {
+        if (existsSync(original)) renameSync(original, replacement);
+        renameSync(saved, original);
+      }
+      await page.request.get(`${baseUrl}/api/v1/runs`);
     }
   });
 

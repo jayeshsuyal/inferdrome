@@ -61,24 +61,14 @@ export function CompareView() {
   const [candidateRunId, setCandidateRunId] = useState("");
 
   useEffect(() => {
-    if (!runIndex.runs.length) return;
-    const available = new Set(runIndex.runs.map((run) => run.run_id));
-    if (!candidateRunId || !available.has(candidateRunId)) {
+    if (runIndex.status !== "success" || !runIndex.runs.length) return;
+    if (!candidateRunId) {
       setCandidateRunId(runIndex.runs[0].run_id);
     }
-    if (!baselineRunId || !available.has(baselineRunId)) {
+    if (!baselineRunId) {
       setBaselineRunId(runIndex.runs[1]?.run_id ?? runIndex.runs[0].run_id);
     }
-  }, [baselineRunId, candidateRunId, runIndex.runs]);
-
-  const canCompare = Boolean(
-    baselineRunId && candidateRunId && baselineRunId !== candidateRunId,
-  );
-  const comparison = useRequest<Comparison>(
-    (signal) => api.compareRuns(baselineRunId, candidateRunId, signal),
-    [baselineRunId, candidateRunId],
-    { enabled: canCompare },
-  );
+  }, [baselineRunId, candidateRunId, runIndex.runs, runIndex.status]);
 
   const selectedBaseline = useMemo(
     () => runIndex.runs.find((run) => run.run_id === baselineRunId),
@@ -87,6 +77,24 @@ export function CompareView() {
   const selectedCandidate = useMemo(
     () => runIndex.runs.find((run) => run.run_id === candidateRunId),
     [candidateRunId, runIndex.runs],
+  );
+
+  const missingSelection = Boolean(
+    (baselineRunId && !selectedBaseline) || (candidateRunId && !selectedCandidate),
+  );
+  const canCompare = Boolean(
+    runIndex.status === "success" && selectedBaseline && selectedCandidate && baselineRunId !== candidateRunId,
+  );
+  const comparison = useRequest<Comparison>(
+    async (signal) => {
+      const result = await api.compareRuns(baselineRunId, candidateRunId, signal);
+      if (result.baseline_run_id !== baselineRunId || result.candidate_run_id !== candidateRunId) {
+        throw new Error("Returned comparison does not match the selected runs. Refresh runs and try again.");
+      }
+      return result;
+    },
+    [baselineRunId, candidateRunId, selectedBaseline?.bundle_digest, selectedCandidate?.bundle_digest, runIndex.refreshRevision],
+    { enabled: canCompare },
   );
 
   const swapRuns = () => {
@@ -125,7 +133,7 @@ export function CompareView() {
         action={<StatusBadge status="DESCRIPTIVE_ONLY" label="Descriptive · not causal" tone="neutral" />}
       />
 
-      {runIndex.runs.length < 2 ? (
+      {runIndex.runs.length < 2 && !missingSelection ? (
         <EmptyState
           title="Two verified runs are required"
           message="Add another run bundle before requesting a pairwise comparison. Rejected bundles cannot be compared."
@@ -137,6 +145,7 @@ export function CompareView() {
               <label>
                 <span>Baseline</span>
                 <select value={baselineRunId} onChange={(event) => setBaselineRunId(event.target.value)}>
+                  {baselineRunId && !selectedBaseline ? <option value={baselineRunId} disabled>{baselineRunId} · unavailable in refreshed snapshot</option> : null}
                   {runIndex.runs.map((run) => (
                     <option value={run.run_id} key={run.run_id}><RunOption run={run} /></option>
                   ))}
@@ -154,6 +163,7 @@ export function CompareView() {
               <label>
                 <span>Candidate</span>
                 <select value={candidateRunId} onChange={(event) => setCandidateRunId(event.target.value)}>
+                  {candidateRunId && !selectedCandidate ? <option value={candidateRunId} disabled>{candidateRunId} · unavailable in refreshed snapshot</option> : null}
                   {runIndex.runs.map((run) => (
                     <option value={run.run_id} key={run.run_id}><RunOption run={run} /></option>
                   ))}
@@ -165,12 +175,14 @@ export function CompareView() {
             </p>
           </Panel>
 
-          {!canCompare ? (
+          {missingSelection ? (
+            <EmptyState title="A selected run is unavailable" message="The selected evidence is not in the latest verified run snapshot. Choose available runs, or refresh after restoring the evidence." />
+          ) : !canCompare ? (
             <EmptyState title="Choose two different runs" message="A run cannot serve as both baseline and candidate." />
           ) : comparison.status === "loading" ? (
             <LoadingState label="Checking pairwise comparability…" />
           ) : comparison.status === "error" && comparison.error ? (
-            <ErrorState error={comparison.error} retry={comparison.retry} title="The comparison could not be calculated" />
+            <ErrorState error={comparison.error} retry={runIndex.refresh} title="The comparison could not be calculated" />
           ) : comparison.data ? (
             <ComparisonResult
               comparison={comparison.data}
