@@ -222,27 +222,89 @@ def test_destroy_ack_and_volume_proof_are_durable_before_absence(
         {"id": 101, "volume_info": ""},
     ],
 )
-def test_missing_volume_inventory_currently_blocks_delete(
+def test_missing_volume_inventory_still_deletes_without_confirming(
     harness: Harness, row: dict[str, Any]
 ) -> None:
-    # Missing-metadata cleanup fallback is separately blocked by approval review.
     harness.retain()
-    harness.transport.responses = [page([row])]
-    with pytest.raises(provider.ProviderFailure, match="VOLUME_INVENTORY_MISSING"):
-        harness.provider.destroy(101, seconds=1)
-    assert [call[0] for call in harness.transport.calls] == ["GET"]
-    assert not harness.journal.has("provider-no-volumes-101.json")
-    assert not harness.journal.has("provider-destroy-ack-101.json")
-
-
-def test_absent_instance_cannot_manufacture_volume_proof_or_ack(
-    harness: Harness,
-) -> None:
-    harness.retain()
-    harness.transport.responses = [page([]), page([])]
-    assert not harness.provider.destroy(101, seconds=1).acknowledged
+    harness.transport.responses = [page([row]), reply({"success": True}), page([])]
+    assert harness.provider.destroy(101, seconds=1).acknowledged
     with pytest.raises(provider.ProviderFailure, match="VOLUMES_UNCONFIRMED"):
         harness.provider.observe_absence(101, seconds=1)
+    assert [call[0] for call in harness.transport.calls] == ["GET", "DELETE", "GET"]
+    assert harness.transport.calls[1][1] == "/api/v0/instances/101/"
+    assert not harness.journal.has("provider-no-volumes-101.json")
+    assert harness.journal.has("provider-destroy-ack-101.json")
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_absent_instance_still_requires_actual_delete_ack_and_volume_proof(
+    harness: Harness,
+    acknowledged: bool,
+) -> None:
+    harness.retain()
+    harness.transport.responses = [page([]), reply({"success": acknowledged}), page([])]
+    if acknowledged:
+        assert harness.provider.destroy(101, seconds=1).acknowledged
+    else:
+        with pytest.raises(provider.ProviderFailure):
+            harness.provider.destroy(101, seconds=1)
+    with pytest.raises(provider.ProviderFailure, match="VOLUMES_UNCONFIRMED"):
+        harness.provider.observe_absence(101, seconds=1)
+    assert harness.journal.has("provider-destroy-ack-101.json") == acknowledged
+    assert not harness.journal.has("provider-no-volumes-101.json")
+    assert harness.transport.calls[1][:3] == ("DELETE", "/api/v0/instances/101/", None)
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [TimeoutError("synthetic-secret")],
+        [reply({"success": False, "msg": "synthetic-secret"})],
+        [reply({"success": True}, 503)],
+        [provider.HttpReply(200, b"malformed synthetic-secret")],
+        [page([{"id": 202, "volume_info": []}])],
+        [page([], total=1)],
+        [page([], token="more"), TimeoutError("synthetic-secret")],
+        [page([], token="same"), page([], token="same")],
+    ],
+)
+def test_failed_or_incomplete_readback_still_deletes_only_retained_id(
+    harness: Harness, responses: list[Any]
+) -> None:
+    harness.retain()
+    harness.transport.responses = [*responses, reply({"success": True}), page([])]
+    assert harness.provider.destroy(101, seconds=1).acknowledged
+    assert harness.provider.destroy(101, seconds=1).acknowledged
+    with pytest.raises(provider.ProviderFailure, match="VOLUMES_UNCONFIRMED"):
+        harness.provider.observe_absence(101, seconds=1)
+    deletes = [call for call in harness.transport.calls if call[0] == "DELETE"]
+    assert len(deletes) == 1 and deletes[0][:3] == (
+        "DELETE",
+        "/api/v0/instances/101/",
+        None,
+    )
+    assert not harness.journal.has("provider-no-volumes-101.json")
+    assert not any(
+        b"synthetic-secret" in f.read_bytes() for f in harness.path.iterdir()
+    )
+
+
+def test_hanging_metadata_leaves_original_budget_for_delete(harness: Harness) -> None:
+    def hang(seconds: float) -> provider.HttpReply:
+        assert 0 < seconds <= 0.1
+        time.sleep(2)
+        raise AssertionError("readback timer did not interrupt")
+
+    def acknowledge(seconds: float) -> provider.HttpReply:
+        assert 0.1 < seconds < 0.25
+        return reply({"success": True})
+
+    harness.retain()
+    harness.transport.responses = [hang, acknowledge]
+    started = time.monotonic()
+    assert harness.provider.destroy(101, seconds=0.3).acknowledged
+    assert time.monotonic() - started < 1
+    assert [call[0] for call in harness.transport.calls] == ["GET", "DELETE"]
     assert not harness.journal.has("provider-no-volumes-101.json")
 
 
@@ -261,6 +323,77 @@ def test_nonempty_volumes_are_sticky_and_never_invent_volume_ids(
     assert b"volume_info_sha256" in record
     with pytest.raises(provider.ProviderFailure, match="VOLUMES_UNCONFIRMED"):
         harness.provider.observe_absence(101, seconds=1)
+
+
+def test_sticky_volume_publication_failure_is_not_metadata_fallback(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness.retain()
+    harness.volume_proof()
+    proof_path = harness.path / "provider-no-volumes-101.json"
+    prior_proof = proof_path.read_bytes()
+    harness.transport.responses = [
+        page([{"id": 101, "volume_info": [{"synthetic_volume": 202}]}]),
+        reply({"success": True}),
+    ]
+    failure = OSError("synthetic journal publication failure")
+    attempted: list[str] = []
+
+    def fail_publication(name: str, value: dict[str, Any]) -> None:
+        attempted.append(name)
+        assert name == "unexpected-volumes.json"
+        assert value["instance_id"] == 101
+        raise failure
+
+    monkeypatch.setattr(harness.journal, "record_once", fail_publication)
+    with pytest.raises(OSError) as error:
+        harness.provider.destroy(101, seconds=1)
+    assert error.value is failure
+    assert attempted == ["unexpected-volumes.json"]
+    assert [call[0] for call in harness.transport.calls] == ["GET"]
+    assert not harness.journal.has("provider-destroy-ack-101.json")
+    assert not harness.journal.has("cleanup-confirmed.json")
+    assert proof_path.read_bytes() == prior_proof
+
+
+def test_prior_volume_proof_survives_failed_readback_and_actual_delete(
+    harness: Harness,
+) -> None:
+    harness.retain()
+    harness.transport.responses = [
+        page([{"id": 101, "volume_info": []}]),
+        TimeoutError("synthetic first delete timeout"),
+        TimeoutError("synthetic later metadata timeout"),
+        reply({"success": True}),
+        page([]),
+    ]
+    with pytest.raises(provider.ProviderFailure):
+        harness.provider.destroy(101, seconds=1)
+    proof_path = harness.path / "provider-no-volumes-101.json"
+    prior_proof = proof_path.read_bytes()
+    assert not harness.journal.has("provider-destroy-ack-101.json")
+
+    destroyed = harness.provider.destroy(101, seconds=1)
+    absence = harness.provider.observe_absence(101, seconds=1)
+    assert destroyed.instance_id == absence.query_instance_id == 101
+    assert destroyed.acknowledged and absence.succeeded
+    assert absence.pagination_exhausted
+    assert absence.matching_instance_ids == absence.persistent_volume_ids == ()
+    assert harness.journal.has("provider-destroy-ack-101.json")
+    assert not harness.journal.has("unexpected-volumes.json")
+    assert proof_path.read_bytes() == prior_proof
+    assert [call[0] for call in harness.transport.calls] == [
+        "GET",
+        "DELETE",
+        "GET",
+        "DELETE",
+        "GET",
+    ]
+    assert all(
+        call[1] == "/api/v0/instances/101/"
+        for call in harness.transport.calls
+        if call[0] == "DELETE"
+    )
 
 
 def test_cleanup_clone_cannot_create_or_request_logs_and_reuses_ack(

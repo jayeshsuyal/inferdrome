@@ -158,10 +158,12 @@ or ambient proxies, bounded bytes and whole-call alarms. Provider error bodies
 and credential values are never copied to journals or exceptions.
 
 Before deletion, the provider attempts a bounded exact-ID volume readback and
-retains an explicit empty inventory when available. Currently a failed or
-missing inventory prevents deletion. A source-only correction to continue
-exact-ID deletion while keeping cleanup unconfirmed awaits explicit approval.
-Nonempty volume inventory
+retains an explicit empty inventory when available. Readback gets at most five
+seconds or one third of the remaining call budget, whichever is smaller.
+Failed, missing, malformed or absent inventory still permits deletion of this
+run's durably retained exact ID; it supplies no empty-volume proof. Without a
+valid earlier proof, even successful deletion and absence remain unconfirmed.
+Journal publication failures remain hard failures. Nonempty volume inventory
 leaves a sticky unresolved-volume record. Complete paginated
 absence, the retained successful destroy acknowledgement and the earlier
 explicit empty-volume observation are all necessary for the positive label.

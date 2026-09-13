@@ -425,11 +425,21 @@ class VastProvider:
             f"provider-destroy-ack-{instance_id}.json", acknowledged
         ):
             return DestroyResult(instance_id=instance_id, acknowledged=True)
-        rows = self._instances(instance_id, end)
-        empty_volumes = self._volume_inventory(instance_id, rows)
-        if not rows:
-            # Absence cannot manufacture a destroy acknowledgement or volume proof.
-            return DestroyResult(instance_id=instance_id, acknowledged=False)
+        # Metadata is best effort; leave most of the original call for deletion
+        # of the already authorized ID. A failed readback cannot provide proof.
+        readback_seconds = min(5.0, _remaining(end, self._monotonic) / 3)
+        readback_end = self._monotonic() + readback_seconds
+        try:
+            rows = _bounded_call(
+                lambda: self._instances(instance_id, readback_end), readback_seconds
+            )
+        except Exception:
+            rows = []
+        empty_volumes = False
+        if rows and isinstance(rows[0].get("volume_info"), list):
+            # Journal failures stay hard failures: losing a sticky nonempty
+            # observation must never let an earlier empty proof confirm cleanup.
+            empty_volumes = self._volume_inventory(instance_id, rows)
         if empty_volumes:
             self._journal.record_once(
                 f"provider-no-volumes-{instance_id}.json", self._no_volumes(instance_id)

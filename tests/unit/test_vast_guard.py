@@ -25,9 +25,16 @@ from tests.unit.test_vast_control import FakeClock, FakeProvider, intent_for
 class FileTransport:
     """No sockets: on-disk fake state is shared with the forked worker."""
 
-    def __init__(self, directory: Path, *, destroy_fails: bool = False) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        destroy_fails: bool = False,
+        missing_volume_info: bool = False,
+    ) -> None:
         self.directory = directory
         self.destroy_fails = destroy_fails
+        self.missing_volume_info = missing_volume_info
 
     def request(
         self, method: str, path: str, body: bytes | None, *, seconds: float
@@ -60,7 +67,11 @@ class FileTransport:
                 "total_instances": 0 if (self.directory / "destroyed").exists() else 1,
                 "instances": []
                 if (self.directory / "destroyed").exists()
-                else [{"id": 101, "volume_info": []}],
+                else [
+                    {"id": 101}
+                    if self.missing_volume_info
+                    else {"id": 101, "volume_info": []}
+                ],
                 "next_token": None,
             }
         else:
@@ -157,6 +168,61 @@ def test_cleanup_survives_controller_exit(tmp_path: Path) -> None:
     assert result["instance_id"] == 101
     wait_record(tmp_path / "guard-finished.json")
     assert (tmp_path / "destroyed").exists()
+
+
+def test_missing_volume_metadata_still_deletes_but_settles_unconfirmed(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    journal = control.ControlJournal(tmp_path)
+    intent = short_intent()
+    journal.initialize(intent)
+    provider = VastProvider(
+        launch_intent(),
+        journal=journal,
+        transport=FileTransport(tmp_path, missing_volume_info=True),
+    )
+    guard = DetachedGuard(provider)
+    try:
+        ready = guard.arm(intent, journal, seconds=1)
+        retain(journal, intent)
+        started = time.monotonic()
+        journal.request_cleanup()
+        assert guard.wait(seconds=4)
+        assert time.monotonic() - started < 3
+        assert not guard.is_alive(ready)
+        requests = [
+            json.loads(line)
+            for line in (tmp_path / "requests.jsonl").read_bytes().splitlines()
+        ]
+        assert [item for item in requests if item["method"] == "DELETE"] == [
+            {"method": "DELETE", "path": "/api/v0/instances/101/"}
+        ]
+        assert all("asks" not in item["path"] for item in requests)
+        assert (tmp_path / "destroyed").exists()
+        assert json.loads(
+            (tmp_path / "provider-destroy-ack-101.json").read_bytes()
+        ) == {"instance_id": 101, "acknowledged": True}
+        assert not journal.has("provider-no-volumes-101.json")
+        assert not journal.has("cleanup-confirmed.json")
+        assert journal.cleanup_status() == control.UNCONFIRMED
+        assert json.loads((tmp_path / "guard-finished.json").read_bytes()) == {
+            "status": control.UNCONFIRMED
+        }
+        window = json.loads((tmp_path / "cleanup-window.json").read_bytes())
+        assert window["deadline_monotonic"] - window["started_monotonic"] == (
+            pytest.approx(2)
+        )
+        assert (
+            window["deadline_unix"]
+            <= datetime.strptime(intent.cleanup_deadline_utc, "%Y-%m-%dT%H:%M:%SZ")
+            .replace(tzinfo=UTC)
+            .timestamp()
+        )
+    finally:
+        journal.request_cleanup()
+        guard.wait(seconds=5)
+        journal.close()
 
 
 def test_unknown_create_never_guesses_cleanup_id(tmp_path: Path) -> None:
