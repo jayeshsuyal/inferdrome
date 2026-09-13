@@ -1537,7 +1537,7 @@ function parseExecutionSummary(
   const manual = value.mode === "LAMBDA_MANUAL_HOST";
   if (
     (manual && (
-      value.topology.accelerator_model !== "NVIDIA A100-PCIE-40GB"
+      !["NVIDIA A100-PCIE-40GB", "NVIDIA H100-SXM5-80GB"].includes(acceleratorModel)
       || value.topology.accelerator_count !== 2
       || value.topology.declared_provider !== "LAMBDA"
       || value.topology.declared_provisioning !== "OPERATOR_SUPPLIED_VM"

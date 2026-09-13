@@ -6,6 +6,7 @@ import {
   existsSync,
   lstatSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -28,6 +29,20 @@ const FIXTURE_PREFIX = "inferdrome-dashboard-e2e-";
 const PLAN_ID = "comparison-plan-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const ROUTING_CAMPAIGN_ID = "routing-campaign-v1";
 const ROUTING_QUALIFICATION_ID = "stale-telemetry-qualification-v1";
+const EXECUTION_PROFILES = [
+  {
+    label: "A100 v2",
+    profileId: "lambda-manual-two-a100-pcie-40gb-v1",
+    acceleratorModel: "NVIDIA A100-PCIE-40GB",
+    manifestVersion: "inferdrome.routing-executed-manifest.v2",
+  },
+  {
+    label: "H100 v3",
+    profileId: "lambda-manual-two-h100-sxm5-80gb-v1",
+    acceleratorModel: "NVIDIA H100-SXM5-80GB",
+    manifestVersion: "inferdrome.routing-executed-manifest.v3",
+  },
+] as const;
 
 interface LocalDemoSummary {
   readonly claim_boundary: string;
@@ -136,13 +151,14 @@ function prepareLocalDemoFixture(root: string): LocalDemoSummary {
   }
 }
 
-function prepareRoutingExecutionFixture(root: string): RoutingExecutionFixtureSummary {
+function prepareRoutingExecutionFixture(root: string, profileId?: string): RoutingExecutionFixtureSummary {
   const result = spawnSync(
     pythonExecutable(),
     [
       join(REPOSITORY_ROOT, "scripts", "create_routing_execution_dashboard_fixture.py"),
       "--output-parent",
       root,
+      ...(profileId ? ["--profile", profileId] : []),
     ],
     {
       cwd: REPOSITORY_ROOT,
@@ -159,7 +175,21 @@ function prepareRoutingExecutionFixture(root: string): RoutingExecutionFixtureSu
     );
   }
   try {
-    return JSON.parse(result.stdout) as RoutingExecutionFixtureSummary;
+    const execution = JSON.parse(result.stdout) as RoutingExecutionFixtureSummary;
+    const provenance = JSON.parse(readFileSync(join(root, "fixture-provenance.json"), "utf8")) as Record<string, unknown>;
+    if (
+      execution.fixture_provenance !== "FIXTURE_GENERATED_LOCAL_NOT_PROVIDER_EVIDENCE"
+      || resolve(execution.root) !== resolve(root, "routing-execution-package")
+      || !/^sha256:[0-9a-f]{64}$/.test(execution.retained_digest)
+      || provenance.fixture_provenance !== execution.fixture_provenance
+      || provenance.package_retained_digest !== execution.retained_digest
+      || provenance.provider_action !== "NONE"
+      || provenance.docker_action !== "NONE"
+      || provenance.gpu_action !== "NONE"
+    ) {
+      throw new Error("The routing-execution fixture did not retain local-only provenance.");
+    }
+    return execution;
   } catch (error) {
     throw new Error(
       `Routing-execution fixture preparation did not return JSON:\n${result.stdout}`,
@@ -217,15 +247,6 @@ function createPopulatedFixture(): FixturePaths {
       throw new Error("The local demo prepared dashboard roots outside its fixture.");
     }
     const execution = prepareRoutingExecutionFixture(root);
-    const expectedExecutionRoot = resolve(root, "routing-execution-package");
-    if (
-      execution.fixture_provenance !== "FIXTURE_GENERATED_LOCAL_NOT_PROVIDER_EVIDENCE"
-      || resolve(execution.root) !== expectedExecutionRoot
-      || !/^sha256:[0-9a-f]{64}$/.test(execution.retained_digest)
-      || !existsSync(join(root, "fixture-provenance.json"))
-    ) {
-      throw new Error("The routing-execution fixture did not retain local-only provenance.");
-    }
     return {
       ...paths,
       routingQualificationDigest: prepared.routing_qualification.retained_digest,
@@ -638,4 +659,101 @@ test.describe("populated dashboard", () => {
     expect(failedRequests).toEqual([]);
     expect(unsafeApiRequests).toEqual([]);
   });
+
+  for (const profile of EXECUTION_PROFILES) {
+    test(`packaged ${profile.label} execution supports list, detail, back, and reload`, async ({ page }) => {
+      if (!fixture) throw new Error("The populated dashboard fixture is unavailable.");
+      let executionRoot = fixture.routingExecutionRoot;
+      let retainedDigest = fixture.routingExecutionDigest;
+      if (profile.profileId !== EXECUTION_PROFILES[0].profileId) {
+        // Keep both closed packages beneath the one owned fixture tree and
+        // reuse the same server lifecycle; no provider or serving process runs.
+        const root = realpathSync(mkdtempSync(join(fixture.root, "h100-")));
+        const execution = prepareRoutingExecutionFixture(root, profile.profileId);
+        executionRoot = execution.root;
+        retainedDigest = execution.retained_digest;
+        await stopDashboardServer();
+        baseUrl = await startDashboardServer({
+          ...fixture,
+          routingExecutionRoot: executionRoot,
+          routingExecutionDigest: retainedDigest,
+        });
+      }
+      const manifest = JSON.parse(readFileSync(join(executionRoot, "executed-manifest.json"), "utf8")) as {
+        readonly schema_version: string;
+        readonly topology: { readonly profile_id: string };
+      };
+      expect(manifest.schema_version).toBe(profile.manifestVersion);
+      expect(manifest.topology.profile_id).toBe(profile.profileId);
+
+      const browserErrors: string[] = [];
+      const failedResponses: string[] = [];
+      const unsafeApiRequests: string[] = [];
+      page.on("console", (message) => { if (message.type() === "error") browserErrors.push(message.text()); });
+      page.on("pageerror", (error) => browserErrors.push(error.message));
+      page.on("response", (response) => {
+        if (new URL(response.url()).origin === baseUrl && response.status() >= 400) {
+          failedResponses.push(`${response.status()} ${response.url()}`);
+        }
+      });
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (url.origin === baseUrl && url.pathname.startsWith("/api/") && request.method() !== "GET") {
+          unsafeApiRequests.push(`${request.method()} ${url.pathname}`);
+        }
+      });
+
+      const indexResponse = await page.request.get(`${baseUrl}/api/v1/routing-executions`);
+      const detailPath = "/routing-executions/routing-execution-v1";
+      const detailResponse = await page.request.get(`${baseUrl}/api/v1${detailPath}`);
+      expect(indexResponse.status()).toBe(200);
+      expect(detailResponse.status()).toBe(200);
+      const index = await indexResponse.json();
+      const detail = await detailResponse.json();
+      expect(index.rejected).toEqual([]);
+      expect(index.routing_executions).toHaveLength(1);
+      expect(index.routing_executions[0]).toEqual(detail.summary);
+      expect(detail.summary).toMatchObject({
+        execution_id: "routing-execution-v1",
+        retained_digest: retainedDigest,
+        mode: "LAMBDA_MANUAL_HOST",
+        topology: {
+          accelerator_model: profile.acceleratorModel,
+          accelerator_count: 2,
+          identity_assertion: "OPERATOR_DECLARED_NOT_OBSERVED",
+          lifecycle_protection: "UNRESOLVED_PRELAUNCH_WATCHDOG_BOUNDARY",
+        },
+        terminal_denominator: 18,
+        verified_by_offline_replay: true,
+      });
+
+      const shell = await page.goto(`${baseUrl}/routing-executions`);
+      expect(shell?.status()).toBe(200);
+      await expect(page.getByText(`2 × ${profile.acceleratorModel}`, { exact: true })).toBeVisible();
+      await expect(page.getByText("Manual host declaration · not provider proof", { exact: true }).first()).toBeVisible();
+      await page.getByRole("link", { name: "routing-execution-v1", exact: true }).first().click();
+      await expectPath(page, detailPath);
+
+      const expectExecutionDetail = async () => {
+        await expect(page.getByRole("heading", { name: "routing-execution-v1", level: 1 })).toBeVisible();
+        await expect(page.locator(".execution-trial-section")).toHaveCount(3);
+        await expect(page.locator(".execution-request-table tbody tr")).toHaveCount(18);
+        await expect(page.getByText("Manual-host facts are operator-declared.", { exact: false })).toBeVisible();
+        await expect(page.getByText("GPU/DCGM and KV/cache retained as unavailable", { exact: true })).toBeVisible();
+      };
+      await expectExecutionDetail();
+      await page.locator(".execution-back-link").getByRole("link", { name: "Routing executions", exact: true }).click();
+      await expectPath(page, "/routing-executions");
+      await expect(page.getByText(`2 × ${profile.acceleratorModel}`, { exact: true })).toBeVisible();
+      const deepLink = await page.goto(`${baseUrl}${detailPath}`);
+      expect(deepLink?.status()).toBe(200);
+      await expectExecutionDetail();
+      const reload = await page.reload();
+      expect(reload?.status()).toBe(200);
+      await expectExecutionDetail();
+      expect(browserErrors).toEqual([]);
+      expect(failedResponses).toEqual([]);
+      expect(unsafeApiRequests).toEqual([]);
+    });
+  }
 });

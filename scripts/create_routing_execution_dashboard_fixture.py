@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create one local-only v2 execution fixture for dashboard/browser rehearsal.
+"""Create one local-only A100 v2 or H100 v3 dashboard/browser fixture.
 
 This helper uses an injected in-process transport and virtual clock. It never
 starts Docker, a provider client, a GPU process, or a network listener. The
@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from inferdrome.deployment.manual_host import (
+    H100_PROFILE_ID,
+    PROFILE_ID,
+    H100ManualHostInput,
     ManualHostInput,
     input_template,
     prepare_artifacts,
@@ -85,14 +88,18 @@ def _source_commit() -> str:
     return result
 
 
-def _input_value(source_commit: str) -> dict[str, Any]:
-    value = input_template()
+def _input_value(source_commit: str, profile_id: str = PROFILE_ID) -> dict[str, Any]:
+    if profile_id not in (PROFILE_ID, H100_PROFILE_ID):
+        raise ValueError("fixture profile is unsupported")
+    value = input_template(profile_id)
     value.update(
         {
             "source_commit": source_commit,
             "instance_id": "0123456789abcdef0123456789abcdef",
             "region": "synthetic-region",
-            "instance_type": "gpu_2x_a100",
+            "instance_type": (
+                "gpu_2x_h100_sxm5" if profile_id == H100_PROFILE_ID else "gpu_2x_a100"
+            ),
             "gpu_uuids": [
                 "GPU-00000000-0000-0000-0000-000000000001",
                 "GPU-00000000-0000-0000-0000-000000000002",
@@ -139,14 +146,17 @@ def _safe_parent(value: Path) -> Path:
     return selected
 
 
-def create(output_parent: Path) -> dict[str, str]:
+def create(output_parent: Path, *, profile_id: str = PROFILE_ID) -> dict[str, str]:
     parent = _safe_parent(output_parent)
     package = parent / _PACKAGE_NAME
     provenance = parent / _PROVENANCE_NAME
     if package.exists() or provenance.exists():
         raise ValueError("fixture output already exists")
-    spec = ManualHostInput.model_validate_json(
-        canonical_json_bytes(_input_value(_source_commit()))
+    input_model = (
+        H100ManualHostInput if profile_id == H100_PROFILE_ID else ManualHostInput
+    )
+    spec = input_model.model_validate_json(
+        canonical_json_bytes(_input_value(_source_commit(), profile_id))
     )
     files = prepare_artifacts(spec, _ROOT)
     sealed = run_execution_from_bytes(
@@ -184,11 +194,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Create a local-only routing-execution dashboard fixture"
     )
     parser.add_argument("--output-parent", type=Path, required=True)
+    parser.add_argument(
+        "--profile", choices=(PROFILE_ID, H100_PROFILE_ID), default=PROFILE_ID
+    )
     arguments = parser.parse_args(argv)
     try:
         print(
             json.dumps(
-                create(arguments.output_parent), sort_keys=True, separators=(",", ":")
+                create(arguments.output_parent, profile_id=arguments.profile),
+                sort_keys=True,
+                separators=(",", ":"),
             )
         )
         return 0
