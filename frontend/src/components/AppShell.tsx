@@ -120,8 +120,8 @@ export function AppShell({ children }: PropsWithChildren) {
         </NavLink>
 
         <div className="workspace-label">
-          Evidence root
-          <strong>./runs</strong>
+          Evidence source
+          <strong>Local bundles</strong>
         </div>
 
         <nav className="primary-nav" aria-label="Dashboard views">
@@ -133,6 +133,13 @@ export function AppShell({ children }: PropsWithChildren) {
                 className="nav-link"
                 to={to}
                 end={end}
+                onFocus={(event) => {
+                  const nav = event.currentTarget.parentElement;
+                  if (nav && nav.scrollWidth > nav.clientWidth
+                    && ["auto", "scroll"].includes(getComputedStyle(nav).overflowX)) {
+                    event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" });
+                  }
+                }}
               >
                 <Icon aria-hidden="true" />
                 <span>{label}</span>
