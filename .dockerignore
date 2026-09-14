@@ -3,6 +3,8 @@
 !Dockerfile
 !Dockerfile.compose-mock
 !Dockerfile.vllm-benchmark-runner
+!Dockerfile.vast-process
+!requirements-vast-downloader.txt
 !.dockerignore
 !pyproject.toml
 !uv.lock
