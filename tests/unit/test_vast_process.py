@@ -10,7 +10,8 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -703,12 +704,33 @@ def test_readiness_subprocess_timeout_is_bounded_and_group_cleaned(
 
 
 def observer_inputs(
-    tmp_path: Path, *, expired: bool = False
-) -> tuple[prep.VastProcessInput, Path, str]:
+    tmp_path: Path,
+    *,
+    expired: bool = False,
+    profile: Literal["v1", "v2"] = "v1",
+    tampered_module: str | None = None,
+) -> tuple[prep.ProcessInput, Path, str]:
     value = process_input_value(tmp_path)
+    if profile == "v2":
+        value["schema_version"] = "inferdrome.vast-process-input.v2"
+        value["module_sha256"] = prep.module_digests(profile="v2")
+        value["launch_readback"].update(
+            user="0:0",
+            transfer_uid=2001,
+            transfer_gid=0,
+            public_port_mappings=[{
+                "purpose": "SSH_MANAGEMENT",
+                "container_port": 2222,
+                "protocol": "tcp",
+                "public_host": "1.1.1.1",
+                "public_port": 2222,
+            }],
+        )
+    if tampered_module is not None:
+        value["module_sha256"][tampered_module] = sha256_digest(b"tampered-module")
     if expired:
         value["cleanup"]["terminate_by_utc"] = "2000-01-01T00:00:00Z"
-    spec = prep.VastProcessInput.model_validate_json(canonical_json_bytes(value))
+    spec = prep.parse_process_input(canonical_json_bytes(value))
     directory = Path(spec.preparation_path)
     digest = prep.prepare(spec, directory)
     observation = {"synthetic": True, "engine_process_ids": [31, 32]}
@@ -733,10 +755,9 @@ def test_observer_guard_rejects_before_transport(
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
 ) -> None:
-    spec, directory, digest = observer_inputs(tmp_path, expired=mutation == "expired")
+    _, directory, digest = observer_inputs(tmp_path, expired=mutation == "expired")
     monkeypatch.setattr(observer.os, "getuid", lambda: 2000)
     monkeypatch.setattr(observer.os, "getgid", lambda: 0)
-    monkeypatch.setattr(observer, "module_digests", lambda: spec.module_sha256)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "void")
     calls = 0
@@ -769,10 +790,9 @@ def test_observer_failed_attempt_cannot_be_retried(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec, directory, digest = observer_inputs(tmp_path)
+    _, directory, digest = observer_inputs(tmp_path)
     monkeypatch.setattr(observer.os, "getuid", lambda: 2000)
     monkeypatch.setattr(observer.os, "getgid", lambda: 0)
-    monkeypatch.setattr(observer, "module_digests", lambda: spec.module_sha256)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "void")
     calls = 0
@@ -788,6 +808,78 @@ def test_observer_failed_attempt_cannot_be_retried(
     with pytest.raises(FileExistsError):
         observer.run(directory, digest)
     assert calls == 1
+
+
+@pytest.mark.parametrize("profile", ["v1", "v2"])
+def test_observer_run_accepts_real_inventory_for_the_validated_plan_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Literal["v1", "v2"],
+) -> None:
+    spec, directory, digest = observer_inputs(tmp_path, profile=profile)
+    assert spec.module_sha256 == prep.module_digests(profile=profile)
+    assert set(spec.module_sha256) == set(
+        prep.SFTP_MODULES if profile == "v2" else prep.MODULES
+    )
+    monkeypatch.setattr(observer.os, "getuid", lambda: 2000)
+    monkeypatch.setattr(observer.os, "getgid", lambda: 0)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "void")
+    output = Path(spec.evidence_path) / "routing-execution-package"
+    retained_digest = sha256_digest(b"synthetic-sealed-package")
+    captured: list[Path] = []
+    verified: list[tuple[Path, str]] = []
+
+    def capture(config: bytes, workload: bytes, target: Path) -> SimpleNamespace:
+        assert config == prep.read_private(directory / "execution-config.json")
+        assert workload == prep.read_private(directory / "selected-workload.jsonl")
+        captured.append(target)
+        return SimpleNamespace(path=target, retained_digest=retained_digest)
+
+    def verify(path: Path, *, expected_digest: str) -> None:
+        verified.append((path, expected_digest))
+
+    monkeypatch.setattr(observer, "run_execution_from_bytes", capture)
+    monkeypatch.setattr(observer, "verify_execution_package", verify)
+    observer.run(directory, digest)
+    assert captured == [output] and verified == [(output, retained_digest)]
+    assert prep.read_private(directory / "observer-attempt.json") == (
+        canonical_json_bytes({"plan_sha256": digest, "no_retry": True})
+    )
+
+
+@pytest.mark.parametrize(
+    ("profile", "module"),
+    [
+        ("v1", "vast_process_observer"),
+        ("v2", "vast_process_observer"),
+        ("v2", "vast_guest_ssh"),
+    ],
+)
+def test_observer_run_rejects_tampered_shared_and_v2_module_digests_before_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Literal["v1", "v2"],
+    module: str,
+) -> None:
+    _, directory, digest = observer_inputs(
+        tmp_path, profile=profile, tampered_module=module
+    )
+    monkeypatch.setattr(observer.os, "getuid", lambda: 2000)
+    monkeypatch.setattr(observer.os, "getgid", lambda: 0)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "void")
+    captured = False
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        nonlocal captured
+        captured = True
+        raise AssertionError("tampered observer reached capture")
+
+    monkeypatch.setattr(observer, "run_execution_from_bytes", forbidden)
+    with pytest.raises(ValueError, match="observer process boundary differs"):
+        observer.run(directory, digest)
+    assert captured is False and not (directory / "observer-attempt.json").exists()
 
 
 def test_observer_cli_arms_and_clears_wall_timer_on_failure(

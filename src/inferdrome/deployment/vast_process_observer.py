@@ -40,7 +40,9 @@ def run(directory: Path, digest: str) -> None:
         or os.getgid() != spec.gid
         or os.environ.get("CUDA_VISIBLE_DEVICES") != ""
         or os.environ.get("NVIDIA_VISIBLE_DEVICES") != "void"
-        or module_digests() != spec.module_sha256
+        or module_digests(
+            profile="v2" if spec.schema_version.endswith(".v2") else "v1"
+        ) != spec.module_sha256
     ):
         raise ValueError("observer process boundary differs")
     config_bytes = read_private(directory / "execution-config.json")
