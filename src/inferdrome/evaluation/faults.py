@@ -11,10 +11,14 @@ import asyncio
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
-from typing import Literal
+from typing import Literal, Protocol
 
-from inferdrome.evaluation.contracts import EndpointId, EvaluationError
-from inferdrome.evaluation.fault_config import RoutingFaultConfig
+from inferdrome.evaluation.contracts import (
+    EndpointId,
+    EvaluationConfig,
+    EvaluationError,
+)
+from inferdrome.evaluation.fault_config import RoutingFaultConfig, TelemetryBounds
 from inferdrome.evaluation.observations import (
     MalformedLoad,
     MissingLoad,
@@ -29,6 +33,7 @@ from inferdrome.evaluation.policies import (
     HealthObservation,
     LoadObservation,
     PolicyDecision,
+    PolicyId,
     RoutingPolicy,
     SampleStatus,
 )
@@ -207,27 +212,76 @@ async def _acquire(
             raise asyncio.CancelledError
 
 
-@dataclass
-class _Trial:
-    config: RoutingFaultConfig
+async def close_routing_clients(
+    clients: Sequence[Transport | ProbeTransport], cleanup_ns: int
+) -> None:
+    """Close partially acquired clients before transferring scenario ownership.
+
+    The caller supplies the validated telemetry cleanup bound and at most the
+    four clients of a trial. Trusted clients must cooperate with cancellation.
+    Cancellation is propagated only after joining every close; a failed close
+    blocks a cleanup claim even when another close succeeds.
+    """
+    interrupted = False
+    failed = False
+
+    def remember_interrupt() -> None:
+        nonlocal interrupted
+        interrupted = True
+
+    tasks = [asyncio.create_task(client.close()) for client in clients]
+    try:
+        await _settle(tasks, cleanup_ns, on_interrupt=remember_interrupt)
+    except EvaluationError:
+        failed = True
+        with suppress(EvaluationError):
+            await _settle(
+                tasks, cleanup_ns, cancel=True, on_interrupt=remember_interrupt
+            )
+    if failed or any(
+        not task.done() or task.cancelled() or task.exception() is not None
+        for task in tasks
+    ):
+        raise EvaluationError("routing client cleanup failed") from None
+    if interrupted:
+        raise asyncio.CancelledError
+
+
+class ObservationConfig(Protocol):
+    """Only the shared foreground and observation settings are required."""
+
+    @property
+    def foreground(self) -> EvaluationConfig: ...
+
+    @property
+    def telemetry(self) -> TelemetryBounds: ...
+
+    @property
+    def policy_id(self) -> PolicyId: ...
+
+
+class ObservationSession:
+    """Shared observation/foreground ownership; scenarios supply only their phases.
+
+    The policy selector receives the router publisher alone. This session owns the
+    independent channel and never exposes it to the selector. No transport is
+    constructed here, and the healthy session has no background/fault state.
+    """
+
+    config: ObservationConfig
     foreground_transport: Transport
-    background_transport: Transport
     router_probe: ProbeTransport
     observer_probe: ProbeTransport
     clock: Clock
     epoch_ns: int
-    gate: RouterObservations = field(default_factory=RouterObservations)
-    foreground_stop: asyncio.Event = field(default_factory=asyncio.Event)
-    background_stop: asyncio.Event = field(default_factory=asyncio.Event)
-    poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
-    foreground_task: asyncio.Task[EvaluationResult] | None = None
-    background_task: asyncio.Task[EvaluationResult] | None = None
-    observations: list[ObservationRecord] = field(default_factory=list)
-    events: list[FaultEvent] = field(default_factory=list)
-    independent_latest_valid: dict[EndpointId, LoadObservation] = field(
-        default_factory=dict
-    )
-    status: TrialStatus = "CANCELLED"
+    gate: RouterObservations
+    foreground_stop: asyncio.Event
+    poll_stop: asyncio.Event
+    foreground_task: asyncio.Task[EvaluationResult] | None
+    observations: list[ObservationRecord]
+    events: list[FaultEvent]
+    independent_latest_valid: dict[EndpointId, LoadObservation]
+    status: TrialStatus
 
     def now(self) -> int:
         return self.clock.now_ns() - self.epoch_ns
@@ -237,11 +291,13 @@ class _Trial:
             FaultEvent(kind, self.now() if observed_ns is None else observed_ns)
         )
 
+    def request_stop(self) -> None:
+        self.foreground_stop.set()
+        self.poll_stop.set()
+
     def interrupt(self) -> None:
         self.status = "CANCELLED"
-        self.foreground_stop.set()
-        self.background_stop.set()
-        self.poll_stop.set()
+        self.request_stop()
 
     async def poll(self, endpoint: EndpointId, channel: Channel) -> None:
         bounds = self.config.telemetry
@@ -340,8 +396,8 @@ class _Trial:
         # Keep a normally finished channel alive until the owner ends the trial.
         await self.poll_stop.wait()
 
-    def warmed_up(self) -> bool:
-        now = self.now()
+    def warmed_up(self, now_ns: int | None = None) -> bool:
+        now = self.now() if now_ns is None else now_ns
         bounds = self.config.telemetry
         for endpoint in self.gate.snapshot().endpoints:
             health, load = endpoint.health, endpoint.load
@@ -371,6 +427,82 @@ class _Trial:
             )
         )
 
+    def owned_clients(self) -> tuple[Transport | ProbeTransport, ...]:
+        return self.foreground_transport, self.router_probe, self.observer_probe
+
+    def ensure_population_tasks(
+        self, selector: _Selector
+    ) -> tuple[asyncio.Task[EvaluationResult], ...]:
+        if self.foreground_task is None:
+            self.start_foreground(selector)
+        assert self.foreground_task is not None
+        return (self.foreground_task,)
+
+    def population_cleanup_ns(self) -> int:
+        return self.config.foreground.bounds.cleanup_timeout_ns
+
+    def restore_for_cleanup(self) -> None:
+        """Healthy sessions have no publication fault to restore."""
+
+    async def drive(self, selector: _Selector) -> None:
+        raise NotImplementedError
+
+
+@dataclass
+class _Trial(ObservationSession):
+    config: RoutingFaultConfig
+    foreground_transport: Transport
+    background_transport: Transport
+    router_probe: ProbeTransport
+    observer_probe: ProbeTransport
+    clock: Clock
+    epoch_ns: int
+    gate: RouterObservations = field(default_factory=RouterObservations)
+    foreground_stop: asyncio.Event = field(default_factory=asyncio.Event)
+    background_stop: asyncio.Event = field(default_factory=asyncio.Event)
+    poll_stop: asyncio.Event = field(default_factory=asyncio.Event)
+    foreground_task: asyncio.Task[EvaluationResult] | None = None
+    background_task: asyncio.Task[EvaluationResult] | None = None
+    observations: list[ObservationRecord] = field(default_factory=list)
+    events: list[FaultEvent] = field(default_factory=list)
+    independent_latest_valid: dict[EndpointId, LoadObservation] = field(
+        default_factory=dict
+    )
+    status: TrialStatus = "CANCELLED"
+
+    def request_stop(self) -> None:
+        self.foreground_stop.set()
+        self.background_stop.set()
+        self.poll_stop.set()
+
+    def owned_clients(self) -> tuple[Transport | ProbeTransport, ...]:
+        return (
+            self.foreground_transport,
+            self.background_transport,
+            self.router_probe,
+            self.observer_probe,
+        )
+
+    def ensure_population_tasks(
+        self, selector: _Selector
+    ) -> tuple[asyncio.Task[EvaluationResult], ...]:
+        foreground = super().ensure_population_tasks(selector)
+        if self.background_task is None:
+            self.start_background()
+        assert self.background_task is not None
+        return (*foreground, self.background_task)
+
+    def population_cleanup_ns(self) -> int:
+        return max(
+            super().population_cleanup_ns(),
+            self.config.background.bounds.cleanup_timeout_ns,
+        )
+
+    def restore_for_cleanup(self) -> None:
+        restored = self.now()
+        if self.gate.restore(restored):
+            self.event("RESTORED_DURING_CLEANUP", restored)
+
     def start_background(self) -> None:
         self.background_task = asyncio.create_task(
             run_evaluation(
@@ -388,11 +520,12 @@ class _Trial:
         if self.foreground_stop.is_set():
             self.interrupt()
             return
-        if not self.warmed_up():
+        warmup = self.now()
+        if not self.warmed_up(warmup):
             self.status = "WARMUP_FAILED"
-            self.event("WARMUP_FAILED")
+            self.event("WARMUP_FAILED", warmup)
             return
-        self.event("WARMUP_PASSED")
+        self.event("WARMUP_PASSED", warmup)
         self.start_foreground(selector)
         timing = self.config.fault
         await self.clock.sleep_until(self.epoch_ns + timing.freeze_start_ns)
@@ -484,6 +617,113 @@ class _Trial:
         }
 
 
+async def run_observation_session(
+    trial: ObservationSession, *, stop: asyncio.Event
+) -> list[PolicyDecision]:
+    """Run one observed scenario and join all owned work before returning.
+
+    Scenario hooks only supply phases, optional extra population ownership, and
+    publication restoration. Polling, error propagation and cleanup stay shared.
+    """
+    config = trial.config
+    selector = _Selector(
+        RoutingPolicy(
+            config.policy_id,
+            health_freshness_ns=config.telemetry.health_freshness_ns,
+            load_freshness_ns=config.telemetry.load_freshness_ns,
+        ),
+        trial.gate,
+    )
+    workers: list[asyncio.Task[object]] = []
+    failure = False
+    try:
+        clients = trial.owned_clients()
+        if len({id(client) for client in clients}) != len(clients):
+            raise EvaluationError("routing requires distinct owned clients")
+        if stop.is_set():
+            trial.interrupt()
+        else:
+            endpoints: tuple[EndpointId, ...] = ("endpoint-a", "endpoint-b")
+            channels: tuple[Channel, ...] = (
+                "HEALTH",
+                "ROUTER_LOAD",
+                "INDEPENDENT_LOAD",
+            )
+            for endpoint in endpoints:
+                for channel in channels:
+                    workers.append(asyncio.create_task(trial.poll(endpoint, channel)))
+            driver = asyncio.create_task(trial.drive(selector))
+            interrupt = asyncio.create_task(stop.wait())
+            workers.extend([driver, interrupt])
+            done, _ = await asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED)
+            if stop.is_set():
+                trial.interrupt()
+            elif driver in done:
+                driver.result()
+            else:
+                raise EvaluationError("routing observation worker failed")
+    except asyncio.CancelledError:
+        trial.interrupt()
+    except Exception:
+        failure = True
+    finally:
+        try:
+            trial.restore_for_cleanup()
+        except EvaluationError:
+            failure = True
+        trial.request_stop()
+        # Missing runners still terminalize all offers and close their clients.
+        populations = trial.ensure_population_tasks(selector)
+        cleanup_ns = config.telemetry.cleanup_timeout_ns
+        try:
+            await _settle(
+                workers, 2 * cleanup_ns, cancel=True, on_interrupt=trial.interrupt
+            )
+        except EvaluationError:
+            failure = True
+        replay_cleanup_ns = trial.population_cleanup_ns()
+        try:
+            await _settle(
+                populations, 3 * replay_cleanup_ns, on_interrupt=trial.interrupt
+            )
+        except EvaluationError:
+            failure = True
+            with suppress(EvaluationError):
+                await _settle(
+                    populations,
+                    replay_cleanup_ns,
+                    cancel=True,
+                    on_interrupt=trial.interrupt,
+                )
+        closes = [
+            asyncio.create_task(probe.close())
+            for probe in (trial.router_probe, trial.observer_probe)
+        ]
+        try:
+            await _settle(closes, cleanup_ns, on_interrupt=trial.interrupt)
+        except EvaluationError:
+            failure = True
+            with suppress(EvaluationError):
+                await _settle(
+                    closes, cleanup_ns, cancel=True, on_interrupt=trial.interrupt
+                )
+        if any(
+            not task.done() or (not task.cancelled() and task.exception() is not None)
+            for task in workers
+        ):
+            failure = True
+        if any(
+            not task.done() or task.cancelled() or task.exception() is not None
+            for task in [*populations, *closes]
+        ):
+            failure = True
+    if failure:
+        raise EvaluationError("routing trial or cleanup failed") from None
+    if stop.is_set():
+        trial.interrupt()
+    return selector.decisions
+
+
 async def run_routing_fault(
     config: RoutingFaultConfig,
     foreground_transport: Transport,
@@ -515,125 +755,8 @@ async def run_routing_fault(
         background_stop=_StopEvent(stop),
         poll_stop=_StopEvent(stop),
     )
-    selector = _Selector(
-        RoutingPolicy(
-            config.policy_id,
-            health_freshness_ns=config.telemetry.health_freshness_ns,
-            load_freshness_ns=config.telemetry.load_freshness_ns,
-        ),
-        trial.gate,
-    )
-    workers: list[asyncio.Task[object]] = []
-    failure = False
-    try:
-        if (
-            len(
-                {
-                    id(client)
-                    for client in (
-                        foreground_transport,
-                        background_transport,
-                        router_probe,
-                        observer_probe,
-                    )
-                }
-            )
-            != 4
-        ):
-            raise EvaluationError("routing requires four distinct owned clients")
-        if stop.is_set():
-            trial.interrupt()
-        else:
-            endpoints: tuple[EndpointId, ...] = ("endpoint-a", "endpoint-b")
-            channels: tuple[Channel, ...] = (
-                "HEALTH",
-                "ROUTER_LOAD",
-                "INDEPENDENT_LOAD",
-            )
-            for endpoint in endpoints:
-                for channel in channels:
-                    workers.append(asyncio.create_task(trial.poll(endpoint, channel)))
-            driver = asyncio.create_task(trial.drive(selector))
-            interrupt = asyncio.create_task(stop.wait())
-            workers.extend([driver, interrupt])
-            done, _ = await asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED)
-            if stop.is_set():
-                trial.interrupt()
-            elif driver in done:
-                driver.result()
-            else:
-                raise EvaluationError("routing observation worker failed")
-    except asyncio.CancelledError:
-        trial.interrupt()
-    except Exception:
-        failure = True
-    finally:
-        try:
-            restored = trial.now()
-            if trial.gate.restore(restored):
-                trial.event("RESTORED_DURING_CLEANUP", restored)
-        except EvaluationError:
-            failure = True
-        trial.foreground_stop.set()
-        trial.background_stop.set()
-        trial.poll_stop.set()
-        # Missing runners still terminalize all offers and close their clients.
-        if trial.foreground_task is None:
-            trial.start_foreground(selector)
-        if trial.background_task is None:
-            trial.start_background()
-        assert trial.foreground_task is not None and trial.background_task is not None
-        cleanup_ns = config.telemetry.cleanup_timeout_ns
-        try:
-            await _settle(
-                workers, 2 * cleanup_ns, cancel=True, on_interrupt=trial.interrupt
-            )
-        except EvaluationError:
-            failure = True
-        populations = [trial.foreground_task, trial.background_task]
-        replay_cleanup_ns = max(
-            config.foreground.bounds.cleanup_timeout_ns,
-            config.background.bounds.cleanup_timeout_ns,
-        )
-        try:
-            await _settle(
-                populations, 3 * replay_cleanup_ns, on_interrupt=trial.interrupt
-            )
-        except EvaluationError:
-            failure = True
-            with suppress(EvaluationError):
-                await _settle(
-                    populations,
-                    replay_cleanup_ns,
-                    cancel=True,
-                    on_interrupt=trial.interrupt,
-                )
-        closes = [
-            asyncio.create_task(probe.close())
-            for probe in (router_probe, observer_probe)
-        ]
-        try:
-            await _settle(closes, cleanup_ns, on_interrupt=trial.interrupt)
-        except EvaluationError:
-            failure = True
-            with suppress(EvaluationError):
-                await _settle(
-                    closes, cleanup_ns, cancel=True, on_interrupt=trial.interrupt
-                )
-        if any(
-            not task.done() or (not task.cancelled() and task.exception() is not None)
-            for task in workers
-        ):
-            failure = True
-        if any(
-            not task.done() or task.cancelled() or task.exception() is not None
-            for task in [*populations, *closes]
-        ):
-            failure = True
-    if failure:
-        raise EvaluationError("routing trial or cleanup failed") from None
-    if stop.is_set():
-        trial.interrupt()
+    decisions = await run_observation_session(trial, stop=stop)
+    assert trial.foreground_task is not None and trial.background_task is not None
     foreground = trial.foreground_task.result()
     background = trial.background_task.result()
     return RoutingFaultResult(
@@ -646,9 +769,9 @@ async def run_routing_fault(
         background=background,
         telemetry_bounds=config.telemetry.model_dump(),
         fault_schedule=config.fault.model_dump(),
-        decisions=tuple(selector.decisions),
+        decisions=tuple(decisions),
         observations=tuple(trial.observations),
         events=tuple(trial.events),
-        recovery=trial.recovery(selector.decisions, foreground, background),
+        recovery=trial.recovery(decisions, foreground, background),
         elapsed_ns=trial.now(),
     )
