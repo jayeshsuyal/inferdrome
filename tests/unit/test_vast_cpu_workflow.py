@@ -72,6 +72,22 @@ def test_only_manual_matching_modes_and_no_ambient_write_permission() -> None:
         assert job["timeout-minutes"] == "110"
 
 
+def test_runner_context_is_step_scoped_and_native_env_is_preserved() -> None:
+    document = workflow()
+    for job in document["jobs"].values():
+        # GitHub's context-availability table excludes runner from jobs.env.
+        assert job["env"] == {"PYTHONPATH": "${{ github.workspace }}/src"}
+        scopes = [document.get("env", {}), job["env"]]
+        scopes.extend(step.get("env", {}) for step in job["steps"])
+        for environment in scopes:
+            assert not any(key.startswith("RUNNER_") for key in environment)
+        for step in job["steps"]:
+            if "-m scripts.vast_cpu_build " in step.get("run", ""):
+                assert step["env"]["WORK_ROOT"] == (
+                    "${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}"
+                )
+
+
 @pytest.mark.parametrize("job_name,mode", MODES.items())
 @pytest.mark.parametrize(
     "changed,value",
@@ -170,9 +186,7 @@ def test_original_attempt_identity_and_deadlines_reach_every_helper_call() -> No
         "max-egress-bytes": "MAX_EGRESS_BYTES",
     }
     for job_name, job in document["jobs"].items():
-        assert job["env"]["WORK_ROOT"] == (
-            "${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}"
-        )
+        assert "WORK_ROOT" not in job["env"]
         commands = [
             step["run"]
             for step in job["steps"]

@@ -75,13 +75,7 @@ jobs:
     permissions:
       contents: read
     env:
-      WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
       PYTHONPATH: ${{ github.workspace }}/src
-      RUNNER_OS: ${{ runner.os }}
-      RUNNER_ARCH: ${{ runner.arch }}
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
-      RUNNER_NAME: ${{ runner.name }}
-      RUNNER_TEMP: ${{ runner.temp }}
     steps:
       - name: Reject the wrong dispatch or worker before checkout
         run: |
@@ -130,6 +124,8 @@ jobs:
 
       - name: Validate source binding and original attempt limits
         id: validate
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
         run: |
           set -euo pipefail
           python3 -m scripts.vast_cpu_build validate \
@@ -185,6 +181,8 @@ jobs:
           timeout --signal=TERM --kill-after=5s "$bootstrap_seconds" bash scripts/bootstrap_ci_uv.sh --extra dev
 
       - name: Qualify the fixed Linux amd64 image without GPU devices
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
         run: |
           set -euo pipefail
           .venv/bin/python -m scripts.vast_cpu_build qualify \
@@ -201,6 +199,8 @@ jobs:
 
       - name: Clean only this validated attempt's owned local resources
         if: ${{ always() && steps.validate.outcome == 'success' }}
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
         run: |
           set -euo pipefail
           python3 -m scripts.vast_cpu_build cleanup \
@@ -232,13 +232,7 @@ jobs:
       contents: read
       packages: write
     env:
-      WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
       PYTHONPATH: ${{ github.workspace }}/src
-      RUNNER_OS: ${{ runner.os }}
-      RUNNER_ARCH: ${{ runner.arch }}
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
-      RUNNER_NAME: ${{ runner.name }}
-      RUNNER_TEMP: ${{ runner.temp }}
     steps:
       - name: Reject the wrong dispatch or worker before checkout
         run: |
@@ -287,6 +281,8 @@ jobs:
 
       - name: Validate source binding and original attempt limits
         id: validate
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
         run: |
           set -euo pipefail
           python3 -m scripts.vast_cpu_build validate \
@@ -342,6 +338,8 @@ jobs:
           timeout --signal=TERM --kill-after=5s "$bootstrap_seconds" bash scripts/bootstrap_ci_uv.sh --extra dev
 
       - name: Qualify the fixed Linux amd64 image without GPU devices
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
         run: |
           set -euo pipefail
           .venv/bin/python -m scripts.vast_cpu_build qualify \
@@ -360,6 +358,7 @@ jobs:
       # confined to publication after qualification; never pass it to builds.
       - name: Publish only the qualified local receipt to the fixed private repository
         env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -377,6 +376,8 @@ jobs:
 
       - name: Clean only this validated attempt's owned local resources
         if: ${{ always() && steps.validate.outcome == 'success' }}
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
         run: |
           set -euo pipefail
           python3 -m scripts.vast_cpu_build cleanup \
