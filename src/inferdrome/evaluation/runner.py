@@ -139,6 +139,7 @@ class _Replay:
     stop: asyncio.Event
     selector: RouteSelector | None
     start_ns: int = 0
+    stop_at_ns: int | None = None
     measurements: list[Measurement] = field(default_factory=list)
     active: dict[asyncio.Task[None], int] = field(default_factory=dict)
     pending: deque[int] = field(default_factory=deque)
@@ -162,11 +163,17 @@ class _Replay:
             raise EvaluationError("duplicate evaluation terminal")
         observed = self.now() if observed_ns is None else observed_ns
         cutoff = self.cutoff_outcome(index, observed)
+        if cutoff == "CANCELLED":
+            self.cancelled = True
         measurement.outcome = cutoff or outcome
         measurement.terminal_ns = observed
 
     def cutoff_outcome(self, index: int, observed: int) -> Outcome | None:
-        if self.cancelled or self.stop.is_set():
+        if (
+            self.cancelled
+            or self.stop.is_set()
+            or (self.stop_at_ns is not None and observed >= self.stop_at_ns)
+        ):
             return "CANCELLED"
         end = self.config.bounds.duration_ns + self.config.bounds.drain_ns
         deadline = self.deadline(index)
@@ -285,12 +292,16 @@ class _Replay:
     async def execute(self) -> None:
         bounds = self.config.bounds
         end_ns = bounds.duration_ns + bounds.drain_ns
+        if self.stop_at_ns is not None:
+            end_ns = min(end_ns, self.stop_at_ns)
         stop_waiter = asyncio.create_task(self.stop.wait())
         try:
             while self.cursor < len(self.measurements) or self.active or self.pending:
                 self.harvest()
                 if self.stop.is_set() or self.now() >= end_ns:
-                    self.cancelled = self.stop.is_set()
+                    self.cancelled = self.stop.is_set() or (
+                        self.stop_at_ns is not None and self.now() >= self.stop_at_ns
+                    )
                     break
 
                 expired = [
@@ -415,10 +426,16 @@ async def run_evaluation(
     clock: Clock | None = None,
     stop: asyncio.Event | None = None,
     selector: RouteSelector | None = None,
+    start_ns: int | None = None,
+    stop_at_ns: int | None = None,
 ) -> EvaluationResult:
     """Take ownership of a cancellable transport and close it before returning.
 
     The injected clock must be monotonic and its sleep must be cancellable.
+    An optional shared start_ns preserves the recipe epoch across replays started
+    after warm-up; it must be a nonnegative integer no later than the current clock.
+    An optional trial-relative stop_at_ns cancels this population at that boundary,
+    including a final pre-dispatch check, independently of controller task ordering.
     Injectable transports/selectors are trusted code, never configuration input.
     Cleanup uses a real event-loop wall-time guard even with a simulated clock.
     """
@@ -435,8 +452,27 @@ async def run_evaluation(
         )
         for _ in config.offers
     ]
-    replay.start_ns = replay.clock.now_ns()
     try:
+        observed_start_ns = replay.clock.now_ns()
+        if start_ns is None:
+            replay.start_ns = observed_start_ns
+        else:
+            if (
+                isinstance(start_ns, bool)
+                or not isinstance(start_ns, int)
+                or not 0 <= start_ns <= observed_start_ns
+            ):
+                raise EvaluationError("evaluation start epoch violates its contract")
+            replay.start_ns = start_ns
+        if stop_at_ns is not None:
+            if (
+                type(stop_at_ns) is not int
+                or not 0
+                <= stop_at_ns
+                <= config.bounds.duration_ns + config.bounds.drain_ns
+            ):
+                raise EvaluationError("evaluation stop boundary violates its contract")
+            replay.stop_at_ns = stop_at_ns
         await replay.execute()
     finally:
         close = asyncio.create_task(transport.close())
