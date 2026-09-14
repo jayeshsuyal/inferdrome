@@ -18,6 +18,18 @@ from inferdrome.evaluation.files import OutputFile, read_input
 from inferdrome.evaluation.loopback import loopback_pair
 from inferdrome.evaluation.observations import AiohttpProbeTransport
 from inferdrome.evaluation.runner import EvaluationResult, run_evaluation
+from inferdrome.evaluation.study import (
+    StudyManifest,
+    plan_bytes,
+    preflight_metadata,
+    report_study,
+    run_study,
+)
+from inferdrome.evaluation.study_config import (
+    StudyConfig,
+    compile_study,
+    load_study_config_bytes,
+)
 from inferdrome.evaluation.transport import AiohttpTransport
 from inferdrome.routing_execution.canonical import canonical_json_bytes
 
@@ -98,6 +110,57 @@ async def demo() -> EvaluationResult:
     return replace(result, evidence_class="SYNTHETIC_ONLY")
 
 
+async def _run_study(config: StudyConfig, output_dir: Path) -> StudyManifest:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for sig in previous:
+            loop.add_signal_handler(sig, stop.set)
+        return await run_study(config, output_dir, stop=stop)
+    finally:
+        for sig, handler in previous.items():
+            loop.remove_signal_handler(sig)
+            signal.signal(sig, handler)
+
+
+def _study_command(args: argparse.Namespace) -> int:
+    config = load_study_config_bytes(read_input(args.config))
+    if args.command == "study-plan":
+        plan = compile_study(config)
+        preflight_metadata(plan)
+        with OutputFile(args.output) as destination:
+            destination.write(plan_bytes(plan))
+        print(
+            json.dumps(
+                {
+                    "planned_trials": len(plan.trials),
+                    "planned_replay_requests": plan.planned_request_count,
+                    "evidence_eligible": False,
+                }
+            )
+        )
+        return 0
+    if args.command == "study-run":
+        manifest = asyncio.run(_run_study(config, args.output_dir))
+        print(
+            json.dumps(
+                {
+                    "status": manifest.status,
+                    "returned_trials": sum(
+                        row.state == "RETURNED" for row in manifest.trials
+                    ),
+                    "planned_trials": len(manifest.trials),
+                    "evidence_eligible": False,
+                }
+            )
+        )
+        return {"COMPLETED": 0, "CANCELLED": 130, "ABORTED": 2}[manifest.status]
+    report_study(config, args.study_dir, args.output_dir)
+    print(json.dumps({"status": "REPORT_WRITTEN", "evidence_eligible": False}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Bounded inference evaluation v1")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -109,8 +172,20 @@ def main(argv: list[str] | None = None) -> int:
     routing_parser.add_argument("--output", required=True, type=Path)
     demo_parser = commands.add_parser("demo")
     demo_parser.add_argument("--output", required=True, type=Path)
+    study_plan_parser = commands.add_parser("study-plan")
+    study_plan_parser.add_argument("--config", required=True, type=Path)
+    study_plan_parser.add_argument("--output", required=True, type=Path)
+    study_run_parser = commands.add_parser("study-run")
+    study_run_parser.add_argument("--config", required=True, type=Path)
+    study_run_parser.add_argument("--output-dir", required=True, type=Path)
+    study_report_parser = commands.add_parser("study-report")
+    study_report_parser.add_argument("--config", required=True, type=Path)
+    study_report_parser.add_argument("--study-dir", required=True, type=Path)
+    study_report_parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.command in {"study-plan", "study-run", "study-report"}:
+            return _study_command(args)
         config = (
             load_config_bytes(read_input(args.config))
             if args.command == "run"
