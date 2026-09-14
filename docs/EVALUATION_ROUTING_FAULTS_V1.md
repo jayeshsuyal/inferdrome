@@ -333,9 +333,10 @@ cookies, redirects, retries, or decompression.
 
 The controller restores the publication gate and stops/drains owned workers,
 population clients, and probe clients on completion, cancellation, or failure.
-Cleanup uses real event-loop time even for a simulated trial clock. A cleanup
-or internal execution failure blocks completed-result publication; it does not
-produce a record claiming clean completion. The cleanup assertion concerns
+Cleanup uses real event-loop time even for a simulated trial clock. A controller,
+observation-worker, or cleanup failure blocks completed-result publication;
+it does not produce a record claiming clean completion. Per-request unexpected
+failures retain PR1's `INTERNAL_ERROR` outcome. The cleanup assertion concerns
 client tasks and connections, not independent verification of a remote engine's
 request state.
 
@@ -354,7 +355,8 @@ The result schema is `inferdrome.evaluation-routing-result.v1`. Trial status is
 lifecycle; inspect both populations' individual outcomes to assess requests.
 The CLI exits 0 for completed trials, 2 for warm-up failure or execution/input
 failure, and 130 for cancellation. Warm-up failure can produce a completed
-measurement record describing that failure; internal or cleanup failures cannot.
+measurement record describing that failure; controller, observation-worker,
+or cleanup failures cannot.
 All PR1 planned-offer denominators, failures, partial timings, and usage
 provenance remain intact. Background offered/dispatched/completed/error counts
 stay separate from foreground traffic.
