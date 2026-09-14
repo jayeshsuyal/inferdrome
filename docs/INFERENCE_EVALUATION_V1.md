@@ -264,6 +264,28 @@ or raw server-error message is retained in the result.
 | `DRAIN_TIMEOUT` | Run-wide drain cutoff stopped an outstanding schedule entry. |
 | `INTERNAL_ERROR` | Trusted injected code or an unexpected execution path failed. |
 
+### Known HTTP-framing limitation
+
+With the pinned aiohttp 3.13.5 C parser, an invalid HTTP chunk size received
+after headers have been delivered can close the socket without waking the
+body reader. The evaluator's scheduled-origin deadline still terminates the
+request as `TIMEOUT` and closes its client tasks/connections. The loopback test
+explicitly gates that sequence and checks this bounded failure. Malformed
+framing delivered during initial response parsing may instead surface as
+`TRANSPORT_ERROR`; TCP read boundaries are not a reliable error taxonomy.
+The pure-Python parser fallback may expose a different error timing; the
+compiled-parser regression is marked accordingly. This failure can occupy a
+concurrency slot until its deadline and affect subsequent client admission.
+
+Therefore `TIMEOUT` means the client did not complete by its declared deadline;
+it is not proof of slow model inference or an overloaded engine. Failed and
+partial requests remain in the offered population. No successful latency or
+token measurements are inferred from this failure. This dependency limitation
+does not justify using private client protocol state to invent a more precise
+diagnosis. The relevant pinned paths are aiohttp's
+[HTTP parser error handling](https://github.com/aio-libs/aiohttp/blob/v3.13.5/aiohttp/_http_parser.pyx)
+and [response exception propagation](https://github.com/aio-libs/aiohttp/blob/v3.13.5/aiohttp/client_proto.py).
+
 ## Why the measurement adapter is separate from benchmark tooling
 
 The integration decision was checked against **vLLM 0.26.0** documentation and

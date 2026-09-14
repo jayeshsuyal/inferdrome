@@ -451,7 +451,8 @@ def test_real_sse_eof_and_errors_have_one_sanitized_terminal(
         ("compressed", "STREAM_ERROR", 200),
         ("short-content-length", "INCOMPLETE_STREAM", 200),
         ("truncated-chunk", "INCOMPLETE_STREAM", 200),
-        ("malformed-chunk", "TRANSPORT_ERROR", None),
+        ("malformed-status", "TRANSPORT_ERROR", None),
+        ("malformed-chunk-after-headers", "TIMEOUT", 200),
         ("disconnect", "TRANSPORT_ERROR", None),
     ],
 )
@@ -460,7 +461,32 @@ def test_http_errors_framing_and_redirects_are_bounded(
     outcome: str,
     status: int | None,
 ) -> None:
+    from aiohttp.http_parser import HttpResponseParser
+
+    if (
+        case == "malformed-chunk-after-headers"
+        and HttpResponseParser.__module__ != "aiohttp._http_parser"
+    ):
+        pytest.skip("regression covers the pinned compiled HTTP parser")
+
     async def exercise() -> None:
+        headers_observed = asyncio.Event()
+        malformed_server_closed = asyncio.Event()
+
+        class HeadersObservedTransport(AiohttpTransport):
+            async def stream(
+                self,
+                origin: str,
+                body: bytes,
+                on_headers: Callable[[int], None],
+                on_bytes: Callable[[bytes], None],
+            ) -> None:
+                def observe(status: int) -> None:
+                    on_headers(status)
+                    headers_observed.set()
+
+                await super().stream(origin, body, observe, on_bytes)
+
         async def handler(
             request: _Request,
             _reader: asyncio.StreamReader,
@@ -492,10 +518,21 @@ def test_http_errors_framing_and_redirects_are_bounded(
                 await _headers(writer, extra=b"Transfer-Encoding: chunked\r\n")
                 writer.write(f"{len(_SUCCESS) + 100:x}\r\n".encode() + _SUCCESS)
                 await writer.drain()
-            elif case == "malformed-chunk":
+            elif case == "malformed-status":
+                writer.write(b"HTTP/1.1 NOT_A_STATUS\r\n\r\n")
+                await writer.drain()
+            elif case == "malformed-chunk-after-headers":
                 await _headers(writer, extra=b"Transfer-Encoding: chunked\r\n")
+                await headers_observed.wait()
+                # aiohttp 3.13.5's C parser drops the rejected chunk's payload.
+                # Once headers were delivered, its payload reader receives no
+                # exception/EOF. The gate fixes this phase deterministically;
+                # the declared request deadline still bounds client cleanup.
                 writer.write(b"NOT_HEXADECIMAL\r\n" + _SUCCESS + b"0\r\n\r\n")
                 await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                malformed_server_closed.set()
             elif case == "disconnect":
                 writer.transport.abort()
             else:
@@ -503,11 +540,15 @@ def test_http_errors_framing_and_redirects_are_bounded(
 
         async with _servers(handler) as pair:
             config = _config(pair)
-            transport = AiohttpTransport(config)
+            transport = HeadersObservedTransport(config)
             result = await asyncio.wait_for(
                 run_evaluation(config, transport), _GUARD_SECONDS
             )
             assert len(pair.requests) == 1  # No retry and no redirect follow-up.
+            if case == "malformed-chunk-after-headers":
+                assert headers_observed.is_set()
+                assert malformed_server_closed.is_set()
+                assert result.records[0].terminal_ns >= config.bounds.request_timeout_ns
             assert result.records[0].outcome == outcome
             assert result.records[0].http_status == status
             assert result.records[0].attempts == 1
