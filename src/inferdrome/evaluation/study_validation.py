@@ -127,6 +127,13 @@ def _record(
         _optional_integer(row[name])
     terminal = _integer(row["terminal_ns"], elapsed)
     outcome = _literal(row["outcome"], OUTCOMES)
+    if routing == "FIXED_ASSIGNMENT":
+        _require(outcome != "REJECTED_ROUTE", "fixed route outcome")
+        if row["endpoint_id"] is not None:
+            _require(
+                row["endpoint_id"] == config.offers[index].endpoint_id,
+                "fixed assignment",
+            )
     arrival, dispatch = row["arrival_observed_ns"], row["dispatch_ns"]
     if arrival is not None:
         _require(scheduled <= arrival <= terminal, "arrival ordering")
@@ -136,11 +143,6 @@ def _record(
         )
         _require(row["dispatch_lag_ns"] == dispatch - scheduled, "dispatch lag")
         _literal(row["endpoint_id"], _ENDPOINTS)
-        if routing == "FIXED_ASSIGNMENT":
-            _require(
-                row["endpoint_id"] == config.offers[index].endpoint_id,
-                "fixed assignment",
-            )
         _require(dispatch < cutoff, "dispatch cutoff")
     else:
         _require(row["dispatch_lag_ns"] is None, "absent dispatch lag")
