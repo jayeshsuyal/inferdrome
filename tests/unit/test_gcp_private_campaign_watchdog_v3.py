@@ -5,6 +5,7 @@ from __future__ import annotations
 import multiprocessing
 import os
 import signal
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,6 +38,7 @@ from inferdrome.deployment.gcp_private_campaign_watchdog_v3 import (
     GcpPrivateCampaignFileFakeWorkerState,
     GcpPrivateCampaignWatchdog,
     GcpPrivateCampaignWatchdogActivationRecord,
+    GcpPrivateCampaignWatchdogEvent,
     _WatchdogStore,
     read_gcp_private_campaign_file_fake_worker_state,
     write_gcp_private_campaign_file_fake_worker_state,
@@ -186,6 +188,190 @@ def _request(
     return build_gcp_private_campaign_create_request(
         proposal=proposal, startup_payload=startup
     )
+
+
+def _store_only_activation_record() -> GcpPrivateCampaignWatchdogActivationRecord:
+    """Build a canonical synthetic binding without activating any worker."""
+
+    proposal, startup, approval, cleanup = _fresh_inputs()
+    now = datetime.now(UTC)
+    binding_seed = watchdog_v3.GcpPrivateCampaignWatchdogBinding.model_construct(
+        schema_version=watchdog_v3.GCP_PRIVATE_CAMPAIGN_WATCHDOG_SCHEMA_VERSION,
+        proposal=proposal,
+        request=_request(proposal, startup),
+        cleanup_authorization=cleanup,
+        approval_sha256=sha256_digest(watchdog_v3._canonical(approval)),
+        journal_root_sha256=sha256_digest(b"store-only synthetic journal"),
+        journal_identity=GcpPrivateCampaignJournalIdentity(
+            root_device=1, root_inode=2, event_device=1, event_inode=3
+        ),
+        execution_deadline_at=_timestamp(now + timedelta(seconds=30)),
+        cleanup_deadline_at=_timestamp(now + timedelta(seconds=60)),
+        parent_process_id=1234,
+        creator_liveness_mode="pid_observation_only_v1",
+        worker_backend="file_fake_cleanup_v1",
+        binding_digest="sha256:" + "0" * 64,
+    )
+    binding = binding_seed.model_copy(
+        update={
+            "binding_digest": watchdog_v3.gcp_private_campaign_watchdog_binding_digest(
+                binding_seed
+            )
+        }
+    )
+    record_seed = GcpPrivateCampaignWatchdogActivationRecord.model_construct(
+        schema_version=watchdog_v3.GCP_PRIVATE_CAMPAIGN_WATCHDOG_RECORD_SCHEMA_VERSION,
+        binding=binding,
+        activated_at=_timestamp(now),
+        activation_id="sha256:" + "0" * 64,
+    )
+    record = record_seed.model_copy(
+        update={
+            "activation_id": watchdog_v3.gcp_private_campaign_watchdog_activation_id(
+                record_seed
+            )
+        }
+    )
+    return GcpPrivateCampaignWatchdogActivationRecord.model_validate_json(
+        watchdog_v3._canonical(record)
+    )
+
+
+def test_store_load_events_waits_for_locked_partial_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fcntl = pytest.importorskip("fcntl")
+    root = _private_root(tmp_path, "event-store")
+    record = _store_only_activation_record()
+    writer_store, reader_store = _WatchdogStore(root), _WatchdogStore(root)
+    ready = writer_store.append_event(
+        record,
+        state="WORKER_READY",
+        worker_process_id=1234,
+        occurred_at=datetime.now(UTC),
+    )
+    partial_written = threading.Event()
+    release_writer = threading.Event()
+    reader_checkpoint = threading.Event()
+    reader_contended = threading.Event()
+    reader_finished = threading.Event()
+    failures: list[BaseException] = []
+    appended: list[GcpPrivateCampaignWatchdogEvent] = []
+    loaded: list[tuple[GcpPrivateCampaignWatchdogEvent, ...]] = []
+    write_all = _WatchdogStore._write_all
+    flock = fcntl.flock
+
+    def append() -> None:
+        try:
+            appended.append(
+                writer_store.append_event(
+                    record,
+                    state="RECOVERY_ATTEMPT",
+                    worker_process_id=1234,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    def read() -> None:
+        try:
+            loaded.append(reader_store.load_events(record))
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            reader_finished.set()
+            reader_checkpoint.set()
+
+    writer = threading.Thread(target=append, daemon=True)
+    reader = threading.Thread(target=read, daemon=True)
+
+    def partial_write(descriptor: int, content: bytes) -> None:
+        assert threading.current_thread() is writer
+        split = len(content) // 2
+        write_all(descriptor, content[:split])
+        partial_written.set()
+        assert release_writer.wait(3), "test owner did not release the writer"
+        write_all(descriptor, content[split:])
+
+    def observe_flock(descriptor: int, operation: int) -> None:
+        if threading.current_thread() is reader and operation == fcntl.LOCK_EX:
+            # Establish actual kernel contention, not merely that the reader
+            # thread started. The probe acquires no lock when it would block.
+            try:
+                flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                reader_contended.set()
+                reader_checkpoint.set()
+            else:
+                raise AssertionError("reader lock did not conflict with writer lock")
+        flock(descriptor, operation)
+
+    monkeypatch.setattr(_WatchdogStore, "_write_all", staticmethod(partial_write))
+    monkeypatch.setattr(fcntl, "flock", observe_flock)
+    writer.start()
+    try:
+        assert partial_written.wait(3), "writer did not reach the partial append"
+        reader.start()
+        assert reader_checkpoint.wait(3), "reader reached neither lock nor completion"
+        assert reader_contended.is_set(), f"reader bypassed writer lock: {failures!r}"
+        assert not reader_finished.is_set()
+    finally:
+        release_writer.set()
+        writer.join(3)
+        if reader.ident is not None:
+            reader.join(3)
+    assert not writer.is_alive() and not reader.is_alive()
+    assert failures == []
+    assert len(appended) == len(loaded) == 1
+    assert loaded[0] == (ready, appended[0])
+    assert appended[0].previous_event_digest == ready.event_digest
+    events_path = root / writer_store._events_name(
+        record.binding.proposal.ownership_labels.controller_id
+    )
+    assert events_path.read_bytes() == b"".join(
+        watchdog_v3._canonical(event) + b"\n" for event in loaded[0]
+    )
+
+
+def test_store_load_events_preserves_missing_events(tmp_path: Path) -> None:
+    store = _WatchdogStore(_private_root(tmp_path, "missing-events"))
+    assert store.load_events(_store_only_activation_record()) == ()
+
+
+@pytest.mark.parametrize("mutation", ["empty", "truncated", "tampered"])
+def test_store_load_events_rejects_corrupt_history(
+    tmp_path: Path, mutation: str
+) -> None:
+    root = _private_root(tmp_path, "corrupt-events")
+    store = _WatchdogStore(root)
+    record = _store_only_activation_record()
+    event = store.append_event(
+        record,
+        state="WORKER_READY",
+        worker_process_id=1234,
+        occurred_at=datetime.now(UTC),
+    )
+    assert store.load_events(record) == (event,)
+    canonical = watchdog_v3._canonical(event) + b"\n"
+    if mutation == "empty":
+        content = b""
+    elif mutation == "truncated":
+        content = canonical[:-1]
+    else:
+        content = canonical.replace(
+            b'"worker_process_id":1234', b'"worker_process_id":1235'
+        )
+        assert content != canonical and len(content) == len(canonical)
+    events_path = root / store._events_name(
+        record.binding.proposal.ownership_labels.controller_id
+    )
+    events_path.write_bytes(content)
+    expected = (
+        "WATCHDOG_RECORD_INVALID" if mutation == "empty" else "WATCHDOG_EVENTS_INVALID"
+    )
+    with pytest.raises(GcpPrivateCampaignError, match=expected):
+        store.load_events(record)
 
 
 def _require_linux_pidfd() -> None:

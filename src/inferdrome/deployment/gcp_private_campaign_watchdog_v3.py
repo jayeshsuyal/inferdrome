@@ -457,8 +457,7 @@ class _WatchdogStore:
         self, record: GcpPrivateCampaignWatchdogActivationRecord
     ) -> tuple[GcpPrivateCampaignWatchdogEvent, ...]:
         controller_id = record.binding.proposal.ownership_labels.controller_id
-        root = self._open_root()
-        try:
+        with self._exclusive(controller_id) as root:
             try:
                 raw = self._read_regular(root, self._events_name(controller_id))
             except GcpPrivateCampaignError as error:
@@ -466,8 +465,6 @@ class _WatchdogStore:
                     return ()
                 raise
             return self._parse_events(raw, activation_id=record.activation_id)
-        finally:
-            root.close()
 
     def append_event(
         self,
