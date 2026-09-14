@@ -1,0 +1,402 @@
+name: Qualify and optionally publish the fixed Vast CPU image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact reviewed lowercase 40-character source commit.
+        required: true
+        type: string
+      expected_ref:
+        description: Exact refs/heads/main or refs/heads/codex/add-vast-process-adapter.
+        required: true
+        type: string
+      execution_mode:
+        description: CPU qualification only, or separately authorized publication.
+        required: true
+        type: choice
+        options:
+          - QUALIFY_ONLY
+          - PUBLISH_QUALIFIED_VAST
+      confirmation:
+        description: Must exactly match execution_mode.
+        required: true
+        type: choice
+        options:
+          - QUALIFY_ONLY
+          - PUBLISH_QUALIFIED_VAST
+      expected_runner_name:
+        description: Exact alias of the single approved ephemeral CPU worker.
+        required: true
+        type: string
+      attempt_start:
+        description: Original attempt start in UTC YYYY-MM-DDTHH:MM:SSZ.
+        required: true
+        type: string
+      execution_deadline:
+        description: Original attempt_start plus 105 minutes in UTC.
+        required: true
+        type: string
+      cleanup_deadline:
+        description: Original attempt_start plus 120 minutes in UTC.
+        required: true
+        type: string
+      max_egress_bytes:
+        description: Approved maximum outbound bytes for this one attempt.
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: inferdrome-vast-cpu-${{ inputs.expected_runner_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_COMMIT: ${{ inputs.source_commit }}
+  EXPECTED_REF: ${{ inputs.expected_ref }}
+  EXECUTION_MODE: ${{ inputs.execution_mode }}
+  MODE_CONFIRMATION: ${{ inputs.confirmation }}
+  EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+  ATTEMPT_START: ${{ inputs.attempt_start }}
+  EXECUTION_DEADLINE: ${{ inputs.execution_deadline }}
+  CLEANUP_DEADLINE: ${{ inputs.cleanup_deadline }}
+  MAX_EGRESS_BYTES: ${{ inputs.max_egress_bytes }}
+
+jobs:
+  qualify-only:
+    if: ${{ github.repository == 'jayeshsuyal/inferdrome' && github.event_name == 'workflow_dispatch' && inputs.execution_mode == 'QUALIFY_ONLY' }}
+    runs-on: [self-hosted, Linux, X64, inferdrome-vast-cpu]
+    timeout-minutes: 110
+    permissions:
+      contents: read
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+    steps:
+      - name: Reject the wrong dispatch or worker before checkout
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "jayeshsuyal/inferdrome" ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]] || exit 1
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$EXPECTED_REF" == "refs/heads/main" || "$EXPECTED_REF" == "refs/heads/codex/add-vast-process-adapter" ]] || exit 1
+          [[ "$EXPECTED_REF" == "$GITHUB_REF" ]] || exit 1
+          [[ "$EXECUTION_MODE" == "QUALIFY_ONLY" && "$MODE_CONFIRMATION" == "$EXECUTION_MODE" ]] || exit 1
+          [[ "$EXPECTED_RUNNER_NAME" =~ ^[a-z][a-z0-9-]{2,62}$ ]] || exit 1
+          [[ "$RUNNER_NAME" == "$EXPECTED_RUNNER_NAME" ]] || exit 1
+          [[ "$RUNNER_OS" == "Linux" && "$RUNNER_ARCH" == "X64" && "$RUNNER_ENVIRONMENT" == "self-hosted" ]] || exit 1
+
+      - name: Bound checkout by the original setup deadline
+        id: precheckout
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import math
+          import os
+          from datetime import UTC, datetime, timedelta
+          raw = os.environ["ATTEMPT_START"]
+          start = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+          now = datetime.now(UTC)
+          if start.strftime("%Y-%m-%dT%H:%M:%SZ") != raw or now < start:
+              raise SystemExit("invalid original attempt clock")
+          deadline = start + timedelta(minutes=15)
+          minutes = min(5, math.floor(((deadline - now).total_seconds() - 5) / 60))
+          if minutes < 1:
+              raise SystemExit("original setup deadline exhausted")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("checkout_minutes=" + str(minutes), file=output)
+          PY
+
+      - name: Check out the exact reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: ${{ fromJSON(steps.precheckout.outputs.checkout_minutes) }}
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate source binding and original attempt limits
+        id: validate
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.vast_cpu_build validate \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --expected-ref "$EXPECTED_REF" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --attempt-start "$ATTEMPT_START" \
+            --execution-deadline "$EXECUTION_DEADLINE" \
+            --cleanup-deadline "$CLEANUP_DEADLINE" \
+            --work-root "$WORK_ROOT" \
+            --attempt-id "$GITHUB_RUN_ID" \
+            --max-egress-bytes "$MAX_EGRESS_BYTES"
+
+          python3 - <<'PY'
+          import math
+          import os
+          from datetime import UTC, datetime, timedelta
+          raw = os.environ["ATTEMPT_START"]
+          start = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+          now = datetime.now(UTC)
+          if start.strftime("%Y-%m-%dT%H:%M:%SZ") != raw or now < start:
+              raise SystemExit("invalid original attempt clock")
+          deadline = start + timedelta(minutes=15)
+          minutes = min(5, math.floor(((deadline - now).total_seconds() - 5) / 60))
+          if minutes < 1:
+              raise SystemExit("original setup deadline exhausted")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("setup_minutes=" + str(minutes), file=output)
+          PY
+
+      - name: Set up pinned Python for the approved worker
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        timeout-minutes: ${{ fromJSON(steps.validate.outputs.setup_minutes) }}
+        with:
+          python-version: "3.12"
+
+      - name: Prepare the frozen development environment within the original deadline
+        run: |
+          set -euo pipefail
+          bootstrap_seconds="$(python3 - <<'PY'
+          import math
+          import os
+          from datetime import UTC, datetime, timedelta
+          start = datetime.strptime(os.environ["ATTEMPT_START"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+          deadline = start + timedelta(minutes=15)
+          remaining = math.floor((deadline - datetime.now(UTC)).total_seconds() - 5)
+          if remaining <= 0:
+              raise SystemExit("original setup deadline exhausted")
+          print(min(600, remaining))
+          PY
+          )"
+          timeout --signal=TERM --kill-after=5s "$bootstrap_seconds" bash scripts/bootstrap_ci_uv.sh --extra dev
+
+      - name: Qualify the fixed Linux amd64 image without GPU devices
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m scripts.vast_cpu_build qualify \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --expected-ref "$EXPECTED_REF" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --attempt-start "$ATTEMPT_START" \
+            --execution-deadline "$EXECUTION_DEADLINE" \
+            --cleanup-deadline "$CLEANUP_DEADLINE" \
+            --work-root "$WORK_ROOT" \
+            --attempt-id "$GITHUB_RUN_ID" \
+            --max-egress-bytes "$MAX_EGRESS_BYTES"
+
+      - name: Clean only this validated attempt's owned local resources
+        if: ${{ always() && steps.validate.outcome == 'success' }}
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.vast_cpu_build cleanup \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --expected-ref "$EXPECTED_REF" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --attempt-start "$ATTEMPT_START" \
+            --execution-deadline "$EXECUTION_DEADLINE" \
+            --cleanup-deadline "$CLEANUP_DEADLINE" \
+            --work-root "$WORK_ROOT" \
+            --attempt-id "$GITHUB_RUN_ID" \
+            --max-egress-bytes "$MAX_EGRESS_BYTES"
+
+      - name: Retain only sanitized bounded JSON evidence
+        if: ${{ always() && steps.validate.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inferdrome-vast-cpu-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}/evidence/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish-qualified-vast:
+    if: ${{ github.repository == 'jayeshsuyal/inferdrome' && github.event_name == 'workflow_dispatch' && inputs.execution_mode == 'PUBLISH_QUALIFIED_VAST' }}
+    runs-on: [self-hosted, Linux, X64, inferdrome-vast-cpu]
+    timeout-minutes: 110
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+    steps:
+      - name: Reject the wrong dispatch or worker before checkout
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "jayeshsuyal/inferdrome" ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]] || exit 1
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$EXPECTED_REF" == "refs/heads/main" || "$EXPECTED_REF" == "refs/heads/codex/add-vast-process-adapter" ]] || exit 1
+          [[ "$EXPECTED_REF" == "$GITHUB_REF" ]] || exit 1
+          [[ "$EXECUTION_MODE" == "PUBLISH_QUALIFIED_VAST" && "$MODE_CONFIRMATION" == "$EXECUTION_MODE" ]] || exit 1
+          [[ "$EXPECTED_RUNNER_NAME" =~ ^[a-z][a-z0-9-]{2,62}$ ]] || exit 1
+          [[ "$RUNNER_NAME" == "$EXPECTED_RUNNER_NAME" ]] || exit 1
+          [[ "$RUNNER_OS" == "Linux" && "$RUNNER_ARCH" == "X64" && "$RUNNER_ENVIRONMENT" == "self-hosted" ]] || exit 1
+
+      - name: Bound checkout by the original setup deadline
+        id: precheckout
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import math
+          import os
+          from datetime import UTC, datetime, timedelta
+          raw = os.environ["ATTEMPT_START"]
+          start = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+          now = datetime.now(UTC)
+          if start.strftime("%Y-%m-%dT%H:%M:%SZ") != raw or now < start:
+              raise SystemExit("invalid original attempt clock")
+          deadline = start + timedelta(minutes=15)
+          minutes = min(5, math.floor(((deadline - now).total_seconds() - 5) / 60))
+          if minutes < 1:
+              raise SystemExit("original setup deadline exhausted")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("checkout_minutes=" + str(minutes), file=output)
+          PY
+
+      - name: Check out the exact reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: ${{ fromJSON(steps.precheckout.outputs.checkout_minutes) }}
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate source binding and original attempt limits
+        id: validate
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.vast_cpu_build validate \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --expected-ref "$EXPECTED_REF" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --attempt-start "$ATTEMPT_START" \
+            --execution-deadline "$EXECUTION_DEADLINE" \
+            --cleanup-deadline "$CLEANUP_DEADLINE" \
+            --work-root "$WORK_ROOT" \
+            --attempt-id "$GITHUB_RUN_ID" \
+            --max-egress-bytes "$MAX_EGRESS_BYTES"
+
+          python3 - <<'PY'
+          import math
+          import os
+          from datetime import UTC, datetime, timedelta
+          raw = os.environ["ATTEMPT_START"]
+          start = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+          now = datetime.now(UTC)
+          if start.strftime("%Y-%m-%dT%H:%M:%SZ") != raw or now < start:
+              raise SystemExit("invalid original attempt clock")
+          deadline = start + timedelta(minutes=15)
+          minutes = min(5, math.floor(((deadline - now).total_seconds() - 5) / 60))
+          if minutes < 1:
+              raise SystemExit("original setup deadline exhausted")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("setup_minutes=" + str(minutes), file=output)
+          PY
+
+      - name: Set up pinned Python for the approved worker
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        timeout-minutes: ${{ fromJSON(steps.validate.outputs.setup_minutes) }}
+        with:
+          python-version: "3.12"
+
+      - name: Prepare the frozen development environment within the original deadline
+        run: |
+          set -euo pipefail
+          bootstrap_seconds="$(python3 - <<'PY'
+          import math
+          import os
+          from datetime import UTC, datetime, timedelta
+          start = datetime.strptime(os.environ["ATTEMPT_START"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+          deadline = start + timedelta(minutes=15)
+          remaining = math.floor((deadline - datetime.now(UTC)).total_seconds() - 5)
+          if remaining <= 0:
+              raise SystemExit("original setup deadline exhausted")
+          print(min(600, remaining))
+          PY
+          )"
+          timeout --signal=TERM --kill-after=5s "$bootstrap_seconds" bash scripts/bootstrap_ci_uv.sh --extra dev
+
+      - name: Qualify the fixed Linux amd64 image without GPU devices
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m scripts.vast_cpu_build qualify \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --expected-ref "$EXPECTED_REF" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --attempt-start "$ATTEMPT_START" \
+            --execution-deadline "$EXECUTION_DEADLINE" \
+            --cleanup-deadline "$CLEANUP_DEADLINE" \
+            --work-root "$WORK_ROOT" \
+            --attempt-id "$GITHUB_RUN_ID" \
+            --max-egress-bytes "$MAX_EGRESS_BYTES"
+
+      # The job permission applies throughout this job. Explicit token access is
+      # confined to publication after qualification; never pass it to builds.
+      - name: Publish only the qualified local receipt to the fixed private repository
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m scripts.vast_cpu_build publish \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --expected-ref "$EXPECTED_REF" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --attempt-start "$ATTEMPT_START" \
+            --execution-deadline "$EXECUTION_DEADLINE" \
+            --cleanup-deadline "$CLEANUP_DEADLINE" \
+            --work-root "$WORK_ROOT" \
+            --attempt-id "$GITHUB_RUN_ID" \
+            --max-egress-bytes "$MAX_EGRESS_BYTES"
+
+      - name: Clean only this validated attempt's owned local resources
+        if: ${{ always() && steps.validate.outcome == 'success' }}
+        env:
+          WORK_ROOT: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.vast_cpu_build cleanup \
+            --mode "$EXECUTION_MODE" \
+            --source-commit "$SOURCE_COMMIT" \
+            --expected-ref "$EXPECTED_REF" \
+            --expected-runner-name "$EXPECTED_RUNNER_NAME" \
+            --attempt-start "$ATTEMPT_START" \
+            --execution-deadline "$EXECUTION_DEADLINE" \
+            --cleanup-deadline "$CLEANUP_DEADLINE" \
+            --work-root "$WORK_ROOT" \
+            --attempt-id "$GITHUB_RUN_ID" \
+            --max-egress-bytes "$MAX_EGRESS_BYTES"
+
+      - name: Retain only sanitized bounded JSON evidence
+        if: ${{ always() && steps.validate.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inferdrome-vast-cpu-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/inferdrome-vast-${{ github.run_id }}/evidence/*.json
+          if-no-files-found: warn
+          retention-days: 14
