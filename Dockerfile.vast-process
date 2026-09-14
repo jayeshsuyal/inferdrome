@@ -14,10 +14,11 @@ RUN /usr/bin/python3.12 -I -m venv --without-pip /opt/inferdrome-runtime \
     && /usr/local/bin/uv sync --frozen --no-dev --no-editable --python /opt/inferdrome-runtime/bin/python --no-python-downloads \
     && /usr/local/bin/uv venv /opt/inferdrome-downloader --python /usr/bin/python3.12 --no-python-downloads \
     && /usr/local/bin/uv pip install --python /opt/inferdrome-downloader/bin/python --require-hashes --only-binary=:all: -r /build/requirements-vast-downloader.txt
-# Record the resolved OS package inventory with the qualified image; current
-# apt sources remain mutable until a reviewed snapshot/package lock is added.
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server openssh-client passwd openssl login \
+# Required generated inputs come from the exact-base, signed-snapshot resolver.
+# The qualifying build has no package-network access and checks the full inventory.
+ARG OS_PACKAGE_LOCK_SHA256
+COPY os-input/ /build/os-input/
+RUN --network=none /usr/bin/python3.12 -I /build/os-input/install.py install /build/os-input --seconds 900 --lock-sha256 "$OS_PACKAGE_LOCK_SHA256" \
     && rm -f /etc/ssh/ssh_host_* /etc/ssh/sshrc \
     && rm -rf /var/lib/apt/lists/*
 RUN /usr/bin/python3.12 -I - <<'PY'
@@ -123,7 +124,10 @@ RUN /opt/inferdrome-runtime/bin/python -I -c 'import json,re,sys; from inferdrom
 FROM scratch
 COPY --from=runtime / /
 ARG SOURCE_REPOSITORY_COMMIT
+ARG OS_PACKAGE_LOCK_SHA256
 LABEL org.opencontainers.image.revision="${SOURCE_REPOSITORY_COMMIT}" \
+      org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome" \
+      com.inferdrome.os-package-lock-sha256="${OS_PACKAGE_LOCK_SHA256}" \
       com.inferdrome.runtime-role="vast-process-campaign" \
       com.inferdrome.vllm-version="0.26.0" \
       com.inferdrome.isolation="separate-processes-shared-container"

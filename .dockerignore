@@ -15,6 +15,8 @@
 !LICENSES/**
 !src/
 !src/**
+!os-input/
+!os-input/**
 
 # Never allow host state or credentials through the allowlist.
 src/**/__pycache__/
