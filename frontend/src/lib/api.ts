@@ -222,6 +222,64 @@ export class ApiError extends Error {
   }
 }
 
+/** Bounded GET for the additive evaluation projection; shares in-memory auth. */
+export async function fetchBoundedDashboardJson(
+  path: string,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  let response: Response;
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (dashboardToken !== null) headers.Authorization = `Bearer ${dashboardToken}`;
+    response = await fetch(`${API_ROOT}${path}`, { method: "GET", headers, signal, cache: "no-store" });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError("The local Inferdrome dashboard service is unavailable. Start it and try again.", 0);
+  }
+  // Evaluation failures never reflect server/source text into the browser.
+  if (!response.ok) {
+    const message = response.status === 401 ? "Dashboard authentication failed."
+      : response.status === 404 ? "This evaluation report is unavailable."
+        : "Evaluation reports are unavailable. Try again.";
+    throw new ApiError(message, response.status);
+  }
+  const declaredLength = response.headers.get("content-length");
+  if ((declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > maxBytes))
+    || !/^application\/json(?:;|$)/i.test(response.headers.get("content-type") ?? "")
+    || response.body === null) {
+    throw protocolError("the evaluation response headers are unsupported");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw protocolError("the evaluation response exceeds its byte limit");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof ApiError || (error instanceof DOMException && error.name === "AbortError")) throw error;
+    throw protocolError("the evaluation response body could not be read");
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    throw protocolError("the evaluation body is not valid JSON");
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

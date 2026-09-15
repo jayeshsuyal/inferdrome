@@ -916,7 +916,7 @@ test.describe("populated dashboard", () => {
         await expect(page.locator(".runs-table tbody tr")).toHaveCount(4);
 
         const names = [
-          "Runs", "Trial sets", "Routing campaigns", "Routing executions",
+          "Runs", "Trial sets", "Evaluations", "Routing campaigns", "Routing executions",
           "Causal qualification", "Run detail", "Comparisons", "Evidence",
         ];
         const navigation = dashboardNavigation(page);

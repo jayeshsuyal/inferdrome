@@ -14,6 +14,7 @@ _LOOPBACK_HOST = "127.0.0.1"
 def run_dashboard(
     runs_root: Path,
     *,
+    evaluation_reports_catalog: Path | None = None,
     trial_sets_root: Path | None = None,
     comparison_plans_root: Path | None = None,
     comparison_results_root: Path | None = None,
@@ -44,6 +45,7 @@ def run_dashboard(
             comparison_plans_root=comparison_plans_root,
             comparison_results_root=comparison_results_root,
         ),
+        evaluation_reports_catalog=evaluation_reports_catalog,
         routing_campaigns_root=routing_campaigns_root,
         routing_qualifications_root=routing_qualifications_root,
         expected_routing_qualification_digest=expected_routing_qualification_digest,

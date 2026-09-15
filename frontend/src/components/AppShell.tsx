@@ -26,6 +26,8 @@ function initialTheme(): Theme {
 }
 
 function pathLabel(pathname: string): string {
+  if (/^\/evaluations\/.+/.test(pathname)) return "Evidence / Evaluation report";
+  if (pathname.startsWith("/evaluations")) return "Evidence / Evaluations";
   if (/^\/routing-executions\/.+/.test(pathname)) return "Evidence / Routing execution detail";
   if (pathname.startsWith("/routing-executions")) return "Evidence / Routing executions";
   if (/^\/routing-qualifications\/.+/.test(pathname)) return "Evidence / Causal qualification detail";
@@ -78,6 +80,7 @@ export function AppShell({ children }: PropsWithChildren) {
     () => [
       { label: "Runs", to: "/runs", icon: LayoutDashboard, end: true },
       { label: "Trial sets", to: "/trial-sets", icon: Layers3 },
+      { label: "Evaluations", to: "/evaluations", icon: Activity },
       { label: "Routing campaigns", to: "/routing-campaigns", icon: Route },
       { label: "Routing executions", to: "/routing-executions", icon: Fingerprint },
       { label: "Causal qualification", to: "/routing-qualifications", icon: GitCompareArrows },

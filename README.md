@@ -406,6 +406,7 @@ provider-neutral.
 - [Managed real-GPU proof](docs/REAL_GPU_PROOF.md)
 - [CLI and orchestration](docs/CLI.md)
 - [Local evidence dashboard](docs/DASHBOARD.md)
+- [Pinned study and prefix-cache report viewer](docs/EVALUATION_DASHBOARD.md)
 - [Local product demo](docs/LOCAL_DEMO.md)
 - [Repeated trial sets](docs/TRIAL_SETS.md)
 - [Controlled comparisons](docs/CONTROLLED_COMPARISONS.md)

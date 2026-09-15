@@ -12,6 +12,14 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from inferdrome.dashboard.auth import DashboardKeyringStore, validate_token_shape
+from inferdrome.dashboard.evaluation_report_models import (
+    EvaluationReportDetail,
+    EvaluationReportIndex,
+)
+from inferdrome.dashboard.evaluation_reports import (
+    EvaluationReportNotFound,
+    EvaluationReportsIndex,
+)
 from inferdrome.dashboard.index import DashboardIndex
 from inferdrome.dashboard.models import (
     ComparisonResponse,
@@ -119,6 +127,8 @@ def create_app(
     index: DashboardIndex | None = None,
     *,
     runs_root: Path | None = None,
+    evaluation_report_index: EvaluationReportsIndex | None = None,
+    evaluation_reports_catalog: Path | None = None,
     routing_campaign_index: RoutingCampaignDashboardIndex | None = None,
     routing_campaigns_root: Path | None = None,
     routing_qualification_index: RoutingQualificationDashboardIndex | None = None,
@@ -136,6 +146,10 @@ def create_app(
         index = DashboardIndex(runs_root)
     elif runs_root is not None:
         raise ValueError("create_app accepts either an index or runs root, not both")
+    if evaluation_report_index is not None and evaluation_reports_catalog is not None:
+        raise ValueError("create_app accepts either an evaluation index or catalog")
+    if evaluation_report_index is None:
+        evaluation_report_index = EvaluationReportsIndex(evaluation_reports_catalog)
     if routing_campaign_index is not None and routing_campaigns_root is not None:
         raise ValueError(
             "create_app accepts either a routing campaign index or root, not both"
@@ -215,6 +229,34 @@ def create_app(
     protected_dependencies = (
         [Depends(require_dashboard_read)] if auth_store is not None else []
     )
+
+    @app.get(
+        "/api/v1/evaluation-reports",
+        response_model=EvaluationReportIndex,
+        dependencies=protected_dependencies,
+    )
+    def list_evaluation_reports() -> EvaluationReportIndex:
+        try:
+            return evaluation_report_index.refresh()
+        except DashboardError:
+            raise HTTPException(
+                503, detail="Evaluation reports are temporarily unavailable."
+            ) from None
+
+    @app.get(
+        "/api/v1/evaluation-reports/{report_id}",
+        response_model=EvaluationReportDetail,
+        dependencies=protected_dependencies,
+    )
+    def get_evaluation_report(report_id: str) -> EvaluationReportDetail:
+        try:
+            return evaluation_report_index.get_report(report_id)
+        except EvaluationReportNotFound:
+            raise HTTPException(404, detail="Evaluation report not found.") from None
+        except DashboardError:
+            raise HTTPException(
+                503, detail="Evaluation reports are temporarily unavailable."
+            ) from None
 
     @app.get(
         "/api/v1/runs",
