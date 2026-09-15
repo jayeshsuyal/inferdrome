@@ -1,4 +1,4 @@
-import { ApiError, fetchBoundedDashboardJson } from "./api";
+import { ApiError, EvaluationScanBusyError, fetchBoundedDashboardJson } from "./api";
 
 export const EVALUATION_VERSION = "inferdrome.evaluation-dashboard.v1";
 export const EVALUATION_POLICIES = [
@@ -387,10 +387,47 @@ export function parseEvaluationDetail(value: unknown, expectedId: string): Evalu
   return detail;
 }
 
+const MAX_SCAN_BUSY_RETRIES = 4;
+const SCAN_BUSY_DELAY_MS = 1000;
+
+function waitForEvaluationScan(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cancelled = () => new DOMException("The evaluation request was cancelled.", "AbortError");
+    if (signal?.aborted) {
+      reject(cancelled());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(cancelled());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, SCAN_BUSY_DELAY_MS);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function fetchEvaluationJson(path: string, maxBytes: number, signal?: AbortSignal): Promise<unknown> {
+  // Only the server's exact scan-contention signal admits another read. The
+  // five-GET ceiling adds at most four one-second waits, without shared state.
+  for (let retries = 0; ; retries += 1) {
+    if (signal?.aborted) throw new DOMException("The evaluation request was cancelled.", "AbortError");
+    try {
+      return await fetchBoundedDashboardJson(path, maxBytes, signal);
+    } catch (error) {
+      if (!(error instanceof EvaluationScanBusyError) || retries === MAX_SCAN_BUSY_RETRIES) throw error;
+      await waitForEvaluationScan(signal);
+    }
+  }
+}
+
 export const evaluationApi = {
-  list: async (signal?: AbortSignal): Promise<EvaluationReportIndex> => parseEvaluationIndex(await fetchBoundedDashboardJson("/evaluation-reports", 65_536, signal)),
+  list: async (signal?: AbortSignal): Promise<EvaluationReportIndex> => parseEvaluationIndex(await fetchEvaluationJson("/evaluation-reports", 65_536, signal)),
   detail: async (id: string, signal?: AbortSignal): Promise<EvaluationReportDetail> => {
     if (!reportId(id)) throw new ApiError("This evaluation report is unavailable.", 404);
-    return parseEvaluationDetail(await fetchBoundedDashboardJson(`/evaluation-reports/${encodeURIComponent(id)}`, 4 * 1024 * 1024, signal), id);
+    return parseEvaluationDetail(await fetchEvaluationJson(`/evaluation-reports/${encodeURIComponent(id)}`, 4 * 1024 * 1024, signal), id);
   },
 };

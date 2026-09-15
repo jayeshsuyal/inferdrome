@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, fetchBoundedDashboardJson, setDashboardToken } from "./api";
+import { ApiError, EvaluationScanBusyError, fetchBoundedDashboardJson, setDashboardToken } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -9,6 +9,31 @@ function response(body: string, status = 200, headers: Record<string, string> = 
 }
 
 describe("bounded evaluation GET", () => {
+  it("recognizes only the explicit one-second evaluation scan-contention response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response('{"detail":"private-source"}', 503, {
+      "X-Inferdrome-Evaluation-Busy": "1", "Retry-After": "1",
+    })));
+    const error = await fetchBoundedDashboardJson("/evaluation-reports", 64).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(EvaluationScanBusyError);
+    expect((error as Error).message).toBe("Evaluation reports are busy. Try again.");
+  });
+
+  it.each([
+    [503, {}],
+    [503, { "Retry-After": "1" }],
+    [503, { "X-Inferdrome-Evaluation-Busy": "1" }],
+    [503, { "X-Inferdrome-Evaluation-Busy": "0", "Retry-After": "1" }],
+    [503, { "X-Inferdrome-Evaluation-Busy": "1", "Retry-After": "2" }],
+    [401, { "X-Inferdrome-Evaluation-Busy": "1", "Retry-After": "1" }],
+    [404, { "X-Inferdrome-Evaluation-Busy": "1", "Retry-After": "1" }],
+  ] as const)("does not classify status %s with unsupported headers %o as busy", async (status, headers) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response("{}", status, headers)));
+    const error = await fetchBoundedDashboardJson("/evaluation-reports", 64).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(EvaluationScanBusyError);
+    expect((error as ApiError).status).toBe(status);
+  });
+
   it("uses the existing in-memory bearer and no-store on a read-only request", async () => {
     setDashboardToken("test-token");
     const fetch = vi.fn().mockResolvedValue(response('{"reports":[]}'));

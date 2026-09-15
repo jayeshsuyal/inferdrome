@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -43,6 +43,34 @@ function open(path = "/evaluations") {
 }
 
 describe("Evaluations views", () => {
+  it("disables index refresh while loading and restores it after completion", async () => {
+    let complete!: (value: Awaited<ReturnType<typeof evaluationApi.list>>) => void;
+    vi.mocked(evaluationApi.list).mockReturnValueOnce(new Promise((resolve) => { complete = resolve; }));
+    open();
+    const button = screen.getByRole("button", { name: "Refresh reports" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(evaluationApi.list).toHaveBeenCalledTimes(1);
+    await act(async () => complete({ projection_version: EVALUATION_VERSION, reports: [study.summary], rejected: [] }));
+    expect(button).toBeEnabled();
+    expect(button).toHaveAttribute("aria-busy", "false");
+  });
+
+  it("keeps a disabled detail refresh control visible during its pending load", async () => {
+    let complete!: (value: EvaluationReportDetail) => void;
+    vi.mocked(evaluationApi.detail).mockReturnValueOnce(new Promise((resolve) => { complete = resolve; }));
+    open(`/evaluations/${cache.summary.report_id}`);
+    const button = screen.getByRole("button", { name: "Refresh report" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(button);
+    expect(evaluationApi.detail).toHaveBeenCalledTimes(1);
+    await act(async () => complete(cache));
+    expect(screen.getByRole("button", { name: "Refresh report" })).toBeEnabled();
+  });
+
   it("filters the bounded index and keeps the evidence boundary visible", async () => {
     const user = userEvent.setup();
     open();

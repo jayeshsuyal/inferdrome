@@ -222,6 +222,13 @@ export class ApiError extends Error {
   }
 }
 
+export class EvaluationScanBusyError extends ApiError {
+  constructor() {
+    super("Evaluation reports are busy. Try again.", 503);
+    this.name = "EvaluationScanBusyError";
+  }
+}
+
 /** Bounded GET for the additive evaluation projection; shares in-memory auth. */
 export async function fetchBoundedDashboardJson(
   path: string,
@@ -239,6 +246,11 @@ export async function fetchBoundedDashboardJson(
   }
   // Evaluation failures never reflect server/source text into the browser.
   if (!response.ok) {
+    if (response.status === 503
+      && response.headers.get("x-inferdrome-evaluation-busy") === "1"
+      && response.headers.get("retry-after") === "1") {
+      throw new EvaluationScanBusyError();
+    }
     const message = response.status === 401 ? "Dashboard authentication failed."
       : response.status === 404 ? "This evaluation report is unavailable."
         : "Evaluation reports are unavailable. Try again.";

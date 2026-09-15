@@ -33,6 +33,10 @@ DEFAULT_COMPARISON_SNAPSHOT_WORK: Final = WorkLimits(
 )
 
 
+class DashboardSnapshotBusy(DashboardError):
+    """A snapshot slot is occupied; no source work was admitted."""
+
+
 @dataclass(frozen=True)
 class DashboardLimits:
     """Local v0.1 discovery and aggregate verification ceilings."""
@@ -169,7 +173,9 @@ class DashboardWorkController:
     @contextmanager
     def session(self, limits: WorkLimits) -> Iterator[WorkBudget]:
         if not self._build_slots.acquire(blocking=False):
-            raise DashboardError("dashboard snapshot concurrency limit was exceeded")
+            raise DashboardSnapshotBusy(
+                "dashboard snapshot concurrency limit was exceeded"
+            )
         try:
             budget = _DashboardWorkBudget(
                 limits,

@@ -352,7 +352,11 @@ function EvaluationDetailContent({ detail, refresh }: {
 export function EvaluationDetailView() {
   const { reportId } = useParams();
   const request = useEvaluationDetail(reportId);
-  const header = <PageHeader title="Evaluation report" subtitle="Read-only results from one pinned report." />;
+  const header = <PageHeader
+    title="Evaluation report"
+    subtitle="Read-only results from one pinned report."
+    action={<button type="button" className="button button-secondary" onClick={request.retry} disabled={request.pendingRefresh} aria-busy={request.pendingRefresh}><RefreshCw aria-hidden="true" />Refresh report</button>}
+  />;
   if (request.status === "loading") return <>
     {header}
     <LoadingState label="Reading pinned evaluation report…" />
