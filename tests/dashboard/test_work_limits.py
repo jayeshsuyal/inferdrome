@@ -11,7 +11,11 @@ from fastapi.testclient import TestClient
 
 from inferdrome.dashboard.api import create_app
 from inferdrome.dashboard.index import DashboardIndex
-from inferdrome.dashboard.work import DashboardLimits, DashboardWorkController
+from inferdrome.dashboard.work import (
+    DashboardLimits,
+    DashboardSnapshotBusy,
+    DashboardWorkController,
+)
 from inferdrome.errors import DashboardError, WorkLimitError
 from inferdrome.limits import WorkLimits
 
@@ -22,10 +26,25 @@ def test_dashboard_controller_rejects_a_concurrent_snapshot_build() -> None:
 
     with (
         controller.session(limits.run_snapshot_work),
-        pytest.raises(DashboardError, match="concurrency limit"),
+        pytest.raises(DashboardSnapshotBusy, match="concurrency limit"),
         controller.session(limits.run_snapshot_work),
     ):
         raise AssertionError("concurrent work session should not start")
+
+
+def test_existing_run_contention_does_not_advertise_evaluation_retry(
+    tmp_path: Path,
+) -> None:
+    limits = DashboardLimits(max_concurrent_snapshot_builds=1)
+    index = DashboardIndex(tmp_path / "runs", limits=limits)
+    with index._work_controller.session(limits.run_snapshot_work):
+        response = TestClient(create_app(index)).get("/api/v1/runs")
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "dashboard verification work is temporarily unavailable"
+    }
+    assert "x-inferdrome-evaluation-busy" not in response.headers
+    assert "retry-after" not in response.headers
 
 
 def test_default_controller_admits_eight_lightweight_builds_but_not_nine() -> None:

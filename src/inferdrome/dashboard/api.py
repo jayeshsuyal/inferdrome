@@ -47,6 +47,7 @@ from inferdrome.dashboard.routing_qualification_models import (
     RoutingQualificationDetail,
     RoutingQualificationIndexResponse,
 )
+from inferdrome.dashboard.work import DashboardSnapshotBusy
 from inferdrome.errors import (
     DashboardAuthError,
     DashboardControlledComparisonNotFound,
@@ -238,6 +239,12 @@ def create_app(
     def list_evaluation_reports() -> EvaluationReportIndex:
         try:
             return evaluation_report_index.refresh()
+        except DashboardSnapshotBusy:
+            raise HTTPException(
+                503,
+                detail="Evaluation reports are temporarily unavailable.",
+                headers={"X-Inferdrome-Evaluation-Busy": "1", "Retry-After": "1"},
+            ) from None
         except DashboardError:
             raise HTTPException(
                 503, detail="Evaluation reports are temporarily unavailable."
@@ -253,6 +260,12 @@ def create_app(
             return evaluation_report_index.get_report(report_id)
         except EvaluationReportNotFound:
             raise HTTPException(404, detail="Evaluation report not found.") from None
+        except DashboardSnapshotBusy:
+            raise HTTPException(
+                503,
+                detail="Evaluation reports are temporarily unavailable.",
+                headers={"X-Inferdrome-Evaluation-Busy": "1", "Retry-After": "1"},
+            ) from None
         except DashboardError:
             raise HTTPException(
                 503, detail="Evaluation reports are temporarily unavailable."

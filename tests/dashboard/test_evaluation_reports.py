@@ -304,6 +304,8 @@ def test_invalid_outer_catalog_is_generic_unavailable(
     assert response.json() == {
         "detail": "Evaluation reports are temporarily unavailable."
     }
+    assert "x-inferdrome-evaluation-busy" not in response.headers
+    assert "retry-after" not in response.headers
 
 
 def test_empty_disabled_catalog_and_bad_id(tmp_path: Path) -> None:
@@ -361,6 +363,98 @@ def test_work_exhaustion_and_concurrent_admission_are_bounded(tmp_path: Path) ->
     index = EvaluationReportsIndex(catalog, clock=lambda: now.pop(0) if now else 100.0)
     with pytest.raises(DashboardError):
         index.refresh()
+
+
+@pytest.mark.parametrize("detail", [False, True])
+def test_only_authenticated_scan_contention_gets_retry_hint(
+    tmp_path: Path, detail: bool
+) -> None:
+    path, _ = write_cache_report(tmp_path / "source")
+    index = EvaluationReportsIndex(_catalog(tmp_path, [("PREFIX_CACHE", path)]))
+    report_id = index.refresh().reports[0].report_id
+    keyring = DashboardKeyringStore(tmp_path / "keyring.json")
+    token, record = keyring.create("contention-test")
+    client = TestClient(
+        create_app(
+            runs_root=tmp_path / "runs",
+            evaluation_report_index=index,
+            keyring_path=keyring.path,
+        )
+    )
+    url = "/api/v1/evaluation-reports" + (f"/{report_id}" if detail else "")
+    headers = {"Authorization": "Bearer " + token}
+    with index._controller.session(index.work_limits):
+        unauthorized = client.get(url)
+        assert unauthorized.status_code == 401
+        assert "x-inferdrome-evaluation-busy" not in unauthorized.headers
+        busy = client.get(url, headers=headers)
+        assert busy.status_code == 503
+        assert busy.json() == {
+            "detail": "Evaluation reports are temporarily unavailable."
+        }
+        assert busy.headers["x-inferdrome-evaluation-busy"] == "1"
+        assert busy.headers["retry-after"] == "1"
+        assert busy.headers["cache-control"] == "no-store"
+        assert str(tmp_path) not in busy.text
+    recovered = client.get(url, headers=headers)
+    assert recovered.status_code == 200
+    assert "x-inferdrome-evaluation-busy" not in recovered.headers
+    keyring.revoke(record.key_id)
+    with index._controller.session(index.work_limits):
+        revoked = client.get(url, headers=headers)
+        assert revoked.status_code == 401
+        assert "x-inferdrome-evaluation-busy" not in revoked.headers
+
+
+@pytest.mark.parametrize("exhaustion", ["bytes", "deadline"])
+def test_evaluation_work_exhaustion_is_not_retryable_contention(
+    tmp_path: Path, exhaustion: str
+) -> None:
+    path, _ = write_cache_report(tmp_path / "source")
+    catalog = _catalog(tmp_path, [("PREFIX_CACHE", path)])
+    report_id = EvaluationReportsIndex(catalog).refresh().reports[0].report_id
+    if exhaustion == "bytes":
+        index = EvaluationReportsIndex(
+            catalog,
+            work_limits=WorkLimits(max_units=1, max_bytes=CATALOG_LIMIT, max_seconds=1),
+        )
+    else:
+        ticks = iter(range(0, 1000, 100))
+        index = EvaluationReportsIndex(catalog, clock=lambda: float(next(ticks)))
+    client = TestClient(
+        create_app(runs_root=tmp_path / "runs", evaluation_report_index=index)
+    )
+    for url in (
+        "/api/v1/evaluation-reports",
+        f"/api/v1/evaluation-reports/{report_id}",
+    ):
+        response = client.get(url)
+        assert response.status_code == 503
+        assert "x-inferdrome-evaluation-busy" not in response.headers
+        assert "retry-after" not in response.headers
+
+
+def test_after_contention_a_changed_pin_cannot_recover_stale_detail(
+    tmp_path: Path,
+) -> None:
+    path, _ = write_cache_report(tmp_path / "source")
+    index = EvaluationReportsIndex(_catalog(tmp_path, [("PREFIX_CACHE", path)]))
+    report_id = index.refresh().reports[0].report_id
+    client = TestClient(
+        create_app(runs_root=tmp_path / "runs", evaluation_report_index=index)
+    )
+    url = f"/api/v1/evaluation-reports/{report_id}"
+    assert client.get(url).status_code == 200
+    with index._controller.session(index.work_limits):
+        assert client.get(url).headers["x-inferdrome-evaluation-busy"] == "1"
+        path.chmod(0o600)
+        path.write_bytes(b"{}\n")
+    response = client.get(url)
+    assert response.status_code == 404
+    assert "x-inferdrome-evaluation-busy" not in response.headers
+    current = client.get("/api/v1/evaluation-reports").json()
+    assert current["reports"] == []
+    assert current["rejected"][0]["code"] == "DIGEST_MISMATCH"
 
 
 def test_viewer_does_not_execute_replay_tokenize_write_or_open_archives(

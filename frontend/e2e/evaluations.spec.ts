@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -138,6 +138,160 @@ async function noOverflow(page: Page): Promise<void> {
   expect(sizes.body, JSON.stringify(sizes.overflow)).toBeLessThanOrEqual(sizes.width);
   expect(sizes.document, JSON.stringify(sizes.overflow)).toBeLessThanOrEqual(sizes.width);
 }
+
+interface RaceObservation {
+  readonly responses: { status: number; path: string; busy: string | null; retryAfter: string | null }[];
+  readonly pageErrors: string[];
+  readonly visibleErrors: () => Promise<string[]>;
+}
+
+async function observeRefreshRace(page: Page): Promise<RaceObservation> {
+  const responses: { status: number; path: string; busy: string | null; retryAfter: string | null }[] = [];
+  const pageErrors: string[] = [];
+  page.on("response", (response) => {
+    const path = new URL(response.url()).pathname;
+    const headers = response.headers();
+    if (path.startsWith("/api/v1/evaluation-reports")) responses.push({ status: response.status(), path, busy: headers["x-inferdrome-evaluation-busy"] ?? null, retryAfter: headers["retry-after"] ?? null });
+  });
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.evaluate(() => {
+    const state = window as unknown as { evaluationRaceErrors: string[] };
+    state.evaluationRaceErrors = [];
+    const observer = new MutationObserver(() => {
+      for (const title of ["The evaluation-report index is unavailable", "This evaluation report could not be opened"]) {
+        if (document.body.innerText.includes(title) && !state.evaluationRaceErrors.includes(title)) state.evaluationRaceErrors.push(title);
+      }
+      if (location.pathname === "/evaluations" && document.querySelector('select[aria-label="Block"], select[aria-label="Trial"]')) {
+        if (!state.evaluationRaceErrors.includes("Stale detail visible on index route")) state.evaluationRaceErrors.push("Stale detail visible on index route");
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  });
+  return { responses, pageErrors, visibleErrors: () => page.evaluate(() => (window as unknown as { evaluationRaceErrors: string[] }).evaluationRaceErrors) };
+}
+
+async function attachRace(testInfo: TestInfo, observations: readonly (RaceObservation | undefined)[]): Promise<void> {
+  const values = [];
+  for (const observation of observations) {
+    if (observation) values.push({ responses: observation.responses, pageErrors: observation.pageErrors, visibleErrors: await observation.visibleErrors() });
+  }
+  await testInfo.attach("real-refresh-race-observations", { body: JSON.stringify(values, null, 2), contentType: "application/json" });
+}
+
+test("refresh recovery: rapid 25 ms double-click keeps the real index available", async ({ page }, testInfo) => {
+  const fixture = prepare("complete", 8);
+  let server: Server | undefined;
+  let observed: RaceObservation | undefined;
+  try {
+    server = await start(fixture);
+    await page.goto(`${server.url}/evaluations`);
+    await expect(page.getByRole("link", { name: "Prefix-cache report 5", exact: true })).toBeVisible();
+    observed = await observeRefreshRace(page);
+    await page.getByRole("button", { name: "Refresh reports", exact: true }).dblclick({ delay: 25 });
+    await expect(page.getByRole("link", { name: "Prefix-cache report 5", exact: true })).toBeVisible();
+    await expect(page.getByRole("main")).toContainText("128 returned records");
+    await expect(page.getByRole("button", { name: "Refresh reports", exact: true })).toBeEnabled();
+    expect(await observed.visibleErrors()).toEqual([]);
+    expect(observed.pageErrors).toEqual([]);
+    expect(observed.responses.some((response) => response.status === 200)).toBe(true);
+    expect(observed.responses.filter((response) => response.status === 503)).toEqual([]);
+  } finally { await attachRace(testInfo, [observed]); await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("refresh recovery: detail refresh then immediate navigation reaches the real index", async ({ page }, testInfo) => {
+  const fixture = prepare("complete", 8);
+  let server: Server | undefined;
+  let observed: RaceObservation | undefined;
+  try {
+    server = await start(fixture);
+    const report = lookup(fixture, await summaries(page, server.url), "cache-complete");
+    await openReport(page, server, report);
+    observed = await observeRefreshRace(page);
+    await page.getByRole("button", { name: "Refresh report", exact: true }).click();
+    await page.getByRole("navigation").getByRole("link", { name: "Evaluations", exact: true }).click();
+    await expect(page).toHaveURL(`${server.url}/evaluations`);
+    await expect(page.getByRole("link", { name: report.label, exact: true })).toBeVisible();
+    await expect(page.getByRole("main")).toContainText("128 returned records");
+    await expect(page.getByLabel("Block", { exact: true })).toHaveCount(0);
+    expect(await observed.visibleErrors()).toEqual([]);
+    expect(observed.pageErrors).toEqual([]);
+    expect(observed.responses.some((response) => response.status === 200 && response.path === "/api/v1/evaluation-reports")).toBe(true);
+  } finally { await attachRace(testInfo, [observed]); await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("refresh recovery: overlapping browser tabs recover an actual busy response", async ({ page, context }, testInfo) => {
+  const fixture = prepare("complete", 8);
+  const other = await context.newPage();
+  let server: Server | undefined;
+  let first: RaceObservation | undefined;
+  let second: RaceObservation | undefined;
+  try {
+    server = await start(fixture);
+    const report = lookup(fixture, await summaries(page, server.url), "cache-complete");
+    await page.goto(`${server.url}/evaluations`);
+    await expect(page.getByRole("link", { name: report.label, exact: true })).toBeVisible();
+    await openReport(other, server, report);
+    first = await observeRefreshRace(page);
+    second = await observeRefreshRace(other);
+    await Promise.all([
+      page.getByRole("button", { name: "Refresh reports", exact: true }).click(),
+      other.getByRole("button", { name: "Refresh report", exact: true }).click(),
+    ]);
+    await expect(page.getByRole("link", { name: report.label, exact: true })).toBeVisible();
+    await expect(other.getByRole("heading", { name: report.label, exact: true })).toBeVisible();
+    await expect(page.getByRole("main")).toContainText("128 returned records");
+    await expect(other.getByLabel("Block", { exact: true })).toBeVisible();
+    expect([...first.responses, ...second.responses].some((response) => response.status === 503 && response.busy === "1" && response.retryAfter === "1")).toBe(true);
+    expect(await first.visibleErrors()).toEqual([]);
+    expect(await second.visibleErrors()).toEqual([]);
+    expect([...first.pageErrors, ...second.pageErrors]).toEqual([]);
+  } finally { await attachRace(testInfo, [first, second]); await other.close(); await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("refresh recovery: a changed pin during an actual busy response stays withheld", async ({ page, context }, testInfo) => {
+  const fixture = prepare("complete", 8);
+  const other = await context.newPage();
+  let server: Server | undefined;
+  let first: RaceObservation | undefined;
+  let second: RaceObservation | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    server = await start(fixture);
+    const report = lookup(fixture, await summaries(page, server.url), "cache-complete");
+    await openReport(page, server, report);
+    await openReport(other, server, report);
+    first = await observeRefreshRace(page);
+    second = await observeRefreshRace(other);
+    const sourcePath = fixture.reports["cache-complete"].report_path;
+    const originalBytes = readFileSync(sourcePath);
+    let changed = false;
+    const busyPage = new Promise<Page>((resolveBusy, reject) => {
+      deadline = setTimeout(() => reject(new Error("The real overlapping scans did not return a busy response")), 10_000);
+      for (const candidate of [page, other]) candidate.on("response", (response) => {
+        if (!changed && response.status() === 503 && new URL(response.url()).pathname === `/api/v1/evaluation-reports/${report.report_id}`) {
+          changed = true;
+          chmodSync(sourcePath, 0o600);
+          writeFileSync(sourcePath, Buffer.concat([originalBytes, Buffer.from(" ")]));
+          if (deadline) clearTimeout(deadline);
+          resolveBusy(candidate);
+        }
+      });
+    });
+    await Promise.all([
+      page.getByRole("button", { name: "Refresh report", exact: true }).click(),
+      other.getByRole("button", { name: "Refresh report", exact: true }).click(),
+    ]);
+    const withheld = await busyPage;
+    await expect(withheld.getByText("This evaluation report could not be opened", { exact: true })).toBeVisible();
+    await expect(withheld.getByText(TRUST, { exact: true })).toHaveCount(0);
+    await expect(withheld.getByLabel("Block", { exact: true })).toHaveCount(0);
+    await expect(withheld.getByRole("main")).not.toContainText(fixture.root);
+    const observed = withheld === page ? first : second;
+    expect(observed.responses.some((response) => response.status === 503 && response.busy === "1" && response.retryAfter === "1")).toBe(true);
+    expect(observed.responses.some((response) => response.status === 404)).toBe(true);
+    expect(observed.pageErrors).toEqual([]);
+  } finally { if (deadline) clearTimeout(deadline); await attachRace(testInfo, [first, second]); await other.close(); await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
+});
 
 test("real reports index, filter, trial and block selectors preserve authoritative values", async ({ page }) => {
   const fixture = prepare();

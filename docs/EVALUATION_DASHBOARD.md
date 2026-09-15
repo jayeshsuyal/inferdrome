@@ -146,8 +146,15 @@ Withheld index entries expose fixed reason codes (`CONFIGURATION_INVALID`,
 `REPORT_UNAVAILABLE`, `DIGEST_MISMATCH`, `REPORT_INVALID`, `PROJECTION_LIMIT`).
 An invalid outer catalog or exhausted work capacity produces a generic 503;
 unknown or no-longer-valid report identities produce a generic 404. Retry
-buttons repeat read requests only. Auth checks precede source work, and API
-responses preserve the app's no-store and response-security headers.
+buttons repeat read requests only. Refresh is disabled while an evaluation
+request is pending. Only an occupied scan slot returns the evaluation-specific
+busy header and `Retry-After: 1`: the evaluation client can retry that response
+at most four times, waiting one second each time. Navigation and authentication
+changes cancel pending retries, and every admitted attempt rechecks the source.
+Other errors are not automatically retried; continued contention shows the
+explicit error and retry action after the bounded attempts. Auth checks precede
+source work, and API responses preserve the app's no-store and response-security
+headers.
 
 This connector is additional product integration. The frozen three-policy,
 six-request routing views and their evidence contracts are unchanged. PR5

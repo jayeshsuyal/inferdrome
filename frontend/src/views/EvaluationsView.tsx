@@ -14,7 +14,7 @@ export function EvaluationsView() {
   const header = <PageHeader
     title="Evaluations"
     subtitle="Bounded read-only study and prefix-cache reports, with separate coverage and comparison status."
-    action={<button type="button" className="button button-secondary" onClick={request.retry}><RefreshCw aria-hidden="true" />Refresh reports</button>}
+    action={<button type="button" className="button button-secondary" onClick={request.retry} disabled={request.pendingRefresh} aria-busy={request.pendingRefresh}><RefreshCw aria-hidden="true" />Refresh reports</button>}
   />;
   if (request.status === "loading") return <>
     {header}
