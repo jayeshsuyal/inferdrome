@@ -1,4 +1,4 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -128,6 +128,15 @@ async function openReport(page: Page, server: Server, report: Summary): Promise<
   await page.goto(`${server.url}/evaluations/${report.report_id}`);
   await expect(page.getByRole("heading", { name: report.label, exact: true })).toBeVisible();
   await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
+}
+
+async function openDisclosure(page: Page, label: string): Promise<Locator> {
+  const summary = page.locator("summary").filter({ hasText: label });
+  await expect(summary).toHaveCount(1);
+  const details = summary.locator("..");
+  if (await details.getAttribute("open") === null) await summary.click();
+  await expect(details).toHaveAttribute("open", "");
+  return details;
 }
 
 async function noOverflow(page: Page): Promise<void> {
@@ -308,9 +317,12 @@ test("real reports index, filter, trial and block selectors preserve authoritati
     await expect(page.getByRole("link", { name: cache.label, exact: true })).toHaveCount(0);
     await page.getByRole("link", { name: study.label, exact: true }).click();
     await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
+    await openDisclosure(page, "Exact policy values");
     await expect(page.getByRole("main")).toContainText("33.333333");
     await expect(page.getByRole("main")).toContainText("27.777778");
+    await openDisclosure(page, "Trial measurements");
     await page.getByLabel("Trial", { exact: true }).selectOption({ index: 3 });
+    await openDisclosure(page, "Exact population values");
     await expect(page.getByRole("main")).toContainText("0.833333");
     await page.getByLabel("Population", { exact: true }).selectOption("background");
     await expect(page.getByLabel("Population", { exact: true })).toHaveValue("background");
@@ -320,11 +332,14 @@ test("real reports index, filter, trial and block selectors preserve authoritati
     await expect(page.getByRole("heading", { name: "Evaluations", exact: true })).toBeVisible();
     await page.getByLabel("Report kind").selectOption("PREFIX_CACHE");
     await page.getByRole("link", { name: cache.label, exact: true }).click();
+    await openDisclosure(page, "Exact contrast values");
     await expect(page.getByRole("main")).toContainText("33.333333");
     await expect(page.getByRole("main")).toContainText("11.111111");
     await expect(page.getByRole("main")).toContainText("22.222222");
     await page.getByLabel("Block", { exact: true }).selectOption({ index: 2 });
+    await openDisclosure(page, "Cell measurements");
     await page.getByLabel("Cell", { exact: true }).selectOption("S1");
+    await openDisclosure(page, "Exact population values");
     await expect(page.getByRole("main")).toContainText("44.444444");
     await expect(page.getByRole("main")).toContainText("Synthetic only");
     await noOverflow(page);
@@ -344,11 +359,13 @@ test("mobile report journeys remain legible, keyboard reachable and theme safe a
       for (const name of ["study-complete", "cache-complete"]) {
         await openReport(page, server, lookup(fixture, list, name));
         await noOverflow(page);
+        if (name.startsWith("study")) await openDisclosure(page, "Trial measurements");
         const selector = page.getByLabel(name.startsWith("study") ? "Trial" : "Block", { exact: true });
         await selector.focus();
         await expect(selector).toBeFocused();
         await page.keyboard.press("ArrowDown");
         await page.keyboard.press("Enter");
+        await openDisclosure(page, name.startsWith("study") ? "Exact policy values" : "Exact contrast values");
         await expect(page.getByRole("main")).toContainText("33.333333");
         await page.getByRole("button", { name: /Switch to .* theme/ }).click();
         await noOverflow(page);
@@ -361,6 +378,88 @@ test("mobile report journeys remain legible, keyboard reachable and theme safe a
       await noOverflow(page);
     }
   } finally { await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("study disclosures support keyboard use while summary and censored recovery stay visible", async ({ page }) => {
+  const fixture = prepare("censored", 8);
+  let server: Server | undefined;
+  try {
+    server = await start(fixture);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const report = lookup(fixture, await summaries(page, server.url), "study-complete");
+    await openReport(page, server, report);
+    await expect(page.getByRole("heading", { name: "Report overview", exact: true })).toBeVisible();
+    await expect(page.getByRole("table", { name: "Four evaluation policies and reported goodput summaries", exact: true })).toBeVisible();
+    await expect(page.getByLabel("Trial", { exact: true })).toBeHidden();
+    const trialSummary = page.locator("summary").filter({ hasText: "Trial measurements" });
+    await expect(trialSummary).toContainText(/p99 unavailable/i);
+    await trialSummary.focus();
+    await expect(trialSummary).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByLabel("Trial", { exact: true })).toBeVisible();
+    await trialSummary.focus();
+    await page.keyboard.press("Space");
+    await expect(page.getByLabel("Trial", { exact: true })).toBeHidden();
+    await expect(trialSummary).toBeFocused();
+    await page.keyboard.press("Enter");
+    const exactSummary = page.locator("summary").filter({ hasText: "Exact population values" });
+    await exactSummary.focus();
+    await page.keyboard.press("Enter");
+    const exactPopulation = exactSummary.locator("..");
+    await expect(exactPopulation).toContainText("33.333333 requests/s");
+    await expect(exactPopulation).toContainText("180000000 ns");
+    await page.getByLabel("Trial", { exact: true }).selectOption({ index: 1 });
+    await page.getByLabel("Population", { exact: true }).selectOption("background");
+    await expect(page.getByRole("heading", { name: "Background population", exact: true })).toBeVisible();
+    await expect(page.getByRole("main")).toContainText(/Background requests do not inflate foreground success/);
+    const exactRecovery = await openDisclosure(page, "Exact recovery values");
+    await expect(exactRecovery).toContainText("60000000 ns");
+    await expect(exactRecovery).toContainText("UNOBSERVED_OR_CENSORED");
+    await trialSummary.focus();
+    await page.keyboard.press("Space");
+    await expect(page.getByLabel("Trial", { exact: true })).toBeHidden();
+    await expect(trialSummary).toContainText(/unobserved or censored/i);
+    await noOverflow(page);
+  } finally { await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("touch disclosures preserve exact cache values, selectors and wrapping at 390 and 320", async ({ browser }) => {
+  const fixture = prepare("complete", 8);
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, colorScheme: "light" });
+  const page = await context.newPage();
+  let server: Server | undefined;
+  try {
+    server = await start(fixture);
+    const report = lookup(fixture, await summaries(page, server.url), "cache-complete");
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await openReport(page, server, report);
+      await expect(page.getByRole("heading", { name: "Report overview", exact: true })).toBeVisible();
+      await expect(page.getByLabel("Cell", { exact: true })).toBeHidden();
+      await expect(page.getByLabel("Block", { exact: true })).toBeVisible();
+      await page.getByLabel("Block", { exact: true }).selectOption({ index: 7 });
+      await expect(page.getByRole("table", { name: "Block 8: all four cache conditions", exact: true })).toBeVisible();
+      const cells = page.locator("summary").filter({ hasText: "Cell measurements" });
+      await cells.tap();
+      await expect(page.getByLabel("Cell", { exact: true })).toBeVisible();
+      await page.getByLabel("Cell", { exact: true }).selectOption("S1");
+      await expect(page.getByLabel("Cell", { exact: true })).toHaveValue("S1");
+      const exact = page.locator("summary").filter({ hasText: "Exact population values" });
+      await exact.tap();
+      await expect(exact.locator("..")).toContainText("44.444444 requests/s");
+      await expect(exact.locator("..")).toContainText("90000000 ns");
+      await noOverflow(page);
+      await cells.tap();
+      await expect(page.getByLabel("Cell", { exact: true })).toBeHidden();
+      const provenance = page.locator("summary").filter({ hasText: "Provenance and report details" });
+      await provenance.tap();
+      await expect(provenance.locator("..")).toContainText(report.report_sha256);
+      await expect(provenance.locator("..")).toContainText(/not performed/i);
+      await noOverflow(page);
+      await page.getByRole("button", { name: /Switch to .* theme/ }).tap();
+      await noOverflow(page);
+    }
+  } finally { await context.close(); await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
 test("eight complete cache blocks display exact descriptive intervals and select block 8", async ({ page }) => {
@@ -387,22 +486,26 @@ test("eight complete cache blocks display exact descriptive intervals and select
       exactValues.map((value) => [value, value, value, "DESCRIPTIVE_ONLY"]),
     );
     await openReport(page, server, report);
-    const table = page.getByRole("table", { name: "Authoritative descriptive contrasts in requests/s", exact: true });
+    const exactContrasts = await openDisclosure(page, "Exact contrast values");
+    const table = exactContrasts.getByRole("table");
     for (const contrast of projected.contrasts) {
       const row = table.getByRole("row").filter({ has: page.getByRole("rowheader", { name: contrast.label, exact: true }) });
       await expect(row).toContainText(`[${contrast.lower_rps}, ${contrast.upper_rps}] requests/s`);
-      await expect(row).toContainText(/descriptive only/i);
+      await expect(row).toContainText("DESCRIPTIVE_ONLY");
     }
     await page.getByLabel("Block", { exact: true }).selectOption({ index: 7 });
     await expect(page.getByRole("table", { name: "Block 8: all four cache conditions", exact: true })).toBeVisible();
+    await openDisclosure(page, "Cell measurements");
     await page.getByLabel("Cell", { exact: true }).selectOption("S1");
+    await openDisclosure(page, "Exact population values");
     await expect(page.getByRole("heading", { name: "S1 · Cell 32 details", exact: true })).toBeVisible();
     await expect(page.getByRole("main")).toContainText("44.444444");
     await expect(page.getByRole("main")).toContainText("Synthetic only");
     await expect(page.getByRole("main")).toContainText("Runtime unverified");
     await expect(page.getByText("Low-replication rehearsal / pilot", { exact: true })).toHaveCount(0);
     await page.reload();
-    await expect(page.getByRole("table", { name: "Authoritative descriptive contrasts in requests/s", exact: true })).toContainText("[33.333333, 33.333333] requests/s");
+    const reloadedContrasts = await openDisclosure(page, "Exact contrast values");
+    await expect(reloadedContrasts.getByRole("table")).toContainText("[33.333333, 33.333333] requests/s");
   } finally { await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
@@ -416,9 +519,14 @@ test("cancelled, invalid-cell and partial reports keep suppression distinct from
       await openReport(page, server, lookup(fixture, list, name));
       await expect(page.getByRole("main")).toContainText(/SUPPRESSED|Suppressed|suppressed/);
       if (name.includes("cancelled")) await expect(page.getByRole("main")).toContainText(/CANCELLED|Cancelled|cancelled/);
-      if (name === "cache-invalid") await expect(page.getByRole("main")).toContainText(/INVALID|Invalid|invalid/);
+      if (name === "cache-invalid") {
+        await openDisclosure(page, "Coverage and reporting details");
+        await expect(page.getByRole("main")).toContainText(/INVALID|Invalid|invalid/);
+      }
     }
     await openReport(page, server, lookup(fixture, list, "cache-zero"));
+    await openDisclosure(page, "Cell measurements");
+    await openDisclosure(page, "Exact population values");
     await expect(page.getByRole("main")).toContainText("0.000000");
     await expect(page.getByRole("main")).toContainText(/HTTP_ERROR|HTTP error|Http error/);
     await expect(page.getByText("No returned measurements", { exact: true })).toHaveCount(0);
@@ -470,14 +578,16 @@ test("actual publication at zero remains distinct from censored decision and dis
   try {
     server = await start(fixture);
     await openReport(page, server, lookup(fixture, await summaries(page, server.url), "study-complete"));
+    await openDisclosure(page, "Trial measurements");
     await page.getByLabel("Trial", { exact: true }).selectOption({ index: 1 });
-    const table = page.getByRole("table", { name: "Publication, decision and dispatch recovery from actual restoration" });
-    const publication = table.getByRole("row").filter({ has: page.getByRole("rowheader", { name: "Publication", exact: true }) });
+    const exactRecovery = await openDisclosure(page, "Exact recovery values");
+    const table = exactRecovery.getByRole("table");
+    const publication = table.getByRole("row").filter({ has: page.getByRole("rowheader", { name: "publication", exact: true }) });
     await expect(publication).toContainText(/observed/i);
     await expect(publication).toContainText("0 ns");
-    for (const name of ["Decision", "Dispatch"]) {
+    for (const name of ["decision", "dispatch"]) {
       const row = table.getByRole("row").filter({ has: page.getByRole("rowheader", { name, exact: true }) });
-      await expect(row).toContainText(/unobserved or censored/i);
+      await expect(row).toContainText("UNOBSERVED_OR_CENSORED");
       await expect(row).toContainText("Unavailable");
       await expect(row).toContainText("60000000 ns");
     }
