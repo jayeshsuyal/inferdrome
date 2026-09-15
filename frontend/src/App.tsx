@@ -7,6 +7,8 @@ import { Navigate, useLocation } from "./lib/router";
 import { CompareView } from "./views/CompareView";
 import { ControlledComparisonDetailView } from "./views/ControlledComparisonDetailView";
 import { ControlledComparisonsView } from "./views/ControlledComparisonsView";
+import { EvaluationsView } from "./views/EvaluationsView";
+import { EvaluationDetailView } from "./views/EvaluationDetailView";
 import { EvidenceView } from "./views/EvidenceView";
 import { RunDetailView } from "./views/RunDetailView";
 import { RoutingCampaignDetailView } from "./views/RoutingCampaignDetailView";
@@ -38,6 +40,8 @@ export function App() {
   if (pathname === "/") view = <Navigate to="/runs" replace />;
   else if (pathname === "/runs" || pathname === "/runs/") view = <RunsView />;
   else if (/^\/runs\/[^/]+\/?$/.test(pathname)) view = <RunDetailView />;
+  else if (pathname === "/evaluations" || pathname === "/evaluations/") view = <EvaluationsView />;
+  else if (/^\/evaluations\/[^/]+\/?$/.test(pathname)) view = <EvaluationDetailView />;
   else if (pathname === "/trial-sets" || pathname === "/trial-sets/") view = <TrialSetsView />;
   else if (/^\/trial-sets\/[^/]+\/?$/.test(pathname)) view = <TrialSetDetailView />;
   else if (pathname === "/routing-campaigns" || pathname === "/routing-campaigns/") view = <RoutingCampaignsView />;

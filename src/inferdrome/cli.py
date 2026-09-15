@@ -675,6 +675,9 @@ def _command_dashboard(namespace: argparse.Namespace) -> int:
 
     run_dashboard(
         _path(namespace, "runs_root"),
+        evaluation_reports_catalog=_optional_path(
+            namespace, "evaluation_reports_catalog"
+        ),
         trial_sets_root=_path(namespace, "trial_sets_root"),
         comparison_plans_root=_path(namespace, "comparison_plans_root"),
         comparison_results_root=_path(namespace, "comparison_results_root"),
@@ -1133,6 +1136,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="serve the local read-only evidence dashboard",
     )
     dashboard.add_argument("--runs-root", default="runs", help="run workspace root")
+    dashboard.add_argument(
+        "--evaluation-reports-catalog",
+        help="private catalog of up to eight digest-pinned evaluation reports",
+    )
     dashboard.add_argument(
         "--trial-sets-root",
         default="trial-sets",

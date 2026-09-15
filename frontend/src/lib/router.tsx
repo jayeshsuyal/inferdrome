@@ -142,6 +142,7 @@ function decodeRouteParam(value: string): string {
 }
 
 export function useParams(): {
+  readonly reportId?: string;
   readonly campaignId?: string;
   readonly executionId?: string;
   readonly qualificationId?: string;
@@ -150,6 +151,8 @@ export function useParams(): {
   readonly trialSetId?: string;
 } {
   const { pathname } = useRouter();
+  const reportMatch = pathname.match(/^\/evaluations\/([^/]+)\/?$/);
+  if (reportMatch) return { reportId: decodeRouteParam(reportMatch[1]) };
   const runMatch = pathname.match(/^\/(?:runs|evidence)\/([^/]+)\/?$/);
   if (runMatch) return { runId: decodeRouteParam(runMatch[1]) };
   const trialSetMatch = pathname.match(/^\/trial-sets\/([^/]+)\/?$/);
