@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from collections.abc import Sequence
 from typing import Any
 
+from inferdrome.evaluation.contracts import EvaluationConfig
 from inferdrome.evaluation.fault_config import RoutingFaultConfig
 from inferdrome.evaluation.policies import POLICY_IDS
 from inferdrome.evaluation.runner import EvaluationResult, RequestRecord
@@ -182,35 +183,37 @@ def _recovery_summary(
     }
 
 
-def summarize_trial(
-    trial: CompiledTrial, result: ValidatedTrialResult
+def summarize_population(
+    config: EvaluationConfig,
+    result: EvaluationResult,
+    *,
+    window_start_ns: int,
+    window_end_ns: int,
+    first_content_slo_ns: int,
+    completion_slo_ns: int,
 ) -> dict[str, Any]:
-    """Summarize a validated result; every planned foreground offer remains in N."""
+    """Summarize one validated population with a fixed all-offered SLO window."""
+    window = window_end_ns - window_start_ns
     _require(
-        result.config_sha256 == trial.config_sha256
-        and result.policy_id == trial.policy_id
+        window > 0
+        and window_end_ns == config.bounds.duration_ns
+        and result.config_sha256
+        == sha256_digest(canonical_json_bytes(config.model_dump(mode="json")))
     )
-    window = trial.window_end_ns - trial.window_start_ns
+    rows = result.records
     _require(
-        window > 0 and trial.window_end_ns == trial.config.foreground.bounds.duration_ns
-    )
-    rows = result.foreground.records
-    _require(
-        len(rows) == len(trial.config.foreground.offers)
-        and all(
-            trial.window_start_ns <= row.scheduled_ns < trial.window_end_ns
-            for row in rows
-        )
+        len(rows) == len(config.offers)
+        and all(window_start_ns <= row.scheduled_ns < window_end_ns for row in rows)
     )
     successful = tuple(row for row in rows if row.outcome == "SUCCESS")
     good = sum(
         row.first_content_ns is not None
-        and row.first_content_ns - row.scheduled_ns <= trial.first_content_slo_ns
-        and row.terminal_ns - row.scheduled_ns <= trial.completion_slo_ns
+        and row.first_content_ns - row.scheduled_ns <= first_content_slo_ns
+        and row.terminal_ns - row.scheduled_ns <= completion_slo_ns
         for row in successful
     )
-    foreground = _population_counts(result.foreground)
-    foreground.update(
+    summary = _population_counts(result)
+    summary.update(
         {
             "slo_good_count": good,
             "slo_success_fraction": _ratio(good, len(rows)),
@@ -220,10 +223,10 @@ def summarize_trial(
                 sum(row.attempts for row in rows) * 1_000_000_000, window
             ),
             "fixed_offered_window_ns": window,
-            "drain_ns": trial.config.foreground.bounds.drain_ns,
+            "drain_ns": config.bounds.drain_ns,
             "last_offer_ns": max(row.scheduled_ns for row in rows),
             "successful_completions_during_drain": sum(
-                row.terminal_ns >= trial.window_end_ns for row in successful
+                row.terminal_ns >= window_end_ns for row in successful
             ),
             "dispatch_lag_ns": {
                 "population": "ALL_DISPATCHED_OUTCOMES",
@@ -282,6 +285,25 @@ def summarize_trial(
                 if outcome != "SUCCESS"
             },
         }
+    )
+    return summary
+
+
+def summarize_trial(
+    trial: CompiledTrial, result: ValidatedTrialResult
+) -> dict[str, Any]:
+    """Summarize a validated result; every planned foreground offer remains in N."""
+    _require(
+        result.config_sha256 == trial.config_sha256
+        and result.policy_id == trial.policy_id
+    )
+    foreground = summarize_population(
+        trial.config.foreground,
+        result.foreground,
+        window_start_ns=trial.window_start_ns,
+        window_end_ns=trial.window_end_ns,
+        first_content_slo_ns=trial.first_content_slo_ns,
+        completion_slo_ns=trial.completion_slo_ns,
     )
     return {
         "schema_version": "inferdrome.evaluation-study-trial-summary.v1",

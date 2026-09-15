@@ -127,6 +127,13 @@ def _record(
         _optional_integer(row[name])
     terminal = _integer(row["terminal_ns"], elapsed)
     outcome = _literal(row["outcome"], OUTCOMES)
+    if routing == "FIXED_ASSIGNMENT":
+        _require(outcome != "REJECTED_ROUTE", "fixed route outcome")
+        if row["endpoint_id"] is not None:
+            _require(
+                row["endpoint_id"] == config.offers[index].endpoint_id,
+                "fixed assignment",
+            )
     arrival, dispatch = row["arrival_observed_ns"], row["dispatch_ns"]
     if arrival is not None:
         _require(scheduled <= arrival <= terminal, "arrival ordering")
@@ -136,11 +143,6 @@ def _record(
         )
         _require(row["dispatch_lag_ns"] == dispatch - scheduled, "dispatch lag")
         _literal(row["endpoint_id"], _ENDPOINTS)
-        if routing == "FIXED_ASSIGNMENT":
-            _require(
-                row["endpoint_id"] == config.offers[index].endpoint_id,
-                "fixed assignment",
-            )
         _require(dispatch < cutoff, "dispatch cutoff")
     else:
         _require(row["dispatch_lag_ns"] is None, "absent dispatch lag")
@@ -950,10 +952,8 @@ def _validate_trial_result(
     )
 
 
-def load_trial_result_bytes(
-    content: bytes, expected_config: TrialConfig
-) -> ValidatedTrialResult:
-    """Reject oversized or ambiguous JSON without reading files."""
+def _load_result_json(content: bytes) -> Any:
+    """Apply the same lexical limits before either result contract is parsed."""
 
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
@@ -972,17 +972,46 @@ def load_trial_result_bytes(
         )
         text = content.decode("utf-8")
         validate_json_structure(text, limits=_RESULT_LIMITS)
-        raw = json.loads(
+        return json.loads(
             text,
             object_pairs_hook=pairs,
             parse_constant=reject_number,
             parse_float=reject_number,
         )
-        return replace(
-            validate_trial_result(raw, expected_config),
-            result_sha256=sha256_digest(content),
-        )
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise StudyValidationError(
             "study trial JSON failed closed validation"
+        ) from None
+
+
+def load_trial_result_bytes(
+    content: bytes, expected_config: TrialConfig
+) -> ValidatedTrialResult:
+    """Reject oversized or ambiguous JSON without reading files."""
+    return replace(
+        validate_trial_result(_load_result_json(content), expected_config),
+        result_sha256=sha256_digest(content),
+    )
+
+
+def load_fixed_population_bytes(
+    content: bytes, expected_config: EvaluationConfig
+) -> EvaluationResult:
+    """Import a PR1 fixed replay using the study's existing record guards.
+
+    Identity and consistency checks do not prove that an execution occurred.
+    This deliberately has no routing-policy or telemetry event wrapper.
+    """
+    try:
+        raw = _load_result_json(content)
+        _require(type(raw) is dict, "population fields")
+        return _population(
+            raw,
+            expected_config,
+            routing="FIXED_ASSIGNMENT",
+            evidence_class=_literal(raw.get("evidence_class"), _EVIDENCE),
+        )
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        raise StudyValidationError(
+            "fixed population JSON failed closed validation"
         ) from None
