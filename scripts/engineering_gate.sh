@@ -20,6 +20,8 @@ export PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}"
 "$inferdrome_python" scripts/generate_qwen3_launch_profile.py --check
 "$inferdrome_python" scripts/generate_routing_execution_contracts.py --check
 "$inferdrome_python" -m inferdrome.deployment.manual_host_schema
+"$inferdrome_python" -m inferdrome.deployment.vast_process_schema --check
+"$inferdrome_python" -m inferdrome.routing_execution.vast_schema --check
 "$inferdrome_python" scripts/generate_external_router_contracts.py --check
 "$inferdrome_python" scripts/generate_routing_qualification_contracts.py --check
 "$inferdrome_python" scripts/generate_fake_golden.py --check

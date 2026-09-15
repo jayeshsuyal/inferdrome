@@ -3,6 +3,8 @@
 !Dockerfile
 !Dockerfile.compose-mock
 !Dockerfile.vllm-benchmark-runner
+!Dockerfile.vast-process
+!requirements-vast-downloader.txt
 !.dockerignore
 !pyproject.toml
 !uv.lock
@@ -13,6 +15,8 @@
 !LICENSES/**
 !src/
 !src/**
+!os-input/
+!os-input/**
 
 # Never allow host state or credentials through the allowlist.
 src/**/__pycache__/

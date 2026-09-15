@@ -25,6 +25,7 @@ import type {
   RoutingExecutionDetail,
   RoutingExecutionTelemetryView,
   RoutingExecutionTrialView,
+  VastRoutingExecutionEvidenceView,
 } from "../lib/types";
 
 function DataCell({ label, value, title }: { readonly label: string; readonly value: string; readonly title?: string }) {
@@ -203,6 +204,9 @@ function TrialLedger({ trial }: { readonly trial: RoutingExecutionTrialView }) {
 }
 
 function executionBoundary(detail: RoutingExecutionDetail): string {
+  if (detail.summary.mode === "VAST_MANUAL_CONTAINER") {
+    return "Vast container and GPU identity are operator-declared. Two serving processes share one container. Observer GPU exclusion uses environment settings only, without hardware enforcement. This record does not prove provider allocation, image attestation, or cleanup.";
+  }
   if (detail.summary.mode === "LAMBDA_MANUAL_HOST") {
     return "Manual-host facts are operator-declared. This is not provider, capacity, GPU allocation, price, or cleanup proof; a locally generated fixture is not a real campaign.";
   }
@@ -210,6 +214,12 @@ function executionBoundary(detail: RoutingExecutionDetail): string {
     return "This is a local loopback execution record. It establishes neither GPU serving nor a provider campaign.";
   }
   return "This package records a private-target execution boundary. It does not authorize a provider action or issue an acceptance verdict.";
+}
+
+function isContainerEvidence(
+  evidence: RoutingExecutionDetail["evidence"],
+): evidence is VastRoutingExecutionEvidenceView {
+  return typeof evidence.container_image === "string";
 }
 
 function RoutingExecutionContent({ detail }: { readonly detail: RoutingExecutionDetail }) {
@@ -236,8 +246,14 @@ function RoutingExecutionContent({ detail }: { readonly detail: RoutingExecution
             <DataCell label="Model / tokenizer" value={detail.summary.model.model_id} />
             <DataCell label="Runtime / adapter" value={`${detail.summary.runtime.runtime_name} ${detail.summary.runtime.runtime_version}`} />
             <DataCell label="Execution mode" value={detail.summary.mode} />
-            <DataCell label="Runner image" value={shortDigest(detail.evidence.runner_image)} title={detail.evidence.runner_image} />
-            <DataCell label="Serving image" value={shortDigest(detail.evidence.serving_image)} title={detail.evidence.serving_image} />
+            {isContainerEvidence(detail.evidence) ? (
+              <DataCell label="Container image" value={shortDigest(detail.evidence.container_image)} title={detail.evidence.container_image} />
+            ) : (
+              <>
+                <DataCell label="Runner image" value={shortDigest(detail.evidence.runner_image)} title={detail.evidence.runner_image} />
+                <DataCell label="Serving image" value={shortDigest(detail.evidence.serving_image)} title={detail.evidence.serving_image} />
+              </>
+            )}
           </div>
         </Panel>
         <Panel>
@@ -252,6 +268,37 @@ function RoutingExecutionContent({ detail }: { readonly detail: RoutingExecution
           </div>
         </Panel>
       </div>
+
+      {detail.summary.mode === "VAST_MANUAL_CONTAINER" && isContainerEvidence(detail.evidence) ? (
+        <div className="execution-overview-grid">
+          <Panel>
+            <SectionHeading title="Declared process topology" meta="Operator declarations" />
+            <div className="execution-data-grid">
+              <DataCell label="Profile" value={detail.summary.topology.profile_id} />
+              <DataCell label="Provider / provisioning" value="Vast.ai / operator-supplied container" />
+              <DataCell label="Accelerators" value={`${detail.summary.topology.accelerator_count} × ${detail.summary.topology.accelerator_model}`} />
+              <DataCell label="Container / serving processes" value="1 container / 2 serving processes" />
+              <DataCell label="Tensor parallel size" value="1 per serving engine" />
+              <DataCell label="Isolation boundary" value={detail.summary.topology.isolation_boundary} />
+              <DataCell label="Observer GPU isolation" value={detail.summary.topology.observer_gpu_isolation} />
+              <DataCell label="Lifecycle protection" value="Unverified; watchdog boundary unresolved" />
+            </div>
+          </Panel>
+          <Panel>
+            <SectionHeading title="Artifact provenance" meta="Retained declarations and local observations" />
+            <div className="execution-data-grid">
+              <DataCell label="Container image assertion" value={detail.evidence.artifact_provenance.container_image_assertion} />
+              <DataCell label="Artifact source commit" value={shortDigest(detail.evidence.artifact_provenance.source_commit)} title={detail.evidence.artifact_provenance.source_commit} />
+              <DataCell label="Observer artifact" value={shortDigest(detail.evidence.artifact_provenance.observer_artifact_sha256)} title={detail.evidence.artifact_provenance.observer_artifact_sha256} />
+              <DataCell label="Supervisor artifact" value={shortDigest(detail.evidence.artifact_provenance.supervisor_artifact_sha256)} title={detail.evidence.artifact_provenance.supervisor_artifact_sha256} />
+              <DataCell label="Model manifest" value={shortDigest(detail.evidence.artifact_provenance.model_manifest_sha256)} title={detail.evidence.artifact_provenance.model_manifest_sha256} />
+              <DataCell label="Model snapshot" value={shortDigest(detail.evidence.artifact_provenance.model_snapshot_sha256)} title={detail.evidence.artifact_provenance.model_snapshot_sha256} />
+              <DataCell label="Runtime observation" value={shortDigest(detail.evidence.artifact_provenance.runtime_observation_sha256)} title={detail.evidence.artifact_provenance.runtime_observation_sha256} />
+              <DataCell label="Runtime assertion" value={detail.evidence.artifact_provenance.runtime_assertion} />
+            </div>
+          </Panel>
+        </div>
+      ) : null}
 
       <Panel className="execution-instrument-panel">
         <SectionHeading title="Observed admission conditions" meta="Measured at observation and decision" />

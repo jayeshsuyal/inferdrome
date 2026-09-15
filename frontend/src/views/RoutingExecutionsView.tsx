@@ -21,6 +21,9 @@ import { Link } from "../lib/router";
 import type { RoutingExecutionSummary } from "../lib/types";
 
 function executionContext(summary: RoutingExecutionSummary): string {
+  if (summary.mode === "VAST_MANUAL_CONTAINER") {
+    return "Vast container declaration · 2 serving processes share 1 container · observer GPU isolation is environment only";
+  }
   if (summary.mode === "LAMBDA_MANUAL_HOST") {
     return "Manual host declaration · not provider proof";
   }
