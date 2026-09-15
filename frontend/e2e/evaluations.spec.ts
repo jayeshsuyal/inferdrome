@@ -200,6 +200,7 @@ test("mobile report journeys remain legible, keyboard reachable and theme safe a
         await noOverflow(page);
       }
       await page.goto(`${server.url}/evaluations`);
+      await expect(page.getByRole("link", { name: lookup(fixture, list, "study-complete").label, exact: true })).toBeVisible();
       const navigation = page.getByRole("navigation").getByRole("link", { name: "Evaluations", exact: true });
       await navigation.focus();
       await expect(navigation).toBeFocused();
