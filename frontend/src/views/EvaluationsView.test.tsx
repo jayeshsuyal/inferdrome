@@ -42,6 +42,12 @@ function open(path = "/evaluations") {
   </MemoryRouter>);
 }
 
+async function disclose(user: ReturnType<typeof userEvent.setup>, title: string) {
+  const summary = screen.getByText(title, { selector: "summary .evaluation-disclosure-title" });
+  await user.click(summary);
+  expect(summary.closest("details")).toHaveAttribute("open");
+}
+
 describe("Evaluations views", () => {
   it("disables index refresh while loading and restores it after completion", async () => {
     let complete!: (value: Awaited<ReturnType<typeof evaluationApi.list>>) => void;
@@ -86,21 +92,145 @@ describe("Evaluations views", () => {
     expect(await screen.findByLabelText("Report kind")).toHaveValue("ALL");
   });
 
+  it("reveals the full index digest through a native disclosure", async () => {
+    const user = userEvent.setup();
+    open();
+    const link = await screen.findByRole("link", { name: study.summary.label });
+    const row = link.closest("tr")!;
+    const digest = within(row).getByText(study.summary.report_sha256, { selector: "code" });
+    const control = within(row).getByText(/^Report digest ·/, { selector: "summary" });
+    expect(digest).not.toBeVisible();
+    expect(control.closest("details")).not.toHaveAttribute("open");
+    await user.click(control);
+    expect(digest).toBeVisible();
+    expect(digest).not.toHaveAttribute("title");
+    expect(screen.getByText(/checks do not establish authorship or actual execution/)).toBeVisible();
+    expect(within(row).getByText("24 returned records")).toBeVisible();
+  });
+
+  it.each([
+    ["SUPPRESSED_INCOMPLETE", "Suppressed: incomplete report"],
+    ["SUPPRESSED_DECLARATION_OR_EVIDENCE_MISMATCH", "Suppressed: declaration or evidence mismatch"],
+  ])("separates completed reports from %s comparisons", async (comparisonStatus, comparisonLabel) => {
+    const user = userEvent.setup();
+    vi.mocked(evaluationApi.detail).mockResolvedValue({
+      ...cache,
+      summary: { ...cache.summary, comparison_status: comparisonStatus },
+    });
+    open(`/evaluations/${cache.summary.report_id}`);
+    const heading = await screen.findByRole("heading", { name: "Report overview" });
+    const overview = heading.closest<HTMLElement>(".evaluation-panel")!;
+    const sourceFact = (label: string) => within(overview).getByText(label, { selector: "dt" }).parentElement!;
+    expect(sourceFact("Reported completion")).toHaveTextContent("Completed");
+    expect(sourceFact("Comparison availability")).toHaveTextContent(comparisonLabel);
+    expect(screen.getByText("Evidence ineligible")).toBeVisible();
+    for (const key of ["planned_blocks", "complete_blocks", "planned_cells", "completed_cells", "planned_offers", "returned_records"]) {
+      const source = cache.coverage.find((item) => item.key === key)!;
+      const visibleFact = within(overview).getAllByText(source.label, { selector: "dt" })[0].parentElement!;
+      expect(visibleFact).toBeVisible();
+      expect(within(visibleFact).getByText(source.value!)).toBeVisible();
+    }
+    expect(within(overview).getByText(/Returned records are not a success count/)).toBeVisible();
+    await disclose(user, "Coverage and reporting details");
+    const fullCoverage = screen.getByText("Coverage and reporting details").closest("details")!;
+    for (const source of cache.coverage) {
+      const fact = within(fullCoverage).getByText(source.label, { selector: "dt" }).parentElement!;
+      expect(fact).toHaveTextContent(`${source.value} count`);
+    }
+  });
+
+  it("keeps each study stratum identity visible before opening exact policy values", async () => {
+    const first = study.strata[0];
+    vi.mocked(evaluationApi.detail).mockResolvedValue({
+      ...study,
+      strata: [
+        { ...first, index: 1, target_endpoint: "endpoint-a" },
+        { ...first, index: 2, target_endpoint: "endpoint-b" },
+      ],
+    });
+    open(`/evaluations/${study.summary.report_id}`);
+    expect(await screen.findByText(/^Stratum 1 ·.*Target endpoint-a$/)).toBeVisible();
+    expect(screen.getByText(/^Stratum 2 ·.*Target endpoint-b$/)).toBeVisible();
+    expect(screen.getAllByRole("table", { name: "Four evaluation policies and reported goodput summaries" })).toHaveLength(2);
+    expect(screen.queryByLabelText("Study stratum")).not.toBeInTheDocument();
+  });
+
+  it("keeps cancellation, unavailable p99 and censored recovery visible when measurements close", async () => {
+    const user = userEvent.setup();
+    const sourceTrial = study.trials[0];
+    const variant: EvaluationStudyDetail = {
+      ...study,
+      trials: [{
+        ...sourceTrial,
+        status: "CANCELLED",
+        foreground: { ...sourceTrial.foreground, cancelled: true },
+        recovery: {
+          ...sourceTrial.recovery,
+          intervals: [{ metric: "decision", status: "UNOBSERVED_OR_CENSORED", duration_ns: null, observation_horizon_ns: "1234567" }],
+        },
+      }],
+    };
+    vi.mocked(evaluationApi.detail).mockResolvedValue(variant);
+    open(`/evaluations/${study.summary.report_id}`);
+    const title = await screen.findByText("Trial measurements", { selector: "summary .evaluation-disclosure-title" });
+    const summary = title.closest("summary")!;
+    expect(summary).toBeVisible();
+    expect(summary).toHaveTextContent("Cancelled");
+    expect(summary).toHaveTextContent("Population cancelled · p99 unavailable: below reporting floor");
+    expect(summary).toHaveTextContent("Decision: Unobserved or censored");
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    await user.click(summary);
+    expect(screen.getByLabelText("Trial")).toBeVisible();
+    await user.click(summary);
+    expect(screen.getByLabelText("Trial")).not.toBeVisible();
+    expect(summary).toHaveTextContent("Decision: Unobserved or censored");
+  });
+
+  it("exposes full identities and exact trust flags without requiring hover", async () => {
+    const user = userEvent.setup();
+    open(`/evaluations/${cache.summary.report_id}`);
+    const title = await screen.findByText("Provenance and report details", { selector: "summary .evaluation-disclosure-title" });
+    const disclosure = title.closest("details")!;
+    const fullHash = within(disclosure).getByText(cache.summary.report_sha256, { selector: "code" });
+    expect(fullHash).not.toBeVisible();
+    await user.click(title);
+    expect(fullHash).toBeVisible();
+    expect(fullHash).not.toHaveAttribute("title");
+    for (const [label, value] of [
+      ["Report ID", cache.summary.report_id],
+      ["Plan digest", cache.summary.plan_sha256],
+      ["Source replay status", cache.summary.source_replay],
+      ["Runtime verification status", cache.summary.runtime_verification],
+      ["Evidence eligible", "false"],
+      ["Tokenizer reverified here flag", "false"],
+    ]) {
+      const fact = within(disclosure).getByText(label, { selector: "dt" }).parentElement!;
+      expect(within(fact).getByText(value)).toBeVisible();
+    }
+    expect(within(disclosure).getByText(/Source cache treatment attribution/)).toHaveTextContent("UNVERIFIED");
+    await disclose(user, "Workload and output diagnostics");
+    expect(screen.getByText(cache.workload_verification, { selector: "code" })).toBeVisible();
+  });
+
   it("selects all four study policies and keeps background and recovery separate", async () => {
     const user = userEvent.setup();
     open(`/evaluations/${study.summary.report_id}`);
-    const trial = await screen.findByLabelText("Trial");
+    await screen.findByText("Trial measurements", { selector: "summary .evaluation-disclosure-title" });
+    await disclose(user, "Trial measurements");
+    const trial = screen.getByLabelText("Trial");
     await user.selectOptions(trial, "4");
     expect(screen.getByRole("heading", { name: "Foreground population" })).toBeVisible();
     expect(screen.getAllByText("27.777778 requests/s").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("0.833333 ratio").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("All successful requests, including SLO misses").length).toBe(4);
-    expect(screen.getAllByText("BELOW REPORTING FLOOR").length).toBe(4);
+    expect(screen.getAllByText("0.833333 ratio")[0]).toBeVisible();
+    await disclose(user, "Latency and dispatch timing");
+    const latency = screen.getByRole("table", { name: "Authoritative latency quantiles" });
+    expect(within(latency).getAllByText("All successful requests, including SLO misses")).toHaveLength(4);
+    expect(within(latency).getAllByText("Below reporting floor")).toHaveLength(4);
     expect(screen.getByRole("table", { name: "Publication, decision and dispatch recovery from actual restoration" })).toBeVisible();
     await user.selectOptions(screen.getByLabelText("Population"), "background");
     expect(screen.getByRole("heading", { name: "Background population" })).toBeVisible();
     expect(screen.getByText(/Background requests do not inflate foreground success/)).toBeVisible();
-    expect(screen.queryByRole("table", { name: "Authoritative latency quantiles in nanoseconds" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Authoritative latency quantiles" })).not.toBeInTheDocument();
     await user.selectOptions(trial, "1");
     expect(screen.getByLabelText("Population")).toHaveValue("foreground");
   });
@@ -109,15 +239,17 @@ describe("Evaluations views", () => {
     const user = userEvent.setup();
     open(`/evaluations/${cache.summary.report_id}`);
     await screen.findByRole("heading", { name: "Four-cell comparison" });
-    expect(screen.getByText("33.333333 requests/s")).toBeVisible();
+    expect(within(screen.getByRole("table", { name: "Authoritative descriptive contrasts in requests/s" })).getByText("33.333333 requests/s")).toBeVisible();
     expect(screen.getAllByText("22.222222 requests/s").length).toBeGreaterThan(0);
     expect(screen.getByText("Low-replication rehearsal / pilot")).toBeVisible();
     expect(screen.getByText("Synthetic only")).toBeVisible();
     expect(screen.getByText("Runtime unverified")).toBeVisible();
     expect(screen.getByText("Evidence ineligible")).toBeVisible();
+    await disclose(user, "Cell measurements");
     await user.selectOptions(screen.getByLabelText("Cell"), "S1");
     expect(screen.getByRole("heading", { name: "S1 · Cell 2 details" })).toBeVisible();
     expect(screen.getAllByText("44.444444 requests/s").length).toBeGreaterThan(0);
+    await disclose(user, "Workload and output diagnostics");
     expect(screen.getByRole("heading", { name: "Potential matching prefix blocks" })).toBeVisible();
     expect(screen.getByText(/Potential matching token-prefix blocks do not measure cache hits/)).toBeVisible();
     expect(screen.queryByText("Cache hits", { exact: true })).not.toBeInTheDocument();
@@ -127,8 +259,8 @@ describe("Evaluations views", () => {
     open(`/evaluations/${empty.summary.report_id}`);
     await screen.findByText("No returned measurements");
     expect(screen.getByText("Local measurement only")).toBeVisible();
-    expect(screen.getByText("No returned trial measurements")).toBeVisible();
-    expect(screen.getByText("SUPPRESSED INCOMPLETE STUDY")).toBeVisible();
+    expect(screen.getByText("No returned trial measurements", { selector: ".evaluation-disclosure-cue" })).toBeVisible();
+    expect(screen.getByText("Suppressed: incomplete study")).toBeVisible();
     expect(screen.queryByLabelText("Trial")).not.toBeInTheDocument();
   });
 
@@ -149,7 +281,10 @@ describe("Evaluations views", () => {
     };
     vi.mocked(evaluationApi.detail).mockResolvedValue(variant);
     open(`/evaluations/${cache.summary.report_id}`);
-    await screen.findByText("Population cancelled");
+    await screen.findByText("Cell measurements", { selector: "summary .evaluation-disclosure-title" });
+    await disclose(user, "Cell measurements");
+    expect(screen.getByText("Population cancelled", { selector: ".status-badge" })).toBeVisible();
+    await disclose(user, "Exact population values");
     expect(screen.getAllByText("0.000000 requests/s").length).toBeGreaterThan(0);
     await user.selectOptions(screen.getByLabelText("Cell"), "S1");
     expect(screen.getByText("Cell measurements unavailable")).toBeVisible();
@@ -180,10 +315,10 @@ describe("Evaluations views", () => {
         }]
       }} />
     </>);
-    expect(screen.getByText("[33.333333, 33.333333] requests/s")).toBeVisible();
+    expect(within(screen.getByRole("table", { name: "Authoritative descriptive contrasts in requests/s" })).getByText("[33.333333, 33.333333] requests/s")).toBeVisible();
     const recovery = screen.getByRole("table", { name: "Publication, decision and dispatch recovery from actual restoration" });
     expect(within(recovery).getByText("0 ns")).toBeVisible();
-    expect(within(recovery).getByText("UNOBSERVED OR CENSORED")).toBeVisible();
+    expect(within(recovery).getByText("Unobserved or censored")).toBeVisible();
     expect(within(recovery).getAllByText("Unavailable")).toHaveLength(3);
   });
 

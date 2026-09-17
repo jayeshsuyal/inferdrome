@@ -5671,3 +5671,58 @@ td strong {
   .evaluation-controls label { flex: 1 1 160px; }
   .evaluation-controls select { width: 100%; min-width: 0; }
 }
+
+/* Evaluation-only disclosures preserve the existing dashboard surfaces. */
+.evaluation-disclosure {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.evaluation-disclosure > summary {
+  padding: 12px 0;
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.evaluation-disclosure > summary::marker { color: var(--accent); }
+.evaluation-disclosure-title { font-weight: 600; }
+.evaluation-disclosure-cue {
+  display: block;
+  margin: 4px 0 0 15px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  font-weight: 400;
+}
+.evaluation-disclosure-body { padding: 8px 0 12px; min-width: 0; }
+.evaluation-disclosure-body > h3 { margin: 0 0 12px; font-size: 14px; }
+.evaluation-major-disclosure {
+  margin: 0 0 20px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 9px 26px var(--shadow);
+}
+.evaluation-major-disclosure > summary { padding: 14px 16px; }
+.evaluation-major-disclosure > .evaluation-disclosure-body { padding: 0 16px 16px; }
+.evaluation-overview-status { gap: 12px 22px; }
+.evaluation-overview-status dd { font-size: 15px; }
+.evaluation-provenance { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.evaluation-provenance code { user-select: all; }
+.evaluation-index-digest { margin-top: 5px; max-width: 100%; font-size: 10px; font-weight: 400; }
+.evaluation-index-digest > summary { min-height: 44px; padding: 12px 0; cursor: pointer; color: var(--muted); overflow-wrap: anywhere; }
+.evaluation-index-digest > code { display: block; margin-top: 7px; user-select: all; }
+.evaluation-table th { text-transform: none; letter-spacing: normal; font-size: 11px; }
+.evaluation-table .table-subtext {
+  white-space: normal;
+  text-overflow: clip;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.evaluation-panel .status-badge,
+.evaluation-boundary .status-badge,
+.evaluation-major-disclosure .status-badge { text-transform: none; letter-spacing: normal; }
+.evaluation-disclosure summary:focus-visible,
+.evaluation-index-digest summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }

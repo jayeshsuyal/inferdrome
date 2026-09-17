@@ -74,6 +74,13 @@ runs; **Refresh reports** / **Refresh report** reload the evaluation source.
 
 ## What the app displays
 
+Each report starts with a plain-language summary of the reported completion,
+comparison availability, and planned/returned coverage. Returned records are
+not counts of successful requests. Detailed coverage, request diagnostics, and
+provenance remain available through keyboard- and touch-accessible disclosures;
+incomplete, censored, low-replication, and unavailable-result cues remain visible
+at the relevant summary or results section.
+
 Study details keep the four new evaluation policies, foreground/background
 populations, fixed offered windows, goodput and SLO fractions, outcome counts,
 latency sample populations, and matched contrasts from the authoritative report.
@@ -95,6 +102,11 @@ The frontend performs selection and presentation only. Supplied numeric strings,
 counts, quantiles, contrasts and nulls remain authoritative; it does not pool
 requests, calculate new rates, rerun a bootstrap, infer a winner, or invent an
 effect percentage. Nanosecond values retain their stated origin and population.
+Evaluation-only formatting presents readable timing units and numeric precision;
+expanded technical detail retains exact source strings and units, identifiers,
+and digests for inspection without hovering. Display formatting does not change
+the supplied values or their denominator, and signed contrasts retain their
+meaning and exact interval bounds.
 Unavailable values never become zero. Failed/cancelled requests remain in the
 offered denominator. A valid incomplete report can contain invalid source-cell
 entries without projecting measurements for those cells.

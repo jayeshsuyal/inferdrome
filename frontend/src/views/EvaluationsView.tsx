@@ -5,7 +5,8 @@ import { EvaluationTable } from "../components/EvaluationData";
 import { EmptyState, ErrorState, LoadingState, PageHeader, Panel, SectionHeading, StatusBadge } from "../components/Primitives";
 import { useEvaluations } from "../hooks/useEvaluations";
 import type { EvaluationKind } from "../lib/evaluations";
-import { humanize, shortDigest } from "../lib/format";
+import { evaluationLabel } from "../lib/evaluation-display";
+import { shortDigest } from "../lib/format";
 import { Link } from "../lib/router";
 
 export function EvaluationsView() {
@@ -13,7 +14,7 @@ export function EvaluationsView() {
   const [kind, setKind] = useState<"ALL" | EvaluationKind>("ALL");
   const header = <PageHeader
     title="Evaluations"
-    subtitle="Bounded read-only study and prefix-cache reports, with separate coverage and comparison status."
+    subtitle="Study and prefix-cache reports. Compare reported results, coverage and provenance."
     action={<button type="button" className="button button-secondary" onClick={request.retry} disabled={request.pendingRefresh} aria-busy={request.pendingRefresh}><RefreshCw aria-hidden="true" />Refresh reports</button>}
   />;
   if (request.status === "loading") return <>
@@ -32,7 +33,7 @@ export function EvaluationsView() {
 
     <div className="evaluation-boundary" role="note">
       <strong>Pinned report; source inputs not replayed</strong>
-      <p>Integrity and contract checks do not establish reducer authorship, actual execution or cache treatment. Runtime remains unverified and evidence eligibility remains false.</p>
+      <p>Report integrity and contract checks do not establish authorship or actual execution. Runtime and cache treatment remain unverified; evidence eligibility remains false.</p>
     </div>
 
     <Panel className="evaluation-panel">
@@ -46,7 +47,7 @@ export function EvaluationsView() {
         </select></label>
       </div>
 
-      {visible.length ? <EvaluationTable caption="Pinned study and prefix-cache reports" columns={["Report", "Kind", "Execution", "Comparison", "Measurements"]}>
+      {visible.length ? <EvaluationTable caption="Pinned study and prefix-cache reports" columns={["Report", "Kind", "Reported completion", "Comparison", "Measurements"]}>
 
         {visible.map((report) => <tr key={report.report_id}>
 
@@ -55,9 +56,7 @@ export function EvaluationsView() {
               {report.label}
               <ArrowUpRight aria-hidden="true" />
             </Link>
-            <span className="table-subtext mono" title={report.report_sha256}>
-              {shortDigest(report.report_sha256)}
-            </span>
+            <details className="evaluation-index-digest"><summary>Report digest · {shortDigest(report.report_sha256)}</summary><code className="evaluation-digest">{report.report_sha256}</code></details>
           </th>
 
           <td data-label="Kind">
@@ -66,13 +65,13 @@ export function EvaluationsView() {
             </span>
           </td>
 
-          <td data-label="Execution">
-            <StatusBadge status={report.status} label={humanize(report.status)} />
+          <td data-label="Reported completion">
+            <StatusBadge status={report.status} label={evaluationLabel(report.status)} />
           </td>
 
           <td data-label="Comparison">
             <span>
-              {humanize(report.comparison_status)}
+              {evaluationLabel(report.comparison_status)}
             </span>
           </td>
 
