@@ -38,28 +38,31 @@ comparison platform, or duplicate lifecycle are in scope.
 
 ## Integration and execution gates
 
-Shared lifecycle integration and the final PR must wait for the parent to
-verify PR #92's merge SHA and successful main CI. At this handoff, the parent
-reports PR #92 remains unmerged and is receiving a bounded repair for a
-delayed-create absence finding. The previously inspected head
-`1a0cf4fb7c6c5c0739b22df64c32d8f5735245cf` is not an approved integration base.
-Do not modify its worktree or depend on unpublished changes.
+The shared lifecycle gate cleared after the parent independently verified
+PR #92's merge `d9798ac6700713af64055f00fe723f4cb9974842` and successful main
+Engineering, Dashboard and Deployment jobs in
+[run 35268332149](https://github.com/jayeshsuyal/inferdrome/actions/runs/35268332149).
+That exact base was merged normally into this branch, preserving checkpoint
+`b94a57d54bcdcdce9248579211ea92b8df78cca6`. The old inspected PR head
+`1a0cf4fb7c6c5c0739b22df64c32d8f5735245cf` was never used as an integration base.
+No other worktree was changed.
 
 The parent subsequently confirmed shell execution was restored. The continuation
 verified `/bin/zsh` with `login:false`, inspected this worktree, and preserved the
 preparation commit. No process killing, machine cleanup, direct GitHub file
-writes, or environment repair was performed. Shared process lifecycle extraction
-still requires the verified merged base. Re-run the required gates against the
+writes, or machine repair was performed. The pinned uv 0.8.17 development tool
+was restored from its checksum-verified official release for offline packaging.
+Shared process lifecycle extraction uses the verified merged base. Run gates on the
 actual completed integration head and obtain independent review before merge.
 
 The preparation's 170 passing SGLang tests are historical preparation results,
 not validation of the completed integration. The earlier unchanged auth
 concurrency-test timeout is not a product pass.
 
-## Contract and native-session continuation
+## Contract and native-session checkpoint
 
-The following work is implemented on the same branch, without a serving-process
-lifecycle or a GPU run:
+Checkpoint `b94a57d` implemented the following work before the shared lifecycle
+gate cleared, without a serving-process lifecycle or a GPU run:
 
 - `engine_binding.py` builds and verifies the closed pre-dispatch engine binding,
   exact compiled study/trial membership, two distinct endpoint identities, and
@@ -105,9 +108,46 @@ required repository gates passed. Independent scoped review found no remaining
 P0/P1 after a strict copied-primitive preflight fix. The preparation commit also
 received independent static review with no confirmed P0/P1.
 
-Still required: obtain the parent-confirmed #92 merge SHA and green main CI;
-integrate only the repaired
-shared lifecycle's narrow engine seams; enforce one engine choice through
-calibration and confirmation; rerun all required gates and exact-head review;
-then create the one integration review PR. No PR, push, merge, GPU qualification
-or runtime compatibility claim has been made by this continuation.
+## Shared lifecycle integration
+
+After the gate cleared, the integration added the fixed Docker bridge/readonly
+artifact projection, exact local snapshot/template verification, and SGLang
+readiness/warmup/drain/flush hooks on the shared exact-owned process owner.
+Mapped reset receipts distinguish original profile, projected launch and mapped
+readiness digests. Every calibration and confirmation recipe is recompiled and
+prebound before lifecycle work, with a durable homogeneous engine-choice ledger.
+Known cross-engine executor/lifecycle combinations fail before dispatch.
+
+Independent review found two pre-dispatch binding gaps and an inherited snapshot
+walker that silently omitted unreadable directories. The integration repairs
+those cases and adds regressions. Valid snapshot hash domains and `.cache`
+exclusion remain unchanged. Deadline review additionally requires artifact hashing
+to remain owned and observable while the async session stays responsive.
+
+See [SGLANG_NATIVE_INTEGRATION.md](SGLANG_NATIVE_INTEGRATION.md) for the API,
+mapping, artifacts and remaining runtime/UI limitations. Local Docker/Compose
+execution remains explicitly withheld; exact-head PR CI supplies that gate.
+No GPU qualification, model/image download, provider/spend or runtime compatibility
+claim is made by this integration.
+
+## Completed local validation
+
+The final integration source passed the full Engineering gate: generated checks,
+Ruff, strict mypy across 198 modules, and 4,344 Python tests; 21 tests skipped
+for optional dependencies/platform support. The Engineering packaging probe
+could not find uv on its default path, but the full Dashboard gate separately
+used the checksum-verified uv 0.8.17 executable and passed offline sdist/wheel
+installation plus installed dashboard/CLI smoke checks.
+
+The full Dashboard gate also passed TypeScript, 177 frontend unit tests,
+36 Playwright tests, 217 backend tests and production asset generation. Committed
+dashboard assets remain unchanged. The dependency lock passed the pinned uv
+offline freshness check. Deployment schema freshness, script compilation and all
+26 qualification unit tests passed locally; these checks do not substitute for
+the withheld complete Docker Compose gate.
+
+Independent scoped reviews found no remaining confirmed P0/P1 in the final
+source, including retained artifact workers and unchanged native lifecycle
+behavior. The single draft PR records its exact head, all three GitHub CI jobs
+and the parent's final independent review. It may become ready for review only
+after those required jobs pass; this handoff does not authorize merging.

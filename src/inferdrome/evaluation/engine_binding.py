@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from inferdrome.evaluation.contracts import ClosedModel, EndpointId, EvaluationError
+from inferdrome.evaluation.sglang_container import build_sglang_container_profile
 from inferdrome.evaluation.sglang_profile import (
     SGLANG_IMAGE_REFERENCE,
     SGLANG_IMAGE_TAG,
@@ -106,6 +107,7 @@ class EngineEndpointBinding(_BindingModel):
     endpoint_id: EndpointId
     origin_sha256: Digest
     profile_config_sha256: Digest
+    projected_launch_sha256: Digest | None = None
 
 
 class EvaluationEngineBinding(_BindingModel):
@@ -115,6 +117,7 @@ class EvaluationEngineBinding(_BindingModel):
         "inferdrome.evaluation-engine-binding.v1"
     )
     engine: Literal["sglang"] = "sglang"
+    execution_mode: Literal["NATIVE_PROCESS", "DOCKER_BRIDGE"] = "NATIVE_PROCESS"
     profile: Literal["SGLANG_0_5_18_SINGLE_DEVICE_BF16"] = (
         "SGLANG_0_5_18_SINGLE_DEVICE_BF16"
     )
@@ -174,6 +177,16 @@ class EvaluationEngineBinding(_BindingModel):
             or len({endpoint.profile_config_sha256 for endpoint in self.endpoints}) != 2
         ):
             raise ValueError("engine binding requires two ordered distinct endpoints")
+        if any(
+            (endpoint.projected_launch_sha256 is not None)
+            != (self.execution_mode == "DOCKER_BRIDGE")
+            for endpoint in self.endpoints
+        ) or (
+            self.execution_mode == "DOCKER_BRIDGE"
+            and len({endpoint.projected_launch_sha256 for endpoint in self.endpoints})
+            != 2
+        ):
+            raise ValueError("engine execution mode and launch identities must agree")
         return self
 
 
@@ -261,6 +274,8 @@ def _check_plan(binding: EvaluationEngineBinding, plan: CompiledStudy) -> None:
 def build_sglang_engine_binding(
     study: StudyConfig | CompiledStudy,
     profiles: Mapping[EndpointId, SglangServingConfig],
+    *,
+    containerized: bool = False,
 ) -> EvaluationEngineBinding:
     """Bind both real native endpoints to one declared SGLang recipe, without I/O.
 
@@ -270,6 +285,8 @@ def build_sglang_engine_binding(
     serving settings must match. Raw names, origins and paths are only hashed.
     """
     try:
+        if type(containerized) is not bool:
+            raise ValueError
         plan = _validated_plan(study)
         if set(profiles) != set(_ENDPOINT_IDS) or any(
             type(profiles[endpoint_id]) is not SglangServingConfig
@@ -290,7 +307,9 @@ def build_sglang_engine_binding(
         first = prepared[0].config
         identity, settings = _identity(first), _settings(first)
         bindings: list[EngineEndpointBinding] = []
-        for endpoint, profile in zip(endpoints, prepared, strict=True):
+        for index, (endpoint, profile) in enumerate(
+            zip(endpoints, prepared, strict=True)
+        ):
             if (
                 profile.config.origin != endpoint.origin
                 or _identity(profile.config) != identity
@@ -306,6 +325,13 @@ def build_sglang_engine_binding(
                     endpoint_id=endpoint.endpoint_id,
                     origin_sha256=sha256_digest(endpoint.origin.encode("utf-8")),
                     profile_config_sha256=profile.config_sha256,
+                    projected_launch_sha256=(
+                        build_sglang_container_profile(
+                            profile.config, index
+                        ).launch_sha256
+                        if containerized
+                        else None
+                    ),
                 )
             )
         binding = EvaluationEngineBinding(
@@ -314,6 +340,7 @@ def build_sglang_engine_binding(
             endpoints=tuple(bindings),
             model_identity=identity,
             settings=settings,
+            execution_mode="DOCKER_BRIDGE" if containerized else "NATIVE_PROCESS",
         )
         _check_plan(binding, plan)
         return binding
@@ -388,7 +415,7 @@ def load_engine_binding_bytes(
             raise ValueError
         _check_plan(binding, _validated_plan(study))
         if profiles is not None and binding != build_sglang_engine_binding(
-            study, profiles
+            study, profiles, containerized=binding.execution_mode == "DOCKER_BRIDGE"
         ):
             raise ValueError
         return binding

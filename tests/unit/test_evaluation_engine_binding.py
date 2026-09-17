@@ -19,6 +19,7 @@ from inferdrome.evaluation.engine_binding import (
     load_engine_binding_bytes,
     validate_engine_binding_trial,
 )
+from inferdrome.evaluation.sglang_container import build_sglang_container_profile
 from inferdrome.evaluation.sglang_profile import (
     SGLANG_IMAGE_REFERENCE,
     SglangServingConfig,
@@ -476,3 +477,59 @@ def test_trial_membership_rejects_rebound_or_tampered_trial(mutation: str) -> No
         trial = plan.trials[0]
     with pytest.raises(EvaluationError):
         validate_engine_binding_trial(binding, plan, trial)
+
+
+def test_docker_binding_freezes_launch_and_preserves_source_identity() -> None:
+    plan = compile_study(study())
+    selected = profiles()
+    native = build_sglang_engine_binding(plan, selected)
+    docker = build_sglang_engine_binding(plan, selected, containerized=True)
+    assert native.execution_mode == "NATIVE_PROCESS"
+    assert all(
+        endpoint.projected_launch_sha256 is None for endpoint in native.endpoints
+    )
+    assert docker.execution_mode == "DOCKER_BRIDGE"
+    for index, endpoint in enumerate(docker.endpoints):
+        projected = build_sglang_container_profile(
+            selected[endpoint.endpoint_id], index
+        )
+        assert (
+            endpoint.profile_config_sha256
+            == native.endpoints[index].profile_config_sha256
+        )
+        assert endpoint.projected_launch_sha256 == projected.launch_sha256
+    assert engine_choice_sha256(native) != engine_choice_sha256(docker)
+    assert (
+        load_engine_binding_bytes(engine_binding_bytes(docker), plan, profiles=selected)
+        == docker
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["mode", "missing", "native-present", "duplicate", "wrong-launch"]
+)
+def test_docker_binding_cannot_drop_or_swap_projected_identity(mutation: str) -> None:
+    plan = compile_study(study())
+    selected = profiles()
+    binding = build_sglang_engine_binding(plan, selected, containerized=True)
+    payload = binding.model_dump(mode="json")
+    if mutation == "mode":
+        payload["execution_mode"] = "UNMANAGED"
+    elif mutation == "missing":
+        payload["endpoints"][0]["projected_launch_sha256"] = None
+    elif mutation == "native-present":
+        payload["execution_mode"] = "NATIVE_PROCESS"
+    elif mutation == "duplicate":
+        payload["endpoints"][1]["projected_launch_sha256"] = payload["endpoints"][0][
+            "projected_launch_sha256"
+        ]
+    else:
+        payload["endpoints"][0]["projected_launch_sha256"] = "sha256:" + "f" * 64
+    with pytest.raises(EvaluationError):
+        load_engine_binding_bytes(encoded(payload), plan, profiles=selected)
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", None])
+def test_containerized_selection_requires_boolean_primitive(value: object) -> None:
+    with pytest.raises(EvaluationError):
+        build_sglang_engine_binding(study(), profiles(), containerized=value)
