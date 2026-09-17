@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { humanize, shortDigest } from "../lib/format";
 import type { EvaluationContrast, EvaluationMetric, EvaluationPopulation, EvaluationRecovery, EvaluationSummary } from "../lib/evaluations";
+import { evaluationEngine } from "../lib/evaluations";
 import { StatusBadge } from "./Primitives";
 
 export function EvaluationValue({ value, unit }: {
@@ -47,6 +48,7 @@ export function EvaluationTable({ caption, columns, children }: {
   </table>;
 }
 export function EvaluationTrust({ summary }: { readonly summary: EvaluationSummary; }) {
+  const engine = evaluationEngine(summary);
   return <div className="evaluation-boundary" role="note">
 
     <strong>Pinned report; source inputs not replayed</strong>
@@ -54,6 +56,8 @@ export function EvaluationTrust({ summary }: { readonly summary: EvaluationSumma
     <p>The retained digest and report contract were checked. Reducer authorship, source execution and runtime identity are not established here. Evidence eligibility remains false.</p>
 
     <div className="evaluation-badges">
+
+      {engine ? <StatusBadge status="SGLANG" label={`SGLang ${engine.producer_version}`} /> : null}
 
       <StatusBadge
         status={summary.evidence_class ?? "UNAVAILABLE"}
@@ -68,10 +72,34 @@ export function EvaluationTrust({ summary }: { readonly summary: EvaluationSumma
     </div>
 
     {summary.evidence_class === "LOCAL_MEASUREMENT_ONLY" ? <p>Local measurement classification does not establish cloud execution or successful requests.</p> : null}
+    {engine ? <>
+      <p>Reported running and queued requests describe SGLang scheduler gauges. Scrape freshness measures acquisition-start age; scheduler-state age is unavailable.</p>
+      <p>Cold cache and warmup, drain and flush are declared. This viewer does not verify the reset or cache state.</p>
+    </> : null}
   </div>;
 }
 export function EvaluationProvenance({ summary }: { readonly summary: EvaluationSummary; }) {
+  const engine = evaluationEngine(summary);
   return <dl className="evaluation-facts">
+
+    {engine ? <>
+      <div>
+        <dt>Serving engine</dt>
+        <dd>SGLang {engine.producer_version}</dd>
+      </div>
+      <div>
+        <dt>Declared engine profile</dt>
+        <dd>Single device · BF16</dd>
+      </div>
+      <div>
+        <dt>Engine binding digest</dt>
+        <dd><code className="evaluation-digest" title={engine.engine_binding_sha256}>{shortDigest(engine.engine_binding_sha256)}</code></dd>
+      </div>
+      <div>
+        <dt>Engine configuration digest</dt>
+        <dd><code className="evaluation-digest" title={engine.engine_choice_sha256}>{shortDigest(engine.engine_choice_sha256)}</code></dd>
+      </div>
+    </> : null}
 
     <div>
       <dt>Report digest</dt>
@@ -92,7 +120,7 @@ export function EvaluationProvenance({ summary }: { readonly summary: Evaluation
     </div>
 
     <div>
-      <dt>Config digest</dt>
+      <dt>{engine ? "Study config digest" : "Config digest"}</dt>
       <dd>
         {summary.config_sha256 ? <code className="evaluation-digest" title={summary.config_sha256}>
           {shortDigest(summary.config_sha256)}

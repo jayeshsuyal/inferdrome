@@ -29,6 +29,8 @@ from inferdrome.evaluation.contracts import ClosedModel, EndpointId, EvaluationE
 from inferdrome.evaluation.engine_binding import (
     EvaluationEngineBinding,
     engine_binding_bytes,
+    engine_binding_sha256,
+    engine_choice_sha256,
 )
 from inferdrome.evaluation.files import OutputFile, read_input
 from inferdrome.evaluation.load_calibration import (
@@ -53,6 +55,10 @@ from inferdrome.evaluation.report_reader import (
 )
 from inferdrome.evaluation.sglang_profile import SglangServingConfig
 from inferdrome.evaluation.sglang_rehearsal import bind_sglang_rehearsal
+from inferdrome.evaluation.sglang_report import (
+    MAX_SGLANG_REPORT_BYTES,
+    read_sglang_report_bytes,
+)
 from inferdrome.evaluation.sglang_results import load_sglang_trial_bytes
 from inferdrome.evaluation.study import (
     StudyExecutor,
@@ -1116,9 +1122,13 @@ def _write_sidecar(path: Path, content: bytes) -> None:
 
 
 def _read_confirmation_report(
-    report_path: Path, *, expected_config_sha256: str, expected_plan_sha256: str
+    report_path: Path,
+    *,
+    expected_config_sha256: str,
+    expected_plan_sha256: str,
+    engine_binding: EvaluationEngineBinding | None = None,
 ) -> tuple[bytes, str, StudyReport]:
-    """Independently re-read one complete native confirmation report."""
+    """Re-read the full envelope; private statistics only check its ledger."""
 
     if (
         report_path.name != "report.json"
@@ -1127,9 +1137,24 @@ def _read_confirmation_report(
     ):
         raise EvaluationError("rehearsal confirmation report is unavailable")
     try:
-        with StudyDirectory.open(report_path.parent) as directory:
-            content = directory.read("report.json", limit=_SIDECAR_OUTPUT_BYTES)
-        loaded = load_evaluation_report_bytes(content, kind="STUDY")
+        maximum = (
+            MAX_SGLANG_REPORT_BYTES
+            if engine_binding is not None
+            else _SIDECAR_OUTPUT_BYTES
+        )
+        with StudyDirectory.open(report_path.parent, budget=maximum) as directory:
+            content = directory.read("report.json", limit=maximum)
+        if engine_binding is None:
+            loaded = load_evaluation_report_bytes(content, kind="STUDY")
+        else:
+            envelope = read_sglang_report_bytes(content)
+            if (
+                envelope.dashboard_projection != "ENGINE_BOUND_V2"
+                or engine_binding_bytes(envelope.engine_binding)
+                != engine_binding_bytes(engine_binding)
+            ):
+                raise ValueError
+            loaded = envelope.statistical_report
     except (OSError, ValueError, EvaluationError):
         raise EvaluationError("rehearsal confirmation report is unavailable") from None
     report_config_sha256 = loaded.model_dump(mode="json").get("config_sha256")
@@ -1172,7 +1197,11 @@ def _validate_confirmation_report_ledger(
 
 
 def _write_pinned_catalog(
-    *, report_path: Path, report_sha256: str, catalog_path: Path
+    *,
+    report_path: Path,
+    report_sha256: str,
+    catalog_path: Path,
+    sglang: bool = False,
 ) -> str:
     _write_sidecar(
         catalog_path,
@@ -1181,7 +1210,7 @@ def _write_pinned_catalog(
                 "schema_version": "inferdrome.dashboard-evaluation-reports-catalog.v1",
                 "entries": [
                     {
-                        "kind": "STUDY",
+                        "kind": "SGLANG_STUDY" if sglang else "STUDY",
                         "report_path": str(report_path.absolute()),
                         "expected_sha256": report_sha256,
                     }
@@ -1213,12 +1242,32 @@ def write_pinned_confirmation_catalog(
         or manifest.status != "COMPLETED"
     ):
         raise EvaluationError("rehearsal has no confirmation report to pin")
+    root = report_path.parent.parent
+    selected_level_id = result.calibration_selection.selected_level_id
+    engine_binding = _confirmation_engine_binding(
+        root,
+        selected_level_id=selected_level_id,
+        expected_ledger_sha256=result.engine_choice_bindings_sha256,
+        expected_candidate_sha256=result.candidate_recipe_bindings_sha256,
+    )
     _, digest, report = _read_confirmation_report(
         report_path,
         expected_config_sha256=manifest.config_sha256,
         expected_plan_sha256=manifest.plan_sha256,
+        engine_binding=engine_binding,
     )
     _validate_confirmation_report_ledger(manifest, report)
+    if engine_binding is not None:
+        if (
+            report_path.absolute()
+            != (
+                root / f"confirmation-{selected_level_id}-report" / "report.json"
+            ).absolute()
+        ):
+            raise EvaluationError("SGLang confirmation location is inconsistent")
+        # The immediate path also verifies durable selection, phase binding and
+        # manifest antecedents before publishing the same recovery-safe pin.
+        return recover_pinned_confirmation_catalog(root, catalog_path=catalog_path)
     return _write_pinned_catalog(
         report_path=report_path, report_sha256=digest, catalog_path=catalog_path
     )
@@ -1241,6 +1290,118 @@ def _canonical_sidecar(path: Path, *, schema_version: str) -> dict[str, object]:
         return value
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         raise EvaluationError("rehearsal recovery artifact is unavailable") from None
+
+
+def _confirmation_engine_binding(
+    output_root: Path,
+    *,
+    selected_level_id: str,
+    expected_ledger_sha256: object,
+    expected_candidate_sha256: str,
+) -> EvaluationEngineBinding | None:
+    """Bind a SGLang pin to every durable candidate/phase engine declaration."""
+    if type(selected_level_id) is not str or not _SAFE_LEVEL_ID.fullmatch(
+        selected_level_id
+    ):
+        raise EvaluationError("SGLang confirmation selection is inconsistent")
+    ledger_path = output_root / "engine-choice-bindings.json"
+    study_path = output_root / f"confirmation-{selected_level_id}"
+    binding_path = study_path / "engine-binding.json"
+    if expected_ledger_sha256 is None:
+        if any(
+            path.exists() or path.is_symlink() for path in (ledger_path, binding_path)
+        ):
+            raise EvaluationError("SGLang confirmation requires its engine ledger")
+        return None
+    if type(expected_ledger_sha256) is not str or not _SHA256_DIGEST.fullmatch(
+        expected_ledger_sha256
+    ):
+        raise EvaluationError("SGLang confirmation engine ledger is inconsistent")
+    candidates = _canonical_sidecar(
+        output_root / "candidate-recipe-bindings.json",
+        schema_version="inferdrome.evaluation-load-rehearsal-candidate-bindings.v1",
+    )
+    ledger = _canonical_sidecar(
+        ledger_path,
+        schema_version="inferdrome.evaluation-load-rehearsal-engine-bindings.v1",
+    )
+    try:
+        if (
+            sha256_digest(canonical_json_bytes(ledger) + b"\n")
+            != expected_ledger_sha256
+            or sha256_digest(canonical_json_bytes(candidates) + b"\n")
+            != expected_candidate_sha256
+            or set(ledger)
+            != {
+                "schema_version",
+                "protocol_sha256",
+                "candidate_recipe_bindings_sha256",
+                "engine_choice_sha256",
+                "phases",
+                "runtime_identity",
+                "evidence_eligible",
+            }
+            or ledger["protocol_sha256"] != candidates.get("protocol_sha256")
+            or ledger["candidate_recipe_bindings_sha256"] != expected_candidate_sha256
+            or ledger["runtime_identity"] != "UNVERIFIED"
+            or ledger["evidence_eligible"] is not False
+        ):
+            raise ValueError
+        recipes = candidates.get("candidates")
+        phases = ledger["phases"]
+        if type(recipes) is not list or not recipes or type(phases) is not list:
+            raise ValueError
+        expected = []
+        level_ids: set[str] = set()
+        for recipe in recipes:
+            if type(recipe) is not dict:
+                raise ValueError
+            level = recipe.get("level_id")
+            if (
+                type(level) is not str
+                or not _SAFE_LEVEL_ID.fullmatch(level)
+                or level in level_ids
+            ):
+                raise ValueError
+            level_ids.add(level)
+            for phase in ("CALIBRATION", "CONFIRMATION"):
+                context = recipe.get(phase.lower())
+                if type(context) is not dict:
+                    raise ValueError
+                expected.append((level, phase, context))
+        if len(phases) != len(expected):
+            raise ValueError
+        selected: EvaluationEngineBinding | None = None
+        for item, (level, phase, context) in zip(phases, expected, strict=True):
+            if (
+                type(item) is not dict
+                or set(item)
+                != {"level_id", "phase", "engine_binding", "engine_binding_sha256"}
+                or item["level_id"] != level
+                or item["phase"] != phase
+            ):
+                raise ValueError
+            binding_bytes = canonical_json_bytes(item["engine_binding"]) + b"\n"
+            binding = EvaluationEngineBinding.model_validate_json(binding_bytes)
+            if (
+                engine_binding_bytes(binding) != binding_bytes
+                or engine_binding_sha256(binding) != item["engine_binding_sha256"]
+                or engine_choice_sha256(binding) != ledger["engine_choice_sha256"]
+                or binding.config_sha256 != context.get("config_sha256")
+                or binding.plan_sha256 != context.get("plan_sha256")
+            ):
+                raise ValueError
+            if level == selected_level_id and phase == "CONFIRMATION":
+                selected = binding
+        if selected is None:
+            raise ValueError
+        if read_input(binding_path) != engine_binding_bytes(selected):
+            raise ValueError
+        return selected
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        raise EvaluationError(
+            "SGLang confirmation engine ledger is inconsistent"
+        ) from None
 
 
 def recover_pinned_confirmation_catalog(
@@ -1316,6 +1477,15 @@ def recover_pinned_confirmation_catalog(
     ):
         raise EvaluationError("rehearsal recovery binding is inconsistent")
     study_dir = output_root / f"confirmation-{selected_level_id}"
+    engine_ledger_sha256 = selection_binding.get("engine_choice_bindings_sha256")
+    if linkage.get("engine_choice_bindings_sha256") != engine_ledger_sha256:
+        raise EvaluationError("SGLang confirmation engine ledger is inconsistent")
+    engine_binding = _confirmation_engine_binding(
+        output_root,
+        selected_level_id=selected_level_id,
+        expected_ledger_sha256=engine_ledger_sha256,
+        expected_candidate_sha256=binding_sha256,
+    )
     try:
         manifest_bytes = read_input(study_dir / "manifest.json")
         manifest = StudyManifest.model_validate_json(manifest_bytes)
@@ -1336,6 +1506,7 @@ def recover_pinned_confirmation_catalog(
         report_path,
         expected_config_sha256=expected_config_sha256,
         expected_plan_sha256=expected_plan_sha256,
+        engine_binding=engine_binding,
     )
     _validate_confirmation_report_ledger(manifest, report)
     if linkage.get("confirmation_report_sha256") != report_sha256:
@@ -1344,6 +1515,7 @@ def recover_pinned_confirmation_catalog(
         report_path=report_path,
         report_sha256=report_sha256,
         catalog_path=catalog_path,
+        sglang=engine_binding is not None,
     )
 
 
@@ -1627,9 +1799,16 @@ async def run_rehearsal(
         if engines is not None
         else None
     )
+    engine_output_reserve = (
+        len(engine_ledger)
+        + (len(rehearsal.candidates) + 1)
+        * (2 * MAX_SGLANG_REPORT_BYTES - _REPORT_OUTPUT_BYTES)
+        if engine_ledger is not None
+        else 0
+    )
     if engine_ledger is not None and (
         len(engine_ledger) > _SIDECAR_OUTPUT_BYTES
-        or rehearsal.reserved_output_bytes + len(engine_ledger)
+        or rehearsal.reserved_output_bytes + engine_output_reserve
         > protocol.max_session_output_bytes
     ):
         raise EvaluationError("SGLang engine ledger exceeds the session output reserve")
@@ -1750,6 +1929,11 @@ async def run_rehearsal(
                         canonical_json_bytes(selection.model_dump(mode="json")) + b"\n"
                     ),
                     "selected_level_id": selection.selected_level_id,
+                    **(
+                        {"engine_choice_bindings_sha256": sha256_digest(engine_ledger)}
+                        if engine_ledger is not None
+                        else {}
+                    ),
                     "evidence_eligible": False,
                     "runtime_identity": "UNVERIFIED",
                 }
@@ -1833,7 +2017,9 @@ async def run_rehearsal(
                         rehearsal.final_cleanup_reserve_ns
                     ),
                     "session_retrieval_reserve_ns": rehearsal.retrieval_reserve_ns,
-                    "session_reserved_output_bytes": rehearsal.reserved_output_bytes,
+                    "session_reserved_output_bytes": (
+                        rehearsal.reserved_output_bytes + engine_output_reserve
+                    ),
                     "candidate_recipe_bindings_sha256": (
                         candidate_recipe_bindings_sha256
                     ),
@@ -1842,6 +2028,11 @@ async def run_rehearsal(
                     ),
                     "candidate_bindings": calibration_reports,
                     "confirmation_report_sha256": confirmation_report_sha256,
+                    **(
+                        {"engine_choice_bindings_sha256": sha256_digest(engine_ledger)}
+                        if engine_ledger is not None
+                        else {}
+                    ),
                     "evidence_eligible": False,
                     "runtime_identity": "UNVERIFIED",
                 }

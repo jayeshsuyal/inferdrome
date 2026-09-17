@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from inferdrome.evaluation.sglang_report import (
     MAX_SGLANG_REPORT_BYTES,
     bind_sglang_report,
     load_sglang_report_bytes,
+    read_sglang_report_bytes,
     render_sglang_markdown,
 )
 from inferdrome.evaluation.study_config import CompiledStudy, compile_study
@@ -79,8 +81,9 @@ def test_bound_report_preserves_statistics_claims_and_exact_component_digests(
     assert report["runtime_verification"] == "UNVERIFIED"
     assert report["evidence_eligible"] is False
     assert report["evidence_class"] == "SYNTHETIC_ONLY"
-    assert report["dashboard_projection"] == "UNSUPPORTED_ENGINE_BINDING"
+    assert report["dashboard_projection"] == "ENGINE_BOUND_V2"
     assert load_sglang_report_bytes(encoded(report), plan, binding) == report
+    assert read_sglang_report_bytes(encoded(report)).model_dump(mode="json") == report
     for forbidden in (b"private-model", b"private foreground", b"127.0.0.1", b"/opt/"):
         assert forbidden not in encoded(report)
 
@@ -125,7 +128,7 @@ def test_markdown_prepends_binding_and_limitations_without_changing_statistics(
         "WARMUP_DRAIN_FLUSH",
         "DECLARED_COLD",
         "does not establish that a reset occurred",
-        "UNSUPPORTED_ENGINE_BINDING",
+        "ENGINE_BOUND_V2",
     ):
         assert required in markdown
 
@@ -156,6 +159,8 @@ def test_parser_rejects_outer_claim_digest_and_extra_field_tampering(
     with pytest.raises(EvaluationError) as error:
         load_sglang_report_bytes(encoded(report), plan, binding)
     assert "secret" not in str(error.value)
+    with pytest.raises(EvaluationError):
+        read_sglang_report_bytes(encoded(report))
 
 
 @pytest.mark.parametrize("mutation", ["binding", "statistics", "trial", "digest"])
@@ -243,6 +248,8 @@ def test_report_loader_requires_complete_canonical_json_and_exact_primitives(
         raw = json.dumps(report).encode() + b"\n"
     with pytest.raises(EvaluationError):
         load_sglang_report_bytes(raw, plan, binding)
+    with pytest.raises(EvaluationError):
+        read_sglang_report_bytes(raw)
 
 
 @pytest.mark.parametrize(
@@ -297,3 +304,124 @@ def test_incomplete_and_unavailable_populations_remain_explicit(
     empty_report = bind_sglang_report(empty, binding, plan)
     assert empty_report["evidence_class"] == empty["evidence_class"]
     assert empty_report["statistical_report"]["coverage"]["returned_trials"] == 0
+
+
+def test_historical_unsupported_envelope_keeps_exact_bytes(
+    fixture: tuple[CompiledStudy, EvaluationEngineBinding, dict[str, Any]],
+) -> None:
+    plan, binding, source = fixture
+    report = bind_sglang_report(source, binding, plan)
+    report["dashboard_projection"] = "UNSUPPORTED_ENGINE_BINDING"
+    content = encoded(report)
+    assert encoded(read_sglang_report_bytes(content).model_dump(mode="json")) == content
+    assert encoded(load_sglang_report_bytes(content, plan, binding)) == content
+
+
+@pytest.mark.parametrize("field", ["config_sha256", "plan_sha256"])
+def test_standalone_reader_rejects_cross_study_binding_even_with_recomputed_digest(
+    fixture: tuple[CompiledStudy, EvaluationEngineBinding, dict[str, Any]],
+    field: str,
+) -> None:
+    plan, binding, source = fixture
+    report = bind_sglang_report(source, binding, plan)
+    report["engine_binding"][field] = "sha256:" + "f" * 64
+    report["engine_binding_sha256"] = sha256_digest(encoded(report["engine_binding"]))
+    with pytest.raises(EvaluationError):
+        read_sglang_report_bytes(encoded(report))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("telemetry_semantics", "VLLM_LOAD"),
+        ("telemetry_source_age", "OBSERVED"),
+        ("cache_state", "OBSERVED_COLD"),
+        ("runtime_verification", "VERIFIED"),
+        ("evidence_eligible", 0),
+        ("private_path", "/private/secret"),
+    ],
+)
+def test_standalone_reader_rejects_unsupported_binding_claims(
+    fixture: tuple[CompiledStudy, EvaluationEngineBinding, dict[str, Any]],
+    field: str,
+    value: object,
+) -> None:
+    plan, binding, source = fixture
+    report = bind_sglang_report(source, binding, plan)
+    report["engine_binding"][field] = value
+    report["engine_binding_sha256"] = sha256_digest(encoded(report["engine_binding"]))
+    with pytest.raises(EvaluationError):
+        read_sglang_report_bytes(encoded(report))
+
+
+def test_standalone_reader_exact_byte_boundary(
+    fixture: tuple[CompiledStudy, EvaluationEngineBinding, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inferdrome.evaluation.sglang_report as module
+
+    plan, binding, source = fixture
+    content = encoded(bind_sglang_report(source, binding, plan))
+    monkeypatch.setattr(module, "MAX_SGLANG_REPORT_BYTES", len(content))
+    assert read_sglang_report_bytes(content).engine == "sglang"
+    monkeypatch.setattr(module, "MAX_SGLANG_REPORT_BYTES", len(content) - 1)
+    with pytest.raises(EvaluationError):
+        read_sglang_report_bytes(content)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("cache_state", "DECLARED_WARM"),
+        ("prefix_caching", "DECLARED_DISABLED"),
+        ("serving_image_reference", "sha256:" + "f" * 64),
+    ],
+)
+def test_standalone_reader_rejects_preparation_contradicting_binding(
+    fixture: tuple[CompiledStudy, EvaluationEngineBinding, dict[str, Any]],
+    field: str,
+    value: str,
+) -> None:
+    plan, binding, source = fixture
+    report = bind_sglang_report(source, binding, plan)
+    report["statistical_report"]["preparation"][field] = value
+    report["statistical_report_sha256"] = sha256_digest(
+        encoded(report["statistical_report"])
+    )
+    with pytest.raises(EvaluationError):
+        read_sglang_report_bytes(encoded(report))
+
+
+def test_sglang_writer_uses_its_explicit_output_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inferdrome.evaluation.sglang_report as report_module
+    from inferdrome.evaluation.study import report_study
+    from inferdrome.evaluation.study_files import MAX_METADATA_BYTES
+    from tests.sglang_dashboard_support import write_sglang_study_report
+
+    # Produce native fake trial files first; only the Markdown rendering size is
+    # controlled here. The JSON envelope still passes real binding validation.
+    root = tmp_path / "source"
+    write_sglang_study_report(root, scenario="HEALTHY")
+    config = study("HEALTHY")
+    binding = build_sglang_engine_binding(config, profiles())
+    assert MAX_SGLANG_REPORT_BYTES > MAX_METADATA_BYTES
+    monkeypatch.setattr(
+        report_module,
+        "render_sglang_markdown",
+        lambda *_args: "x" * MAX_SGLANG_REPORT_BYTES,
+    )
+    destination = tmp_path / "boundary"
+    report_study(config, root / "study", destination, engine_binding=binding)
+    assert (destination / "report.md").stat().st_size == MAX_SGLANG_REPORT_BYTES
+    read_sglang_report_bytes((destination / "report.json").read_bytes())
+    monkeypatch.setattr(
+        report_module,
+        "render_sglang_markdown",
+        lambda *_args: "x" * (MAX_SGLANG_REPORT_BYTES + 1),
+    )
+    rejected = tmp_path / "over-boundary"
+    with pytest.raises(EvaluationError):
+        report_study(config, root / "study", rejected, engine_binding=binding)
+    assert not rejected.exists()

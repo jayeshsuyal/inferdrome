@@ -121,12 +121,12 @@ calibration reduces only semantically validated v2 records. Supplying both a
 SGLang profile choice and a native executor is rejected before lifecycle work;
 a declared SGLang lifecycle cannot enter the unbound vLLM path either.
 
-The session reserves the additional engine ledger within the declared output
+The session reserves the additional engine ledger and v2 report envelopes within the declared output
 limit. Cleanup/readback uncertainty aborts later work using the existing owner.
 No new policy, generic provider/lifecycle registry, campaign CLI, or permission
 to run infrastructure is introduced.
 
-## Reports and dashboard limitation
+## Reports and dashboard projection
 
 `report_study(..., engine_binding=binding)` verifies the persisted binding and all
 trial envelopes before using the existing statistical reducers. The report v2
@@ -134,11 +134,18 @@ contains the validated statistical report, its digest, the complete engine
 binding and its digest. Markdown carries the same provenance and limitations.
 Declared cold-cache preparation does not by itself establish a performed reset.
 
-The current dashboard/catalog reader accepts only the existing frozen v1 report
-contracts. It cannot carry this engine identity, so SGLang reports explicitly
-declare `dashboard_projection=UNSUPPORTED_ENGINE_BINDING` and are rejected by
-that reader. No SGLang catalog is published, and the nested statistical report
-must not be exported on its own as an unbound v1 result.
+New SGLang reports declare `dashboard_projection=ENGINE_BOUND_V2`. The existing
+Evaluation UI accepts them through an explicit `SGLANG_STUDY` catalog entry,
+pinned to the full v2 envelope digest. Its additive dashboard v2 projection keeps
+engine/version/configuration identity, scheduler semantics and evidence limits
+attached to the statistics. Legacy report projections remain unchanged and do
+not acquire an inferred engine identity.
+
+Historical reports declaring `UNSUPPORTED_ENGINE_BINDING` remain valid historical
+envelopes, but the dashboard withholds them. Their bytes are never rewritten.
+The nested statistical report must not be exported on its own as an unbound v1
+result. See [SGLANG_DASHBOARD_PROJECTION.md](SGLANG_DASHBOARD_PROJECTION.md) for
+catalog recovery, explicit size limits and reader qualification boundaries.
 
 ## CPU verification
 

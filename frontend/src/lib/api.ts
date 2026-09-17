@@ -234,6 +234,7 @@ export async function fetchBoundedDashboardJson(
   path: string,
   maxBytes: number,
   signal?: AbortSignal,
+  decodedByteLimit?: (value: unknown) => number,
 ): Promise<unknown> {
   let response: Response;
   try {
@@ -285,11 +286,21 @@ export async function fetchBoundedDashboardJson(
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  let value: unknown;
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
   } catch {
     throw protocolError("the evaluation body is not valid JSON");
   }
+  // Versioned evaluation projections retain their own wire-byte ceilings. The
+  // initial read is always bounded by maxBytes before any JSON is inspected.
+  const versionLimit = decodedByteLimit?.(value) ?? maxBytes;
+  if (!Number.isSafeInteger(versionLimit) || versionLimit < 1 || versionLimit > maxBytes
+    || (declaredLength !== null && Number(declaredLength) > versionLimit)) {
+    throw protocolError("the evaluation response headers are unsupported");
+  }
+  if (total > versionLimit) throw protocolError("the evaluation response exceeds its byte limit");
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,0 +1,2841 @@
+{
+  "projection_version": "inferdrome.evaluation-dashboard.v2",
+  "summary": {
+    "report_id": "ev-27d589b32eabef55496a887c375270fe43a4211744af63a2bf941751e2f391ac",
+    "kind": "STUDY",
+    "label": "SGLang study report 2",
+    "report_sha256": "sha256:8ba2ccb0c5bbd1101988909ff86cd4933d905758aa35e2f150de7fa8d2997899",
+    "plan_sha256": "sha256:e0ac82e71c480fb9c45775f0b92475a35ba27d070fa81fe2bd7fe6e736c26c52",
+    "config_sha256": "sha256:421ed317cdaacfc51019dc8a9a048e1ee635b339c403f32c111afef9feb1918c",
+    "source_schema": "inferdrome.evaluation-study-report.v2",
+    "status": "COMPLETED",
+    "comparison_status": "DESCRIPTIVE_UNCALIBRATED_REHEARSAL",
+    "reason": null,
+    "calibration": "UNCALIBRATED_REHEARSAL",
+    "evidence_class": "SYNTHETIC_ONLY",
+    "returned_records": 24,
+    "report_integrity": "EXPECTED_DIGEST_MATCH",
+    "report_contract": "VALIDATED",
+    "source_replay": "NOT_PERFORMED",
+    "runtime_verification": "UNVERIFIED",
+    "evidence_eligible": false,
+    "tokenizer_reverified_here": false,
+    "engine_identity": {
+      "engine": "sglang",
+      "producer_version": "0.5.18",
+      "profile": "SGLANG_0_5_18_SINGLE_DEVICE_BF16",
+      "engine_binding_sha256": "sha256:291ba2b65c94bce7ce0715f440ac057e55d8e8e8e3490cb325014c0ef1c50ba4",
+      "engine_choice_sha256": "sha256:dda8b0c2a0912e32589022fc07eda530b3565bf7f89a4fb8b936008e5e1ea47b",
+      "telemetry_semantics": "SGLANG_0_5_18_SCHEDULER_GAUGES",
+      "telemetry_freshness": "ACQUISITION_START_AGE_ONLY",
+      "telemetry_source_age": "UNAVAILABLE",
+      "cache_preparation": "WARMUP_DRAIN_FLUSH",
+      "cache_state": "DECLARED_COLD"
+    }
+  },
+  "coverage": [
+    {
+      "key": "planned_trials",
+      "label": "Planned trials",
+      "value": "4",
+      "unit": "count"
+    },
+    {
+      "key": "started_trials",
+      "label": "Started trials",
+      "value": "4",
+      "unit": "count"
+    },
+    {
+      "key": "returned_trials",
+      "label": "Returned trials",
+      "value": "4",
+      "unit": "count"
+    },
+    {
+      "key": "aborted_trials",
+      "label": "Aborted trials",
+      "value": "0",
+      "unit": "count"
+    },
+    {
+      "key": "not_run_trials",
+      "label": "Not-run trials",
+      "value": "0",
+      "unit": "count"
+    },
+    {
+      "key": "completed_trial_results",
+      "label": "Completed trial results",
+      "value": "4",
+      "unit": "count"
+    },
+    {
+      "key": "warmup_failed_results",
+      "label": "Warmup-failed results",
+      "value": "0",
+      "unit": "count"
+    },
+    {
+      "key": "cancelled_results",
+      "label": "Cancelled results",
+      "value": "0",
+      "unit": "count"
+    },
+    {
+      "key": "foreground_planned_offers",
+      "label": "Foreground \u00b7 Planned offers",
+      "value": "24",
+      "unit": "count"
+    },
+    {
+      "key": "foreground_returned_records",
+      "label": "Foreground \u00b7 Returned records",
+      "value": "24",
+      "unit": "count"
+    },
+    {
+      "key": "foreground_offers_in_aborted_trials_without_measurements",
+      "label": "Foreground \u00b7 Aborted-trial offers without measurements",
+      "value": "0",
+      "unit": "count"
+    },
+    {
+      "key": "foreground_offers_in_not_run_trials",
+      "label": "Foreground \u00b7 Not-run offers",
+      "value": "0",
+      "unit": "count"
+    },
+    {
+      "key": "background_planned_offers",
+      "label": "Background \u00b7 Planned offers",
+      "value": "8",
+      "unit": "count"
+    },
+    {
+      "key": "background_returned_records",
+      "label": "Background \u00b7 Returned records",
+      "value": "8",
+      "unit": "count"
+    },
+    {
+      "key": "background_offers_in_aborted_trials_without_measurements",
+      "label": "Background \u00b7 Aborted-trial offers without measurements",
+      "value": "0",
+      "unit": "count"
+    },
+    {
+      "key": "background_offers_in_not_run_trials",
+      "label": "Background \u00b7 Not-run offers",
+      "value": "0",
+      "unit": "count"
+    }
+  ],
+  "reporting": [
+    {
+      "key": "study_elapsed_ns",
+      "label": "Whole study operation elapsed",
+      "value": "680000000",
+      "unit": "ns"
+    },
+    {
+      "key": "duplicate_payload_hash_groups",
+      "label": "Duplicate payload hash groups",
+      "value": "0",
+      "unit": "count"
+    }
+  ],
+  "limitations": [
+    "DIGESTS_CHECK_INTEGRITY_NOT_RUNTIME_ATTESTATION_OR_INDEPENDENT_EXECUTION",
+    "SCHEDULED_ARRIVAL_ORIGIN_AND_FIXED_OFFERED_WINDOW",
+    "REJECTIONS_FAILURES_CANCELLATIONS_REMAIN_IN_OFFERED_DENOMINATOR",
+    "TRIAL_BLOCK_BOOTSTRAP_ASSUMES_INDEPENDENT_BLOCKS_NOT_REQUESTS",
+    "P99_FLOOR_IS_NOT_A_PRECISION_OR_INDEPENDENCE_GUARANTEE",
+    "DECLARED_CACHE_PREPARATION_AND_RUNTIME_IDENTITIES_UNVERIFIED",
+    "MALFORMED_AIOHTTP_FRAMING_CAN_BE_CLASSIFIED_TIMEOUT",
+    "NO_LIVE_CAPACITY_COST_OR_ACTUAL_OVERLOAD_ESTABLISHED"
+  ],
+  "kind": "STUDY",
+  "strata": [
+    {
+      "index": 1,
+      "scenario": "STALE_LOAD",
+      "profile_index": 1,
+      "target_endpoint": "endpoint-a",
+      "metrics": [
+        {
+          "key": "planned_blocks",
+          "label": "Planned blocks",
+          "value": "1",
+          "unit": "blocks"
+        },
+        {
+          "key": "complete_blocks",
+          "label": "Complete blocks",
+          "value": "1",
+          "unit": "blocks"
+        },
+        {
+          "key": "fixed_window_ns",
+          "label": "Fixed offered window",
+          "value": "180000000",
+          "unit": "ns"
+        }
+      ],
+      "policies": [
+        {
+          "policy_id": "evaluation_round_robin_v1",
+          "metrics": [
+            {
+              "key": "returned_trials",
+              "label": "Returned trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "completed_trials",
+              "label": "Completed trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "mean_goodput_rps",
+              "label": "Mean SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_min_goodput_rps",
+              "label": "Observed minimum SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_max_goodput_rps",
+              "label": "Observed maximum SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            }
+          ]
+        },
+        {
+          "policy_id": "evaluation_least_reported_load_v1",
+          "metrics": [
+            {
+              "key": "returned_trials",
+              "label": "Returned trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "completed_trials",
+              "label": "Completed trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "mean_goodput_rps",
+              "label": "Mean SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_min_goodput_rps",
+              "label": "Observed minimum SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_max_goodput_rps",
+              "label": "Observed maximum SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            }
+          ]
+        },
+        {
+          "policy_id": "evaluation_freshness_fallback_v1",
+          "metrics": [
+            {
+              "key": "returned_trials",
+              "label": "Returned trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "completed_trials",
+              "label": "Completed trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "mean_goodput_rps",
+              "label": "Mean SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_min_goodput_rps",
+              "label": "Observed minimum SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_max_goodput_rps",
+              "label": "Observed maximum SLO goodput",
+              "value": "33.333333",
+              "unit": "requests/s"
+            }
+          ]
+        },
+        {
+          "policy_id": "evaluation_fail_closed_v1",
+          "metrics": [
+            {
+              "key": "returned_trials",
+              "label": "Returned trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "completed_trials",
+              "label": "Completed trials",
+              "value": "1",
+              "unit": "count"
+            },
+            {
+              "key": "mean_goodput_rps",
+              "label": "Mean SLO goodput",
+              "value": "27.777778",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_min_goodput_rps",
+              "label": "Observed minimum SLO goodput",
+              "value": "27.777778",
+              "unit": "requests/s"
+            },
+            {
+              "key": "observed_max_goodput_rps",
+              "label": "Observed maximum SLO goodput",
+              "value": "27.777778",
+              "unit": "requests/s"
+            }
+          ]
+        }
+      ],
+      "contrasts": [
+        {
+          "label": "Least reported load minus Round robin",
+          "complete_blocks": 1,
+          "mean_rps": "0.000000",
+          "lower_rps": null,
+          "upper_rps": null,
+          "interval_status": "INSUFFICIENT_TRIAL_REPLICATION"
+        },
+        {
+          "label": "Freshness fallback minus Round robin",
+          "complete_blocks": 1,
+          "mean_rps": "0.000000",
+          "lower_rps": null,
+          "upper_rps": null,
+          "interval_status": "INSUFFICIENT_TRIAL_REPLICATION"
+        },
+        {
+          "label": "Fail closed minus Round robin",
+          "complete_blocks": 1,
+          "mean_rps": "-5.555556",
+          "lower_rps": null,
+          "upper_rps": null,
+          "interval_status": "INSUFFICIENT_TRIAL_REPLICATION"
+        }
+      ]
+    }
+  ],
+  "trials": [
+    {
+      "index": 1,
+      "block_index": 1,
+      "profile_index": 1,
+      "policy_id": "evaluation_round_robin_v1",
+      "scenario": "STALE_LOAD",
+      "status": "COMPLETED",
+      "result_sha256": "sha256:bb6d1bbca53f35da95e0a37e5fbf0347605640ec91019c6ac7650644a13ab94a",
+      "metrics": [
+        {
+          "key": "window_start_ns",
+          "label": "Offered window start",
+          "value": "20000000",
+          "unit": "ns"
+        },
+        {
+          "key": "window_end_ns",
+          "label": "Offered window end",
+          "value": "200000000",
+          "unit": "ns"
+        },
+        {
+          "key": "first_content_slo_ns",
+          "label": "First-content SLO",
+          "value": "5000000",
+          "unit": "ns"
+        },
+        {
+          "key": "completion_slo_ns",
+          "label": "Completion SLO",
+          "value": "10000000",
+          "unit": "ns"
+        },
+        {
+          "key": "trial_elapsed_ns",
+          "label": "Owned trial elapsed",
+          "value": "170000000",
+          "unit": "ns"
+        }
+      ],
+      "foreground": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "1",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "170000000",
+            "unit": "ns"
+          },
+          {
+            "key": "slo_good_count",
+            "label": "SLO-good requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "slo_success_fraction",
+            "label": "SLO success fraction",
+            "value": "1.000000",
+            "unit": "ratio"
+          },
+          {
+            "key": "slo_goodput_rps",
+            "label": "SLO goodput",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "offered_rate_rps",
+            "label": "Offered rate",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "dispatch_rate_rps",
+            "label": "Dispatch rate",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "fixed_offered_window_ns",
+            "label": "Fixed offered window",
+            "value": "180000000",
+            "unit": "ns"
+          },
+          {
+            "key": "drain_ns",
+            "label": "Drain allowance",
+            "value": "20000000",
+            "unit": "ns"
+          },
+          {
+            "key": "successful_completions_during_drain",
+            "label": "Successful completions in drain",
+            "value": "0",
+            "unit": "count"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 6,
+            "offered_fraction": "1.000000"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [
+          {
+            "label": "Scheduled arrival to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Scheduled arrival to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch lag",
+            "population": "ALL_DISPATCHED_OUTCOMES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: CANCELLED",
+            "population": "CANCELLED",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: DRAIN_TIMEOUT",
+            "population": "DRAIN_TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: HTTP_ERROR",
+            "population": "HTTP_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INCOMPLETE_STREAM",
+            "population": "INCOMPLETE_STREAM",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INTERNAL_ERROR",
+            "population": "INTERNAL_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_CAPACITY",
+            "population": "REJECTED_CAPACITY",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_ROUTE",
+            "population": "REJECTED_ROUTE",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_ERROR",
+            "population": "STREAM_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_LIMIT",
+            "population": "STREAM_LIMIT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TIMEOUT",
+            "population": "TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TRANSPORT_ERROR",
+            "population": "TRANSPORT_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          }
+        ],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": false
+      },
+      "background": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "160000000",
+            "unit": "ns"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 2,
+            "offered_fraction": "1.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": true
+      },
+      "recovery": {
+        "applicability": "NOT_APPLICABLE_POLICY",
+        "origin": "ACTUAL_TELEMETRY_RESTORED_EVENT",
+        "planned_restore_ns": "100000000",
+        "actual_restore_ns": "100000000",
+        "intervals": [
+          {
+            "metric": "publication",
+            "status": "OBSERVED",
+            "duration_ns": "0",
+            "observation_horizon_ns": "70000000"
+          },
+          {
+            "metric": "decision",
+            "status": "NOT_APPLICABLE",
+            "duration_ns": null,
+            "observation_horizon_ns": null
+          },
+          {
+            "metric": "dispatch",
+            "status": "NOT_APPLICABLE",
+            "duration_ns": null,
+            "observation_horizon_ns": null
+          }
+        ],
+        "background_active_at_restore": true
+      }
+    },
+    {
+      "index": 2,
+      "block_index": 1,
+      "profile_index": 1,
+      "policy_id": "evaluation_least_reported_load_v1",
+      "scenario": "STALE_LOAD",
+      "status": "COMPLETED",
+      "result_sha256": "sha256:768f5ebe38e9e198cca9900c2bf7f341944fe0e98cd5a24652921f90d93ef593",
+      "metrics": [
+        {
+          "key": "window_start_ns",
+          "label": "Offered window start",
+          "value": "20000000",
+          "unit": "ns"
+        },
+        {
+          "key": "window_end_ns",
+          "label": "Offered window end",
+          "value": "200000000",
+          "unit": "ns"
+        },
+        {
+          "key": "first_content_slo_ns",
+          "label": "First-content SLO",
+          "value": "5000000",
+          "unit": "ns"
+        },
+        {
+          "key": "completion_slo_ns",
+          "label": "Completion SLO",
+          "value": "10000000",
+          "unit": "ns"
+        },
+        {
+          "key": "trial_elapsed_ns",
+          "label": "Owned trial elapsed",
+          "value": "170000000",
+          "unit": "ns"
+        }
+      ],
+      "foreground": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "1",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "170000000",
+            "unit": "ns"
+          },
+          {
+            "key": "slo_good_count",
+            "label": "SLO-good requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "slo_success_fraction",
+            "label": "SLO success fraction",
+            "value": "1.000000",
+            "unit": "ratio"
+          },
+          {
+            "key": "slo_goodput_rps",
+            "label": "SLO goodput",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "offered_rate_rps",
+            "label": "Offered rate",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "dispatch_rate_rps",
+            "label": "Dispatch rate",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "fixed_offered_window_ns",
+            "label": "Fixed offered window",
+            "value": "180000000",
+            "unit": "ns"
+          },
+          {
+            "key": "drain_ns",
+            "label": "Drain allowance",
+            "value": "20000000",
+            "unit": "ns"
+          },
+          {
+            "key": "successful_completions_during_drain",
+            "label": "Successful completions in drain",
+            "value": "0",
+            "unit": "count"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 6,
+            "offered_fraction": "1.000000"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [
+          {
+            "label": "Scheduled arrival to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Scheduled arrival to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch lag",
+            "population": "ALL_DISPATCHED_OUTCOMES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: CANCELLED",
+            "population": "CANCELLED",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: DRAIN_TIMEOUT",
+            "population": "DRAIN_TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: HTTP_ERROR",
+            "population": "HTTP_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INCOMPLETE_STREAM",
+            "population": "INCOMPLETE_STREAM",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INTERNAL_ERROR",
+            "population": "INTERNAL_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_CAPACITY",
+            "population": "REJECTED_CAPACITY",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_ROUTE",
+            "population": "REJECTED_ROUTE",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_ERROR",
+            "population": "STREAM_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_LIMIT",
+            "population": "STREAM_LIMIT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TIMEOUT",
+            "population": "TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TRANSPORT_ERROR",
+            "population": "TRANSPORT_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          }
+        ],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": false
+      },
+      "background": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "160000000",
+            "unit": "ns"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 2,
+            "offered_fraction": "1.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": true
+      },
+      "recovery": {
+        "applicability": "APPLICABLE",
+        "origin": "ACTUAL_TELEMETRY_RESTORED_EVENT",
+        "planned_restore_ns": "100000000",
+        "actual_restore_ns": "100000000",
+        "intervals": [
+          {
+            "metric": "publication",
+            "status": "OBSERVED",
+            "duration_ns": "0",
+            "observation_horizon_ns": "70000000"
+          },
+          {
+            "metric": "decision",
+            "status": "OBSERVED",
+            "duration_ns": "10000000",
+            "observation_horizon_ns": "70000000"
+          },
+          {
+            "metric": "dispatch",
+            "status": "OBSERVED",
+            "duration_ns": "10000000",
+            "observation_horizon_ns": "70000000"
+          }
+        ],
+        "background_active_at_restore": true
+      }
+    },
+    {
+      "index": 3,
+      "block_index": 1,
+      "profile_index": 1,
+      "policy_id": "evaluation_freshness_fallback_v1",
+      "scenario": "STALE_LOAD",
+      "status": "COMPLETED",
+      "result_sha256": "sha256:be0cbf3a09c9b6b8815a7f37c74c8dd5be276a63bb5eb0fd3a5338fa814d81b9",
+      "metrics": [
+        {
+          "key": "window_start_ns",
+          "label": "Offered window start",
+          "value": "20000000",
+          "unit": "ns"
+        },
+        {
+          "key": "window_end_ns",
+          "label": "Offered window end",
+          "value": "200000000",
+          "unit": "ns"
+        },
+        {
+          "key": "first_content_slo_ns",
+          "label": "First-content SLO",
+          "value": "5000000",
+          "unit": "ns"
+        },
+        {
+          "key": "completion_slo_ns",
+          "label": "Completion SLO",
+          "value": "10000000",
+          "unit": "ns"
+        },
+        {
+          "key": "trial_elapsed_ns",
+          "label": "Owned trial elapsed",
+          "value": "170000000",
+          "unit": "ns"
+        }
+      ],
+      "foreground": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "1",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "170000000",
+            "unit": "ns"
+          },
+          {
+            "key": "slo_good_count",
+            "label": "SLO-good requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "slo_success_fraction",
+            "label": "SLO success fraction",
+            "value": "1.000000",
+            "unit": "ratio"
+          },
+          {
+            "key": "slo_goodput_rps",
+            "label": "SLO goodput",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "offered_rate_rps",
+            "label": "Offered rate",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "dispatch_rate_rps",
+            "label": "Dispatch rate",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "fixed_offered_window_ns",
+            "label": "Fixed offered window",
+            "value": "180000000",
+            "unit": "ns"
+          },
+          {
+            "key": "drain_ns",
+            "label": "Drain allowance",
+            "value": "20000000",
+            "unit": "ns"
+          },
+          {
+            "key": "successful_completions_during_drain",
+            "label": "Successful completions in drain",
+            "value": "0",
+            "unit": "count"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 6,
+            "offered_fraction": "1.000000"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [
+          {
+            "label": "Scheduled arrival to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Scheduled arrival to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch lag",
+            "population": "ALL_DISPATCHED_OUTCOMES",
+            "count": 6,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: CANCELLED",
+            "population": "CANCELLED",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: DRAIN_TIMEOUT",
+            "population": "DRAIN_TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: HTTP_ERROR",
+            "population": "HTTP_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INCOMPLETE_STREAM",
+            "population": "INCOMPLETE_STREAM",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INTERNAL_ERROR",
+            "population": "INTERNAL_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_CAPACITY",
+            "population": "REJECTED_CAPACITY",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_ROUTE",
+            "population": "REJECTED_ROUTE",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_ERROR",
+            "population": "STREAM_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_LIMIT",
+            "population": "STREAM_LIMIT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TIMEOUT",
+            "population": "TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TRANSPORT_ERROR",
+            "population": "TRANSPORT_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          }
+        ],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": false
+      },
+      "background": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "160000000",
+            "unit": "ns"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 2,
+            "offered_fraction": "1.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": true
+      },
+      "recovery": {
+        "applicability": "APPLICABLE",
+        "origin": "ACTUAL_TELEMETRY_RESTORED_EVENT",
+        "planned_restore_ns": "100000000",
+        "actual_restore_ns": "100000000",
+        "intervals": [
+          {
+            "metric": "publication",
+            "status": "OBSERVED",
+            "duration_ns": "0",
+            "observation_horizon_ns": "70000000"
+          },
+          {
+            "metric": "decision",
+            "status": "OBSERVED",
+            "duration_ns": "10000000",
+            "observation_horizon_ns": "70000000"
+          },
+          {
+            "metric": "dispatch",
+            "status": "OBSERVED",
+            "duration_ns": "10000000",
+            "observation_horizon_ns": "70000000"
+          }
+        ],
+        "background_active_at_restore": true
+      }
+    },
+    {
+      "index": 4,
+      "block_index": 1,
+      "profile_index": 1,
+      "policy_id": "evaluation_fail_closed_v1",
+      "scenario": "STALE_LOAD",
+      "status": "COMPLETED",
+      "result_sha256": "sha256:3e7be625978dba234e94fc8da6bd4af80c1d594fb381e7a559ce0c530326247c",
+      "metrics": [
+        {
+          "key": "window_start_ns",
+          "label": "Offered window start",
+          "value": "20000000",
+          "unit": "ns"
+        },
+        {
+          "key": "window_end_ns",
+          "label": "Offered window end",
+          "value": "200000000",
+          "unit": "ns"
+        },
+        {
+          "key": "first_content_slo_ns",
+          "label": "First-content SLO",
+          "value": "5000000",
+          "unit": "ns"
+        },
+        {
+          "key": "completion_slo_ns",
+          "label": "Completion SLO",
+          "value": "10000000",
+          "unit": "ns"
+        },
+        {
+          "key": "trial_elapsed_ns",
+          "label": "Owned trial elapsed",
+          "value": "170000000",
+          "unit": "ns"
+        }
+      ],
+      "foreground": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "5",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "6",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "5",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "1",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "170000000",
+            "unit": "ns"
+          },
+          {
+            "key": "slo_good_count",
+            "label": "SLO-good requests",
+            "value": "5",
+            "unit": "count"
+          },
+          {
+            "key": "slo_success_fraction",
+            "label": "SLO success fraction",
+            "value": "0.833333",
+            "unit": "ratio"
+          },
+          {
+            "key": "slo_goodput_rps",
+            "label": "SLO goodput",
+            "value": "27.777778",
+            "unit": "requests/s"
+          },
+          {
+            "key": "offered_rate_rps",
+            "label": "Offered rate",
+            "value": "33.333333",
+            "unit": "requests/s"
+          },
+          {
+            "key": "dispatch_rate_rps",
+            "label": "Dispatch rate",
+            "value": "27.777778",
+            "unit": "requests/s"
+          },
+          {
+            "key": "fixed_offered_window_ns",
+            "label": "Fixed offered window",
+            "value": "180000000",
+            "unit": "ns"
+          },
+          {
+            "key": "drain_ns",
+            "label": "Drain allowance",
+            "value": "20000000",
+            "unit": "ns"
+          },
+          {
+            "key": "successful_completions_during_drain",
+            "label": "Successful completions in drain",
+            "value": "0",
+            "unit": "count"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 1,
+            "offered_fraction": "0.166667"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 5,
+            "offered_fraction": "0.833333"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [
+          {
+            "label": "Scheduled arrival to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 5,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Scheduled arrival to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 5,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to first content",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 5,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch to terminal",
+            "population": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+            "count": 5,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "BELOW_REPORTING_FLOOR"
+          },
+          {
+            "label": "Dispatch lag",
+            "population": "ALL_DISPATCHED_OUTCOMES",
+            "count": 5,
+            "p50_ns": "0",
+            "p90_ns": "0",
+            "p95_ns": "0",
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: CANCELLED",
+            "population": "CANCELLED",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: DRAIN_TIMEOUT",
+            "population": "DRAIN_TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: HTTP_ERROR",
+            "population": "HTTP_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INCOMPLETE_STREAM",
+            "population": "INCOMPLETE_STREAM",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: INTERNAL_ERROR",
+            "population": "INTERNAL_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_CAPACITY",
+            "population": "REJECTED_CAPACITY",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: REJECTED_ROUTE",
+            "population": "REJECTED_ROUTE",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_ERROR",
+            "population": "STREAM_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: STREAM_LIMIT",
+            "population": "STREAM_LIMIT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TIMEOUT",
+            "population": "TIMEOUT",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          },
+          {
+            "label": "Partial first content: TRANSPORT_ERROR",
+            "population": "TRANSPORT_ERROR",
+            "count": 0,
+            "p50_ns": null,
+            "p90_ns": null,
+            "p95_ns": null,
+            "p99_ns": null,
+            "p99_status": "NOT_A_SUCCESS_LATENCY_POPULATION"
+          }
+        ],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "5",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "5",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "1",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "1",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": false
+      },
+      "background": {
+        "metrics": [
+          {
+            "key": "offered_count",
+            "label": "Offered requests",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "successful_count",
+            "label": "Successful requests",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "arrival_observed_count",
+            "label": "Observed arrivals",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "dispatched_count",
+            "label": "Actual dispatches",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_active",
+            "label": "Peak active",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "peak_queue",
+            "label": "Peak queue",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "elapsed_ns",
+            "label": "Population elapsed",
+            "value": "160000000",
+            "unit": "ns"
+          }
+        ],
+        "outcomes": [
+          {
+            "outcome": "CANCELLED",
+            "count": 2,
+            "offered_fraction": "1.000000"
+          },
+          {
+            "outcome": "DRAIN_TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "HTTP_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INCOMPLETE_STREAM",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "INTERNAL_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_CAPACITY",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "REJECTED_ROUTE",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "STREAM_LIMIT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "SUCCESS",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TIMEOUT",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          },
+          {
+            "outcome": "TRANSPORT_ERROR",
+            "count": 0,
+            "offered_fraction": "0.000000"
+          }
+        ],
+        "latency": [],
+        "usage": [
+          {
+            "key": "usage_success_population_count",
+            "label": "Success usage \u00b7 population",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_reported_count",
+            "label": "Success usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_missing_count",
+            "label": "Success usage \u00b7 missing",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_success_prompt_tokens_total_decimal",
+            "label": "Success usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_success_completion_tokens_total_decimal",
+            "label": "Success usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_population_count",
+            "label": "Other outcomes usage \u00b7 population",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_reported_count",
+            "label": "Other outcomes usage \u00b7 reported",
+            "value": "0",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_missing_count",
+            "label": "Other outcomes usage \u00b7 missing",
+            "value": "2",
+            "unit": "count"
+          },
+          {
+            "key": "usage_other_outcomes_prompt_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 prompt tokens",
+            "value": "0",
+            "unit": "tokens"
+          },
+          {
+            "key": "usage_other_outcomes_completion_tokens_total_decimal",
+            "label": "Other outcomes usage \u00b7 completion tokens",
+            "value": "0",
+            "unit": "tokens"
+          }
+        ],
+        "cancelled": true
+      },
+      "recovery": {
+        "applicability": "APPLICABLE",
+        "origin": "ACTUAL_TELEMETRY_RESTORED_EVENT",
+        "planned_restore_ns": "100000000",
+        "actual_restore_ns": "100000000",
+        "intervals": [
+          {
+            "metric": "publication",
+            "status": "OBSERVED",
+            "duration_ns": "0",
+            "observation_horizon_ns": "70000000"
+          },
+          {
+            "metric": "decision",
+            "status": "OBSERVED",
+            "duration_ns": "10000000",
+            "observation_horizon_ns": "70000000"
+          },
+          {
+            "metric": "dispatch",
+            "status": "OBSERVED",
+            "duration_ns": "10000000",
+            "observation_horizon_ns": "70000000"
+          }
+        ],
+        "background_active_at_restore": true
+      }
+    }
+  ]
+}

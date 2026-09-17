@@ -21,17 +21,57 @@ from inferdrome.evaluation.load_calibration_rehearsal import (
     CandidateStudyRecipe,
     LoopbackTwoEndpointReadinessLifecycle,
     compile_rehearsal,
+    recover_pinned_confirmation_catalog,
     run_rehearsal,
     write_pinned_confirmation_catalog,
 )
 from inferdrome.evaluation.study import TrialResult, execute_trial
 from inferdrome.evaluation.study_config import CompiledTrial
 from tests.integration import test_evaluation_routing_loopback as routing_loopback
+from tests.integration import test_sglang_study_loopback as sglang_loopback
 from tests.integration.test_evaluation_routing_loopback import _replicas
 from tests.integration.test_load_calibration_rehearsal import _protocol, _recipe_configs
+from tests.integration.test_sglang_rehearsal import _profiles, _rehearsal
+from tests.sglang_dashboard_support import synthetic_sglang_sources
 
 
-async def _prepare(root: Path) -> dict[str, object]:
+async def _prepare_sglang(root: Path) -> dict[str, object]:
+    output = root / "rehearsal"
+    output.mkdir(mode=0o700)
+    (root / "runs").mkdir(mode=0o700)
+    with pytest.MonkeyPatch.context() as patch, synthetic_sglang_sources():
+        patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
+        patch.setattr(sglang_loopback, "_MODEL", "Qwen/Qwen3-8B")
+        async with sglang_loopback._replicas() as (origins, replicas):
+            result = await run_rehearsal(
+                _rehearsal(origins),
+                output,
+                lifecycle=LoopbackTwoEndpointReadinessLifecycle(origins),
+                sglang_profiles=_profiles(origins),
+            )
+            report_sha256 = write_pinned_confirmation_catalog(
+                result, catalog_path=root / "original-catalog.json"
+            )
+            catalog = root / "dashboard-catalog.json"
+            assert (
+                recover_pinned_confirmation_catalog(output, catalog_path=catalog)
+                == report_sha256
+            )
+            await asyncio.gather(
+                *(replica.assert_disconnected() for replica in replicas)
+            )
+    return {
+        "fixture_provenance": "CPU_LOOPBACK_REHEARSAL_ONLY",
+        "engine": "sglang",
+        "root": str(root),
+        "catalog": str(catalog),
+        "report_sha256": report_sha256,
+    }
+
+
+async def _prepare(root: Path, *, engine: str = "vllm") -> dict[str, object]:
+    if engine == "sglang":
+        return await _prepare_sglang(root)
     output = root / "rehearsal"
     output.mkdir(mode=0o700)
     (root / "runs").mkdir(mode=0o700)
@@ -82,7 +122,7 @@ async def _prepare(root: Path) -> dict[str, object]:
                     evidence_class="SYNTHETIC_ONLY",
                     foreground=replace(
                         result.foreground, evidence_class="SYNTHETIC_ONLY"
-                    )
+                    ),
                 )
 
             result = await run_rehearsal(
@@ -100,6 +140,7 @@ async def _prepare(root: Path) -> dict[str, object]:
             )
     return {
         "fixture_provenance": "CPU_LOOPBACK_REHEARSAL_ONLY",
+        "engine": "vllm",
         "root": str(root),
         "catalog": str(catalog),
         "report_sha256": report_sha256,
@@ -109,13 +150,16 @@ async def _prepare(root: Path) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--engine", choices=("vllm", "sglang"), default="vllm")
     args = parser.parse_args()
     root = args.root.absolute()
     if not root.is_dir() or root.is_symlink():
         raise SystemExit("dashboard fixture root must be an existing regular directory")
     print(
         json.dumps(
-            asyncio.run(_prepare(root)), sort_keys=True, separators=(",", ":")
+            asyncio.run(_prepare(root, engine=args.engine)),
+            sort_keys=True,
+            separators=(",", ":"),
         )
     )
     return 0

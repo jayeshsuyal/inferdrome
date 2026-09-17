@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
+from inferdrome.dashboard.api import create_app
 from inferdrome.evaluation import sglang_execution
 from inferdrome.evaluation.contracts import EndpointId, EvaluationError
 from inferdrome.evaluation.engine_binding import (
@@ -237,9 +239,7 @@ def test_sglang_calibration_and_confirmation_keep_one_prebound_engine_choice(
                     assert report["evidence_class"] == "SYNTHETIC_ONLY"
                     assert report["runtime_verification"] == "UNVERIFIED"
                     assert report["evidence_eligible"] is False
-                    assert (
-                        report["dashboard_projection"] == "UNSUPPORTED_ENGINE_BINDING"
-                    )
+                    assert report["dashboard_projection"] == "ENGINE_BOUND_V2"
             assert len(choices) == 1
             assert len(binding_digests) == 4
             ledger = lifecycle.choice_contents[0]
@@ -258,15 +258,173 @@ def test_sglang_calibration_and_confirmation_keep_one_prebound_engine_choice(
                 sha256_digest(result.confirmation_report_path.read_bytes()).encode()
                 in linkage
             )
-            catalog = output / "forbidden-dashboard-catalog.json"
-            with pytest.raises(EvaluationError):
-                write_pinned_confirmation_catalog(result, catalog_path=catalog)
-            with pytest.raises(EvaluationError):
-                recover_pinned_confirmation_catalog(output, catalog_path=catalog)
-            assert not catalog.exists()
+            catalog = output / "dashboard-catalog.json"
+            digest = write_pinned_confirmation_catalog(result, catalog_path=catalog)
+            recovered = output / "dashboard-catalog-recovered.json"
+            assert (
+                recover_pinned_confirmation_catalog(output, catalog_path=recovered)
+                == digest
+            )
+            assert recovered.read_bytes() == catalog.read_bytes()
+            assert (
+                json.loads(catalog.read_bytes())["entries"][0]["kind"] == "SGLANG_STUDY"
+            )
+            assert digest == sha256_digest(result.confirmation_report_path.read_bytes())
+            with TestClient(
+                create_app(
+                    runs_root=tmp_path / "runs", evaluation_reports_catalog=recovered
+                )
+            ) as client:
+                index = client.get("/api/v1/evaluation-reports").json()
+                assert (
+                    index["projection_version"] == "inferdrome.evaluation-dashboard.v2"
+                )
+                assert index["rejected"] == []
+                summary = index["reports"][0]
+                assert summary["report_sha256"] == digest
+                assert summary["engine_identity"]["engine"] == "sglang"
+                assert summary["engine_identity"]["engine_choice_sha256"] in choices
+                assert (
+                    summary["source_schema"] == "inferdrome.evaluation-study-report.v2"
+                )
+                assert summary["evidence_class"] == "SYNTHETIC_ONLY"
+                assert summary["runtime_verification"] == "UNVERIFIED"
+                assert summary["evidence_eligible"] is False
+                detail = client.get(
+                    f"/api/v1/evaluation-reports/{summary['report_id']}"
+                ).json()
+                assert detail["summary"] == summary
+                assert len(detail["trials"]) == 8
+            _assert_catalog_tampering_rejected(output, result)
         assert asyncio.all_tasks() == {asyncio.current_task()}
 
     asyncio.run(exercise())
+
+
+def _assert_catalog_tampering_rejected(output: Path, result: Any) -> None:
+    """Mutate durable antecedents after successful CPU execution, never rerun it."""
+    report_path = result.confirmation_report_path
+    assert report_path is not None
+    ledger_path = output / "engine-choice-bindings.json"
+    binding_path = output / "confirmation-load-high" / "engine-binding.json"
+    selection_path = output / "calibration-selection-binding.json"
+    linkage_path = output / "calibration-linkage.json"
+    paths = (report_path, ledger_path, binding_path, selection_path, linkage_path)
+    originals = {path: path.read_bytes() for path in paths}
+
+    def write(path: Path, content: bytes) -> None:
+        if path.exists():
+            path.chmod(0o600)
+        path.write_bytes(content)
+        path.chmod(0o400)
+
+    def write_json(path: Path, value: Any) -> None:
+        write(path, canonical_json_bytes(value) + b"\n")
+
+    def repin_ledger() -> None:
+        for path in (selection_path, linkage_path):
+            value = json.loads(path.read_bytes())
+            value["engine_choice_bindings_sha256"] = sha256_digest(
+                ledger_path.read_bytes()
+            )
+            write_json(path, value)
+
+    mutations = (
+        "missing-ledger",
+        "missing-study-binding",
+        "unanchored-ledger",
+        "missing-phase",
+        "duplicate-phase",
+        "phase-order",
+        "phase-config",
+        "phase-digest",
+        "engine-choice",
+        "candidate-digest",
+        "extra-ledger-field",
+        "binding-mismatch",
+        "missing-engine-anchors",
+        "report-component-digest",
+        "report-statistical-digest",
+        "report-unsupported",
+        "report-unwrapped",
+        "report-unsupported-version",
+    )
+    for case in mutations:
+        try:
+            if case == "missing-ledger":
+                ledger_path.unlink()
+            elif case == "missing-study-binding":
+                binding_path.unlink()
+            elif case == "binding-mismatch":
+                value = json.loads(binding_path.read_bytes())
+                value["settings"]["random_seed"] += 1
+                write_json(binding_path, value)
+            elif case == "missing-engine-anchors":
+                for path in (selection_path, linkage_path):
+                    value = json.loads(path.read_bytes())
+                    del value["engine_choice_bindings_sha256"]
+                    write_json(path, value)
+            elif case.startswith("report-"):
+                value = json.loads(report_path.read_bytes())
+                if case == "report-component-digest":
+                    value["engine_binding_sha256"] = "sha256:" + "0" * 64
+                elif case == "report-statistical-digest":
+                    value["statistical_report_sha256"] = "sha256:" + "0" * 64
+                elif case == "report-unsupported":
+                    value["dashboard_projection"] = "UNSUPPORTED_ENGINE_BINDING"
+                elif case == "report-unwrapped":
+                    value = value["statistical_report"]
+                else:
+                    value["schema_version"] = "inferdrome.evaluation-study-report.v99"
+                write_json(report_path, value)
+                linkage = json.loads(linkage_path.read_bytes())
+                linkage["confirmation_report_sha256"] = sha256_digest(
+                    report_path.read_bytes()
+                )
+                write_json(linkage_path, linkage)
+            else:
+                value = json.loads(ledger_path.read_bytes())
+                if case == "missing-phase":
+                    value["phases"].pop(0)
+                elif case == "duplicate-phase":
+                    value["phases"][0] = value["phases"][1]
+                elif case == "phase-order":
+                    value["phases"].reverse()
+                elif case == "phase-config":
+                    value["phases"][0]["engine_binding"]["config_sha256"] = (
+                        "sha256:" + "0" * 64
+                    )
+                    binding = value["phases"][0]["engine_binding"]
+                    value["phases"][0]["engine_binding_sha256"] = sha256_digest(
+                        canonical_json_bytes(binding) + b"\n"
+                    )
+                elif case == "phase-digest":
+                    value["phases"][0]["engine_binding_sha256"] = "sha256:" + "0" * 64
+                elif case in ("engine-choice", "unanchored-ledger"):
+                    value["engine_choice_sha256"] = "sha256:" + "0" * 64
+                elif case == "candidate-digest":
+                    value["candidate_recipe_bindings_sha256"] = "sha256:" + "0" * 64
+                else:
+                    value["unknown"] = True
+                write_json(ledger_path, value)
+                if case != "unanchored-ledger":
+                    repin_ledger()
+            for direct in (False, True):
+                path = output / f"rejected-{case}-{direct}.json"
+                with pytest.raises(EvaluationError):
+                    if direct:
+                        write_pinned_confirmation_catalog(result, catalog_path=path)
+                    else:
+                        recover_pinned_confirmation_catalog(output, catalog_path=path)
+                assert not path.exists()
+        finally:
+            for path, content in originals.items():
+                write(path, content)
+    with pytest.raises(EvaluationError):
+        write_pinned_confirmation_catalog(
+            replace(result, engine_choice_bindings_sha256=None),
+            catalog_path=output / "rejected-unbound-result.json",
+        )
 
 
 @pytest.mark.parametrize(
@@ -435,6 +593,44 @@ def test_sglang_marked_lifecycle_cannot_enter_native_vllm_path(
         assert not synthetic_sources
         assert list(output.iterdir()) == []
         assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    asyncio.run(exercise())
+
+
+def test_sglang_report_envelopes_are_reserved_before_any_lifecycle_work(
+    tmp_path: Path, synthetic_sources: list[str]
+) -> None:
+    async def exercise() -> None:
+        origins = ("http://127.0.0.1:18001", "http://127.0.0.1:18002")
+        original = _rehearsal(origins)
+        protocol = original.calibration_plan.protocol.model_dump(mode="json")
+        # The native reserve fits, but the additional v2 JSON/Markdown envelopes
+        # and durable engine ledger must fit before creating any output.
+        protocol["max_session_output_bytes"] = original.reserved_output_bytes
+        rehearsal = compile_rehearsal(
+            load_calibration_protocol_bytes(canonical_json_bytes(protocol)),
+            tuple(
+                CandidateStudyRecipe(
+                    item.level.level_id,
+                    item.calibration_config,
+                    item.confirmation_config,
+                )
+                for item in original.candidates
+            ),
+        )
+        output = tmp_path / "bounded-output"
+        output.mkdir(mode=0o700)
+        lifecycle = _Lifecycle(origins, output=output, replicas=())
+        with pytest.raises(EvaluationError, match="output reserve"):
+            await run_rehearsal(
+                rehearsal,
+                output,
+                lifecycle=lifecycle,
+                sglang_profiles=_profiles(origins),
+            )
+        assert not lifecycle.events
+        assert not synthetic_sources
+        assert list(output.iterdir()) == []
 
     asyncio.run(exercise())
 
