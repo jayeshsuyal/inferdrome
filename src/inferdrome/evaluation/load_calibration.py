@@ -168,7 +168,8 @@ class LoadCalibrationProtocol(ClosedModel):
                 for level in self.levels
             )
             + max(level.worst_case_duration_ns for level in self.levels) * confirmation
-            + (calibration + confirmation)
+            + 2
+            * (calibration + confirmation)
             * self.preparation.warmup_reset_max_duration_ns
         )
         if worst_case > self.max_session_duration_ns:
@@ -490,6 +491,42 @@ def select_calibration_level(
     )
 
 
+def compile_confirmation_trials(
+    protocol: LoadCalibrationProtocol, level: LoadLevel
+) -> tuple[ConfirmationTrial, ...]:
+    """Compile the two declared confirmation scenarios for one candidate.
+
+    This is separate from selection so an execution preflight can bind every
+    candidate's healthy and stale-load study recipes before it dispatches even
+    the first calibration request.
+    """
+    if level not in protocol.levels:
+        raise EvaluationError("calibration confirmation level is not declared")
+    trials: list[ConfirmationTrial] = []
+    for repeat_index in range(protocol.confirmation_repetitions):
+        phase_orders: tuple[tuple[Literal["HEALTHY", "STALE_LOAD"], int], ...] = (
+            ("HEALTHY", protocol.calibration_repetitions + repeat_index),
+            ("STALE_LOAD", repeat_index),
+        )
+        for scenario, order_index in phase_orders:
+            for policy_id in _policy_order_for_repeat(order_index):
+                trials.append(
+                    ConfirmationTrial(
+                        trial_id=f"confirmation-{len(trials):04d}",
+                        level_id=level.level_id,
+                        repeat_index=repeat_index,
+                        policy_id=policy_id,
+                        scenario=scenario,
+                        study_config_sha256=level.study_config_sha256,
+                        study_plan_sha256=level.study_plan_sha256,
+                        offered_rate_millirps=level.offered_rate_millirps,
+                        planned_requests=level.planned_requests,
+                        worst_case_duration_ns=level.worst_case_duration_ns,
+                    )
+                )
+    return tuple(trials)
+
+
 def confirmation_plan(
     plan: CompiledCalibrationPlan, selection: CalibrationSelection
 ) -> ConfirmationPlan:
@@ -518,35 +555,13 @@ def confirmation_plan(
     )
     if level is None:
         raise EvaluationError("calibration selection does not name a declared level")
-    trials: list[ConfirmationTrial] = []
-    for repeat_index in range(plan.protocol.confirmation_repetitions):
-        phase_orders: tuple[tuple[Literal["HEALTHY", "STALE_LOAD"], int], ...] = (
-            ("HEALTHY", plan.protocol.calibration_repetitions + repeat_index),
-            ("STALE_LOAD", repeat_index),
-        )
-        for scenario, order_index in phase_orders:
-            for policy_id in _policy_order_for_repeat(order_index):
-                trials.append(
-                    ConfirmationTrial(
-                        trial_id=f"confirmation-{len(trials):04d}",
-                        level_id=level.level_id,
-                        repeat_index=repeat_index,
-                        policy_id=policy_id,
-                        scenario=scenario,
-                        study_config_sha256=level.study_config_sha256,
-                        study_plan_sha256=level.study_plan_sha256,
-                        offered_rate_millirps=level.offered_rate_millirps,
-                        planned_requests=level.planned_requests,
-                        worst_case_duration_ns=level.worst_case_duration_ns,
-                    )
-                )
     return ConfirmationPlan(
         schema_version="inferdrome.evaluation-load-confirmation-plan.v1",
         protocol_sha256=plan.protocol_sha256,
         selection_sha256=sha256_digest(selection_bytes),
         status="READY",
         selected_level_id=level.level_id,
-        trials=tuple(trials),
+        trials=compile_confirmation_trials(plan.protocol, level),
         preparation=plan.protocol.preparation,
         primary_metric=plan.protocol.selection_rule.primary_metric,
     )
