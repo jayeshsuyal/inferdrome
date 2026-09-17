@@ -14,7 +14,7 @@ import errno
 import json
 import re
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic_ns
@@ -25,7 +25,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from pydantic import ValidationError
 
-from inferdrome.evaluation.contracts import ClosedModel, EvaluationError
+from inferdrome.evaluation.contracts import ClosedModel, EndpointId, EvaluationError
+from inferdrome.evaluation.engine_binding import (
+    EvaluationEngineBinding,
+    engine_binding_bytes,
+)
 from inferdrome.evaluation.files import OutputFile, read_input
 from inferdrome.evaluation.load_calibration import (
     CalibrationObservationSet,
@@ -47,6 +51,9 @@ from inferdrome.evaluation.report_reader import (
     StudyReport,
     load_evaluation_report_bytes,
 )
+from inferdrome.evaluation.sglang_profile import SglangServingConfig
+from inferdrome.evaluation.sglang_rehearsal import bind_sglang_rehearsal
+from inferdrome.evaluation.sglang_results import load_sglang_trial_bytes
 from inferdrome.evaluation.study import (
     StudyExecutor,
     StudyManifest,
@@ -251,9 +258,7 @@ class AsyncioLocalSubprocessRunner:
     Docker, a model, or an NVIDIA device.
     """
 
-    async def run(
-        self, argv: tuple[str, ...], *, timeout_ns: int
-    ) -> SubprocessResult:
+    async def run(self, argv: tuple[str, ...], *, timeout_ns: int) -> SubprocessResult:
         if not argv or type(timeout_ns) is not int or timeout_ns < 1:
             raise EvaluationError("local subprocess command is invalid")
         try:
@@ -340,8 +345,8 @@ def _assert_loopback_port_closed(port: int, timeout_seconds: float) -> None:
         raise EvaluationError("local serving-port readback is unavailable")
 
 
-class TwoEngineVllmSubprocessLifecycle:
-    """Concrete local cold-reset lifecycle for two pinned vLLM engine processes.
+class _TwoEngineOwnedSubprocessLifecycle:
+    """Shared exact-owned process lifecycle with the original vLLM defaults.
 
     Every native trial gets two fresh exact-owned containers: endpoint A is
     constrained to GPU 0 and endpoint B to GPU 1.  Startup verifies only the
@@ -373,8 +378,7 @@ class TwoEngineVllmSubprocessLifecycle:
             not model_snapshot_path.is_absolute()
             or model_snapshot_path.is_symlink()
             or any(
-                character in str(model_snapshot_path)
-                for character in (",", "\n", "\r")
+                character in str(model_snapshot_path) for character in (",", "\n", "\r")
             )
             or type(readiness_timeout_ns) is not int
             or not 1 <= readiness_timeout_ns <= _LOCAL_ENGINE_COMMAND_TIMEOUT_NS
@@ -435,9 +439,7 @@ class TwoEngineVllmSubprocessLifecycle:
             raise EvaluationError("local engine operation deadline expired")
         return min(_LOCAL_ENGINE_COMMAND_TIMEOUT_NS, remaining)
 
-    def _engine_argv(
-        self, trial: CompiledTrial, *, index: int
-    ) -> tuple[str, ...]:
+    def _engine_argv(self, trial: CompiledTrial, *, index: int) -> tuple[str, ...]:
         if index not in (0, 1):
             raise EvaluationError("local engine index is invalid")
         parsed = urlsplit(self._origins[index])
@@ -473,8 +475,7 @@ class TwoEngineVllmSubprocessLifecycle:
             "--tmpfs",
             "/home/vllm:rw,nosuid,nodev,size=1g",
             "--mount",
-            "type=bind,src="
-            f"{self._model_snapshot_path},dst=/model,readonly",
+            f"type=bind,src={self._model_snapshot_path},dst=/model,readonly",
             "--env",
             "HF_HUB_OFFLINE=1",
             "--env",
@@ -498,6 +499,23 @@ class TwoEngineVllmSubprocessLifecycle:
             "8000",
             "--disable-log-requests",
         )
+
+    def _expected_image_reference(self) -> str:
+        return VLLM_RUNTIME_IMAGE_REFERENCE
+
+    def _bind_trial(self, trial: CompiledTrial) -> None:
+        self._readiness._bound_to_trial(trial)
+
+    async def _verify_artifacts(self, *, stop: asyncio.Event) -> None:
+        del stop
+        if (
+            not self._model_snapshot_path.is_dir()
+            or self._model_snapshot_path.is_symlink()
+        ):
+            raise EvaluationError("preloaded model snapshot is unavailable")
+        if not self._snapshot_verified:
+            self._snapshot_verifier(self._model_snapshot_path)
+            self._snapshot_verified = True
 
     async def _command(
         self, argv: tuple[str, ...], *, deadline_ns: int
@@ -564,9 +582,7 @@ class TwoEngineVllmSubprocessLifecycle:
                 "declared serving-port readback is unconfirmed"
             ) from errors[0]
 
-    async def _inspect_pending(
-        self, target: _OwnedEngine, *, deadline_ns: int
-    ) -> None:
+    async def _inspect_pending(self, target: _OwnedEngine, *, deadline_ns: int) -> None:
         """Bind a pending create only after exact name/image/label readback."""
 
         argv = (
@@ -609,7 +625,7 @@ class TwoEngineVllmSubprocessLifecycle:
                 or type(container_id) is not str
                 or not _CONTAINER_ID.fullmatch(container_id)
                 or observed.get("Name") != f"/{target.name}"
-                or config.get("Image") != VLLM_RUNTIME_IMAGE_REFERENCE
+                or config.get("Image") != self._expected_image_reference()
                 or labels.get("io.inferdrome.load-calibration.owner")
                 != self._ownership_id
                 or labels.get("io.inferdrome.load-calibration.attempt")
@@ -698,17 +714,10 @@ class TwoEngineVllmSubprocessLifecycle:
     async def prepare(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None:
         if stop.is_set():
             raise EvaluationError("local engine lifecycle was cancelled")
-        self._readiness._bound_to_trial(trial)
+        self._bind_trial(trial)
         if self._active:
             raise EvaluationError("local engine lifecycle has an active trial")
-        if (
-            not self._model_snapshot_path.is_dir()
-            or self._model_snapshot_path.is_symlink()
-        ):
-            raise EvaluationError("preloaded model snapshot is unavailable")
-        if not self._snapshot_verified:
-            self._snapshot_verifier(self._model_snapshot_path)
-            self._snapshot_verified = True
+        await self._verify_artifacts(stop=stop)
         deadline_ns = self._deadline()
         await self._verify_gpu_idle(deadline_ns=deadline_ns)
         try:
@@ -744,8 +753,12 @@ class TwoEngineVllmSubprocessLifecycle:
 
     async def cleanup(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None:
         del stop
-        self._readiness._bound_to_trial(trial)
+        self._bind_trial(trial)
         await self._remove_active(deadline_ns=self._deadline())
+
+
+class TwoEngineVllmSubprocessLifecycle(_TwoEngineOwnedSubprocessLifecycle):
+    """Original two-engine vLLM constructor, argv, ownership and cleanup behavior."""
 
 
 class RehearsalLifecycleReceipt(ClosedModel):
@@ -815,6 +828,7 @@ class RehearsalResult:
     confirmation_report_path: Path | None
     candidate_recipe_bindings_sha256: str
     evidence_eligible: bool = False
+    engine_choice_bindings_sha256: str | None = None
 
 
 def _plan_sha256(plan: CompiledStudy) -> str:
@@ -1256,8 +1270,7 @@ def recover_pinned_confirmation_catalog(
     if (
         type(selected_level_id) is not str
         or not _SAFE_LEVEL_ID.fullmatch(selected_level_id)
-        or selection_binding.get("candidate_recipe_bindings_sha256")
-        != binding_sha256
+        or selection_binding.get("candidate_recipe_bindings_sha256") != binding_sha256
         or linkage.get("candidate_recipe_bindings_sha256") != binding_sha256
         or bindings.get("protocol_sha256") != linkage.get("protocol_sha256")
     ):
@@ -1385,6 +1398,7 @@ async def _run_phase(
     lifecycle_timeout_ns: int,
     execution_deadline_ns: int,
     hard_deadline_ns: int,
+    engine_binding: EvaluationEngineBinding | None = None,
 ) -> StudyManifest:
     receipts: list[RehearsalLifecycleReceipt] = []
 
@@ -1458,7 +1472,16 @@ async def _run_phase(
         assert result is not None
         return result
 
-    manifest = await run_study(config, output_dir, executor=owned_trial, stop=stop)
+    if engine_binding is None:
+        manifest = await run_study(config, output_dir, executor=owned_trial, stop=stop)
+    else:
+        manifest = await run_study(
+            config,
+            output_dir,
+            executor=owned_trial,
+            stop=stop,
+            engine_binding=engine_binding,
+        )
     _write_sidecar(
         receipt_path,
         _lifecycle_bytes(phase=phase, plan=plan, receipts=tuple(receipts)),
@@ -1467,12 +1490,18 @@ async def _run_phase(
 
 
 def _observations(
-    recipe: BoundCandidateRecipe, study_dir: Path
+    recipe: BoundCandidateRecipe,
+    study_dir: Path,
+    engine_binding: EvaluationEngineBinding | None = None,
 ) -> tuple[CalibrationTrialObservation, ...]:
     rows: list[CalibrationTrialObservation] = []
     with StudyDirectory.open(
         study_dir, budget=recipe.calibration_config.limits.total_output_bytes
     ) as directory:
+        if engine_binding is not None and directory.read(
+            "engine-binding.json", limit=_SIDECAR_OUTPUT_BYTES
+        ) != engine_binding_bytes(engine_binding):
+            raise EvaluationError("calibration engine binding changed before reduction")
         manifest = read_manifest(directory, recipe.calibration_plan)
         if manifest.status != "COMPLETED":
             raise EvaluationError("incomplete calibration study cannot select a level")
@@ -1486,12 +1515,20 @@ def _observations(
             )
             if sha256_digest(content) != entry.result_sha256:
                 raise EvaluationError("calibration trial bytes differ from its ledger")
-            summary = summarize_trial(
-                binding.source_trial,
-                load_study_trial_bytes(
+            if engine_binding is None:
+                validated = load_study_trial_bytes(
                     content, recipe.calibration_plan, binding.source_trial
-                ),
-            )
+                )
+            else:
+                # Only the existing numerical reducers receive this private
+                # input. Public artifacts retain the full SGLang binding.
+                validated = load_sglang_trial_bytes(
+                    content,
+                    recipe.calibration_plan,
+                    binding.source_trial,
+                    engine_binding,
+                )._statistical_input
+            summary = summarize_trial(binding.source_trial, validated)
             foreground = summary["foreground"]
             assert isinstance(foreground, dict)
             outcomes = foreground["outcomes"]
@@ -1532,7 +1569,9 @@ async def run_rehearsal(
     output_root: Path,
     *,
     lifecycle: TrialLifecycle,
-    executor: StudyExecutor,
+    executor: StudyExecutor | None = None,
+    sglang_profiles: Mapping[EndpointId, SglangServingConfig] | None = None,
+    containerized: bool = False,
 ) -> RehearsalResult:
     """Run one non-renewable session through calibration and confirmation.
 
@@ -1543,6 +1582,29 @@ async def run_rehearsal(
     """
     protocol = rehearsal.calibration_plan.protocol
     _validate_lifecycle_reservation(lifecycle, protocol)
+    if type(containerized) is not bool:
+        raise EvaluationError("rehearsal launch mapping is invalid")
+    engines = None
+    if sglang_profiles is None:
+        if (
+            executor is None
+            or containerized
+            or getattr(lifecycle, "engine_choice_sha256", None) is not None
+        ):
+            raise EvaluationError("native rehearsal requires its explicit executor")
+    else:
+        if executor is not None or isinstance(
+            lifecycle, TwoEngineVllmSubprocessLifecycle
+        ):
+            raise EvaluationError("SGLang rehearsal cannot mix native engine executors")
+        engines = bind_sglang_rehearsal(
+            rehearsal, sglang_profiles, containerized=containerized
+        )
+        owned_choice = getattr(lifecycle, "engine_choice_sha256", None)
+        if owned_choice is not None and owned_choice != engines.engine_choice_sha256:
+            raise EvaluationError(
+                "SGLang lifecycle differs from the declared engine choice"
+            )
     started_ns = monotonic_ns()
     hard_deadline_ns = started_ns + protocol.max_session_duration_ns
     execution_deadline_ns = (
@@ -1559,6 +1621,18 @@ async def run_rehearsal(
             raise EvaluationError(message)
 
     candidate_recipe_bindings = _candidate_recipe_bindings_bytes(rehearsal)
+    candidate_recipe_bindings_sha256 = sha256_digest(candidate_recipe_bindings)
+    engine_ledger = (
+        engines.ledger_bytes(candidate_recipe_bindings_sha256)
+        if engines is not None
+        else None
+    )
+    if engine_ledger is not None and (
+        len(engine_ledger) > _SIDECAR_OUTPUT_BYTES
+        or rehearsal.reserved_output_bytes + len(engine_ledger)
+        > protocol.max_session_output_bytes
+    ):
+        raise EvaluationError("SGLang engine ledger exceeds the session output reserve")
     # This no-replace write is deliberately before every lifecycle call. A
     # failed/tampered/reserved ledger therefore means no
     # endpoint reset, warmup, transport, or native dispatch.
@@ -1567,7 +1641,8 @@ async def run_rehearsal(
     _write_sidecar(
         output_root / "candidate-recipe-bindings.json", candidate_recipe_bindings
     )
-    candidate_recipe_bindings_sha256 = sha256_digest(candidate_recipe_bindings)
+    if engine_ledger is not None:
+        _write_sidecar(output_root / "engine-choice-bindings.json", engine_ledger)
     stop = asyncio.Event()
 
     async def expire_execution_window() -> None:
@@ -1596,6 +1671,17 @@ async def run_rehearsal(
             require_active_session()
             stem = f"calibration-{candidate.level.level_id}"
             study_dir = output_root / stem
+            phase_binding = (
+                engines.binding_for(candidate.level.level_id, "CALIBRATION")
+                if engines is not None
+                else None
+            )
+            phase_executor = (
+                engines.executor_for(candidate.level.level_id, "CALIBRATION")
+                if engines is not None
+                else executor
+            )
+            assert phase_executor is not None
             manifest = await _run_phase(
                 phase="CALIBRATION",
                 config=candidate.calibration_config,
@@ -1603,16 +1689,25 @@ async def run_rehearsal(
                 output_dir=study_dir,
                 receipt_path=output_root / f"{stem}-lifecycle.json",
                 lifecycle=lifecycle,
-                executor=executor,
+                executor=phase_executor,
                 stop=stop,
                 lifecycle_timeout_ns=protocol.preparation.warmup_reset_max_duration_ns,
                 execution_deadline_ns=execution_deadline_ns,
                 hard_deadline_ns=hard_deadline_ns,
+                engine_binding=phase_binding,
             )
             require_active_session()
             manifests.append((candidate.level.level_id, manifest))
             report_dir = output_root / f"{stem}-report"
-            report_study(candidate.calibration_config, study_dir, report_dir)
+            if phase_binding is None:
+                report_study(candidate.calibration_config, study_dir, report_dir)
+            else:
+                report_study(
+                    candidate.calibration_config,
+                    study_dir,
+                    report_dir,
+                    engine_binding=phase_binding,
+                )
             require_retrieval_window()
             calibration_reports.append(
                 {
@@ -1624,7 +1719,7 @@ async def run_rehearsal(
                     ),
                 }
             )
-            observations.extend(_observations(candidate, study_dir))
+            observations.extend(_observations(candidate, study_dir, phase_binding))
         observed = CalibrationObservationSet(
             schema_version="inferdrome.evaluation-load-calibration-observations.v1",
             protocol_sha256=rehearsal.calibration_plan.protocol_sha256,
@@ -1652,8 +1747,7 @@ async def run_rehearsal(
                         candidate_recipe_bindings_sha256
                     ),
                     "selection_sha256": sha256_digest(
-                        canonical_json_bytes(selection.model_dump(mode="json"))
-                        + b"\n"
+                        canonical_json_bytes(selection.model_dump(mode="json")) + b"\n"
                     ),
                     "selected_level_id": selection.selected_level_id,
                     "evidence_eligible": False,
@@ -1678,6 +1772,17 @@ async def run_rehearsal(
                 if item.level.level_id == selection.selected_level_id
             )
             study_dir = output_root / f"confirmation-{candidate.level.level_id}"
+            phase_binding = (
+                engines.binding_for(candidate.level.level_id, "CONFIRMATION")
+                if engines is not None
+                else None
+            )
+            phase_executor = (
+                engines.executor_for(candidate.level.level_id, "CONFIRMATION")
+                if engines is not None
+                else executor
+            )
+            assert phase_executor is not None
             confirmation_manifest = await _run_phase(
                 phase="CONFIRMATION",
                 config=candidate.confirmation_config,
@@ -1688,17 +1793,26 @@ async def run_rehearsal(
                     / f"confirmation-{candidate.level.level_id}-lifecycle.json"
                 ),
                 lifecycle=lifecycle,
-                executor=executor,
+                executor=phase_executor,
                 stop=stop,
                 lifecycle_timeout_ns=(
                     protocol.preparation.warmup_reset_max_duration_ns
                 ),
                 execution_deadline_ns=execution_deadline_ns,
                 hard_deadline_ns=hard_deadline_ns,
+                engine_binding=phase_binding,
             )
             require_active_session()
             report_dir = output_root / f"confirmation-{candidate.level.level_id}-report"
-            report_study(candidate.confirmation_config, study_dir, report_dir)
+            if phase_binding is None:
+                report_study(candidate.confirmation_config, study_dir, report_dir)
+            else:
+                report_study(
+                    candidate.confirmation_config,
+                    study_dir,
+                    report_dir,
+                    engine_binding=phase_binding,
+                )
             require_retrieval_window()
             confirmation_report_path = report_dir / "report.json"
             confirmation_report_sha256 = sha256_digest(
@@ -1742,6 +1856,9 @@ async def run_rehearsal(
             confirmation_manifest=confirmation_manifest,
             confirmation_report_path=confirmation_report_path,
             candidate_recipe_bindings_sha256=candidate_recipe_bindings_sha256,
+            engine_choice_bindings_sha256=(
+                sha256_digest(engine_ledger) if engine_ledger is not None else None
+            ),
         )
     finally:
         deadline.cancel()

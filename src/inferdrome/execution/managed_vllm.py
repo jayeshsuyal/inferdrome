@@ -230,9 +230,12 @@ def _safe_relative_path(relative: Path, *, label: str) -> str:
 
 
 def _discover_snapshot_files(root: Path) -> tuple[_DiscoveredFile, ...]:
+    def fail_walk(error: OSError) -> None:
+        raise error
+
     discovered: list[_DiscoveredFile] = []
     try:
-        walker = os.walk(root, topdown=True, followlinks=False)
+        walker = os.walk(root, topdown=True, onerror=fail_walk, followlinks=False)
         for directory, directory_names, filenames in walker:
             current = Path(directory)
             retained_directories: list[str] = []

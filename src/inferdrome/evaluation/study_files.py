@@ -18,7 +18,8 @@ from inferdrome.evaluation.files import MAX_RESULT_BYTES
 MAX_BUNDLE_BYTES = 1024 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 _NAMES = re.compile(
-    r"(?:plan\.json|manifest\.json|report\.json|report\.md|trial-[0-9]{4}\.json)"
+    r"(?:plan\.json|engine-binding\.json|manifest\.json|report\.json|report\.md|"
+    r"trial-[0-9]{4}\.json)"
 )
 
 

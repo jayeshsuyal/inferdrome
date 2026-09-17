@@ -115,6 +115,14 @@ async def run_routing_healthy(
         foreground_stop=_StopEvent(stop),
         poll_stop=_StopEvent(stop),
     )
+    return await _run_healthy_session(session, stop=stop)
+
+
+async def _run_healthy_session(
+    session: _HealthySession, *, stop: asyncio.Event
+) -> HealthyRoutingResult:
+    """Internal numerical result; alternate engines must wrap it before export."""
+    config = session.config
     decisions = await run_observation_session(session, stop=stop)
     assert session.foreground_task is not None
     return HealthyRoutingResult(
