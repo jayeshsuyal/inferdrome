@@ -1,0 +1,46 @@
+{
+  "schema_version": "inferdrome.load-calibrated-routing-live-proposal.template.v1",
+  "state": "INERT_UNRESOLVED_NOT_EXECUTABLE",
+  "purpose": "two-endpoint Qwen3-8B load-calibrated routing measurement",
+  "required_exact_inputs": {
+    "source_commit": { "__UNRESOLVED_REQUIRED__": "reviewed source commit" },
+    "protocol_sha256": { "__UNRESOLVED_REQUIRED__": "canonical protocol digest" },
+    "workload_sha256": { "__UNRESOLVED_REQUIRED__": "canonical workload digest" },
+    "trace_sha256": { "__UNRESOLVED_REQUIRED__": "canonical trace digest" },
+    "model_snapshot_sha256": { "__UNRESOLVED_REQUIRED__": "preloaded Qwen3 snapshot proof" },
+    "serving_images": {
+      "endpoint_a": { "__UNRESOLVED_REQUIRED__": "repository@sha256" },
+      "endpoint_b": { "__UNRESOLVED_REQUIRED__": "repository@sha256" }
+    },
+    "provider": {
+      "project": { "__UNRESOLVED_REQUIRED__": "exact project" },
+      "region": { "__UNRESOLVED_REQUIRED__": "exact region" },
+      "zone": { "__UNRESOLVED_REQUIRED__": "exact zone" },
+      "host": { "__UNRESOLVED_REQUIRED__": "exact approved host/topology" },
+      "private_connectivity": { "__UNRESOLVED_REQUIRED__": "reviewed private route" },
+      "controller_principal": { "__UNRESOLVED_REQUIRED__": "exact principal" },
+      "guest_principal": { "__UNRESOLVED_REQUIRED__": "exact principal" }
+    },
+    "quote": {
+      "identity": { "__UNRESOLVED_REQUIRED__": "provider quote identity" },
+      "rate": { "__UNRESOLVED_REQUIRED__": "rate and currency" },
+      "expires_at": { "__UNRESOLVED_REQUIRED__": "UTC timestamp" },
+      "usd_cap": { "__UNRESOLVED_REQUIRED__": "approved cap" }
+    },
+    "limits": {
+      "maximum_runtime": { "__UNRESOLVED_REQUIRED__": "bounded duration" },
+      "cleanup_horizon": { "__UNRESOLVED_REQUIRED__": "exact cleanup deadline" }
+    },
+    "approval": {
+      "exact_user_authorization": { "__UNRESOLVED_REQUIRED__": "commit-bound approval" },
+      "issued_at": { "__UNRESOLVED_REQUIRED__": "UTC timestamp" }
+    }
+  },
+  "non_claims": [
+    "not an approval",
+    "not a quote",
+    "not a capacity reservation",
+    "not a spend authorization",
+    "not an executable deployment request"
+  ]
+}

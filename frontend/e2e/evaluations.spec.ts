@@ -27,6 +27,7 @@ interface Summary {
   readonly report_sha256: string;
   readonly label: string;
   readonly kind: "STUDY" | "PREFIX_CACHE";
+  readonly evidence_class: "SYNTHETIC_ONLY" | "LOCAL_MEASUREMENT_ONLY" | null;
   readonly returned_records: number;
 }
 
@@ -56,6 +57,31 @@ function prepare(studyVariant = "complete", cacheBlockCount = 4): Fixture {
   if (fixture.fixture_provenance !== "SYNTHETIC_ONLY") throw new Error("Expected explicitly synthetic evaluation fixtures");
   mkdirSync(join(root, "runs"), { mode: 0o700 });
   return { ...fixture, root };
+}
+
+function prepareCpuLoopbackRehearsal(): Fixture {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "inferdrome-load-rehearsal-ui-")));
+  const result = spawnSync(python(), ["-m", "tests.load_calibration_rehearsal_dashboard_support", "--root", root], {
+    cwd: ROOT, encoding: "utf8", env: environment(), timeout: 90_000, maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) throw new Error(`CPU loopback rehearsal preparation failed: ${result.stderr}`);
+  const fixture = JSON.parse(result.stdout) as {
+    fixture_provenance: string;
+    catalog: string;
+    report_sha256: string;
+  };
+  if (fixture.fixture_provenance !== "CPU_LOOPBACK_REHEARSAL_ONLY") throw new Error("Expected a CPU-loopback-only rehearsal fixture");
+  return {
+    root,
+    catalog: fixture.catalog,
+    reports: {
+      rehearsal: {
+        kind: "STUDY",
+        report_path: "",
+        expected_sha256: fixture.report_sha256,
+      },
+    },
+  };
 }
 
 async function port(): Promise<number> {
@@ -177,6 +203,32 @@ async function attachRace(testInfo: TestInfo, observations: readonly (RaceObserv
   }
   await testInfo.attach("real-refresh-race-observations", { body: JSON.stringify(values, null, 2), contentType: "application/json" });
 }
+
+test("CPU loopback rehearsal: a native confirmation report reaches the existing read-only browser", async ({ page }) => {
+  const fixture = prepareCpuLoopbackRehearsal();
+  let server: Server | undefined;
+  try {
+    server = await start(fixture);
+    const response = await page.request.get(`${server.url}/api/v1/evaluation-reports`);
+    expect(response.status()).toBe(200);
+    const index = await response.json() as { reports: Summary[]; rejected: unknown[] };
+    expect(index.rejected).toEqual([]);
+    expect(index.reports).toHaveLength(1);
+    const report = index.reports[0]!;
+    expect(report.kind).toBe("STUDY");
+    expect(report.evidence_class).toBe("SYNTHETIC_ONLY");
+    expect(report.report_sha256).toBe(fixture.reports.rehearsal.expected_sha256);
+    await page.goto(`${server.url}/evaluations/${report.report_id}`);
+    await expect(page.getByRole("heading", { name: report.label, exact: true })).toBeVisible();
+    await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
+    await expect(page.getByRole("main")).toContainText("Synthetic only");
+    await expect(page.getByRole("main")).not.toContainText("127.0.0.1");
+  } finally {
+    await stop(server);
+    remove(fixture.root);
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 
 test("refresh recovery: rapid 25 ms double-click keeps the real index available", async ({ page }, testInfo) => {
   const fixture = prepare("complete", 8);
