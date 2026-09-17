@@ -19,6 +19,11 @@ actual overload, policy superiority, independent execution, or a sealed R1
 receipt. The frozen `routing_execution` experiment and its policies, fixtures,
 receipts, and verifiers retain their existing semantics.
 
+The additive [load-calibrated routing study protocol](LOAD_CALIBRATED_ROUTING_STUDY_V1.md)
+binds a future finite offered-load sweep and confirmation selection to exact
+study plans. It does not alter this v1 report schema or reclassify any retained
+study report.
+
 ## Entry points and artifacts
 
 ```sh
@@ -58,6 +63,9 @@ Schema versions are independent of the earlier evaluation schemas:
 | Per-trial envelope | `inferdrome.evaluation-study-trial-result.v1` |
 | Final study manifest | `inferdrome.evaluation-study-result.v1` |
 | Offline report | `inferdrome.evaluation-study-report.v1` |
+| Additive calibration protocol | `inferdrome.evaluation-load-calibration-protocol.v1` |
+| Additive calibration plan | `inferdrome.evaluation-load-calibration-plan.v1` |
+| Additive confirmation plan | `inferdrome.evaluation-load-confirmation-plan.v1` |
 
 The envelope contains the unchanged routing result or the new
 `inferdrome.evaluation-healthy-result.v1` result. Files contain canonical JSON
@@ -77,9 +85,11 @@ A profile declares `profile_id`, `load_level`, `window_start_ns`,
 `window_end_ns`, `first_content_slo_ns`, and `completion_slo_ns`. The available
 load labels are `REHEARSAL`, `MODERATE`, and `NEAR_CAPACITY`; every one retains
 `calibration_status=UNCALIBRATED_REHEARSAL`. A label cannot certify a rate.
-An authorized later pilot must choose actual workload/rate and concurrency
-sweeps, prompt mix, response limits, schedules, and SLOs. Client queue rejection,
-capacity rejection, or dispatch lag cannot by itself identify engine capacity.
+The separately versioned calibration protocol must freeze actual workload/rate
+and concurrency sweeps, prompt and response lengths, schedules, SLOs, reset,
+and selection semantics before accepting calibration observations. Client queue
+rejection, capacity rejection, or dispatch lag cannot by itself identify engine
+capacity.
 
 Each ordered block declares:
 
