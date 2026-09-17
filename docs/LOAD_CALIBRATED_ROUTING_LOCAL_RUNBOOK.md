@@ -39,9 +39,12 @@ The code-level `TwoEngineVllmSubprocessLifecycle` is deliberately explicit:
    polling for health, metrics, and a fixed-shape warmup probe before running
    the native trial. The protocol must reserve the lifecycle's declared
    startup/cleanup maximum; otherwise no trial dispatches.
-4. It force-removes only the names created for that exact trial and repeats
-   both GPU-idle readbacks. Any failed startup, readiness, warmup, or cleanup
-   fails closed.
+4. It force-removes only immutable container IDs returned by a create or later
+   reconciled through that exact name, image, owner label, and attempt label;
+   it never removes by name. Cleanup independently confirms both declared
+   loopback ports are closed and both GPUs are idle. An absent unknown-ID
+   create remains unresolved until an exact later reconciliation. Any failed
+   startup, readiness, warmup, or cleanup fails closed.
 
 This lifecycle is not exposed as an unguarded campaign CLI. Calling it for a
 real model requires the separately approved campaign path and all inputs below.

@@ -566,8 +566,8 @@ class TwoEngineVllmSubprocessLifecycle:
 
     async def _inspect_pending(
         self, target: _OwnedEngine, *, deadline_ns: int
-    ) -> bool:
-        """Reconcile only a lost create response for its exact name/labels."""
+    ) -> None:
+        """Bind a pending create only after exact name/image/label readback."""
 
         argv = (
             "docker",
@@ -591,7 +591,11 @@ class TwoEngineVllmSubprocessLifecycle:
             and result.stdout == b""
             and result.stderr in missing_messages
         ):
-            return False
+            # A killed or timed-out Docker CLI does not prove that the daemon
+            # did not subsequently materialize this dispatched create. Keep
+            # the pending target so a later cleanup can reconcile only this
+            # exact attempt; closed ports and idle GPUs are not ownership proof.
+            raise EvaluationError("exact-owned local engine target remains pending")
         if result.returncode != 0 or len(result.stderr) > _SUBPROCESS_OUTPUT_BYTES:
             raise EvaluationError("exact-owned local engine reconciliation failed")
         try:
@@ -617,17 +621,13 @@ class TwoEngineVllmSubprocessLifecycle:
                 "exact-owned local engine reconciliation failed"
             ) from None
         target.container_id = container_id
-        return True
 
     async def _remove_active(self, *, deadline_ns: int) -> None:
         errors: list[Exception] = []
         for target in tuple(reversed(self._active)):
             try:
                 if target.container_id is None:
-                    found = await self._inspect_pending(target, deadline_ns=deadline_ns)
-                    if not found:
-                        self._active.remove(target)
-                        continue
+                    await self._inspect_pending(target, deadline_ns=deadline_ns)
                 assert target.container_id is not None
                 await self._command(
                     ("docker", "rm", "--force", target.container_id),

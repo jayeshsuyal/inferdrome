@@ -179,6 +179,7 @@ class _FakeLocalEngineRunner:
         *,
         fail_second_start: bool = False,
         lost_response_start: int | None = None,
+        delayed_materialization_start: int | None = None,
         fail_rm_once: bool = False,
         slow_rm: bool = False,
         gpu_busy_indices: set[int] | None = None,
@@ -187,8 +188,10 @@ class _FakeLocalEngineRunner:
         self.commands: list[tuple[str, ...]] = []
         self.by_name: dict[str, str] = {}
         self.containers: dict[str, dict[str, object]] = {}
+        self.delayed_materializations: dict[str, tuple[str, dict[str, str]]] = {}
         self.fail_second_start = fail_second_start
         self.lost_response_start = lost_response_start
+        self.delayed_materialization_start = delayed_materialization_start
         self.fail_rm_once = fail_rm_once
         self.slow_rm = slow_rm
         self.gpu_busy_indices = gpu_busy_indices or set()
@@ -231,6 +234,15 @@ class _FakeLocalEngineRunner:
         self.by_name[name] = replacement_id
         return replacement_id
 
+    def materialize_delayed(self) -> str:
+        """Materialize exactly one create after its caller lost the response."""
+
+        assert len(self.delayed_materializations) == 1
+        name, (container_id, labels) = self.delayed_materializations.popitem()
+        self.by_name[name] = container_id
+        self.containers[container_id] = {"name": name, "labels": labels}
+        return container_id
+
     async def run(
         self, argv: tuple[str, ...], *, timeout_ns: int
     ) -> SubprocessResult:
@@ -252,10 +264,14 @@ class _FakeLocalEngineRunner:
                     argv=argv, returncode=17, stdout=b"", stderr=b"failed"
                 )
             container_id = self._container_id(self.start_count)
+            labels = self._labels(argv)
+            if self.delayed_materialization_start == self.start_count:
+                self.delayed_materializations[name] = (container_id, labels)
+                raise OSError("simulated delayed create response")
             self.by_name[name] = container_id
             self.containers[container_id] = {
                 "name": name,
-                "labels": self._labels(argv),
+                "labels": labels,
             }
             if self.lost_response_start == self.start_count:
                 raise OSError("simulated lost create response")
@@ -408,7 +424,7 @@ def test_two_engine_subprocess_lifecycle_renders_exact_pinned_reset_commands(
     asyncio.run(exercise())
 
 
-def test_two_engine_subprocess_lifecycle_fails_closed_and_removes_only_started_names(
+def test_two_engine_subprocess_lifecycle_fails_closed_without_dropping_unknown_start(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -431,9 +447,12 @@ def test_two_engine_subprocess_lifecycle_fails_closed_and_removes_only_started_n
                     snapshot_verifier=lambda _path: None,
                     port_closed_probe=lambda _port, _timeout: None,
                 )
-                with pytest.raises(EvaluationError, match="startup or warmup failed"):
+                with pytest.raises(
+                    EvaluationError, match="startup failed and cleanup is unconfirmed"
+                ):
                     await lifecycle.prepare(trial, stop=asyncio.Event())
                 assert failed.active == set()
+                assert len(lifecycle._active) == 1
                 removals = [
                     command
                     for command in failed.commands
@@ -441,6 +460,9 @@ def test_two_engine_subprocess_lifecycle_fails_closed_and_removes_only_started_n
                 ]
                 assert len(removals) == 1
                 assert removals[0][3] == f"{1:064x}"
+                with pytest.raises(EvaluationError, match="cleanup is unconfirmed"):
+                    await lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert len(lifecycle._active) == 1
 
                 busy = _FakeLocalEngineRunner(gpu_busy_indices={0})
                 busy_lifecycle = TwoEngineVllmSubprocessLifecycle(
@@ -520,6 +542,53 @@ def test_two_engine_lifecycle_reconciles_only_an_exact_lost_create_attempt(
                 ]
                 assert len(inspections) == len(removals) == 1
                 assert removals[0][3] == f"{1:064x}"
+
+                delayed = _FakeLocalEngineRunner(delayed_materialization_start=1)
+                delayed_lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=delayed,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
+                )
+                with pytest.raises(
+                    EvaluationError, match="startup failed and cleanup is unconfirmed"
+                ):
+                    await delayed_lifecycle.prepare(trial, stop=asyncio.Event())
+                assert len(delayed_lifecycle._active) == 1
+                assert delayed.containers == {}
+                assert not any(
+                    command[:3] == ("docker", "rm", "--force")
+                    for command in delayed.commands
+                )
+                with pytest.raises(EvaluationError, match="cleanup is unconfirmed"):
+                    await delayed_lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert len(delayed_lifecycle._active) == 1
+                assert delayed.containers == {}
+                assert len(
+                    [
+                        command
+                        for command in delayed.commands
+                        if command[:3] == ("docker", "container", "inspect")
+                    ]
+                ) == 2
+                delayed_id = delayed.materialize_delayed()
+                await delayed_lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert delayed.containers == {}
+                delayed_removals = [
+                    command
+                    for command in delayed.commands
+                    if command[:3] == ("docker", "rm", "--force")
+                ]
+                assert [command[3] for command in delayed_removals] == [delayed_id]
+                assert len(
+                    [
+                        command
+                        for command in delayed.commands
+                        if command[:3] == ("docker", "container", "inspect")
+                    ]
+                ) == 3
 
     asyncio.run(exercise())
 
