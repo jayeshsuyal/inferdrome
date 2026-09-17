@@ -175,13 +175,61 @@ class _FakeLocalEngineRunner:
     """CPU-only command seam: it records commands and never launches Docker."""
 
     def __init__(
-        self, *, fail_second_start: bool = False, gpu_busy: bool = False
+        self,
+        *,
+        fail_second_start: bool = False,
+        lost_response_start: int | None = None,
+        fail_rm_once: bool = False,
+        slow_rm: bool = False,
+        gpu_busy_indices: set[int] | None = None,
+        gpu_error_indices: set[int] | None = None,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
-        self.active: set[str] = set()
+        self.by_name: dict[str, str] = {}
+        self.containers: dict[str, dict[str, object]] = {}
         self.fail_second_start = fail_second_start
-        self.gpu_busy = gpu_busy
+        self.lost_response_start = lost_response_start
+        self.fail_rm_once = fail_rm_once
+        self.slow_rm = slow_rm
+        self.gpu_busy_indices = gpu_busy_indices or set()
+        self.gpu_error_indices = gpu_error_indices or set()
         self.start_count = 0
+        self.remove_count = 0
+
+    @property
+    def active(self) -> set[str]:
+        """Compatibility view of names still owned by this command seam."""
+
+        return set(self.by_name)
+
+    @staticmethod
+    def _container_id(index: int) -> str:
+        return f"{index:064x}"
+
+    @staticmethod
+    def _labels(argv: tuple[str, ...]) -> dict[str, str]:
+        labels: dict[str, str] = {}
+        for index, value in enumerate(argv[:-1]):
+            if value == "--label":
+                key, label_value = argv[index + 1].split("=", 1)
+                labels[key] = label_value
+        return labels
+
+    def replace_name(self, name: str) -> str:
+        """Simulate a different local container reusing a once-owned name."""
+
+        old_id = self.by_name.pop(name)
+        self.containers.pop(old_id)
+        replacement_id = self._container_id(self.start_count + 100)
+        self.containers[replacement_id] = {
+            "name": name,
+            "labels": {
+                "io.inferdrome.load-calibration.owner": "different-owner",
+                "io.inferdrome.load-calibration.attempt": "different-attempt",
+            },
+        }
+        self.by_name[name] = replacement_id
+        return replacement_id
 
     async def run(
         self, argv: tuple[str, ...], *, timeout_ns: int
@@ -189,26 +237,80 @@ class _FakeLocalEngineRunner:
         assert timeout_ns > 0
         self.commands.append(argv)
         if argv[0] == "nvidia-smi":
+            index = int(argv[1].removeprefix("--id="))
             return SubprocessResult(
                 argv=argv,
-                returncode=0,
-                stdout=b"1234\n" if self.gpu_busy else b"",
+                returncode=17 if index in self.gpu_error_indices else 0,
+                stdout=b"1234\n" if index in self.gpu_busy_indices else b"",
                 stderr=b"",
             )
         if argv[:2] == ("docker", "run"):
             self.start_count += 1
+            name = argv[argv.index("--name") + 1]
             if self.fail_second_start and self.start_count == 2:
                 return SubprocessResult(
                     argv=argv, returncode=17, stdout=b"", stderr=b"failed"
                 )
-            name = argv[argv.index("--name") + 1]
-            self.active.add(name)
+            container_id = self._container_id(self.start_count)
+            self.by_name[name] = container_id
+            self.containers[container_id] = {
+                "name": name,
+                "labels": self._labels(argv),
+            }
+            if self.lost_response_start == self.start_count:
+                raise OSError("simulated lost create response")
             return SubprocessResult(
-                argv=argv, returncode=0, stdout=b"a" * 64 + b"\n", stderr=b""
+                argv=argv,
+                returncode=0,
+                stdout=container_id.encode() + b"\n",
+                stderr=b"",
+            )
+        if argv[:3] == ("docker", "container", "inspect"):
+            name = argv[-1]
+            inspected_container_id = self.by_name.get(name)
+            if inspected_container_id is None:
+                return SubprocessResult(
+                    argv=argv,
+                    returncode=1,
+                    stdout=b"",
+                    stderr=f"Error: No such container: {name}\n".encode(),
+                )
+            inspected_container = self.containers[inspected_container_id]
+            return SubprocessResult(
+                argv=argv,
+                returncode=0,
+                stdout=(
+                    json.dumps(
+                        {
+                            "Config": {
+                                "Image": VLLM_RUNTIME_IMAGE_REFERENCE,
+                                "Labels": inspected_container["labels"],
+                            },
+                            "Id": inspected_container_id,
+                            "Name": "/" + name,
+                        }
+                    ).encode()
+                ),
+                stderr=b"",
             )
         if argv[:3] == ("docker", "rm", "--force"):
-            name = argv[3]
-            self.active.discard(name)
+            self.remove_count += 1
+            if self.slow_rm:
+                await asyncio.sleep(0.05)
+            if self.fail_rm_once and self.remove_count == 1:
+                return SubprocessResult(
+                    argv=argv, returncode=17, stdout=b"", stderr=b"failed"
+                )
+            removed_container_id = argv[3]
+            removed_container = self.containers.pop(removed_container_id, None)
+            if removed_container is None:
+                return SubprocessResult(
+                    argv=argv, returncode=1, stdout=b"", stderr=b"missing"
+                )
+            removed_name = removed_container["name"]
+            assert isinstance(removed_name, str)
+            if self.by_name.get(removed_name) == removed_container_id:
+                self.by_name.pop(removed_name)
             return SubprocessResult(
                 argv=argv,
                 returncode=0,
@@ -243,6 +345,7 @@ def test_two_engine_subprocess_lifecycle_renders_exact_pinned_reset_commands(
                         (origin, timeout)
                     ),
                     snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
                 )
                 await lifecycle.prepare(trial, stop=asyncio.Event())
                 assert len(runner.active) == 2
@@ -285,7 +388,7 @@ def test_two_engine_subprocess_lifecycle_renders_exact_pinned_reset_commands(
                 ]
                 assert len(removals) == 4
                 assert {command[3] for command in removals} == {
-                    start[start.index("--name") + 1] for start in starts
+                    f"{index:064x}" for index in range(1, 5)
                 }
                 assert len({start[start.index("--name") + 1] for start in starts}) == 4
                 gpu_checks = [
@@ -326,6 +429,7 @@ def test_two_engine_subprocess_lifecycle_fails_closed_and_removes_only_started_n
                     model_snapshot_path=snapshot,
                     runner=failed,
                     snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
                 )
                 with pytest.raises(EvaluationError, match="startup or warmup failed"):
                     await lifecycle.prepare(trial, stop=asyncio.Event())
@@ -336,18 +440,24 @@ def test_two_engine_subprocess_lifecycle_fails_closed_and_removes_only_started_n
                     if command[:3] == ("docker", "rm", "--force")
                 ]
                 assert len(removals) == 1
-                assert removals[0][3].endswith("-endpoint-a")
+                assert removals[0][3] == f"{1:064x}"
 
-                busy = _FakeLocalEngineRunner(gpu_busy=True)
+                busy = _FakeLocalEngineRunner(gpu_busy_indices={0})
                 busy_lifecycle = TwoEngineVllmSubprocessLifecycle(
                     origins,
                     ownership_id="local-rehearsal",
                     model_snapshot_path=snapshot,
                     runner=busy,
                     snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
                 )
-                with pytest.raises(EvaluationError, match="GPU is not idle"):
+                with pytest.raises(EvaluationError, match="GPU-idle readback"):
                     await busy_lifecycle.prepare(trial, stop=asyncio.Event())
+                assert [
+                    command[1]
+                    for command in busy.commands
+                    if command[0] == "nvidia-smi"
+                ] == ["--id=0", "--id=1"]
                 assert not any(
                     command[:2] == ("docker", "run") for command in busy.commands
                 )
@@ -367,6 +477,262 @@ def test_two_engine_subprocess_lifecycle_fails_closed_and_removes_only_started_n
                     command[:2] == ("docker", "run")
                     for command in unverified.commands
                 )
+
+    asyncio.run(exercise())
+
+
+def test_two_engine_lifecycle_reconciles_only_an_exact_lost_create_attempt(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        snapshot = tmp_path / "qwen3-snapshot"
+        snapshot.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
+            async with _replicas() as (origins, _replicas_unused):
+                trial = compile_study(
+                    _recipe_configs(
+                        origins, level_id="load-low", offered_count=7, seed=11
+                    )[0]
+                ).trials[0]
+                runner = _FakeLocalEngineRunner(lost_response_start=1)
+                lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=runner,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
+                )
+                with pytest.raises(EvaluationError, match="startup or warmup failed"):
+                    await lifecycle.prepare(trial, stop=asyncio.Event())
+                assert runner.active == set()
+                assert runner.containers == {}
+                inspections = [
+                    command
+                    for command in runner.commands
+                    if command[:3] == ("docker", "container", "inspect")
+                ]
+                removals = [
+                    command
+                    for command in runner.commands
+                    if command[:3] == ("docker", "rm", "--force")
+                ]
+                assert len(inspections) == len(removals) == 1
+                assert removals[0][3] == f"{1:064x}"
+
+    asyncio.run(exercise())
+
+
+def test_two_engine_lifecycle_retains_unresolved_ids_and_never_deletes_by_name(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        snapshot = tmp_path / "qwen3-snapshot"
+        snapshot.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
+            async with _replicas() as (origins, _replicas_unused):
+                trial = compile_study(
+                    _recipe_configs(
+                        origins, level_id="load-low", offered_count=7, seed=11
+                    )[0]
+                ).trials[0]
+                retry_runner = _FakeLocalEngineRunner(fail_rm_once=True)
+                retry_lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=retry_runner,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
+                )
+                async def no_warmup(
+                    _trial: CompiledTrial, _stop: asyncio.Event
+                ) -> None:
+                    return None
+
+                patch.setattr(retry_lifecycle, "_await_ready_and_warm", no_warmup)
+                await retry_lifecycle.prepare(trial, stop=asyncio.Event())
+                with pytest.raises(EvaluationError, match="cleanup is unconfirmed"):
+                    await retry_lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert len(retry_runner.containers) == 1
+                await retry_lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert retry_runner.containers == {}
+
+                replacement_runner = _FakeLocalEngineRunner()
+                replacement_lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=replacement_runner,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
+                )
+                patch.setattr(
+                    replacement_lifecycle, "_await_ready_and_warm", no_warmup
+                )
+                await replacement_lifecycle.prepare(trial, stop=asyncio.Event())
+                endpoint_b_name = next(
+                    command[command.index("--name") + 1]
+                    for command in replacement_runner.commands
+                    if command[:2] == ("docker", "run")
+                    and command[command.index("--name") + 1].endswith("endpoint-b")
+                )
+                replacement_id = replacement_runner.replace_name(endpoint_b_name)
+                with pytest.raises(EvaluationError, match="cleanup is unconfirmed"):
+                    await replacement_lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert replacement_id in replacement_runner.containers
+                assert all(
+                    command[3] != endpoint_b_name
+                    for command in replacement_runner.commands
+                    if command[:3] == ("docker", "rm", "--force")
+                )
+
+    asyncio.run(exercise())
+
+
+def test_two_engine_lifecycle_cleanup_reads_every_port_and_gpu_before_confirming(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        snapshot = tmp_path / "qwen3-snapshot"
+        snapshot.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
+            async with _replicas() as (origins, _replicas_unused):
+                trial = compile_study(
+                    _recipe_configs(
+                        origins, level_id="load-low", offered_count=7, seed=11
+                    )[0]
+                ).trials[0]
+                ports: list[int] = []
+                lingering = [True]
+
+                def read_port(port: int, _timeout: float) -> None:
+                    ports.append(port)
+                    if lingering[0] and port == int(origins[0].rsplit(":", 1)[1]):
+                        raise EvaluationError("simulated lingering listener")
+
+                runner = _FakeLocalEngineRunner()
+                lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=runner,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=read_port,
+                )
+                async def no_warmup(
+                    _trial: CompiledTrial, _stop: asyncio.Event
+                ) -> None:
+                    return None
+
+                patch.setattr(lifecycle, "_await_ready_and_warm", no_warmup)
+                await lifecycle.prepare(trial, stop=asyncio.Event())
+                runner.gpu_busy_indices.add(0)
+                with pytest.raises(EvaluationError, match="cleanup is unconfirmed"):
+                    await lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert ports == [
+                    int(origin.rsplit(":", 1)[1]) for origin in origins
+                ]
+                gpu_checks = [
+                    command[1]
+                    for command in runner.commands
+                    if command[0] == "nvidia-smi"
+                ]
+                assert gpu_checks[-2:] == ["--id=0", "--id=1"]
+                runner.gpu_busy_indices.clear()
+                lingering[0] = False
+                ports.clear()
+                await lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert ports == [
+                    int(origin.rsplit(":", 1)[1]) for origin in origins
+                ]
+
+    asyncio.run(exercise())
+
+
+def test_two_engine_lifecycle_preserves_unresolved_targets_on_cancellation_or_deadline(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        snapshot = tmp_path / "qwen3-snapshot"
+        snapshot.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
+            async with _replicas() as (origins, _replicas_unused):
+                trial = compile_study(
+                    _recipe_configs(
+                        origins, level_id="load-low", offered_count=7, seed=11
+                    )[0]
+                ).trials[0]
+                slow_runner = _FakeLocalEngineRunner(slow_rm=True)
+                slow_lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=slow_runner,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
+                )
+                async def no_warmup(
+                    _trial: CompiledTrial, _stop: asyncio.Event
+                ) -> None:
+                    return None
+
+                patch.setattr(slow_lifecycle, "_await_ready_and_warm", no_warmup)
+                await slow_lifecycle.prepare(trial, stop=asyncio.Event())
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        slow_lifecycle.cleanup(trial, stop=asyncio.Event()),
+                        timeout=0.01,
+                    )
+                assert len(slow_runner.containers) == 2
+                slow_runner.slow_rm = False
+                await slow_lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert slow_runner.containers == {}
+
+                now = [0]
+
+                class DeadlineRunner(_FakeLocalEngineRunner):
+                    async def run(
+                        self, argv: tuple[str, ...], *, timeout_ns: int
+                    ) -> SubprocessResult:
+                        result = await super().run(argv, timeout_ns=timeout_ns)
+                        if argv[:3] == ("docker", "rm", "--force"):
+                            now[0] += 2
+                        return result
+
+                deadline_runner = DeadlineRunner()
+                deadline_lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=deadline_runner,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
+                    clock=lambda: now[0],
+                )
+                patch.setattr(
+                    deadline_lifecycle, "_await_ready_and_warm", no_warmup
+                )
+                await deadline_lifecycle.prepare(trial, stop=asyncio.Event())
+                before = len(deadline_runner.commands)
+                deadline_lifecycle.set_operation_deadline(1)
+                with pytest.raises(EvaluationError, match="cleanup is unconfirmed"):
+                    await deadline_lifecycle.cleanup(trial, stop=asyncio.Event())
+                new_commands = deadline_runner.commands[before:]
+                removals = [
+                    command
+                    for command in new_commands
+                    if command[:3] == ("docker", "rm", "--force")
+                ]
+                assert removals == [new_commands[0]]
+                assert len(deadline_runner.containers) == 1
+                deadline_lifecycle.set_operation_deadline(now[0] + 1_000_000_000)
+                await deadline_lifecycle.cleanup(trial, stop=asyncio.Event())
+                assert deadline_runner.containers == {}
 
     asyncio.run(exercise())
 
@@ -556,6 +922,30 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                     ).status_code
                     == 200
                 )
+                manifest_path = output / "confirmation-load-high" / "manifest.json"
+                manifest_bytes = manifest_path.read_bytes()
+                manifest_path.chmod(0o600)
+                for field, drifted_value in (
+                    ("trial_id", "trial-0001"),
+                    ("state", "ABORTED"),
+                    ("result_status", "WARMUP_FAILED"),
+                    ("result_sha256", "sha256:" + "0" * 64),
+                ):
+                    manifest_drift = json.loads(manifest_bytes)
+                    manifest_drift["trials"][0][field] = drifted_value
+                    manifest_path.write_bytes(
+                        canonical_json_bytes(manifest_drift) + b"\n"
+                    )
+                    ledger_catalog = output / f"manifest-{field}-drift-catalog.json"
+                    with pytest.raises(
+                        EvaluationError,
+                        match="rehearsal recovery report is inconsistent",
+                    ):
+                        recover_pinned_confirmation_catalog(
+                            output, catalog_path=ledger_catalog
+                        )
+                    assert not ledger_catalog.exists()
+                    manifest_path.write_bytes(manifest_bytes)
                 linkage_path = output / "calibration-linkage.json"
                 linkage_path.chmod(0o600)
                 selection_drift = json.loads(linkage)

@@ -10,8 +10,10 @@ binds the protocol declarations to exact compiled trial IDs.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import re
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +42,10 @@ from inferdrome.evaluation.load_calibration import (
     compile_confirmation_trials,
     confirmation_plan,
     select_calibration_level,
+)
+from inferdrome.evaluation.report_reader import (
+    StudyReport,
+    load_evaluation_report_bytes,
 )
 from inferdrome.evaluation.study import (
     StudyExecutor,
@@ -75,6 +81,7 @@ _CONTROL_OUTPUT_BYTES = 4 * _SIDECAR_OUTPUT_BYTES
 _SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SAFE_LEVEL_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _SAFE_OWNERSHIP_ID = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
+_CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
 _READINESS_BODY_BYTES = 32_768
 _SUBPROCESS_OUTPUT_BYTES = 65_536
 _LOCAL_ENGINE_COMMAND_TIMEOUT_NS = 30_000_000_000
@@ -209,6 +216,17 @@ class LocalSubprocessRunner(Protocol):
     ) -> SubprocessResult: ...
 
 
+@dataclass
+class _OwnedEngine:
+    """One exact-owned engine target, retained until its exact ID is absent."""
+
+    name: str
+    attempt_label: str
+    gpu_index: int
+    port: int
+    container_id: str | None = None
+
+
 class _SubprocessOutputLimit(Exception):
     """A local command tried to exceed the fixed in-memory output bound."""
 
@@ -256,7 +274,7 @@ class AsyncioLocalSubprocessRunner:
                 asyncio.gather(stdout_task, stderr_task, process.wait()),
                 timeout=_operation_timeout_seconds(timeout_ns=timeout_ns),
             )
-        except BaseException as error:
+        except (Exception, asyncio.CancelledError) as error:
             if process.returncode is None:
                 process.kill()
             await asyncio.gather(process.wait(), return_exceptions=True)
@@ -307,6 +325,21 @@ def _verify_pinned_model_snapshot(path: Path) -> None:
         raise EvaluationError("preloaded model snapshot is unavailable") from error
 
 
+def _assert_loopback_port_closed(port: int, timeout_seconds: float) -> None:
+    """Fail if a declared local serving port still accepts a connection."""
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(timeout_seconds)
+            result = probe.connect_ex(("127.0.0.1", port))
+    except OSError as error:
+        raise EvaluationError("local serving-port readback is unavailable") from error
+    if result == 0:
+        raise EvaluationError("declared local serving port is still open")
+    if result != errno.ECONNREFUSED:
+        raise EvaluationError("local serving-port readback is unavailable")
+
+
 class TwoEngineVllmSubprocessLifecycle:
     """Concrete local cold-reset lifecycle for two pinned vLLM engine processes.
 
@@ -329,6 +362,8 @@ class TwoEngineVllmSubprocessLifecycle:
         runner: LocalSubprocessRunner | None = None,
         warmup_probe: Callable[[str, float], None] = _probe_loopback_warmup,
         snapshot_verifier: Callable[[Path], None] = _verify_pinned_model_snapshot,
+        port_closed_probe: Callable[[int, float], None] = _assert_loopback_port_closed,
+        clock: Callable[[], int] = monotonic_ns,
         readiness_timeout_ns: int = 1_000_000_000,
         startup_timeout_ns: int = _LOCAL_ENGINE_STARTUP_TIMEOUT_NS,
     ) -> None:
@@ -356,21 +391,49 @@ class TwoEngineVllmSubprocessLifecycle:
         self._runner = runner or AsyncioLocalSubprocessRunner()
         self._warmup_probe = warmup_probe
         self._snapshot_verifier = snapshot_verifier
+        self._port_closed_probe = port_closed_probe
+        self._clock = clock
         self._readiness_timeout_ns = readiness_timeout_ns
         self._startup_timeout_ns = startup_timeout_ns
-        self._active_names: tuple[str, ...] = ()
+        self._active: list[_OwnedEngine] = []
         self._snapshot_verified = False
+        self._operation_deadline_ns: int | None = None
 
     @property
     def required_operation_timeout_ns(self) -> int:
         """Maximum one prepare/cleanup operation time that a protocol must reserve."""
 
-        prepare = 2 * _LOCAL_ENGINE_COMMAND_TIMEOUT_NS + self._startup_timeout_ns
-        cleanup = 4 * _LOCAL_ENGINE_COMMAND_TIMEOUT_NS
+        # Prepare checks both GPUs, starts two engines, then consumes the
+        # bounded readiness/warmup allowance. Cleanup permits reconciliation
+        # plus removal for both targets, two port readbacks, and both GPU
+        # readbacks, all under the same original operation deadline.
+        prepare = 4 * _LOCAL_ENGINE_COMMAND_TIMEOUT_NS + self._startup_timeout_ns
+        cleanup = 8 * _LOCAL_ENGINE_COMMAND_TIMEOUT_NS
         return max(prepare, cleanup)
 
     def _engine_name(self, trial: CompiledTrial, endpoint_id: str) -> str:
         return f"inferdrome-lcr-{self._ownership_id}-{trial.trial_id}-{endpoint_id}"
+
+    def _attempt_label(self, trial: CompiledTrial, endpoint_id: str) -> str:
+        return f"{self._ownership_id}-{trial.trial_id}-{endpoint_id}"
+
+    def set_operation_deadline(self, deadline_ns: int) -> None:
+        """Accept one absolute phase deadline from the native rehearsal bridge."""
+
+        if type(deadline_ns) is not int or deadline_ns < 1:
+            raise EvaluationError("local engine operation deadline is invalid")
+        self._operation_deadline_ns = deadline_ns
+
+    def _deadline(self) -> int:
+        if self._operation_deadline_ns is not None:
+            return self._operation_deadline_ns
+        return self._clock() + self.required_operation_timeout_ns
+
+    def _remaining_timeout_ns(self, deadline_ns: int) -> int:
+        remaining = deadline_ns - self._clock()
+        if remaining < 1:
+            raise EvaluationError("local engine operation deadline expired")
+        return min(_LOCAL_ENGINE_COMMAND_TIMEOUT_NS, remaining)
 
     def _engine_argv(
         self, trial: CompiledTrial, *, index: int
@@ -391,6 +454,9 @@ class TwoEngineVllmSubprocessLifecycle:
             self._engine_name(trial, endpoint_id),
             "--label",
             f"io.inferdrome.load-calibration.owner={self._ownership_id}",
+            "--label",
+            "io.inferdrome.load-calibration.attempt="
+            f"{self._attempt_label(trial, endpoint_id)}",
             "--gpus",
             f"device={index}",
             "--network",
@@ -433,9 +499,11 @@ class TwoEngineVllmSubprocessLifecycle:
             "--disable-log-requests",
         )
 
-    async def _command(self, argv: tuple[str, ...]) -> bytes:
+    async def _command(
+        self, argv: tuple[str, ...], *, deadline_ns: int
+    ) -> SubprocessResult:
         result = await self._runner.run(
-            argv, timeout_ns=_LOCAL_ENGINE_COMMAND_TIMEOUT_NS
+            argv, timeout_ns=self._remaining_timeout_ns(deadline_ns)
         )
         if (
             result.argv != argv
@@ -444,33 +512,141 @@ class TwoEngineVllmSubprocessLifecycle:
             or len(result.stderr) > _SUBPROCESS_OUTPUT_BYTES
         ):
             raise EvaluationError("exact-owned local engine command failed")
-        return result.stdout
+        return result
 
-    async def _verify_gpu_idle(self) -> None:
+    async def _verify_gpu_idle(self, *, deadline_ns: int) -> None:
+        errors: list[Exception] = []
         for index in (0, 1):
-            content = await self._command(
-                (
-                    "nvidia-smi",
-                    f"--id={index}",
-                    "--query-compute-apps=pid",
-                    "--format=csv,noheader",
-                )
-            )
-            if content.strip():
-                raise EvaluationError("declared GPU is not idle")
-
-    async def _remove_active(self) -> None:
-        errors: list[BaseException] = []
-        for name in reversed(self._active_names):
             try:
-                await self._command(("docker", "rm", "--force", name))
-            except BaseException as error:
+                content = (
+                    await self._command(
+                        (
+                            "nvidia-smi",
+                            f"--id={index}",
+                            "--query-compute-apps=pid",
+                            "--format=csv,noheader",
+                        ),
+                        deadline_ns=deadline_ns,
+                    )
+                ).stdout
+                if content.strip():
+                    raise EvaluationError("declared GPU is not idle")
+            except Exception as error:
                 errors.append(error)
-        self._active_names = ()
+                if self._clock() >= deadline_ns:
+                    break
+        if errors:
+            raise EvaluationError(
+                "declared GPU-idle readback is unconfirmed"
+            ) from errors[0]
+
+    async def _verify_ports_closed(self, *, deadline_ns: int) -> None:
+        errors: list[Exception] = []
+        for origin in self._origins:
+            try:
+                port = urlsplit(origin).port
+                assert port is not None
+                timeout_ns = self._remaining_timeout_ns(deadline_ns)
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._port_closed_probe,
+                        port,
+                        timeout_ns / 1_000_000_000,
+                    ),
+                    timeout=timeout_ns / 1_000_000_000,
+                )
+            except Exception as error:
+                errors.append(error)
+                if self._clock() >= deadline_ns:
+                    break
+        if errors:
+            raise EvaluationError(
+                "declared serving-port readback is unconfirmed"
+            ) from errors[0]
+
+    async def _inspect_pending(
+        self, target: _OwnedEngine, *, deadline_ns: int
+    ) -> bool:
+        """Reconcile only a lost create response for its exact name/labels."""
+
+        argv = (
+            "docker",
+            "container",
+            "inspect",
+            "--format",
+            "{{json .}}",
+            target.name,
+        )
+        result = await self._runner.run(
+            argv, timeout_ns=self._remaining_timeout_ns(deadline_ns)
+        )
+        if result.argv != argv or len(result.stdout) > _SUBPROCESS_OUTPUT_BYTES:
+            raise EvaluationError("exact-owned local engine reconciliation failed")
+        missing_messages = {
+            f"Error: No such container: {target.name}\n".encode(),
+            f"Error response from daemon: No such container: {target.name}\n".encode(),
+        }
+        if (
+            result.returncode == 1
+            and result.stdout == b""
+            and result.stderr in missing_messages
+        ):
+            return False
+        if result.returncode != 0 or len(result.stderr) > _SUBPROCESS_OUTPUT_BYTES:
+            raise EvaluationError("exact-owned local engine reconciliation failed")
         try:
-            await self._verify_gpu_idle()
-        except BaseException as error:
-            errors.append(error)
+            observed = json.loads(result.stdout)
+            config = observed["Config"]
+            labels = config["Labels"]
+            container_id = observed["Id"]
+            if (
+                type(config) is not dict
+                or type(labels) is not dict
+                or type(container_id) is not str
+                or not _CONTAINER_ID.fullmatch(container_id)
+                or observed.get("Name") != f"/{target.name}"
+                or config.get("Image") != VLLM_RUNTIME_IMAGE_REFERENCE
+                or labels.get("io.inferdrome.load-calibration.owner")
+                != self._ownership_id
+                or labels.get("io.inferdrome.load-calibration.attempt")
+                != target.attempt_label
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise EvaluationError(
+                "exact-owned local engine reconciliation failed"
+            ) from None
+        target.container_id = container_id
+        return True
+
+    async def _remove_active(self, *, deadline_ns: int) -> None:
+        errors: list[Exception] = []
+        for target in tuple(reversed(self._active)):
+            try:
+                if target.container_id is None:
+                    found = await self._inspect_pending(target, deadline_ns=deadline_ns)
+                    if not found:
+                        self._active.remove(target)
+                        continue
+                assert target.container_id is not None
+                await self._command(
+                    ("docker", "rm", "--force", target.container_id),
+                    deadline_ns=deadline_ns,
+                )
+                self._active.remove(target)
+            except Exception as error:
+                errors.append(error)
+                if self._clock() >= deadline_ns:
+                    break
+        for readback in (self._verify_ports_closed, self._verify_gpu_idle):
+            try:
+                await readback(deadline_ns=deadline_ns)
+            except Exception as error:
+                errors.append(error)
+        if self._active:
+            errors.append(
+                EvaluationError("exact-owned local engine remains unresolved")
+            )
         if errors:
             raise EvaluationError(
                 "exact-owned local engine cleanup is unconfirmed"
@@ -479,32 +655,40 @@ class TwoEngineVllmSubprocessLifecycle:
     async def _await_ready_and_warm(
         self, trial: CompiledTrial, stop: asyncio.Event
     ) -> None:
-        deadline_ns = monotonic_ns() + self._startup_timeout_ns
+        deadline_ns = min(self._deadline(), self._clock() + self._startup_timeout_ns)
         delay_seconds = 0.05
-        last_error: BaseException | None = None
-        while monotonic_ns() < deadline_ns:
+        last_error: Exception | None = None
+        while self._clock() < deadline_ns:
             if stop.is_set():
                 raise EvaluationError("local engine lifecycle was cancelled")
             try:
                 await self._readiness.prepare(trial, stop=stop)
-                await asyncio.gather(
-                    *(
-                        asyncio.to_thread(
-                            self._warmup_probe,
-                            origin,
-                            min(
-                                self._readiness_timeout_ns,
-                                _LOCAL_ENGINE_WARMUP_TIMEOUT_NS,
-                            )
-                            / 1_000_000_000,
-                        )
-                        for origin in self._origins
+                timeout_ns = self._remaining_timeout_ns(deadline_ns)
+                warmup_timeout_seconds = (
+                    min(
+                        self._readiness_timeout_ns,
+                        _LOCAL_ENGINE_WARMUP_TIMEOUT_NS,
+                        timeout_ns,
                     )
+                    / 1_000_000_000
+                )
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(
+                            asyncio.to_thread(
+                                self._warmup_probe,
+                                origin,
+                                warmup_timeout_seconds,
+                            )
+                            for origin in self._origins
+                        )
+                    ),
+                    timeout=timeout_ns / 1_000_000_000,
                 )
                 return
-            except (EvaluationError, OSError) as error:
+            except (TimeoutError, EvaluationError, OSError) as error:
                 last_error = error
-            remaining_ns = deadline_ns - monotonic_ns()
+            remaining_ns = deadline_ns - self._clock()
             if remaining_ns < 1:
                 break
             await asyncio.sleep(min(delay_seconds, remaining_ns / 1_000_000_000))
@@ -515,7 +699,7 @@ class TwoEngineVllmSubprocessLifecycle:
         if stop.is_set():
             raise EvaluationError("local engine lifecycle was cancelled")
         self._readiness._bound_to_trial(trial)
-        if self._active_names:
+        if self._active:
             raise EvaluationError("local engine lifecycle has an active trial")
         if (
             not self._model_snapshot_path.is_dir()
@@ -525,31 +709,43 @@ class TwoEngineVllmSubprocessLifecycle:
         if not self._snapshot_verified:
             self._snapshot_verifier(self._model_snapshot_path)
             self._snapshot_verified = True
-        await self._verify_gpu_idle()
+        deadline_ns = self._deadline()
+        await self._verify_gpu_idle(deadline_ns=deadline_ns)
         try:
             for index, endpoint_id in enumerate(("endpoint-a", "endpoint-b")):
-                content = await self._command(self._engine_argv(trial, index=index))
-                if not re.fullmatch(rb"[0-9a-f]{64}\n?", content):
-                    raise EvaluationError("local engine did not return an exact ID")
-                self._active_names = (
-                    *self._active_names,
-                    self._engine_name(trial, endpoint_id),
+                parsed = urlsplit(self._origins[index])
+                assert parsed.port is not None
+                target = _OwnedEngine(
+                    name=self._engine_name(trial, endpoint_id),
+                    attempt_label=self._attempt_label(trial, endpoint_id),
+                    gpu_index=index,
+                    port=parsed.port,
                 )
+                # Track before command dispatch: a timeout/lost response may
+                # still have materialized a container that must be reconciled.
+                self._active.append(target)
+                result = await self._command(
+                    self._engine_argv(trial, index=index), deadline_ns=deadline_ns
+                )
+                if not _CONTAINER_ID.fullmatch(result.stdout.decode("ascii").strip()):
+                    raise EvaluationError("local engine did not return an exact ID")
+                target.container_id = result.stdout.decode("ascii").strip()
             await self._await_ready_and_warm(trial, stop)
-        except BaseException as error:
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
             try:
-                await self._remove_active()
-            except BaseException as cleanup_error:
+                await self._remove_active(deadline_ns=deadline_ns)
+            except Exception as cleanup_error:
                 raise EvaluationError(
                     "local engine startup failed and cleanup is unconfirmed"
                 ) from cleanup_error
             raise EvaluationError("local engine startup or warmup failed") from error
 
     async def cleanup(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None:
-        # Cleanup deliberately remains available after a deadline/cancellation.
         del stop
         self._readiness._bound_to_trial(trial)
-        await self._remove_active()
+        await self._remove_active(deadline_ns=self._deadline())
 
 
 class RehearsalLifecycleReceipt(ClosedModel):
@@ -907,7 +1103,7 @@ def _write_sidecar(path: Path, content: bytes) -> None:
 
 def _read_confirmation_report(
     report_path: Path, *, expected_config_sha256: str, expected_plan_sha256: str
-) -> tuple[bytes, str]:
+) -> tuple[bytes, str, StudyReport]:
     """Independently re-read one complete native confirmation report."""
 
     if (
@@ -919,8 +1115,6 @@ def _read_confirmation_report(
     try:
         with StudyDirectory.open(report_path.parent) as directory:
             content = directory.read("report.json", limit=_SIDECAR_OUTPUT_BYTES)
-        from inferdrome.evaluation.report_reader import load_evaluation_report_bytes
-
         loaded = load_evaluation_report_bytes(content, kind="STUDY")
     except (OSError, ValueError, EvaluationError):
         raise EvaluationError("rehearsal confirmation report is unavailable") from None
@@ -932,7 +1126,35 @@ def _read_confirmation_report(
         or report_plan_sha256 != expected_plan_sha256
     ):
         raise EvaluationError("rehearsal confirmation report is not complete")
-    return content, sha256_digest(content)
+    if not isinstance(loaded, StudyReport):
+        raise EvaluationError("rehearsal confirmation report is unavailable")
+    return content, sha256_digest(content), loaded
+
+
+def _validate_confirmation_report_ledger(
+    manifest: StudyManifest, report: StudyReport
+) -> None:
+    """Require the durable study ledger to name exactly the reported trials.
+
+    Report validation proves a native report is canonical.  Recovery also
+    needs the independently durable manifest to bind the same ordered native
+    results before it creates a dashboard pin; neither artifact is allowed to
+    stand in for the other.
+    """
+
+    if len(manifest.trials) != len(report.trials):
+        raise EvaluationError("rehearsal recovery report is inconsistent")
+    for index, (entry, summary) in enumerate(
+        zip(manifest.trials, report.trials, strict=True)
+    ):
+        if (
+            entry.trial_id != summary.trial_id
+            or entry.state != "RETURNED"
+            or entry.result_filename != trial_filename(index)
+            or entry.result_status != summary.status
+            or entry.result_sha256 != summary.result_sha256
+        ):
+            raise EvaluationError("rehearsal recovery report is inconsistent")
 
 
 def _write_pinned_catalog(
@@ -977,11 +1199,12 @@ def write_pinned_confirmation_catalog(
         or manifest.status != "COMPLETED"
     ):
         raise EvaluationError("rehearsal has no confirmation report to pin")
-    _, digest = _read_confirmation_report(
+    _, digest, report = _read_confirmation_report(
         report_path,
         expected_config_sha256=manifest.config_sha256,
         expected_plan_sha256=manifest.plan_sha256,
     )
+    _validate_confirmation_report_ledger(manifest, report)
     return _write_pinned_catalog(
         report_path=report_path, report_sha256=digest, catalog_path=catalog_path
     )
@@ -1096,11 +1319,12 @@ def recover_pinned_confirmation_catalog(
     report_path = (
         output_root / f"confirmation-{selected_level_id}-report" / "report.json"
     )
-    _, report_sha256 = _read_confirmation_report(
+    _, report_sha256, report = _read_confirmation_report(
         report_path,
         expected_config_sha256=expected_config_sha256,
         expected_plan_sha256=expected_plan_sha256,
     )
+    _validate_confirmation_report_ledger(manifest, report)
     if linkage.get("confirmation_report_sha256") != report_sha256:
         raise EvaluationError("rehearsal recovery report is inconsistent")
     return _write_pinned_catalog(
@@ -1130,6 +1354,22 @@ def _validate_lifecycle_reservation(
         raise EvaluationError(
             "protocol lifecycle reserve cannot run the supplied lifecycle"
         )
+
+
+def _set_lifecycle_deadline(lifecycle: TrialLifecycle, deadline_ns: int) -> None:
+    """Give a deadline-aware lifecycle the phase's original absolute cutoff."""
+
+    setter = getattr(lifecycle, "set_operation_deadline", None)
+    if setter is None:
+        return
+    if not callable(setter):
+        raise EvaluationError("rehearsal lifecycle deadline boundary is invalid")
+    try:
+        setter(deadline_ns)
+    except Exception as error:
+        raise EvaluationError(
+            "rehearsal lifecycle deadline boundary is invalid"
+        ) from error
 
 
 async def _run_phase(
@@ -1163,6 +1403,7 @@ async def _run_phase(
         prepared = False
         result: TrialResult | None = None
         try:
+            _set_lifecycle_deadline(lifecycle, execution_deadline_ns)
             await asyncio.wait_for(
                 lifecycle.prepare(trial, stop=stop),
                 timeout=remaining_timeout_seconds(execution_deadline_ns),
@@ -1178,11 +1419,12 @@ async def _run_phase(
                 else max(0, cleanup_started - execute_started)
             )
             try:
+                _set_lifecycle_deadline(lifecycle, hard_deadline_ns)
                 await asyncio.wait_for(
                     lifecycle.cleanup(trial, stop=stop),
                     timeout=remaining_timeout_seconds(hard_deadline_ns),
                 )
-            except BaseException:
+            except (Exception, asyncio.CancelledError):
                 receipts.append(
                     RehearsalLifecycleReceipt(
                         schema_version="inferdrome.evaluation-load-rehearsal-lifecycle.v1",
