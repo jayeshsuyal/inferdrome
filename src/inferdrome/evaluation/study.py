@@ -15,6 +15,12 @@ from typing import Annotated, Literal, Protocol
 from pydantic import Field, ValidationError
 
 from inferdrome.evaluation.contracts import ClosedModel, EvaluationError
+from inferdrome.evaluation.engine_binding import (
+    MAX_ENGINE_BINDING_BYTES,
+    EvaluationEngineBinding,
+    engine_binding_bytes,
+    load_engine_binding_bytes,
+)
 from inferdrome.evaluation.fault_config import RoutingFaultConfig
 from inferdrome.evaluation.faults import (
     RoutingFaultResult,
@@ -24,6 +30,11 @@ from inferdrome.evaluation.faults import (
 from inferdrome.evaluation.healthy import HealthyRoutingResult, run_routing_healthy
 from inferdrome.evaluation.observations import AiohttpProbeTransport, ProbeTransport
 from inferdrome.evaluation.runner import Clock, SystemClock, Transport
+from inferdrome.evaluation.sglang_results import (
+    SGLangTrialResult,
+    load_sglang_trial_bytes,
+    sglang_trial_bytes,
+)
 from inferdrome.evaluation.study_config import (
     PLAN_MANIFEST_RESERVE_BYTES,
     CompiledStudy,
@@ -44,7 +55,7 @@ from inferdrome.evaluation.transport import AiohttpTransport
 from inferdrome.parsing import StructuredDataLimits, validate_json_structure
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
 
-TrialResult = RoutingFaultResult | HealthyRoutingResult
+TrialResult = RoutingFaultResult | HealthyRoutingResult | SGLangTrialResult
 StudyStatus = Literal["COMPLETED", "CANCELLED", "ABORTED"]
 FailureReason = Literal[
     "CANCELLED",
@@ -100,6 +111,8 @@ class StudyTrialArtifact(ClosedModel):
 def _trial_bytes(
     plan: CompiledStudy, trial: CompiledTrial, result: TrialResult
 ) -> bytes:
+    if isinstance(result, SGLangTrialResult):
+        raise EvaluationError("SGLang results require their bound v2 envelope")
     artifact = StudyTrialArtifact(
         schema_version="inferdrome.evaluation-study-trial-result.v1",
         plan_sha256=sha256_digest(plan_bytes(plan)),
@@ -178,7 +191,9 @@ def _encoded(manifest: StudyManifest) -> bytes:
     return canonical_json_bytes(manifest.model_dump(mode="json")) + b"\n"
 
 
-def preflight_metadata(plan: CompiledStudy) -> None:
+def preflight_metadata(
+    plan: CompiledStudy, engine_binding: EvaluationEngineBinding | None = None
+) -> None:
     # Reserve the largest ledger shape, plus slack for finite failure categories
     # and the elapsed clock. This happens before creating clients or a directory.
     entries = [
@@ -197,7 +212,10 @@ def preflight_metadata(plan: CompiledStudy) -> None:
         plan, entries, status="COMPLETED", reason=None, elapsed_ns=2**53 - 1
     )
     if (
-        len(plan_bytes(plan)) + len(_encoded(largest)) + 4096
+        len(plan_bytes(plan))
+        + len(_encoded(largest))
+        + (len(engine_binding_bytes(engine_binding)) if engine_binding else 0)
+        + 4096
         > PLAN_MANIFEST_RESERVE_BYTES
     ):
         raise EvaluationError("study plan and ledger exceed their metadata reserve")
@@ -275,6 +293,7 @@ async def run_study(
     executor: StudyExecutor = execute_trial,
     stop: asyncio.Event | None = None,
     clock: Clock | None = None,
+    engine_binding: EvaluationEngineBinding | None = None,
 ) -> StudyManifest:
     """Publish each completed local result once; abort later trials on failure.
 
@@ -282,7 +301,16 @@ async def run_study(
     draining after a stop; filesystem fsync and scheduling are not hard real-time.
     """
     plan = compile_study(config)
-    preflight_metadata(plan)
+    if engine_binding is not None:
+        engine_binding = load_engine_binding_bytes(
+            engine_binding_bytes(engine_binding), plan
+        )
+        if executor is execute_trial:
+            raise EvaluationError("SGLang binding requires an explicit SGLang executor")
+    if engine_binding is None:
+        preflight_metadata(plan)
+    else:
+        preflight_metadata(plan, engine_binding)
     clock = clock or SystemClock()
     stop = stop or asyncio.Event()
     started = clock.now_ns()
@@ -307,6 +335,12 @@ async def run_study(
         output_dir, budget=config.limits.total_output_bytes
     ) as directory:
         directory.write("plan.json", plan_bytes(plan), limit=MAX_METADATA_BYTES)
+        if engine_binding is not None:
+            directory.write(
+                "engine-binding.json",
+                engine_binding_bytes(engine_binding),
+                limit=MAX_ENGINE_BINDING_BYTES,
+            )
         timer = asyncio.create_task(deadline())
         try:
             for index, trial in enumerate(plan.trials):
@@ -325,8 +359,20 @@ async def run_study(
                     failure = "CONTROLLER_OR_CLEANUP_FAILED"
                 if failure is None:
                     try:
-                        content = _trial_bytes(plan, trial, result)
-                        load_study_trial_bytes(content, plan, trial)
+                        if engine_binding is None:
+                            content = _trial_bytes(plan, trial, result)
+                            load_study_trial_bytes(content, plan, trial)
+                        else:
+                            if not isinstance(result, SGLangTrialResult):
+                                raise EvaluationError(
+                                    "bound study requires typed results"
+                                )
+                            content = sglang_trial_bytes(
+                                plan, trial, result, engine_binding
+                            )
+                            result = load_sglang_trial_bytes(
+                                content, plan, trial, engine_binding
+                            )
                     except Exception:
                         failure = "RESULT_VALIDATION_FAILED"
                 if failure is None:
@@ -402,7 +448,13 @@ async def run_study(
         )
         validate_manifest(plan, manifest)
         content = _encoded(manifest)
-        if len(content) + len(plan_bytes(plan)) > PLAN_MANIFEST_RESERVE_BYTES:
+        binding_size = (
+            len(engine_binding_bytes(engine_binding)) if engine_binding else 0
+        )
+        if (
+            len(content) + len(plan_bytes(plan)) + binding_size
+            > PLAN_MANIFEST_RESERVE_BYTES
+        ):
             raise EvaluationError("study manifest exceeds its metadata reserve")
         directory.write("manifest.json", content, limit=MAX_METADATA_BYTES)
         return manifest
@@ -490,7 +542,11 @@ def read_manifest(directory: StudyDirectory, plan: CompiledStudy) -> StudyManife
 
 
 def report_study(
-    config: StudyConfig, study_dir: Path, output_dir: Path
+    config: StudyConfig,
+    study_dir: Path,
+    output_dir: Path,
+    *,
+    engine_binding: EvaluationEngineBinding | None = None,
 ) -> dict[str, object]:
     """Validate one expected artifact at a time; publish bounded offline reports."""
     from inferdrome.evaluation.study_report import (
@@ -500,12 +556,34 @@ def report_study(
     )
 
     plan = compile_study(config)
-    preflight_metadata(plan)
+    if engine_binding is not None:
+        engine_binding = load_engine_binding_bytes(
+            engine_binding_bytes(engine_binding), plan
+        )
+    if engine_binding is None:
+        preflight_metadata(plan)
+    else:
+        preflight_metadata(plan, engine_binding)
     summaries: list[dict[str, object]] = []
     trial_elapsed_ns = 0
     with StudyDirectory.open(
         study_dir, budget=config.limits.total_output_bytes
     ) as source:
+        try:
+            stored_binding = source.read(
+                "engine-binding.json", limit=MAX_ENGINE_BINDING_BYTES
+            )
+        except FileNotFoundError:
+            stored_binding = None
+        if engine_binding is None:
+            if stored_binding is not None:
+                raise EvaluationError(
+                    "engine-bound study requires its explicit binding"
+                )
+        elif stored_binding != engine_binding_bytes(engine_binding):
+            raise EvaluationError(
+                "study engine binding differs from the supplied binding"
+            )
         manifest = read_manifest(source, plan)
         for index, (trial, entry) in enumerate(
             zip(plan.trials, manifest.trials, strict=True)
@@ -517,7 +595,13 @@ def report_study(
             )
             if sha256_digest(content) != entry.result_sha256:
                 raise EvaluationError("study trial bytes differ from the ledger digest")
-            validated = load_study_trial_bytes(content, plan, trial)
+            if engine_binding is None:
+                validated = load_study_trial_bytes(content, plan, trial)
+            else:
+                # Only used inside the bound report below; never exported as v1.
+                validated = load_sglang_trial_bytes(
+                    content, plan, trial, engine_binding
+                )._statistical_input
             trial_elapsed_ns += validated.elapsed_ns
             summaries.append(summarize_trial(trial, validated))
     started_trials = sum(entry.state != "NOT_RUN" for entry in manifest.trials)
@@ -527,8 +611,19 @@ def report_study(
             "study elapsed time contradicts sequential trial durations"
         )
     report = summarize_study(plan, summaries, manifest.model_dump(mode="json"))
+    if engine_binding is None:
+        markdown_content = render_markdown(report).encode("utf-8")
+    else:
+        from inferdrome.evaluation.sglang_report import (
+            bind_sglang_report,
+            render_sglang_markdown,
+        )
+
+        report = bind_sglang_report(report, engine_binding, plan)
+        markdown_content = render_sglang_markdown(report, plan, engine_binding).encode(
+            "utf-8"
+        )
     json_content = canonical_json_bytes(report) + b"\n"
-    markdown_content = render_markdown(report).encode("utf-8")
     if max(len(json_content), len(markdown_content)) > MAX_METADATA_BYTES:
         raise EvaluationError("study report exceeds its output bound")
     with StudyDirectory.create(output_dir, budget=2 * MAX_METADATA_BYTES) as output:

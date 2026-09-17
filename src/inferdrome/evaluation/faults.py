@@ -299,6 +299,17 @@ class ObservationSession:
         self.status = "CANCELLED"
         self.request_stop()
 
+    def policy_counts(
+        self, body: bytes, *, started_ns: int, completed_ns: int
+    ) -> tuple[int, int]:
+        """Default vLLM coordinates for the existing sum-based routing policies.
+
+        Engine-specific sessions may supply an explicit numerical adaptation.
+        Such sessions must publish their own typed, versioned result contract;
+        the default public scenario entrypoints always retain vLLM semantics.
+        """
+        return parse_load(body, model=self.config.foreground.model, engine="0")
+
     async def poll(self, endpoint: EndpointId, channel: Channel) -> None:
         bounds = self.config.telemetry
         end = (
@@ -336,8 +347,8 @@ class ObservationSession:
                 elif channel == "HEALTH":
                     healthy = True
                 else:
-                    running, waiting = parse_load(
-                        response.body, model=self.config.foreground.model, engine="0"
+                    running, waiting = self.policy_counts(
+                        response.body, started_ns=started, completed_ns=self.now()
                     )
             except TimeoutError:
                 status = "TIMEOUT"
@@ -755,6 +766,14 @@ async def run_routing_fault(
         background_stop=_StopEvent(stop),
         poll_stop=_StopEvent(stop),
     )
+    return await _run_fault_session(trial, stop=stop)
+
+
+async def _run_fault_session(
+    trial: _Trial, *, stop: asyncio.Event
+) -> RoutingFaultResult:
+    """Internal numerical result; alternate engines must wrap it before export."""
+    config = trial.config
     decisions = await run_observation_session(trial, stop=stop)
     assert trial.foreground_task is not None and trial.background_task is not None
     foreground = trial.foreground_task.result()
