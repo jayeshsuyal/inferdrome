@@ -28,6 +28,14 @@ from inferdrome.evaluation.fault_config import (
 )
 from inferdrome.evaluation.faults import RoutingFaultResult, run_routing_fault
 from inferdrome.evaluation.files import OutputFile, read_input
+from inferdrome.evaluation.load_calibration import (
+    calibration_plan_bytes,
+    compile_calibration,
+    confirmation_plan,
+    load_calibration_observations_bytes,
+    load_calibration_protocol_bytes,
+    select_calibration_level,
+)
 from inferdrome.evaluation.loopback import loopback_pair
 from inferdrome.evaluation.observations import AiohttpProbeTransport
 from inferdrome.evaluation.runner import EvaluationResult, run_evaluation
@@ -174,6 +182,50 @@ def _study_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _calibration_command(args: argparse.Namespace) -> int:
+    """Compile or select local JSON declarations without opening a transport."""
+    protocol = load_calibration_protocol_bytes(read_input(args.protocol))
+    plan = compile_calibration(protocol)
+    if args.command == "load-calibration-plan":
+        with OutputFile(args.output) as destination:
+            destination.write(calibration_plan_bytes(plan))
+        print(
+            json.dumps(
+                {
+                    "phase": "CALIBRATION",
+                    "planned_trials": len(plan.trials),
+                    "protocol_sha256": plan.protocol_sha256,
+                    "evidence_eligible": False,
+                }
+            )
+        )
+        return 0
+    observations = load_calibration_observations_bytes(read_input(args.observations))
+    selection = select_calibration_level(plan, observations)
+    confirmation = confirmation_plan(plan, selection)
+    with OutputFile(args.selection_output) as destination:
+        destination.write(
+            canonical_json_bytes(selection.model_dump(mode="json")) + b"\n"
+        )
+    with OutputFile(args.confirmation_output) as destination:
+        destination.write(
+            canonical_json_bytes(confirmation.model_dump(mode="json")) + b"\n"
+        )
+    print(
+        json.dumps(
+            {
+                "selection_status": selection.status,
+                "selected_level_id": selection.selected_level_id,
+                "confirmation_status": confirmation.status,
+                "planned_confirmation_trials": len(confirmation.trials),
+                "protocol_sha256": plan.protocol_sha256,
+                "evidence_eligible": False,
+            }
+        )
+    )
+    return 0
+
+
 async def _run_cache(
     plan: CompiledCachePlan,
     cell_id: str,
@@ -272,6 +324,18 @@ def main(argv: list[str] | None = None) -> int:
     study_report_parser.add_argument("--config", required=True, type=Path)
     study_report_parser.add_argument("--study-dir", required=True, type=Path)
     study_report_parser.add_argument("--output-dir", required=True, type=Path)
+    calibration_plan_parser = commands.add_parser("load-calibration-plan")
+    calibration_plan_parser.add_argument("--protocol", required=True, type=Path)
+    calibration_plan_parser.add_argument("--output", required=True, type=Path)
+    calibration_select_parser = commands.add_parser("load-calibration-select")
+    calibration_select_parser.add_argument("--protocol", required=True, type=Path)
+    calibration_select_parser.add_argument("--observations", required=True, type=Path)
+    calibration_select_parser.add_argument(
+        "--selection-output", required=True, type=Path
+    )
+    calibration_select_parser.add_argument(
+        "--confirmation-output", required=True, type=Path
+    )
     for name in ("cache-plan", "cache-run-cell", "cache-report"):
         cache_parser = commands.add_parser(name)
         cache_parser.add_argument("--config", required=True, type=Path)
@@ -291,6 +355,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cache_command(args)
         if args.command in {"study-plan", "study-run", "study-report"}:
             return _study_command(args)
+        if args.command in {"load-calibration-plan", "load-calibration-select"}:
+            return _calibration_command(args)
         config = (
             load_config_bytes(read_input(args.config))
             if args.command == "run"
