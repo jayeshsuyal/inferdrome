@@ -764,10 +764,14 @@ class _TwoEngineOwnedSubprocessLifecycle:
         if self._active:
             raise EvaluationError("local engine lifecycle has an active trial")
         await self._verify_artifacts(stop=stop)
+        if stop.is_set():
+            raise EvaluationError("local engine lifecycle was cancelled")
         deadline_ns = self._deadline()
         await self._verify_gpu_idle(deadline_ns=deadline_ns)
         try:
             for index, endpoint_id in enumerate(("endpoint-a", "endpoint-b")):
+                if stop.is_set():
+                    raise EvaluationError("local engine lifecycle was cancelled")
                 parsed = urlsplit(self._origins[index])
                 assert parsed.port is not None
                 target = _OwnedEngine(

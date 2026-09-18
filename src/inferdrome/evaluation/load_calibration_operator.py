@@ -852,12 +852,16 @@ def _nofollow() -> int:
     return value
 
 
-def _read_regular(root: SafeDirFD, name: str) -> bytes:
+def _read_regular(root: SafeDirFD, name: str, *, maximum_bytes: int) -> bytes:
+    """Read one already-budgeted regular child without allocating past its cap."""
+
+    if type(maximum_bytes) is not int or maximum_bytes < 1:
+        raise EvaluationError("host-local export exceeds its byte bound")
     descriptor: int | None = None
     try:
         descriptor = root.open_child(name, os.O_RDONLY | os.O_NONBLOCK)
         before = root.validated_regular_child(name, descriptor=descriptor)
-        if not 1 <= before.st_size <= _MAX_EXPORT_FILE_BYTES:
+        if not 1 <= before.st_size <= min(_MAX_EXPORT_FILE_BYTES, maximum_bytes):
             raise EvaluationError("host-local export file exceeds its bound")
         content = bytearray()
         while len(content) < before.st_size:
@@ -901,6 +905,25 @@ def _allowed_root_file(name: str) -> bool:
     return name in _ROOT_FILE_NAMES or _PHASE_ROOT_FILE.fullmatch(name) is not None
 
 
+def _bounded_child_names(directory: SafeDirFD, *, maximum: int) -> tuple[str, ...]:
+    """Collect at most the finite inventory grammar permits through a held fd."""
+
+    if type(maximum) is not int or maximum < 1:
+        raise EvaluationError("host-local export inventory exceeds its bound")
+    values: list[str] = []
+    try:
+        with os.scandir(directory.fd) as entries:
+            for entry in entries:
+                if len(values) >= maximum:
+                    raise EvaluationError(
+                        "host-local export inventory exceeds its bound"
+                    )
+                values.append(entry.name)
+    except OSError:
+        raise EvaluationError("host-local export inventory changed") from None
+    return tuple(sorted(values))
+
+
 def _snapshot_output(root_path: Path) -> tuple[tuple[str, bytes], ...]:
     """Read only the finite rehearsal output grammar through held dir fds."""
 
@@ -910,7 +933,19 @@ def _snapshot_output(root_path: Path) -> tuple[tuple[str, bytes], ...]:
         raise EvaluationError("host-local export root is unsafe") from None
     try:
         values: list[tuple[str, bytes]] = []
-        for name in sorted(os.listdir(root.fd)):
+        remaining_bytes = _MAX_EXPORT_BYTES
+
+        def read_child(directory: SafeDirFD, name: str, relative_name: str) -> None:
+            nonlocal remaining_bytes
+            if len(values) >= _MAX_EXPORT_FILES:
+                raise EvaluationError("host-local export inventory exceeds its bound")
+            # ``_read_regular`` opens and validates this name before allocating
+            # its buffer, with the aggregate remainder as a second hard cap.
+            content = _read_regular(directory, name, maximum_bytes=remaining_bytes)
+            remaining_bytes -= len(content)
+            values.append((relative_name, content))
+
+        for name in _bounded_child_names(root, maximum=_MAX_EXPORT_FILES):
             try:
                 metadata = root.stat_child(name)
             except OSError:
@@ -920,7 +955,7 @@ def _snapshot_output(root_path: Path) -> tuple[tuple[str, bytes], ...]:
                     raise EvaluationError(
                         "host-local export contains an undeclared file"
                     )
-                values.append((name, _read_regular(root, name)))
+                read_child(root, name, name)
                 continue
             if not stat.S_ISDIR(metadata.st_mode):
                 raise EvaluationError("host-local export contains an unsafe entry")
@@ -932,22 +967,20 @@ def _snapshot_output(root_path: Path) -> tuple[tuple[str, bytes], ...]:
             child = _open_directory(root, name)
             try:
                 allowed = _REPORT_FILE if report else _STUDY_FILE
-                for child_name in sorted(os.listdir(child.fd)):
+                for child_name in _bounded_child_names(
+                    child, maximum=_MAX_EXPORT_FILES - len(values)
+                ):
                     child_metadata = child.stat_child(child_name)
                     if (
                         not stat.S_ISREG(child_metadata.st_mode)
                         or allowed.fullmatch(child_name) is None
                     ):
                         raise EvaluationError("host-local export child is unsafe")
-                    values.append(
-                        (f"{name}/{child_name}", _read_regular(child, child_name))
-                    )
+                    read_child(child, child_name, f"{name}/{child_name}")
             finally:
                 child.close()
-        if not values or len(values) > _MAX_EXPORT_FILES:
+        if not values:
             raise EvaluationError("host-local export inventory exceeds its bound")
-        if sum(len(content) for _, content in values) > _MAX_EXPORT_BYTES:
-            raise EvaluationError("host-local export exceeds its byte bound")
         return tuple(sorted(values))
     finally:
         root.close()
@@ -978,35 +1011,34 @@ def _tarinfo(name: str, size: int) -> tarfile.TarInfo:
     return value
 
 
-def _archive_sha256(path: Path) -> str:
-    descriptor: int | None = None
+def _archive_sha256(descriptor: int, *, before: os.stat_result) -> str:
+    """Hash one already-validated archive fd, then rewind it for parsing."""
+
     try:
-        metadata = os.lstat(path)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or metadata.st_size < 1
-        ):
-            raise ValueError
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | _nofollow())
-        before = os.fstat(descriptor)
         digest = hashlib.sha256()
         while content := os.read(descriptor, 65_536):
             digest.update(content)
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            before.st_nlink,
+        ) != (
             after.st_dev,
             after.st_ino,
             after.st_size,
             after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_nlink,
         ):
             raise ValueError
+        os.lseek(descriptor, 0, os.SEEK_SET)
         return "sha256:" + digest.hexdigest()
     except (OSError, ValueError):
         raise EvaluationError("host-local export archive is unsafe") from None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
 
 
 def export_host_local_rehearsal(
@@ -1097,15 +1129,16 @@ def verify_retrieved_host_local_export(
     handle: io.BufferedReader | None = None
     try:
         target = archive_path.absolute()
-        metadata = os.lstat(target)
+        descriptor = os.open(target, os.O_RDONLY | os.O_NONBLOCK | _nofollow())
+        metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
             or not 1 <= metadata.st_size <= _MAX_EXPORT_BYTES + 8 * 1024 * 1024
         ):
             raise ValueError
-        descriptor = os.open(target, os.O_RDONLY | os.O_NONBLOCK | _nofollow())
         before = os.fstat(descriptor)
+        archive_sha256 = _archive_sha256(descriptor, before=before)
         handle = os.fdopen(descriptor, "rb", closefd=True)
         descriptor = None
         with tarfile.open(fileobj=handle, mode="r:") as archive:
@@ -1167,14 +1200,22 @@ def verify_retrieved_host_local_export(
         if tuple(actual) != manifest.artifacts:
             raise ValueError
         after = os.fstat(handle.fileno())
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            before.st_nlink,
+        ) != (
             after.st_dev,
             after.st_ino,
             after.st_size,
             after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_nlink,
         ):
             raise ValueError
-        archive_sha256 = _archive_sha256(target)
         if expected_archive_sha256 is not None and (
             not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_archive_sha256)
             or archive_sha256 != expected_archive_sha256

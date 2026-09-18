@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -353,3 +354,111 @@ def test_export_rejects_unsafe_entries_and_verifies_regular_allowlist(
     os.symlink("elsewhere", unsafe / "operator-outcome.json")
     with pytest.raises(EvaluationError, match="unsafe"):
         operator.export_host_local_rehearsal(unsafe, archive_root / "unsafe.tar")
+
+
+def test_export_bounds_are_checked_before_file_reads_or_allocations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _directory(tmp_path / "output")
+    _write_private(output / "operator-outcome.json", b"x" * 5)
+    archive_root = _directory(tmp_path / "retrieval")
+
+    def unexpected_read(*args: object, **kwargs: object) -> bytes:
+        del args, kwargs
+        raise AssertionError("oversized export file was read")
+
+    monkeypatch.setattr(operator, "_MAX_EXPORT_BYTES", 4)
+    monkeypatch.setattr(operator.os, "read", unexpected_read)
+    with pytest.raises(EvaluationError, match="file exceeds its bound"):
+        operator.export_host_local_rehearsal(output, archive_root / "oversized.tar")
+
+
+def test_export_file_count_is_checked_before_any_file_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _directory(tmp_path / "output")
+    _write_private(output / "operator-outcome.json", b"{}\n")
+    _write_private(output / "calibration-plan.json", b"{}\n")
+    archive_root = _directory(tmp_path / "retrieval")
+
+    def unexpected_read(*args: object, **kwargs: object) -> bytes:
+        del args, kwargs
+        raise AssertionError("over-limit export inventory was read")
+
+    monkeypatch.setattr(operator, "_MAX_EXPORT_FILES", 1)
+    monkeypatch.setattr(operator, "_read_regular", unexpected_read)
+    with pytest.raises(EvaluationError, match="inventory exceeds its bound"):
+        operator.export_host_local_rehearsal(output, archive_root / "over-count.tar")
+
+
+def test_export_rejects_a_file_that_grows_during_its_bounded_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _directory(tmp_path / "output")
+    outcome = output / "operator-outcome.json"
+    _write_private(outcome, b"x")
+    archive_root = _directory(tmp_path / "retrieval")
+    original_read = operator.os.read
+    expanded = False
+
+    def append_after_first_read(descriptor: int, count: int) -> bytes:
+        nonlocal expanded
+        content = original_read(descriptor, count)
+        if not expanded:
+            expanded = True
+            os.chmod(outcome, 0o600)
+            with outcome.open("ab") as destination:
+                destination.write(b"growth")
+        return content
+
+    monkeypatch.setattr(operator.os, "read", append_after_first_read)
+    with pytest.raises(EvaluationError, match="changed during read"):
+        operator.export_host_local_rehearsal(output, archive_root / "growth.tar")
+    assert expanded
+
+
+def test_retrieved_export_hash_and_manifest_stay_bound_to_one_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def output(name: str, state: str) -> Path:
+        root = _directory(tmp_path / name)
+        _write_private(
+            root / "operator-outcome.json",
+            canonical_json_bytes(
+                {
+                    "schema_version": "inferdrome.load-calibration-host-outcome.v1",
+                    "state": state,
+                    "reason": "REHEARSAL_FINISHED",
+                    "provider_termination_verified": False,
+                    "evidence_eligible": False,
+                }
+            )
+            + b"\n",
+        )
+        return root
+
+    archive_root = _directory(tmp_path / "retrieval")
+    first = operator.export_host_local_rehearsal(
+        output("first-output", "COMPLETED"), archive_root / "first.tar"
+    )
+    second = operator.export_host_local_rehearsal(
+        output("second-output", "FAILED"), archive_root / "second.tar"
+    )
+    original_open = operator.tarfile.open
+    replaced = False
+
+    def replace_path_then_open(*args: object, **kwargs: object) -> tarfile.TarFile:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            os.replace(archive_root / "second.tar", archive_root / "first.tar")
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(operator.tarfile, "open", replace_path_then_open)
+    with pytest.raises(EvaluationError, match="invalid"):
+        operator.verify_retrieved_host_local_export(
+            archive_root / "first.tar",
+            expected_archive_sha256=second.archive_sha256,
+        )
+    assert replaced
+    assert first.archive_sha256 != second.archive_sha256
