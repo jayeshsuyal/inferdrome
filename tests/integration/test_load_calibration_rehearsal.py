@@ -99,7 +99,11 @@ def _recipe_configs(
     return load(calibration), load(confirmation)
 
 
-def _protocol(configs: tuple[tuple[str, StudyConfig, StudyConfig], ...]) -> bytes:
+def _protocol(
+    configs: tuple[tuple[str, StudyConfig, StudyConfig], ...],
+    *,
+    lifecycle_allowance_ns: int = 500_000_000,
+) -> bytes:
     levels: list[dict[str, object]] = []
     for level_id, calibration, _ in configs:
         plan = compile_study(calibration)
@@ -134,13 +138,34 @@ def _protocol(configs: tuple[tuple[str, StudyConfig, StudyConfig], ...]) -> byte
             "completion_slo_ns": 150_000_000,
             # This is the controller's reset/readiness allowance, distinct from
             # the frozen telemetry-freshness threshold exercised by the study.
-            "preparation": {"warmup_reset_max_duration_ns": 500_000_000},
+            "preparation": {"warmup_reset_max_duration_ns": lifecycle_allowance_ns},
             "selection_rule": {},
             "per_trial_output_bytes": 2 * 1024 * 1024,
             "max_session_duration_ns": 86_400_000_000_000,
             "max_session_output_bytes": 128 * 1024 * 1024,
         }
     ).encode()
+
+
+def _rehearsal_failure_diagnostics(output: Path) -> str:
+    """Keep sanitized phase status and lifecycle timing visible in CI failures."""
+
+    paths = [
+        *sorted(output.glob("*/manifest.json"))[:3],
+        *sorted(output.glob("*-lifecycle.json"))[:3],
+    ]
+    details: list[str] = []
+    for path in paths:
+        try:
+            with path.open("rb") as stream:
+                content = stream.read(8193)
+            text = content[:8192].decode("utf-8", errors="replace")
+            if len(content) > 8192:
+                text += " [truncated]"
+        except OSError as error:
+            text = f"unreadable ({type(error).__name__})"
+        details.append(f"{path.relative_to(output)}: {text}")
+    return ("CPU loopback phase diagnostics:\n" + "\n".join(details))[:32_768]
 
 
 class _LocalLifecycle(LoopbackTwoEndpointReadinessLifecycle):
@@ -899,7 +924,11 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                         (
                             ("load-low", low_calibration, low_confirmation),
                             ("load-high", high_calibration, high_confirmation),
-                        )
+                        ),
+                        # Four concurrent readiness reads each allow one second.
+                        # Reserve their scheduling overhead in this CPU fixture;
+                        # study warmup, freshness and request SLOs stay unchanged.
+                        lifecycle_allowance_ns=2_000_000_000,
                     )
                 )
                 rehearsal = compile_rehearsal(
@@ -933,15 +962,19 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                     origins,
                     binding_path=output / "candidate-recipe-bindings.json"
                 )
-                result = await asyncio.wait_for(
-                    run_rehearsal(
-                        rehearsal,
-                        output,
-                        lifecycle=lifecycle,
-                        executor=execute_trial,
-                    ),
-                    45,
-                )
+                try:
+                    result = await asyncio.wait_for(
+                        run_rehearsal(
+                            rehearsal,
+                            output,
+                            lifecycle=lifecycle,
+                            executor=execute_trial,
+                        ),
+                        45,
+                    )
+                except Exception as error:
+                    error.add_note(_rehearsal_failure_diagnostics(output))
+                    raise
                 assert result.calibration_selection.selected_level_id == "load-high"
                 assert result.confirmation.status == "READY"
                 assert result.confirmation_manifest is not None
