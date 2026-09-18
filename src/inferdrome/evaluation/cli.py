@@ -6,7 +6,9 @@ import json
 import signal
 import sys
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic_ns
 
 from inferdrome.evaluation.cache import (
     CacheCellManifest,
@@ -36,6 +38,15 @@ from inferdrome.evaluation.load_calibration import (
     load_calibration_protocol_bytes,
     select_calibration_level,
 )
+from inferdrome.evaluation.load_calibration_operator import (
+    export_host_local_rehearsal,
+    load_host_local_authorization,
+    prepare_host_local_rehearsal,
+    run_authorized_host_local_rehearsal,
+    verify_retrieved_host_local_export,
+    write_preflight,
+)
+from inferdrome.evaluation.load_calibration_rehearsal import RehearsalResult
 from inferdrome.evaluation.loopback import loopback_pair
 from inferdrome.evaluation.observations import AiohttpProbeTransport
 from inferdrome.evaluation.runner import EvaluationResult, run_evaluation
@@ -226,6 +237,111 @@ def _calibration_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_host_local_operator(args: argparse.Namespace) -> RehearsalResult:
+    # This pair deliberately precedes all packet reads and compilation.  The
+    # local command must never turn a slow preflight into renewed runtime.
+    session_anchor_utc = datetime.now(UTC)
+    session_started_ns = monotonic_ns()
+    prepared = prepare_host_local_rehearsal(
+        protocol_path=args.protocol,
+        recipe_paths=tuple(args.recipe),
+        runtime=args.runtime,
+        sglang_profile_paths=tuple(args.sglang_profile),
+    )
+    authorization = load_host_local_authorization(args.authorization)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for sig in previous:
+            loop.add_signal_handler(sig, stop.set)
+        return await run_authorized_host_local_rehearsal(
+            prepared,
+            authorization=authorization,
+            model_snapshot_path=args.model_snapshot,
+            docker_config_directory=args.docker_config_directory,
+            output_root=args.output_root,
+            stop=stop,
+            session_anchor_utc=session_anchor_utc,
+            session_started_ns=session_started_ns,
+        )
+    finally:
+        for sig, handler in previous.items():
+            loop.remove_signal_handler(sig)
+            signal.signal(sig, handler)
+
+
+def _host_local_operator_command(args: argparse.Namespace) -> int:
+    if args.command == "load-calibration-host-preflight":
+        prepared = prepare_host_local_rehearsal(
+            protocol_path=args.protocol,
+            recipe_paths=tuple(args.recipe),
+            runtime=args.runtime,
+            sglang_profile_paths=tuple(args.sglang_profile),
+        )
+        write_preflight(args.output, prepared.preflight)
+        print(
+            json.dumps(
+                {
+                    "status": "PREFLIGHT_WRITTEN",
+                    "runtime": prepared.runtime,
+                    "protocol_sha256": prepared.preflight.protocol_sha256,
+                    "provider_action_performed": False,
+                    "evidence_eligible": False,
+                }
+            )
+        )
+        return 0
+    if args.command == "load-calibration-host-export":
+        export = export_host_local_rehearsal(args.output_root, args.archive)
+        print(
+            json.dumps(
+                {
+                    "status": "EXPORT_VERIFIED",
+                    "archive_sha256": export.archive_sha256,
+                    "source_state": export.source_state,
+                    "artifact_count": export.artifact_count,
+                    "provider_termination_verified": False,
+                    "evidence_eligible": False,
+                }
+            )
+        )
+        return 0
+    if args.command == "load-calibration-host-verify-export":
+        verification = verify_retrieved_host_local_export(
+            args.archive, expected_archive_sha256=args.expected_archive_sha256
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "EXPORT_VERIFIED",
+                    "archive_sha256": verification.archive_sha256,
+                    "source_state": verification.source_state,
+                    "artifact_count": verification.artifact_count,
+                    "provider_termination_verified": False,
+                    "evidence_eligible": False,
+                }
+            )
+        )
+        return 0
+    if args.execute_approval != "I_UNDERSTAND_LOCAL_DOCKER_WILL_BE_INVOKED":
+        raise ValueError("host-local execution requires its exact local confirmation")
+    rehearsal = asyncio.run(_run_host_local_operator(args))
+    print(
+        json.dumps(
+            {
+                "status": "REHEARSAL_COMPLETED",
+                "calibration_candidate_count": len(rehearsal.calibration_manifests),
+                "confirmation_manifest_written": rehearsal.confirmation_manifest
+                is not None,
+                "provider_termination_verified": False,
+                "evidence_eligible": False,
+            }
+        )
+    )
+    return 0
+
+
 async def _run_cache(
     plan: CompiledCachePlan,
     cell_id: str,
@@ -336,6 +452,31 @@ def main(argv: list[str] | None = None) -> int:
     calibration_select_parser.add_argument(
         "--confirmation-output", required=True, type=Path
     )
+    for name in (
+        "load-calibration-host-preflight",
+        "load-calibration-host-run",
+    ):
+        host_parser = commands.add_parser(name)
+        host_parser.add_argument("--protocol", required=True, type=Path)
+        host_parser.add_argument("--recipe", required=True, action="append", type=Path)
+        host_parser.add_argument("--runtime", required=True, choices=("vllm", "sglang"))
+        host_parser.add_argument("--sglang-profile", action="append", default=[])
+        if name == "load-calibration-host-preflight":
+            host_parser.add_argument("--output", required=True, type=Path)
+        else:
+            host_parser.add_argument("--authorization", required=True, type=Path)
+            host_parser.add_argument("--model-snapshot", required=True, type=Path)
+            host_parser.add_argument(
+                "--docker-config-directory", required=True, type=Path
+            )
+            host_parser.add_argument("--output-root", required=True, type=Path)
+            host_parser.add_argument("--execute-approval", required=True)
+    host_export_parser = commands.add_parser("load-calibration-host-export")
+    host_export_parser.add_argument("--output-root", required=True, type=Path)
+    host_export_parser.add_argument("--archive", required=True, type=Path)
+    host_verify_parser = commands.add_parser("load-calibration-host-verify-export")
+    host_verify_parser.add_argument("--archive", required=True, type=Path)
+    host_verify_parser.add_argument("--expected-archive-sha256", required=True)
     for name in ("cache-plan", "cache-run-cell", "cache-report"):
         cache_parser = commands.add_parser(name)
         cache_parser.add_argument("--config", required=True, type=Path)
@@ -357,6 +498,8 @@ def main(argv: list[str] | None = None) -> int:
             return _study_command(args)
         if args.command in {"load-calibration-plan", "load-calibration-select"}:
             return _calibration_command(args)
+        if args.command.startswith("load-calibration-host-"):
+            return _host_local_operator_command(args)
         config = (
             load_config_bytes(read_input(args.config))
             if args.command == "run"
@@ -403,3 +546,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         print("evaluation failed; no completed report was produced", file=sys.stderr)
         return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

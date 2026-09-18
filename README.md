@@ -407,6 +407,7 @@ provider-neutral.
 - [CLI and orchestration](docs/CLI.md)
 - [Local evidence dashboard](docs/DASHBOARD.md)
 - [Pinned study and prefix-cache report viewer](docs/EVALUATION_DASHBOARD.md)
+- [Bounded load-calibration host operator path](docs/LOAD_CALIBRATED_ROUTING_HOST_OPERATOR.md)
 - [Local product demo](docs/LOCAL_DEMO.md)
 - [Repeated trial sets](docs/TRIAL_SETS.md)
 - [Controlled comparisons](docs/CONTROLLED_COMPARISONS.md)

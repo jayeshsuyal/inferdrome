@@ -83,3 +83,9 @@ live execution remain external preparation and require separate authorization.
   scheduling or a remote server hard real-time.
 - Raw prompts, completion bodies, endpoint origins, credentials, provider
   payloads, and invoice claims are not stored in rehearsal sidecars.
+
+For the separately authorized, bounded manual-host command that owns an
+external cutoff, explicit local-Docker target, durable SGLang reset sidecars,
+and bounded retrieval export, see
+[the host operator runbook](LOAD_CALIBRATED_ROUTING_HOST_OPERATOR.md). That
+path remains local-only and does not create or terminate a provider resource.
