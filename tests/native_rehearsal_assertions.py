@@ -48,6 +48,7 @@ def _assert_population(
 ) -> None:
     """Use records as the denominator, independently of the reducer's counts."""
     records = result.records
+    assert result.evidence_class == "SYNTHETIC_ONLY"
     assert result.config_sha256 == sha256_digest(
         canonical_json_bytes(config.model_dump(mode="json"))
     )
@@ -80,6 +81,7 @@ def _read_phase(
             directory.read("report.json", limit=MAX_METADATA_BYTES), kind="STUDY"
         )
     assert isinstance(report, StudyReport)
+    assert report.evidence_class == "SYNTHETIC_ONLY"
     assert report.status == "COMPLETED"
     assert report.config_sha256 == plan.config_sha256
     assert report.plan_sha256 == sha256_digest(plan_bytes(plan))

@@ -27,7 +27,7 @@ from inferdrome.evaluation.load_calibration_rehearsal import (
     write_pinned_confirmation_catalog,
 )
 from inferdrome.evaluation.policies import POLICY_IDS
-from inferdrome.evaluation.study import execute_trial, plan_bytes
+from inferdrome.evaluation.study import plan_bytes
 from inferdrome.evaluation.study_config import CompiledTrial, StudyConfig, compile_study
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
 from inferdrome.vllm_compose import VLLM_RUNTIME_IMAGE_REFERENCE
@@ -35,6 +35,7 @@ from tests.integration import test_evaluation_routing_loopback as routing_loopba
 from tests.integration.test_evaluation_routing_loopback import _replicas
 from tests.integration.test_evaluation_study_loopback import _payload
 from tests.native_rehearsal_assertions import assert_native_selected_candidate
+from tests.native_rehearsal_executor import NativeRehearsalExecutor
 from tests.unit.test_evaluation_study_config import load
 
 
@@ -148,6 +149,42 @@ def _protocol(
     ).encode()
 
 
+def _warmup_failure_diagnostics(manifest_path: Path, content: bytes) -> str:
+    """Include bounded telemetry status/timing, never request or response bodies."""
+
+    try:
+        manifest = json.loads(content)
+        for index, row in enumerate(manifest["trials"][:8]):
+            if row["result_status"] != "WARMUP_FAILED":
+                continue
+            trial_path = manifest_path.parent / f"trial-{index:04d}.json"
+            with trial_path.open("rb") as stream:
+                trial_bytes = stream.read(2 * 1024 * 1024 + 1)
+            if len(trial_bytes) > 2 * 1024 * 1024:
+                return "warmup telemetry: artifact exceeds diagnostic bound"
+            result = json.loads(trial_bytes)["result"]
+            fields = (
+                "channel", "endpoint_id", "sequence", "status", "started_ns",
+                "completed_ns", "published_ns",
+            )
+            diagnostic = {
+                "trial_id": row["trial_id"],
+                "status": result["status"],
+                "events": [
+                    {key: event[key] for key in ("kind", "observed_ns")}
+                    for event in result["events"][-8:]
+                ],
+                "observations": [
+                    {key: observation[key] for key in fields}
+                    for observation in result["observations"][-18:]
+                ],
+            }
+            return "warmup telemetry: " + json.dumps(diagnostic, sort_keys=True)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        return f"warmup telemetry unavailable ({type(error).__name__})"
+    return ""
+
+
 def _rehearsal_failure_diagnostics(output: Path) -> str:
     """Keep selection reasons, phase status and lifecycle timing visible in CI."""
 
@@ -165,6 +202,10 @@ def _rehearsal_failure_diagnostics(output: Path) -> str:
             text = content[:8192].decode("utf-8", errors="replace")
             if len(content) > 8192:
                 text += " [truncated]"
+            elif path.name == "manifest.json":
+                telemetry = _warmup_failure_diagnostics(path, content)
+                if telemetry:
+                    details.append(telemetry)
         except OSError as error:
             text = f"unreadable ({type(error).__name__})"
         details.append(f"{path.relative_to(output)}: {text}")
@@ -910,37 +951,14 @@ def test_two_engine_lifecycle_requires_its_full_protocol_reserve_before_dispatch
 
 
 @pytest.mark.parametrize("force_high_slo_miss", [False, True])
-def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
+def test_cpu_protocol_rehearsal_binds_all_trials_and_uses_native_artifacts(
     tmp_path: Path,
     force_high_slo_miss: bool,
 ) -> None:
     async def exercise() -> None:
-        with pytest.MonkeyPatch.context() as patch:
+        executor = NativeRehearsalExecutor(high_slo_miss=force_high_slo_miss)
+        with pytest.MonkeyPatch.context() as patch, executor.study_clock_context():
             patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
-            delay_high_calibration = False
-            delayed_requests: list[str] = []
-            original_complete = routing_loopback._Replica.complete
-
-            async def controlled_complete(replica, request):
-                if delay_high_calibration:
-                    delayed_requests.append(request.path)
-                    # Produce a real recorded SLO miss only for high calibration.
-                    # The unchanged 100/150 ms targets and native reducers decide
-                    # eligibility; no result or observation is rewritten.
-                    await asyncio.sleep(0.2)
-                return await original_complete(replica, request)
-
-            async def execute(trial, *, stop):
-                nonlocal delay_high_calibration
-                delay_high_calibration = (
-                    force_high_slo_miss and trial.block_id.startswith("load-high-cal-")
-                )
-                try:
-                    return await execute_trial(trial, stop=stop)
-                finally:
-                    delay_high_calibration = False
-
-            patch.setattr(routing_loopback._Replica, "complete", controlled_complete)
             async with _replicas() as (origins, replicas):
                 low_calibration, low_confirmation = _recipe_configs(
                     origins, level_id="load-low", offered_count=7, seed=11
@@ -996,19 +1014,20 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                         rehearsal,
                         output,
                         lifecycle=lifecycle,
-                        executor=execute,
+                        executor=executor,
                     ),
                     45,
                 )
                 selected = assert_native_selected_candidate(rehearsal, result, output)
+                executor.assert_quiescent()
+                assert len(executor.calls) == 24
                 if force_high_slo_miss:
-                    assert delayed_requests
                     assert selected.level.level_id == "load-low"
                     high = result.calibration_selection.assessments[1]
                     assert high.level_id == "load-high" and not high.admissible
                     assert high.reason == "SLO_MISS_OR_LATENCY_TARGET_MISS"
                 else:
-                    assert not delayed_requests
+                    assert selected.level.level_id == "load-high"
                 assert result.confirmation.status == "READY"
                 assert result.confirmation_manifest is not None
                 assert result.confirmation_manifest.status == "COMPLETED"
@@ -1049,6 +1068,7 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                 listed = client.get("/api/v1/evaluation-reports")
                 assert listed.status_code == 200
                 summary = listed.json()["reports"][0]
+                assert summary["evidence_class"] == "SYNTHETIC_ONLY"
                 assert summary["report_sha256"] == catalog_digest
                 assert summary["source_replay"] == "NOT_PERFORMED"
                 assert (
