@@ -1,5 +1,6 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -11,7 +12,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const TRUST = "Pinned report; source inputs not replayed";
 
 interface ReportFixture {
-  readonly kind: "STUDY" | "PREFIX_CACHE";
+  readonly kind: "STUDY" | "PREFIX_CACHE" | "SGLANG_STUDY";
   readonly report_path: string;
   readonly expected_sha256: string;
 }
@@ -29,6 +30,11 @@ interface Summary {
   readonly kind: "STUDY" | "PREFIX_CACHE";
   readonly evidence_class: "SYNTHETIC_ONLY" | "LOCAL_MEASUREMENT_ONLY" | null;
   readonly returned_records: number;
+  readonly engine_identity?: {
+    readonly engine: "sglang";
+    readonly engine_binding_sha256: string;
+    readonly engine_choice_sha256: string;
+  };
 }
 
 interface Server {
@@ -59,9 +65,21 @@ function prepare(studyVariant = "complete", cacheBlockCount = 4): Fixture {
   return { ...fixture, root };
 }
 
-function prepareCpuLoopbackRehearsal(): Fixture {
+function prepareEngineCatalog(): Fixture {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "inferdrome-engine-evaluation-ui-")));
+  const result = spawnSync(python(), ["-m", "tests.sglang_dashboard_support", "--root", root], {
+    cwd: ROOT, encoding: "utf8", env: environment(), timeout: 60_000, maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) throw new Error(`Native fake SGLang preparation failed: ${result.stderr}`);
+  const fixture = JSON.parse(result.stdout) as Omit<Fixture, "root"> & { fixture_provenance: string };
+  if (fixture.fixture_provenance !== "SYNTHETIC_ONLY") throw new Error("Expected synthetic native SGLang fixtures");
+  mkdirSync(join(root, "runs"), { mode: 0o700 });
+  return { ...fixture, root };
+}
+
+function prepareCpuLoopbackRehearsal(engine: "vllm" | "sglang" = "vllm"): Fixture {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "inferdrome-load-rehearsal-ui-")));
-  const result = spawnSync(python(), ["-m", "tests.load_calibration_rehearsal_dashboard_support", "--root", root], {
+  const result = spawnSync(python(), ["-m", "tests.load_calibration_rehearsal_dashboard_support", "--root", root, "--engine", engine], {
     cwd: ROOT, encoding: "utf8", env: environment(), timeout: 90_000, maxBuffer: 1024 * 1024,
   });
   if (result.error || result.status !== 0) throw new Error(`CPU loopback rehearsal preparation failed: ${result.stderr}`);
@@ -76,7 +94,7 @@ function prepareCpuLoopbackRehearsal(): Fixture {
     catalog: fixture.catalog,
     reports: {
       rehearsal: {
-        kind: "STUDY",
+        kind: engine === "sglang" ? "SGLANG_STUDY" : "STUDY",
         report_path: "",
         expected_sha256: fixture.report_sha256,
       },
@@ -150,6 +168,30 @@ function lookup(fixture: Fixture, list: Summary[], name: string): Summary {
   return found;
 }
 
+async function engineSummaries(page: Page, url: string): Promise<Summary[]> {
+  const response = await page.request.get(`${url}/api/v1/evaluation-reports`);
+  expect(response.status()).toBe(200);
+  expect(response.headers()["cache-control"]).toBe("no-store");
+  const body = await response.json() as { projection_version: string; reports: Summary[]; rejected: unknown[] };
+  expect(body.projection_version).toBe("inferdrome.evaluation-dashboard.v2");
+  expect(body.rejected).toEqual([]);
+  expect(body.reports).toHaveLength(2);
+  return body.reports;
+}
+
+function canonicalBytes(value: unknown): Buffer {
+  const ordered = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(ordered);
+    if (item !== null && typeof item === "object") return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => [key, ordered(child)]));
+    return item;
+  };
+  return Buffer.from(`${JSON.stringify(ordered(value))}\n`);
+}
+
+function digest(content: Buffer): string {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
 async function openReport(page: Page, server: Server, report: Summary): Promise<void> {
   await page.goto(`${server.url}/evaluations/${report.report_id}`);
   await expect(page.getByRole("heading", { name: report.label, exact: true })).toBeVisible();
@@ -204,8 +246,8 @@ async function attachRace(testInfo: TestInfo, observations: readonly (RaceObserv
   await testInfo.attach("real-refresh-race-observations", { body: JSON.stringify(values, null, 2), contentType: "application/json" });
 }
 
-test("CPU loopback rehearsal: a native confirmation report reaches the existing read-only browser", async ({ page }) => {
-  const fixture = prepareCpuLoopbackRehearsal();
+for (const engine of ["vllm", "sglang"] as const) test(`CPU loopback rehearsal: ${engine} native confirmation reaches the read-only browser`, async ({ page }) => {
+  const fixture = prepareCpuLoopbackRehearsal(engine);
   let server: Server | undefined;
   try {
     server = await start(fixture);
@@ -223,11 +265,130 @@ test("CPU loopback rehearsal: a native confirmation report reaches the existing 
     await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
     await expect(page.getByRole("main")).toContainText("Synthetic only");
     await expect(page.getByRole("main")).not.toContainText("127.0.0.1");
+    if (engine === "sglang") {
+      expect(report.engine_identity?.engine).toBe("sglang");
+      await expect(page.getByRole("main")).toContainText("SGLang 0.5.18");
+      await expect(page.getByTitle(report.engine_identity!.engine_binding_sha256, { exact: true })).toBeVisible();
+      await page.reload();
+      await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
+    } else expect(report.engine_identity).toBeUndefined();
   } finally {
     await stop(server);
     remove(fixture.root);
     rmSync(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("engine-bound SGLang and legacy reports retain identity, values and navigation on desktop and mobile", async ({ page }, testInfo) => {
+  const fixture = prepareEngineCatalog();
+  let server: Server | undefined;
+  try {
+    server = await start(fixture);
+    const list = await engineSummaries(page, server.url);
+    const sglang = lookup(fixture, list, "sglang-study");
+    const legacy = lookup(fixture, list, "legacy-study");
+    expect(sglang.engine_identity?.engine).toBe("sglang");
+    expect(legacy.engine_identity).toBeUndefined();
+    expect(sglang.returned_records).toBe(24);
+    const identity = sglang.engine_identity!;
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.goto(`${server.url}/evaluations`);
+      await page.getByLabel("Report kind").selectOption("STUDY");
+      for (const report of [sglang, legacy]) await expect(page.getByRole("link", { name: report.label, exact: true })).toBeVisible();
+      await expect(page.getByRole("main")).toContainText("SGLang 0.5.18");
+      await noOverflow(page);
+      await page.getByRole("link", { name: sglang.label, exact: true }).click();
+      await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
+      for (const text of ["SGLang 0.5.18", "Synthetic only", "Runtime unverified", "33.333333", "27.777778"]) await expect(page.getByRole("main")).toContainText(text);
+      for (const value of [identity.engine_binding_sha256, identity.engine_choice_sha256]) await expect(page.getByTitle(value, { exact: true })).toBeVisible();
+      await expect(page.getByRole("main")).toContainText(/scheduler-state age is unavailable/i);
+      if (width === 1280 || width === 320) await page.screenshot({ path: testInfo.outputPath(`sglang-detail-${width}.png`), fullPage: true });
+      const trial = page.getByLabel("Trial", { exact: true });
+      await trial.focus();
+      await expect(trial).toBeFocused();
+      await trial.selectOption({ index: 3 });
+      await expect(page.getByRole("main")).toContainText("0.833333");
+      await page.getByLabel("Population", { exact: true }).selectOption("background");
+      await expect(page.getByLabel("Population", { exact: true })).toHaveValue("background");
+      await noOverflow(page);
+      await page.reload();
+      await expect(page.getByTitle(identity.engine_binding_sha256, { exact: true })).toBeVisible();
+      await page.goBack();
+      await page.getByRole("link", { name: legacy.label, exact: true }).click();
+      await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
+      await expect(page.getByRole("main")).toContainText("33.333333");
+      await expect(page.getByRole("main")).not.toContainText("SGLang 0.5.18");
+      await expect(page.getByTitle(identity.engine_binding_sha256, { exact: true })).toHaveCount(0);
+      await page.getByRole("button", { name: /Switch to .* theme/ }).click();
+      await noOverflow(page);
+    }
+    const text = await page.getByRole("main").innerText();
+    for (const privateValue of [fixture.root, "127.0.0.1", "private-model", "private foreground"]) expect(text).not.toContain(privateValue);
+  } finally { await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("engine-bound missing, mismatched, tampered and unsupported reports stay withheld and recover from exact bytes", async ({ page }) => {
+  const fixture = prepareEngineCatalog();
+  let server: Server | undefined;
+  try {
+    server = await start(fixture);
+    const list = await engineSummaries(page, server.url);
+    const sglang = lookup(fixture, list, "sglang-study");
+    const legacy = lookup(fixture, list, "legacy-study");
+    const path = fixture.reports["sglang-study"].report_path;
+    const original = readFileSync(path);
+    const originalCatalog = readFileSync(fixture.catalog);
+    const cases = ["missing-file", "changed-pin", "binding-mismatch", "statistics-tamper", "missing-binding", "unsupported-version", "historical-marker"] as const;
+    for (const variant of cases) {
+      await openReport(page, server, sglang);
+      chmodSync(path, 0o600);
+      if (variant === "missing-file") renameSync(path, `${path}.removed`);
+      else if (variant === "changed-pin") writeFileSync(path, Buffer.concat([original, Buffer.from(" ")]));
+      else {
+        const altered = JSON.parse(original.toString("utf8")) as Record<string, any>;
+        if (variant === "binding-mismatch") {
+          altered.engine_binding.config_sha256 = `sha256:${"f".repeat(64)}`;
+          altered.engine_binding_sha256 = digest(canonicalBytes(altered.engine_binding));
+        } else if (variant === "statistics-tamper") {
+          altered.statistical_report.coverage.foreground.returned_records += 1;
+          altered.statistical_report_sha256 = digest(canonicalBytes(altered.statistical_report));
+        } else if (variant === "missing-binding") delete altered.engine_binding;
+        else if (variant === "unsupported-version") altered.schema_version = "inferdrome.evaluation-study-report.v999";
+        else altered.dashboard_projection = "UNSUPPORTED_ENGINE_BINDING";
+        const bytes = canonicalBytes(altered);
+        writeFileSync(path, bytes);
+        const catalog = JSON.parse(originalCatalog.toString("utf8")) as { entries: { expected_sha256: string }[] };
+        catalog.entries[1]!.expected_sha256 = digest(bytes);
+        writeFileSync(fixture.catalog, canonicalBytes(catalog));
+      }
+      const response = page.waitForResponse((item) => new URL(item.url()).pathname === `/api/v1/evaluation-reports/${sglang.report_id}`);
+      await page.getByRole("button", { name: "Refresh report", exact: true }).click();
+      expect((await response).status()).toBe(404);
+      await expect(page.getByRole("heading", { name: sglang.label, exact: true })).toHaveCount(0);
+      await expect(page.getByText(TRUST, { exact: true })).toHaveCount(0);
+      await expect(page.getByLabel("Trial", { exact: true })).toHaveCount(0);
+      await expect(page.getByTitle(sglang.engine_identity!.engine_binding_sha256, { exact: true })).toHaveCount(0);
+      const indexResponse = await page.request.get(`${server.url}/api/v1/evaluation-reports`);
+      expect(indexResponse.status()).toBe(200);
+      expect(indexResponse.headers()["cache-control"]).toBe("no-store");
+      const index = await indexResponse.json() as { reports: Summary[]; rejected: { entry: number; code: string }[] };
+      expect(index.reports.map((report) => report.report_id)).toEqual([legacy.report_id]);
+      expect(index.rejected).toEqual([{ entry: 2, code: variant === "missing-file" ? "REPORT_UNAVAILABLE" : variant === "changed-pin" ? "DIGEST_MISMATCH" : "REPORT_INVALID", message: "Configured report was withheld." }]);
+      await page.goto(`${server.url}/evaluations`);
+      await expect(page.getByRole("main")).toContainText(/withheld/i);
+      await expect(page.getByRole("link", { name: legacy.label, exact: true })).toBeVisible();
+      await expect(page.getByRole("link", { name: sglang.label, exact: true })).toHaveCount(0);
+      await expect(page.getByRole("main")).not.toContainText(fixture.root);
+      if (variant === "missing-file") renameSync(`${path}.removed`, path);
+      writeFileSync(path, original);
+      writeFileSync(fixture.catalog, originalCatalog);
+      await page.getByRole("button", { name: "Refresh reports", exact: true }).click();
+      await page.getByRole("link", { name: sglang.label, exact: true }).click();
+      await expect(page.getByText(TRUST, { exact: true })).toBeVisible();
+      await expect(page.getByTitle(sglang.engine_identity!.engine_binding_sha256, { exact: true })).toBeVisible();
+    }
+  } finally { await stop(server); remove(fixture.root); rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
 test("refresh recovery: rapid 25 ms double-click keeps the real index available", async ({ page }, testInfo) => {

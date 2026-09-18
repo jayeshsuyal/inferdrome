@@ -13,8 +13,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from inferdrome.dashboard.auth import DashboardKeyringStore, validate_token_shape
 from inferdrome.dashboard.evaluation_report_models import (
-    EvaluationReportDetail,
-    EvaluationReportIndex,
+    EvaluationReportDetailResponse,
+    EvaluationReportIndexResponse,
 )
 from inferdrome.dashboard.evaluation_reports import (
     EvaluationReportNotFound,
@@ -233,10 +233,10 @@ def create_app(
 
     @app.get(
         "/api/v1/evaluation-reports",
-        response_model=EvaluationReportIndex,
+        response_model=EvaluationReportIndexResponse,
         dependencies=protected_dependencies,
     )
-    def list_evaluation_reports() -> EvaluationReportIndex:
+    def list_evaluation_reports() -> EvaluationReportIndexResponse:
         try:
             return evaluation_report_index.refresh()
         except DashboardSnapshotBusy:
@@ -252,10 +252,10 @@ def create_app(
 
     @app.get(
         "/api/v1/evaluation-reports/{report_id}",
-        response_model=EvaluationReportDetail,
+        response_model=EvaluationReportDetailResponse,
         dependencies=protected_dependencies,
     )
-    def get_evaluation_report(report_id: str) -> EvaluationReportDetail:
+    def get_evaluation_report(report_id: str) -> EvaluationReportDetailResponse:
         try:
             return evaluation_report_index.get_report(report_id)
         except EvaluationReportNotFound:

@@ -1,6 +1,9 @@
 import { ApiError, EvaluationScanBusyError, fetchBoundedDashboardJson } from "./api";
 
 export const EVALUATION_VERSION = "inferdrome.evaluation-dashboard.v1";
+export const ENGINE_EVALUATION_VERSION = "inferdrome.evaluation-dashboard.v2";
+const LEGACY_DETAIL_BYTES = 4 * 1024 * 1024;
+const ENGINE_DETAIL_BYTES = LEGACY_DETAIL_BYTES + 20 * 1024;
 export const EVALUATION_POLICIES = [
   "evaluation_round_robin_v1",
   "evaluation_least_reported_load_v1",
@@ -108,7 +111,7 @@ export interface EvaluationCacheBlock {
   readonly prefix_potential: readonly EvaluationMetric[];
   readonly output_length_differences: readonly EvaluationMetric[];
 }
-export interface EvaluationSummary {
+export interface LegacyEvaluationSummary {
   readonly report_id: string;
   readonly kind: EvaluationKind;
   readonly label: string;
@@ -129,29 +132,63 @@ export interface EvaluationSummary {
   readonly evidence_eligible: false;
   readonly tokenizer_reverified_here: false;
 }
+export interface SGLangEngineIdentity {
+  readonly engine: "sglang";
+  readonly producer_version: "0.5.18";
+  readonly profile: "SGLANG_0_5_18_SINGLE_DEVICE_BF16";
+  readonly engine_binding_sha256: string;
+  readonly engine_choice_sha256: string;
+  readonly telemetry_semantics: "SGLANG_0_5_18_SCHEDULER_GAUGES";
+  readonly telemetry_freshness: "ACQUISITION_START_AGE_ONLY";
+  readonly telemetry_source_age: "UNAVAILABLE";
+  readonly cache_preparation: "WARMUP_DRAIN_FLUSH";
+  readonly cache_state: "DECLARED_COLD";
+}
+export interface SGLangEvaluationSummary extends Omit<LegacyEvaluationSummary, "kind" | "source_schema"> {
+  readonly kind: "STUDY";
+  readonly source_schema: "inferdrome.evaluation-study-report.v2";
+  readonly engine_identity: SGLangEngineIdentity;
+  readonly config_sha256: string;
+  readonly evidence_class: "SYNTHETIC_ONLY" | "LOCAL_MEASUREMENT_ONLY";
+  readonly calibration: "UNCALIBRATED_REHEARSAL";
+}
+export type EvaluationSummary = LegacyEvaluationSummary | SGLangEvaluationSummary;
+
+export function evaluationEngine(summary: EvaluationSummary): SGLangEngineIdentity | null {
+  return summary.source_schema === "inferdrome.evaluation-study-report.v2" ? summary.engine_identity : null;
+}
 export interface RejectedEvaluationReport {
   readonly entry: number;
   readonly code: "CONFIGURATION_INVALID" | "REPORT_UNAVAILABLE" | "DIGEST_MISMATCH" | "REPORT_INVALID" | "PROJECTION_LIMIT";
   readonly message: "Configured report was withheld.";
 }
 export interface EvaluationReportIndex {
-  readonly projection_version: typeof EVALUATION_VERSION;
+  readonly projection_version: typeof EVALUATION_VERSION | typeof ENGINE_EVALUATION_VERSION;
   readonly reports: readonly EvaluationSummary[];
   readonly rejected: readonly RejectedEvaluationReport[];
 }
 interface EvaluationDetail {
-  readonly projection_version: typeof EVALUATION_VERSION;
-  readonly summary: EvaluationSummary;
   readonly coverage: readonly EvaluationMetric[];
   readonly reporting: readonly EvaluationMetric[];
   readonly limitations: readonly string[];
 }
-export interface EvaluationStudyDetail extends EvaluationDetail {
+interface StudyDetail extends EvaluationDetail {
   readonly kind: "STUDY";
   readonly strata: readonly EvaluationStratum[];
   readonly trials: readonly EvaluationTrial[];
 }
+export interface LegacyEvaluationStudyDetail extends StudyDetail {
+  readonly projection_version: typeof EVALUATION_VERSION;
+  readonly summary: LegacyEvaluationSummary;
+}
+export interface SGLangEvaluationStudyDetail extends StudyDetail {
+  readonly projection_version: typeof ENGINE_EVALUATION_VERSION;
+  readonly summary: SGLangEvaluationSummary;
+}
+export type EvaluationStudyDetail = LegacyEvaluationStudyDetail | SGLangEvaluationStudyDetail;
 export interface EvaluationCacheDetail extends EvaluationDetail {
+  readonly projection_version: typeof EVALUATION_VERSION;
+  readonly summary: LegacyEvaluationSummary;
   readonly kind: "PREFIX_CACHE";
   readonly cache_treatment_attribution: "UNVERIFIED";
   readonly workload_verification: "VERIFIED_PINNED_QWEN3" | "SYNTHETIC_TOKENIZER" | "UNAVAILABLE";
@@ -313,15 +350,13 @@ const block: Rule = (v) => object({
 })(v)
   && unique((v as EvaluationCacheBlock).cells, (row) => row.condition)
   && unique((v as EvaluationCacheBlock).cells, (row) => row.index);
-const summary: Rule = (v) => {
-  if (!object({
+const summaryShape = {
     report_id: reportId,
     kind: oneOf("STUDY", "PREFIX_CACHE"),
     label,
     report_sha256: digest,
     plan_sha256: digest,
     config_sha256: optional(digest),
-    source_schema: oneOf("inferdrome.evaluation-study-report.v1", "inferdrome.evaluation-cache-report.v1"),
     status: code,
     comparison_status: code,
     reason: optional(code),
@@ -334,14 +369,46 @@ const summary: Rule = (v) => {
     runtime_verification: oneOf("UNVERIFIED"),
     evidence_eligible: oneOf(false),
     tokenizer_reverified_here: oneOf(false)
+};
+const summaryStatus = (row: EvaluationSummary): boolean => row.kind === "STUDY"
+  ? ["COMPLETED", "ABORTED", "CANCELLED"].includes(row.status) && row.comparison_status === (row.status === "COMPLETED" ? "DESCRIPTIVE_UNCALIBRATED_REHEARSAL" : "SUPPRESSED_INCOMPLETE_STUDY")
+  : ["COMPLETED", "INCOMPLETE"].includes(row.status) && ["AVAILABLE", "SUPPRESSED_INCOMPLETE", "SUPPRESSED_DECLARATION_OR_EVIDENCE_MISMATCH"].includes(row.comparison_status);
+const legacySummary: Rule = (v) => {
+  if (!object({
+    ...summaryShape,
+    source_schema: oneOf("inferdrome.evaluation-study-report.v1", "inferdrome.evaluation-cache-report.v1")
   })(v)) return false;
   const row = v as EvaluationSummary;
-  return (row.kind === "STUDY"
-    ? ["COMPLETED", "ABORTED", "CANCELLED"].includes(row.status) && row.comparison_status === (row.status === "COMPLETED" ? "DESCRIPTIVE_UNCALIBRATED_REHEARSAL" : "SUPPRESSED_INCOMPLETE_STUDY")
-    : ["COMPLETED", "INCOMPLETE"].includes(row.status) && ["AVAILABLE", "SUPPRESSED_INCOMPLETE", "SUPPRESSED_DECLARATION_OR_EVIDENCE_MISMATCH"].includes(row.comparison_status))
+  return summaryStatus(row)
     && row.source_schema === (row.kind === "STUDY" ? "inferdrome.evaluation-study-report.v1" : "inferdrome.evaluation-cache-report.v1")
     && (row.kind === "STUDY" ? /^Study report [1-8]$/ : /^Prefix-cache report [1-8]$/).test(row.label);
 };
+const engineIdentity = object({
+  engine: oneOf("sglang"),
+  producer_version: oneOf("0.5.18"),
+  profile: oneOf("SGLANG_0_5_18_SINGLE_DEVICE_BF16"),
+  engine_binding_sha256: digest,
+  engine_choice_sha256: digest,
+  telemetry_semantics: oneOf("SGLANG_0_5_18_SCHEDULER_GAUGES"),
+  telemetry_freshness: oneOf("ACQUISITION_START_AGE_ONLY"),
+  telemetry_source_age: oneOf("UNAVAILABLE"),
+  cache_preparation: oneOf("WARMUP_DRAIN_FLUSH"),
+  cache_state: oneOf("DECLARED_COLD")
+});
+const sglangSummary: Rule = (v) => {
+  if (!object({
+    ...summaryShape,
+    kind: oneOf("STUDY"),
+    config_sha256: digest,
+    source_schema: oneOf("inferdrome.evaluation-study-report.v2"),
+    evidence_class: oneOf("SYNTHETIC_ONLY", "LOCAL_MEASUREMENT_ONLY"),
+    calibration: oneOf("UNCALIBRATED_REHEARSAL"),
+    engine_identity: engineIdentity
+  })(v)) return false;
+  const row = v as SGLangEvaluationSummary;
+  return summaryStatus(row) && /^SGLang study report [1-8]$/.test(row.label);
+};
+const summary: Rule = (v) => legacySummary(v) || sglangSummary(v);
 const rejected = object({
   entry: integer(1, 8),
   code: oneOf("CONFIGURATION_INVALID", "REPORT_UNAVAILABLE", "DIGEST_MISMATCH", "REPORT_INVALID", "PROJECTION_LIMIT"),
@@ -349,12 +416,20 @@ const rejected = object({
 });
 const detailShape = {
   projection_version: oneOf(EVALUATION_VERSION),
-  summary,
+  summary: legacySummary,
   coverage: metrics(24),
   reporting: metrics(16),
   limitations: array(code, 16)
 };
 const study = object({ ...detailShape, kind: oneOf("STUDY"), strata: array(stratum, 64), trials: array(trial, 256) });
+const sglangStudy = object({
+  ...detailShape,
+  projection_version: oneOf(ENGINE_EVALUATION_VERSION),
+  summary: sglangSummary,
+  kind: oneOf("STUDY"),
+  strata: array(stratum, 64),
+  trials: array(trial, 256)
+});
 const cache = object({
   ...detailShape,
   kind: oneOf("PREFIX_CACHE"),
@@ -368,17 +443,24 @@ const cache = object({
 function invalid(): never { throw new ApiError("Inferdrome returned an invalid evaluation report projection.", 502); }
 
 export function parseEvaluationIndex(value: unknown): EvaluationReportIndex {
-  if (!object({
+  const legacy = object({
     projection_version: oneOf(EVALUATION_VERSION),
+    reports: array(legacySummary, 8),
+    rejected: array(rejected, 8)
+  })(value);
+  const engineBound = object({
+    projection_version: oneOf(ENGINE_EVALUATION_VERSION),
     reports: array(summary, 8),
     rejected: array(rejected, 8)
-  })(value)) invalid();
+  })(value);
+  if (!legacy && !engineBound) invalid();
   const index = value as EvaluationReportIndex;
+  if (engineBound && !index.reports.some((row) => evaluationEngine(row) !== null)) invalid();
   if (!unique(index.reports, (row) => row.report_id) || !unique(index.rejected, (row) => row.entry) || index.reports.length + index.rejected.length > 8) invalid();
   return index;
 }
 export function parseEvaluationDetail(value: unknown, expectedId: string): EvaluationReportDetail {
-  if (!reportId(expectedId) || (!study(value) && !cache(value))) invalid();
+  if (!reportId(expectedId) || (!study(value) && !cache(value) && !sglangStudy(value))) invalid();
   const detail = value as EvaluationReportDetail;
   if (detail.summary.report_id !== expectedId || detail.summary.kind !== detail.kind) invalid();
   if (detail.kind === "STUDY") {
@@ -410,13 +492,13 @@ function waitForEvaluationScan(signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function fetchEvaluationJson(path: string, maxBytes: number, signal?: AbortSignal): Promise<unknown> {
+async function fetchEvaluationJson(path: string, maxBytes: number, signal?: AbortSignal, decodedByteLimit?: (value: unknown) => number): Promise<unknown> {
   // Only the server's exact scan-contention signal admits another read. The
   // five-GET ceiling adds at most four one-second waits, without shared state.
   for (let retries = 0; ; retries += 1) {
     if (signal?.aborted) throw new DOMException("The evaluation request was cancelled.", "AbortError");
     try {
-      return await fetchBoundedDashboardJson(path, maxBytes, signal);
+      return await fetchBoundedDashboardJson(path, maxBytes, signal, decodedByteLimit);
     } catch (error) {
       if (!(error instanceof EvaluationScanBusyError) || retries === MAX_SCAN_BUSY_RETRIES) throw error;
       await waitForEvaluationScan(signal);
@@ -428,6 +510,9 @@ export const evaluationApi = {
   list: async (signal?: AbortSignal): Promise<EvaluationReportIndex> => parseEvaluationIndex(await fetchEvaluationJson("/evaluation-reports", 65_536, signal)),
   detail: async (id: string, signal?: AbortSignal): Promise<EvaluationReportDetail> => {
     if (!reportId(id)) throw new ApiError("This evaluation report is unavailable.", 404);
-    return parseEvaluationDetail(await fetchEvaluationJson(`/evaluation-reports/${encodeURIComponent(id)}`, 4 * 1024 * 1024, signal), id);
+    const byteLimit = (value: unknown): number => typeof value === "object" && value !== null
+      && "projection_version" in value && value.projection_version === ENGINE_EVALUATION_VERSION
+      ? ENGINE_DETAIL_BYTES : LEGACY_DETAIL_BYTES;
+    return parseEvaluationDetail(await fetchEvaluationJson(`/evaluation-reports/${encodeURIComponent(id)}`, ENGINE_DETAIL_BYTES, signal, byteLimit), id);
   },
 };

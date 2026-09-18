@@ -166,6 +166,43 @@ class EvaluationSummary(FrozenModel):
     tokenizer_reverified_here: Literal[False] = False
 
 
+class EvaluationSglangIdentity(FrozenModel):
+    engine: Literal["sglang"]
+    producer_version: Literal["0.5.18"]
+    profile: Literal["SGLANG_0_5_18_SINGLE_DEVICE_BF16"]
+    engine_binding_sha256: Digest
+    engine_choice_sha256: Digest
+    telemetry_semantics: Literal["SGLANG_0_5_18_SCHEDULER_GAUGES"]
+    telemetry_freshness: Literal["ACQUISITION_START_AGE_ONLY"]
+    telemetry_source_age: Literal["UNAVAILABLE"]
+    cache_preparation: Literal["WARMUP_DRAIN_FLUSH"]
+    cache_state: Literal["DECLARED_COLD"]
+
+
+class EvaluationSglangSummary(FrozenModel):
+    report_id: ReportId
+    kind: Literal["STUDY"]
+    label: Label
+    report_sha256: Digest
+    plan_sha256: Digest
+    config_sha256: Digest
+    source_schema: Literal["inferdrome.evaluation-study-report.v2"]
+    status: Code
+    comparison_status: Code
+    reason: Code | None
+    calibration: Literal["UNCALIBRATED_REHEARSAL", "UNAVAILABLE"]
+    evidence_class: Literal["SYNTHETIC_ONLY", "LOCAL_MEASUREMENT_ONLY"]
+    returned_records: Count
+    report_integrity: Literal["EXPECTED_DIGEST_MATCH"] = "EXPECTED_DIGEST_MATCH"
+    report_contract: Literal["VALIDATED"] = "VALIDATED"
+    source_replay: Literal["NOT_PERFORMED"] = "NOT_PERFORMED"
+    runtime_verification: Literal["UNVERIFIED"] = "UNVERIFIED"
+    evidence_eligible: Literal[False] = False
+    tokenizer_reverified_here: Literal[False] = False
+
+    engine_identity: EvaluationSglangIdentity
+
+
 class RejectedEvaluationReport(FrozenModel):
     entry: Annotated[int, Field(ge=1, le=8)]
     code: Literal[
@@ -218,4 +255,37 @@ class EvaluationCacheDetail(_EvaluationDetail):
 
 EvaluationReportDetail = Annotated[
     EvaluationStudyDetail | EvaluationCacheDetail, Field(discriminator="kind")
+]
+
+
+class EvaluationSglangStudyDetail(FrozenModel):
+    projection_version: Literal["inferdrome.evaluation-dashboard.v2"] = (
+        "inferdrome.evaluation-dashboard.v2"
+    )
+    summary: EvaluationSglangSummary
+    coverage: Annotated[tuple[EvaluationMetric, ...], Field(max_length=24)]
+    reporting: Annotated[tuple[EvaluationMetric, ...], Field(max_length=16)]
+    limitations: Annotated[tuple[Code, ...], Field(max_length=16)]
+    kind: Literal["STUDY"] = "STUDY"
+    strata: Annotated[tuple[EvaluationStratum, ...], Field(max_length=64)]
+    trials: Annotated[tuple[EvaluationTrial, ...], Field(max_length=256)]
+
+
+class EvaluationReportIndexV2(FrozenModel):
+    projection_version: Literal["inferdrome.evaluation-dashboard.v2"] = (
+        "inferdrome.evaluation-dashboard.v2"
+    )
+    reports: Annotated[
+        tuple[EvaluationSummary | EvaluationSglangSummary, ...], Field(max_length=8)
+    ]
+    rejected: Annotated[tuple[RejectedEvaluationReport, ...], Field(max_length=8)]
+
+
+EvaluationReportIndexResponse = Annotated[
+    EvaluationReportIndex | EvaluationReportIndexV2,
+    Field(discriminator="projection_version"),
+]
+EvaluationReportDetailResponse = Annotated[
+    EvaluationReportDetail | EvaluationSglangStudyDetail,
+    Field(discriminator="projection_version"),
 ]

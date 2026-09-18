@@ -17,11 +17,15 @@ from pydantic import Field, field_validator
 from inferdrome.dashboard.evaluation_projection import (
     evaluation_report_id,
     project_report,
+    project_sglang_report,
 )
 from inferdrome.dashboard.evaluation_report_models import (
     Digest,
-    EvaluationReportDetail,
+    EvaluationReportDetailResponse,
     EvaluationReportIndex,
+    EvaluationReportIndexResponse,
+    EvaluationReportIndexV2,
+    EvaluationSglangStudyDetail,
     RejectedEvaluationReport,
     ReportKind,
 )
@@ -29,6 +33,10 @@ from inferdrome.dashboard.work import DashboardLimits, DashboardWorkController
 from inferdrome.deployment.gcp_securefs import SafeDirFD
 from inferdrome.domain.base import FrozenModel
 from inferdrome.errors import DashboardError, InferdromeError, WorkLimitError
+from inferdrome.evaluation.sglang_report import (
+    MAX_SGLANG_REPORT_BYTES,
+    read_sglang_report_bytes,
+)
 from inferdrome.evaluation.study_files import MAX_METADATA_BYTES, StudyDirectory
 from inferdrome.limits import WorkLimits
 from inferdrome.parsing import StructuredDataLimits, validate_json_structure
@@ -38,7 +46,7 @@ CATALOG_LIMIT = 64 * 1024
 INDEX_LIMIT = 64 * 1024
 MAX_ENTRIES = 8
 SNAPSHOT_WORK = WorkLimits(
-    max_units=8, max_bytes=8 * MAX_METADATA_BYTES + CATALOG_LIMIT, max_seconds=30.0
+    max_units=8, max_bytes=8 * MAX_SGLANG_REPORT_BYTES + CATALOG_LIMIT, max_seconds=30.0
 )
 
 
@@ -47,9 +55,21 @@ class EvaluationReportNotFound(DashboardError):
 
 
 class _CatalogEntry(FrozenModel):
-    kind: ReportKind
+    kind: Literal["STUDY", "PREFIX_CACHE", "SGLANG_STUDY"]
     report_path: Annotated[str, Field(min_length=1, max_length=4096)]
     expected_sha256: Digest
+
+    @property
+    def public_kind(self) -> ReportKind:
+        return "STUDY" if self.kind == "SGLANG_STUDY" else self.kind
+
+    @property
+    def report_limit(self) -> int:
+        return (
+            MAX_SGLANG_REPORT_BYTES
+            if self.kind == "SGLANG_STUDY"
+            else MAX_METADATA_BYTES
+        )
 
     @field_validator("report_path")
     @classmethod
@@ -142,8 +162,8 @@ def _catalog_entries(content: bytes) -> list[Any]:
 def _report_bytes(entry: _CatalogEntry) -> bytes:
     path = Path(entry.report_path)
     identity = _directory_identity(path.parent)
-    with StudyDirectory.open(path.parent, budget=MAX_METADATA_BYTES) as directory:
-        content = directory.read("report.json", limit=MAX_METADATA_BYTES)
+    with StudyDirectory.open(path.parent, budget=entry.report_limit) as directory:
+        content = directory.read("report.json", limit=entry.report_limit)
         if _directory_identity(path.parent) != identity:
             raise ValueError("report directory changed")
         return content
@@ -176,7 +196,11 @@ class EvaluationReportsIndex:
             clock=clock,
         )
 
-    def _scan(self) -> tuple[EvaluationReportIndex, tuple[EvaluationReportDetail, ...]]:
+    def _scan(
+        self,
+    ) -> tuple[
+        EvaluationReportIndexResponse, tuple[EvaluationReportDetailResponse, ...]
+    ]:
         # Importing the reader never invokes the source writers or runtime.
         from inferdrome.evaluation.report_reader import load_evaluation_report_bytes
 
@@ -198,16 +222,17 @@ class EvaluationReportsIndex:
                 except (ValueError, TypeError):
                     parsed.append(None)
             ids = Counter(
-                evaluation_report_id(item.kind, item.expected_sha256)
+                evaluation_report_id(item.public_kind, item.expected_sha256)
                 for item in parsed
                 if item
             )
             paths = Counter(item.report_path for item in parsed if item)
-            details: list[EvaluationReportDetail] = []
+            details: list[EvaluationReportDetailResponse] = []
             rejected: list[RejectedEvaluationReport] = []
             total_encoded = 0
             for index, entry in enumerate(parsed, 1):
-                budget.reserve(units=1, bytes_=MAX_METADATA_BYTES)
+                entry_limit = entry.report_limit if entry else MAX_METADATA_BYTES
+                budget.reserve(units=1, bytes_=entry_limit)
                 code: (
                     Literal[
                         "CONFIGURATION_INVALID",
@@ -220,7 +245,10 @@ class EvaluationReportsIndex:
                 ) = None
                 if (
                     entry is None
-                    or ids[evaluation_report_id(entry.kind, entry.expected_sha256)] != 1
+                    or ids[
+                        evaluation_report_id(entry.public_kind, entry.expected_sha256)
+                    ]
+                    != 1
                     or paths[entry.report_path] != 1
                 ):
                     code = "CONFIGURATION_INVALID"
@@ -235,28 +263,36 @@ class EvaluationReportsIndex:
                             code = "DIGEST_MISMATCH"
                         else:
                             try:
-                                report = load_evaluation_report_bytes(
-                                    content, kind=entry.kind
-                                )
-                                detail = project_report(
-                                    report.model_dump(mode="json"),
-                                    kind=entry.kind,
-                                    digest=entry.expected_sha256,
-                                    entry=index,
-                                )
+                                detail: EvaluationReportDetailResponse
+                                if entry.kind == "SGLANG_STUDY":
+                                    detail = project_sglang_report(
+                                        read_sglang_report_bytes(content),
+                                        digest=entry.expected_sha256,
+                                        entry=index,
+                                    )
+                                else:
+                                    report = load_evaluation_report_bytes(
+                                        content, kind=entry.kind
+                                    )
+                                    detail = project_report(
+                                        report.model_dump(mode="json"),
+                                        kind=entry.kind,
+                                        digest=entry.expected_sha256,
+                                        entry=index,
+                                    )
+                                    del report
                                 encoded_size = len(
                                     detail.model_dump_json().encode("utf-8")
                                 )
                                 if (
-                                    encoded_size > MAX_METADATA_BYTES
+                                    encoded_size > entry_limit
                                     or total_encoded + encoded_size
-                                    > MAX_ENTRIES * MAX_METADATA_BYTES
+                                    > MAX_ENTRIES * MAX_SGLANG_REPORT_BYTES
                                 ):
                                     code = "PROJECTION_LIMIT"
                                 else:
                                     details.append(detail)
                                     total_encoded += encoded_size
-                                del report
                             except (
                                 ValueError,
                                 TypeError,
@@ -270,15 +306,28 @@ class EvaluationReportsIndex:
                 if code is not None:
                     rejected.append(RejectedEvaluationReport(entry=index, code=code))
                 budget.checkpoint()
-            result = EvaluationReportIndex(
-                reports=tuple(detail.summary for detail in details),
-                rejected=tuple(rejected),
-            )
+            result: EvaluationReportIndexResponse
+            if any(
+                isinstance(detail, EvaluationSglangStudyDetail) for detail in details
+            ):
+                result = EvaluationReportIndexV2(
+                    reports=tuple(detail.summary for detail in details),
+                    rejected=tuple(rejected),
+                )
+            else:
+                result = EvaluationReportIndex(
+                    reports=tuple(
+                        detail.summary
+                        for detail in details
+                        if not isinstance(detail, EvaluationSglangStudyDetail)
+                    ),
+                    rejected=tuple(rejected),
+                )
             if len(result.model_dump_json().encode("utf-8")) > INDEX_LIMIT:
                 raise DashboardError("evaluation report index limit exceeded")
             return result, tuple(details)
 
-    def refresh(self) -> EvaluationReportIndex:
+    def refresh(self) -> EvaluationReportIndexResponse:
         try:
             return self._scan()[0]
         except WorkLimitError:
@@ -286,7 +335,7 @@ class EvaluationReportsIndex:
                 "evaluation report work is temporarily unavailable"
             ) from None
 
-    def get_report(self, report_id: str) -> EvaluationReportDetail:
+    def get_report(self, report_id: str) -> EvaluationReportDetailResponse:
         if re.fullmatch(r"ev-[0-9a-f]{64}", report_id) is None:
             raise EvaluationReportNotFound("evaluation report not found")
         try:

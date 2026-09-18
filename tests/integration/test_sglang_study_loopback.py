@@ -308,7 +308,7 @@ def test_sglang_native_study_keeps_populations_bound_through_offline_report(
             assert report["evidence_class"] == "SYNTHETIC_ONLY"
             assert report["runtime_verification"] == "UNVERIFIED"
             assert report["evidence_eligible"] is False
-            assert report["dashboard_projection"] == "UNSUPPORTED_ENGINE_BINDING"
+            assert report["dashboard_projection"] == "ENGINE_BOUND_V2"
             statistics = report["statistical_report"]
             assert report["statistical_report_sha256"] == sha256_digest(
                 canonical_json_bytes(statistics) + b"\n"
@@ -322,7 +322,7 @@ def test_sglang_native_study_keeps_populations_bound_through_offline_report(
             markdown = (tmp_path / "report" / "report.md").read_text()
             assert "SGLang 0.5.18" in markdown
             assert "SYNTHETIC_ONLY" in markdown
-            assert "UNSUPPORTED_ENGINE_BINDING" in markdown
+            assert "ENGINE_BOUND_V2" in markdown
             for directory in (output, tmp_path / "report"):
                 assert directory.stat().st_mode & 0o777 == 0o700
                 for path in directory.iterdir():

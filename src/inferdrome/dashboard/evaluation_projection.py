@@ -5,12 +5,15 @@ from typing import Any, cast
 from inferdrome.dashboard.evaluation_report_models import (
     EvaluationCacheDetail,
     EvaluationReportDetail,
+    EvaluationSglangStudyDetail,
     EvaluationStudyDetail,
     EvaluationSummary,
     ReportKind,
     Unit,
 )
 from inferdrome.domain.base import FrozenModel
+from inferdrome.evaluation.engine_binding import engine_choice_sha256
+from inferdrome.evaluation.sglang_report import SglangStudyReport
 from inferdrome.routing_execution.canonical import sha256_digest
 
 
@@ -213,6 +216,42 @@ def project_report(
     if kind == "STUDY":
         return _study(source, summary, coverage)
     return _cache(source, summary, coverage)
+
+
+def project_sglang_report(
+    source: SglangStudyReport, *, digest: str, entry: int
+) -> EvaluationSglangStudyDetail:
+    """Project validated statistics with their inseparable engine identity.
+
+    The standalone reader verifies report integrity, not raw-source replay or
+    runtime provenance. Never interpret declared cold preparation as observed.
+    """
+    if source.dashboard_projection != "ENGINE_BOUND_V2":
+        raise ValueError("unsupported SGLang dashboard projection")
+    detail = project_report(
+        source.statistical_report.model_dump(mode="json"),
+        kind="STUDY",
+        digest=digest,
+        entry=entry,
+    ).model_dump(mode="json")
+    detail["projection_version"] = "inferdrome.evaluation-dashboard.v2"
+    summary = detail["summary"]
+    summary["source_schema"] = source.schema_version
+    summary["label"] = f"SGLang study report {entry}"
+    binding = source.engine_binding
+    summary["engine_identity"] = {
+        "engine": binding.engine,
+        "producer_version": binding.producer_version,
+        "profile": binding.profile,
+        "engine_binding_sha256": source.engine_binding_sha256,
+        "engine_choice_sha256": engine_choice_sha256(binding),
+        "telemetry_semantics": binding.telemetry_semantics,
+        "telemetry_freshness": binding.telemetry_freshness,
+        "telemetry_source_age": binding.telemetry_source_age,
+        "cache_preparation": binding.cache_preparation,
+        "cache_state": binding.cache_state,
+    }
+    return _validate_view(EvaluationSglangStudyDetail, detail)
 
 
 _COVERAGE_LABELS = {

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { EvaluationTable } from "../components/EvaluationData";
 import { EmptyState, ErrorState, LoadingState, PageHeader, Panel, SectionHeading, StatusBadge } from "../components/Primitives";
 import { useEvaluations } from "../hooks/useEvaluations";
-import type { EvaluationKind } from "../lib/evaluations";
+import { evaluationEngine, type EvaluationKind } from "../lib/evaluations";
 import { humanize, shortDigest } from "../lib/format";
 import { Link } from "../lib/router";
 
@@ -55,6 +55,7 @@ export function EvaluationsView() {
               {report.label}
               <ArrowUpRight aria-hidden="true" />
             </Link>
+            {evaluationEngine(report) ? <span className="table-subtext">SGLang {evaluationEngine(report)?.producer_version}</span> : null}
             <span className="table-subtext mono" title={report.report_sha256}>
               {shortDigest(report.report_sha256)}
             </span>

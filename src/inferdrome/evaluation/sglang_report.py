@@ -2,8 +2,8 @@
 
 The source population's LOCAL_MEASUREMENT_ONLY or SYNTHETIC_ONLY classification
 is retained. Identity digests and DECLARED_COLD do not establish artifact identity,
-GPU qualification, a performed reset, or observed cache state. The frozen dashboard
-reader does not accept this envelope; never export its nested v1 report by itself.
+GPU qualification, a performed reset, or observed cache state. The engine binding
+must accompany every statistical projection; never export its nested v1 report.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class SglangStudyReport(ClosedModel):
     evidence_class: Literal["LOCAL_MEASUREMENT_ONLY", "SYNTHETIC_ONLY"]
     runtime_verification: Literal["UNVERIFIED"]
     evidence_eligible: Literal[False]
-    dashboard_projection: Literal["UNSUPPORTED_ENGINE_BINDING"]
+    dashboard_projection: Literal["UNSUPPORTED_ENGINE_BINDING", "ENGINE_BOUND_V2"]
 
     @field_validator("evidence_eligible", mode="before")
     @classmethod
@@ -176,12 +176,64 @@ def bind_sglang_report(
             evidence_class=checked_report.evidence_class,
             runtime_verification="UNVERIFIED",
             evidence_eligible=False,
-            dashboard_projection="UNSUPPORTED_ENGINE_BINDING",
+            dashboard_projection="ENGINE_BOUND_V2",
         ).model_dump(mode="json")
         if len(canonical_json_bytes(report)) + 1 > MAX_SGLANG_REPORT_BYTES:
             raise ValueError
         return report
     except (ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        raise EvaluationError(
+            "SGLang report violates its bound study contract"
+        ) from None
+
+
+def read_sglang_report_bytes(content: bytes) -> SglangStudyReport:
+    """Read a self-contained envelope without replaying a private study or sources.
+
+    Validate both exact component digests and their shared study identities. This
+    does not attest the declared engine, model artifacts, cache state or runtime.
+    Historical unsupported envelopes remain readable, but are not projectable.
+    """
+    try:
+        raw = _json_object(content, MAX_SGLANG_REPORT_BYTES)
+        if canonical_json_bytes(raw) + b"\n" != content:
+            raise ValueError
+        report = SglangStudyReport.model_validate_json(content)
+        if canonical_json_bytes(report.model_dump(mode="json")) + b"\n" != content:
+            raise ValueError
+        statistics = load_evaluation_report_bytes(
+            canonical_json_bytes(raw["statistical_report"]) + b"\n", kind="STUDY"
+        )
+        if not isinstance(statistics, StudyReport):
+            raise ValueError
+        binding = report.engine_binding
+        expected_prefix = (
+            "DECLARED_ENABLED"
+            if binding.settings.prefix_cache == "RADIX_ENABLED"
+            else "DECLARED_DISABLED"
+        )
+        if (
+            report.engine_binding_sha256 != engine_binding_sha256(binding)
+            or report.statistical_report_sha256
+            != sha256_digest(canonical_json_bytes(raw["statistical_report"]) + b"\n")
+            or statistics.config_sha256 != binding.config_sha256
+            or statistics.plan_sha256 != binding.plan_sha256
+            or statistics.evidence_class != report.evidence_class
+            or statistics.preparation.cache_state != binding.cache_state
+            or statistics.preparation.prefix_caching != expected_prefix
+            or statistics.preparation.serving_image_reference
+            not in (None, binding.image_reference.split("@", 1)[1])
+        ):
+            raise ValueError
+        return report
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+        KeyError,
+        UnicodeError,
+        RecursionError,
+    ):
         raise EvaluationError(
             "SGLang report violates its bound study contract"
         ) from None
@@ -194,13 +246,12 @@ def load_sglang_report_bytes(
 ) -> dict[str, Any]:
     """Validate exact canonical bytes, both component digests and bound summaries."""
     try:
-        raw = _json_object(content, MAX_SGLANG_REPORT_BYTES)
-        if canonical_json_bytes(raw) + b"\n" != content:
-            raise ValueError
-        report = SglangStudyReport.model_validate_json(content)
+        report = read_sglang_report_bytes(content)
         rebuilt = bind_sglang_report(
             report.statistical_report.model_dump(mode="json"), binding, plan
         )
+        # Preserve producer-era capability declarations and historical bytes.
+        rebuilt["dashboard_projection"] = report.dashboard_projection
         if canonical_json_bytes(rebuilt) + b"\n" != content:
             raise ValueError
         return rebuilt
@@ -255,9 +306,9 @@ def render_sglang_markdown(
         "This declaration does not establish that a reset occurred or that cache "
         "state was observed. Artifact and GPU compatibility remain unverified.",
         "",
-        "Dashboard projection: **UNSUPPORTED_ENGINE_BINDING**. The frozen dashboard "
-        "does not accept this envelope; keep the engine binding attached to the "
-        "statistical report.",
+        f"Dashboard projection: **{checked['dashboard_projection']}**. "
+        "Keep the engine binding attached to the statistical report. "
+        "Historical UNSUPPORTED_ENGINE_BINDING reports remain withheld.",
         "",
     ]
     return "\n".join(lines) + "\n" + render_markdown(checked["statistical_report"])

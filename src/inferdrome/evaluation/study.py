@@ -611,22 +611,25 @@ def report_study(
             "study elapsed time contradicts sequential trial durations"
         )
     report = summarize_study(plan, summaries, manifest.model_dump(mode="json"))
+    report_limit = MAX_METADATA_BYTES
     if engine_binding is None:
         markdown_content = render_markdown(report).encode("utf-8")
     else:
         from inferdrome.evaluation.sglang_report import (
+            MAX_SGLANG_REPORT_BYTES,
             bind_sglang_report,
             render_sglang_markdown,
         )
 
+        report_limit = MAX_SGLANG_REPORT_BYTES
         report = bind_sglang_report(report, engine_binding, plan)
         markdown_content = render_sglang_markdown(report, plan, engine_binding).encode(
             "utf-8"
         )
     json_content = canonical_json_bytes(report) + b"\n"
-    if max(len(json_content), len(markdown_content)) > MAX_METADATA_BYTES:
+    if max(len(json_content), len(markdown_content)) > report_limit:
         raise EvaluationError("study report exceeds its output bound")
-    with StudyDirectory.create(output_dir, budget=2 * MAX_METADATA_BYTES) as output:
-        output.write("report.json", json_content, limit=MAX_METADATA_BYTES)
-        output.write("report.md", markdown_content, limit=MAX_METADATA_BYTES)
+    with StudyDirectory.create(output_dir, budget=2 * report_limit) as output:
+        output.write("report.json", json_content, limit=report_limit)
+        output.write("report.md", markdown_content, limit=report_limit)
     return report
