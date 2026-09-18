@@ -34,6 +34,7 @@ from inferdrome.vllm_compose import VLLM_RUNTIME_IMAGE_REFERENCE
 from tests.integration import test_evaluation_routing_loopback as routing_loopback
 from tests.integration.test_evaluation_routing_loopback import _replicas
 from tests.integration.test_evaluation_study_loopback import _payload
+from tests.native_rehearsal_assertions import assert_native_selected_candidate
 from tests.unit.test_evaluation_study_config import load
 
 
@@ -148,9 +149,11 @@ def _protocol(
 
 
 def _rehearsal_failure_diagnostics(output: Path) -> str:
-    """Keep sanitized phase status and lifecycle timing visible in CI failures."""
+    """Keep selection reasons, phase status and lifecycle timing visible in CI."""
 
     paths = [
+        output / "calibration-selection.json",
+        output / "calibration-selection-binding.json",
         *sorted(output.glob("*/manifest.json"))[:3],
         *sorted(output.glob("*-lifecycle.json"))[:3],
     ]
@@ -906,12 +909,38 @@ def test_two_engine_lifecycle_requires_its_full_protocol_reserve_before_dispatch
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("force_high_slo_miss", [False, True])
 def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
     tmp_path: Path,
+    force_high_slo_miss: bool,
 ) -> None:
     async def exercise() -> None:
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
+            delay_high_calibration = False
+            delayed_requests: list[str] = []
+            original_complete = routing_loopback._Replica.complete
+
+            async def controlled_complete(replica, request):
+                if delay_high_calibration:
+                    delayed_requests.append(request.path)
+                    # Produce a real recorded SLO miss only for high calibration.
+                    # The unchanged 100/150 ms targets and native reducers decide
+                    # eligibility; no result or observation is rewritten.
+                    await asyncio.sleep(0.2)
+                return await original_complete(replica, request)
+
+            async def execute(trial, *, stop):
+                nonlocal delay_high_calibration
+                delay_high_calibration = (
+                    force_high_slo_miss and trial.block_id.startswith("load-high-cal-")
+                )
+                try:
+                    return await execute_trial(trial, stop=stop)
+                finally:
+                    delay_high_calibration = False
+
+            patch.setattr(routing_loopback._Replica, "complete", controlled_complete)
             async with _replicas() as (origins, replicas):
                 low_calibration, low_confirmation = _recipe_configs(
                     origins, level_id="load-low", offered_count=7, seed=11
@@ -962,20 +991,24 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                     origins,
                     binding_path=output / "candidate-recipe-bindings.json"
                 )
-                try:
-                    result = await asyncio.wait_for(
-                        run_rehearsal(
-                            rehearsal,
-                            output,
-                            lifecycle=lifecycle,
-                            executor=execute_trial,
-                        ),
-                        45,
-                    )
-                except Exception as error:
-                    error.add_note(_rehearsal_failure_diagnostics(output))
-                    raise
-                assert result.calibration_selection.selected_level_id == "load-high"
+                result = await asyncio.wait_for(
+                    run_rehearsal(
+                        rehearsal,
+                        output,
+                        lifecycle=lifecycle,
+                        executor=execute,
+                    ),
+                    45,
+                )
+                selected = assert_native_selected_candidate(rehearsal, result, output)
+                if force_high_slo_miss:
+                    assert delayed_requests
+                    assert selected.level.level_id == "load-low"
+                    high = result.calibration_selection.assessments[1]
+                    assert high.level_id == "load-high" and not high.admissible
+                    assert high.reason == "SLO_MISS_OR_LATENCY_TARGET_MISS"
+                else:
+                    assert not delayed_requests
                 assert result.confirmation.status == "READY"
                 assert result.confirmation_manifest is not None
                 assert result.confirmation_manifest.status == "COMPLETED"
@@ -1024,7 +1057,9 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                     ).status_code
                     == 200
                 )
-                manifest_path = output / "confirmation-load-high" / "manifest.json"
+                manifest_path = (
+                    output / f"confirmation-{selected.level.level_id}" / "manifest.json"
+                )
                 manifest_bytes = manifest_path.read_bytes()
                 manifest_path.chmod(0o600)
                 for field, drifted_value in (
@@ -1104,7 +1139,11 @@ def test_cpu_loopback_rehearsal_binds_all_trials_and_uses_native_artifacts(
                     *(replica.assert_disconnected() for replica in replicas)
                 )
 
-    asyncio.run(exercise())
+    try:
+        asyncio.run(exercise())
+    except Exception as error:
+        error.add_note(_rehearsal_failure_diagnostics(tmp_path / "rehearsal"))
+        raise
 
 
 def test_rehearsal_rejects_a_confirmation_plan_with_the_wrong_native_order(
