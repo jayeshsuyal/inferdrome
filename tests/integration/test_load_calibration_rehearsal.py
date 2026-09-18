@@ -875,6 +875,86 @@ def test_two_engine_lifecycle_preserves_unresolved_targets_on_cancellation_or_de
     asyncio.run(exercise())
 
 
+def test_two_engine_lifecycle_cancellation_blocks_each_create_boundary(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        snapshot = tmp_path / "qwen3-snapshot"
+        snapshot.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(routing_loopback, "_MODEL", "Qwen/Qwen3-8B")
+            async with _replicas() as (origins, _replicas_unused):
+                trial = compile_study(
+                    _recipe_configs(
+                        origins, level_id="load-low", offered_count=7, seed=11
+                    )[0]
+                ).trials[0]
+
+                before_first_stop = asyncio.Event()
+
+                def cancel_after_artifact_check(_path: Path) -> None:
+                    before_first_stop.set()
+
+                before_first_runner = _FakeLocalEngineRunner()
+                before_first_lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=before_first_runner,
+                    snapshot_verifier=cancel_after_artifact_check,
+                    port_closed_probe=lambda _port, _timeout: None,
+                )
+                with pytest.raises(EvaluationError, match="was cancelled"):
+                    await before_first_lifecycle.prepare(
+                        trial, stop=before_first_stop
+                    )
+                assert not any(
+                    command[:2] == ("docker", "run")
+                    for command in before_first_runner.commands
+                )
+
+                between_creates_stop = asyncio.Event()
+
+                class CancelAfterFirstCreate(_FakeLocalEngineRunner):
+                    async def run(
+                        self, argv: tuple[str, ...], *, timeout_ns: int
+                    ) -> SubprocessResult:
+                        result = await super().run(argv, timeout_ns=timeout_ns)
+                        if argv[:2] == ("docker", "run") and self.start_count == 1:
+                            between_creates_stop.set()
+                        return result
+
+                between_creates_runner = CancelAfterFirstCreate()
+                between_creates_lifecycle = TwoEngineVllmSubprocessLifecycle(
+                    origins,
+                    ownership_id="local-rehearsal",
+                    model_snapshot_path=snapshot,
+                    runner=between_creates_runner,
+                    snapshot_verifier=lambda _path: None,
+                    port_closed_probe=lambda _port, _timeout: None,
+                )
+                with pytest.raises(EvaluationError, match="startup or warmup failed"):
+                    await between_creates_lifecycle.prepare(
+                        trial, stop=between_creates_stop
+                    )
+                starts = [
+                    command
+                    for command in between_creates_runner.commands
+                    if command[:2] == ("docker", "run")
+                ]
+                removals = [
+                    command
+                    for command in between_creates_runner.commands
+                    if command[:3] == ("docker", "rm", "--force")
+                ]
+                assert len(starts) == 1
+                assert [command[3] for command in removals] == [f"{1:064x}"]
+                assert between_creates_runner.containers == {}
+                assert between_creates_lifecycle._active == []
+
+    asyncio.run(exercise())
+
+
 def test_two_engine_subprocess_lifecycle_rejects_an_ambiguous_mount_source(
     tmp_path: Path,
 ) -> None:

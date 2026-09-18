@@ -18,12 +18,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic_ns
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from inferdrome.evaluation.contracts import ClosedModel, EndpointId, EvaluationError
 from inferdrome.evaluation.engine_binding import (
@@ -110,6 +110,34 @@ class TrialLifecycle(Protocol):
     async def prepare(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None: ...
 
     async def cleanup(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None: ...
+
+
+@dataclass(frozen=True)
+class RehearsalSessionWindow:
+    """An already-started bounded session supplied by a host-local owner.
+
+    The native default remains unchanged when no window is supplied.  A caller
+    that stages an approved host before execution can supply its original
+    monotonic start and a non-renewable external cutoff rather than minting a
+    new full session at dispatch time.
+    """
+
+    started_ns: int
+    hard_deadline_ns: int
+
+    def validated_for(self, protocol: LoadCalibrationProtocol, *, now_ns: int) -> None:
+        if (
+            type(self.started_ns) is not int
+            or type(self.hard_deadline_ns) is not int
+            or type(now_ns) is not int
+            or self.started_ns < 0
+            or self.hard_deadline_ns <= self.started_ns
+            or now_ns < self.started_ns
+            or now_ns >= self.hard_deadline_ns
+            or self.hard_deadline_ns - self.started_ns
+            > protocol.max_session_duration_ns
+        ):
+            raise EvaluationError("rehearsal session window is invalid")
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -264,6 +292,17 @@ class AsyncioLocalSubprocessRunner:
     Docker, a model, or an NVIDIA device.
     """
 
+    def __init__(self, *, environment: Mapping[str, str] | None = None) -> None:
+        if environment is not None and (
+            not isinstance(environment, Mapping)
+            or any(
+                type(key) is not str or type(value) is not str
+                for key, value in environment.items()
+            )
+        ):
+            raise EvaluationError("local subprocess environment is invalid")
+        self._environment = None if environment is None else dict(environment)
+
     async def run(self, argv: tuple[str, ...], *, timeout_ns: int) -> SubprocessResult:
         if not argv or type(timeout_ns) is not int or timeout_ns < 1:
             raise EvaluationError("local subprocess command is invalid")
@@ -273,6 +312,7 @@ class AsyncioLocalSubprocessRunner:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._environment,
             )
         except OSError as error:
             raise EvaluationError("local subprocess could not start") from error
@@ -724,10 +764,14 @@ class _TwoEngineOwnedSubprocessLifecycle:
         if self._active:
             raise EvaluationError("local engine lifecycle has an active trial")
         await self._verify_artifacts(stop=stop)
+        if stop.is_set():
+            raise EvaluationError("local engine lifecycle was cancelled")
         deadline_ns = self._deadline()
         await self._verify_gpu_idle(deadline_ns=deadline_ns)
         try:
             for index, endpoint_id in enumerate(("endpoint-a", "endpoint-b")):
+                if stop.is_set():
+                    raise EvaluationError("local engine lifecycle was cancelled")
                 parsed = urlsplit(self._origins[index])
                 assert parsed.port is not None
                 target = _OwnedEngine(
@@ -780,6 +824,61 @@ class RehearsalLifecycleReceipt(ClosedModel):
     cleanup_elapsed_ns: int | None
     evidence_eligible: Literal[False] = False
     runtime_identity: Literal["UNVERIFIED"] = "UNVERIFIED"
+
+
+class SGLangResetReceipt(ClosedModel):
+    """Sanitized successful SGLang prepare/reset facts for one endpoint.
+
+    These fields bind a declared profile, projected launch, readiness contract,
+    and server-accepted flush to the phase trial.  They deliberately do not
+    retain origins, model paths, response bodies, or claim cache attestation.
+    """
+
+    endpoint_id: Literal["endpoint-a", "endpoint-b"]
+    source_profile_sha256: str
+    projected_launch_sha256: str
+    readiness_config_sha256: str
+    flush_completed_ns: Annotated[int, Field(ge=0)]
+    before_metrics_started_ns: Annotated[int, Field(ge=0)]
+    before_metrics_completed_ns: Annotated[int, Field(ge=0)]
+    after_metrics_started_ns: Annotated[int, Field(ge=0)]
+    after_metrics_completed_ns: Annotated[int, Field(ge=0)]
+    disposition: Literal["SERVER_ACCEPTED"]
+    scheduler_source_age: Literal["UNKNOWN"]
+    runtime_verification: Literal["UNVERIFIED"]
+    evidence_eligible: Literal[False]
+
+    @model_validator(mode="after")
+    def ordered_acquisitions(self) -> SGLangResetReceipt:
+        if (
+            not _SHA256_DIGEST.fullmatch(self.source_profile_sha256)
+            or not _SHA256_DIGEST.fullmatch(self.projected_launch_sha256)
+            or not _SHA256_DIGEST.fullmatch(self.readiness_config_sha256)
+            or self.before_metrics_started_ns > self.before_metrics_completed_ns
+            or self.after_metrics_started_ns > self.after_metrics_completed_ns
+            or self.flush_completed_ns < self.before_metrics_completed_ns
+            or self.after_metrics_started_ns < self.flush_completed_ns
+        ):
+            raise ValueError("SGLang reset receipt is invalid")
+        return self
+
+
+class SGLangPrepareReceipt(ClosedModel):
+    schema_version: Literal["inferdrome.evaluation-load-rehearsal-sglang-prepare.v1"]
+    phase: Literal["CALIBRATION", "CONFIRMATION"]
+    source_trial_id: str
+    resets: tuple[SGLangResetReceipt, SGLangResetReceipt]
+    evidence_eligible: Literal[False] = False
+    runtime_identity: Literal["UNVERIFIED"] = "UNVERIFIED"
+
+    @model_validator(mode="after")
+    def one_reset_per_endpoint(self) -> SGLangPrepareReceipt:
+        if tuple(reset.endpoint_id for reset in self.resets) != (
+            "endpoint-a",
+            "endpoint-b",
+        ):
+            raise ValueError("SGLang prepare receipt endpoint order is invalid")
+        return self
 
 
 @dataclass(frozen=True)
@@ -1110,6 +1209,85 @@ def _lifecycle_bytes(
         )
         + b"\n"
     )
+
+
+def _sglang_prepare_receipt(
+    lifecycle: TrialLifecycle,
+    *,
+    phase: Literal["CALIBRATION", "CONFIRMATION"],
+    trial: CompiledTrial,
+) -> SGLangPrepareReceipt | None:
+    """Copy only a completed SGLang ``last_reset`` receipt after prepare.
+
+    The vLLM/default lifecycle has no such property, so it emits no new file
+    and retains the historical receipt bytes.  A malformed optional value is a
+    fail-closed lifecycle violation rather than a reason to fabricate a reset.
+    """
+
+    try:
+        value = lifecycle.last_reset  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
+    try:
+        if type(value) is not tuple:
+            raise ValueError
+        resets: list[SGLangResetReceipt] = []
+        for item in value:
+            reset = item.reset
+            before = reset.before
+            after = reset.after
+            resets.append(
+                SGLangResetReceipt(
+                    endpoint_id=item.endpoint_id,
+                    source_profile_sha256=item.source_profile_sha256,
+                    projected_launch_sha256=item.projected_launch_sha256,
+                    readiness_config_sha256=item.readiness_config_sha256,
+                    flush_completed_ns=reset.flush_completed_ns,
+                    before_metrics_started_ns=before.started_ns,
+                    before_metrics_completed_ns=before.completed_ns,
+                    after_metrics_started_ns=after.started_ns,
+                    after_metrics_completed_ns=after.completed_ns,
+                    disposition=reset.disposition,
+                    scheduler_source_age=reset.scheduler_source_age,
+                    runtime_verification=reset.runtime_verification,
+                    evidence_eligible=reset.evidence_eligible,
+                )
+            )
+        return SGLangPrepareReceipt(
+            schema_version="inferdrome.evaluation-load-rehearsal-sglang-prepare.v1",
+            phase=phase,
+            source_trial_id=trial.trial_id,
+            resets=tuple(resets),  # type: ignore[arg-type]
+        )
+    except (AttributeError, TypeError, ValueError, ValidationError):
+        raise EvaluationError("SGLang lifecycle reset receipt is invalid") from None
+
+
+def _sglang_prepare_bytes(
+    *,
+    phase: Literal["CALIBRATION", "CONFIRMATION"],
+    plan: CompiledStudy,
+    receipts: tuple[SGLangPrepareReceipt, ...],
+) -> bytes:
+    content = (
+        canonical_json_bytes(
+            {
+                "schema_version": (
+                    "inferdrome.evaluation-load-rehearsal-sglang-prepares.v1"
+                ),
+                "phase": phase,
+                "config_sha256": plan.config_sha256,
+                "plan_sha256": _plan_sha256(plan),
+                "receipts": [receipt.model_dump(mode="json") for receipt in receipts],
+                "evidence_eligible": False,
+                "runtime_identity": "UNVERIFIED",
+            }
+        )
+        + b"\n"
+    )
+    if len(content) > _SIDECAR_OUTPUT_BYTES:
+        raise EvaluationError("SGLang reset receipt exceeds its output reserve")
+    return content
 
 
 def _write_sidecar(path: Path, content: bytes) -> None:
@@ -1595,6 +1773,23 @@ async def _run_phase(
                 timeout=remaining_timeout_seconds(execution_deadline_ns),
             )
             prepared = True
+            sglang_prepare = _sglang_prepare_receipt(
+                lifecycle, phase=phase, trial=trial
+            )
+            if sglang_prepare is not None:
+                # Persist the completed reset before native request dispatch.
+                # If a later request or process dies, this receipt is still a
+                # bounded, no-replace record of the launch/readiness/reset
+                # sequence that actually completed; it is never cache proof.
+                receipt_index = plan.trials.index(trial)
+                _write_sidecar(
+                    receipt_path.with_name(
+                        receipt_path.stem + f"-sglang-reset-{receipt_index:04d}.json"
+                    ),
+                    _sglang_prepare_bytes(
+                        phase=phase, plan=plan, receipts=(sglang_prepare,)
+                    ),
+                )
             execute_started = monotonic_ns()
             result = await executor(trial, stop=stop)
         finally:
@@ -1744,6 +1939,8 @@ async def run_rehearsal(
     executor: StudyExecutor | None = None,
     sglang_profiles: Mapping[EndpointId, SglangServingConfig] | None = None,
     containerized: bool = False,
+    session_window: RehearsalSessionWindow | None = None,
+    stop: asyncio.Event | None = None,
 ) -> RehearsalResult:
     """Run one non-renewable session through calibration and confirmation.
 
@@ -1777,8 +1974,16 @@ async def run_rehearsal(
             raise EvaluationError(
                 "SGLang lifecycle differs from the declared engine choice"
             )
-    started_ns = monotonic_ns()
-    hard_deadline_ns = started_ns + protocol.max_session_duration_ns
+    observed_start_ns = monotonic_ns()
+    if session_window is None:
+        started_ns = observed_start_ns
+        hard_deadline_ns = started_ns + protocol.max_session_duration_ns
+    else:
+        if type(session_window) is not RehearsalSessionWindow:
+            raise EvaluationError("rehearsal session window is invalid")
+        session_window.validated_for(protocol, now_ns=observed_start_ns)
+        started_ns = session_window.started_ns
+        hard_deadline_ns = session_window.hard_deadline_ns
     execution_deadline_ns = (
         hard_deadline_ns
         - rehearsal.final_cleanup_reserve_ns
@@ -1787,7 +1992,18 @@ async def run_rehearsal(
     if execution_deadline_ns <= started_ns:
         raise EvaluationError("rehearsal session has no execution window")
 
+    if stop is not None and type(stop) is not asyncio.Event:
+        raise EvaluationError("rehearsal stop boundary is invalid")
+    external_stop = stop
+    stop = stop or asyncio.Event()
+
     def require_before(deadline_ns: int, *, message: str) -> None:
+        # A caller-provided signal boundary must prevent a later dispatch.
+        # The native default event is also set by expected trial cancellation;
+        # preserving its historical report/reduction path avoids relabelling a
+        # lifecycle failure as an external session cancellation.
+        if external_stop is not None and external_stop.is_set():
+            raise EvaluationError("rehearsal session was cancelled")
         if monotonic_ns() >= deadline_ns:
             stop.set()
             raise EvaluationError(message)
@@ -1806,9 +2022,16 @@ async def run_rehearsal(
         if engine_ledger is not None
         else 0
     )
+    sglang_prepare_reserve = (
+        2 * len(rehearsal.candidates) * _SIDECAR_OUTPUT_BYTES
+        if engines is not None
+        else 0
+    )
     if engine_ledger is not None and (
         len(engine_ledger) > _SIDECAR_OUTPUT_BYTES
-        or rehearsal.reserved_output_bytes + engine_output_reserve
+        or rehearsal.reserved_output_bytes
+        + engine_output_reserve
+        + sglang_prepare_reserve
         > protocol.max_session_output_bytes
     ):
         raise EvaluationError("SGLang engine ledger exceeds the session output reserve")
@@ -1822,7 +2045,6 @@ async def run_rehearsal(
     )
     if engine_ledger is not None:
         _write_sidecar(output_root / "engine-choice-bindings.json", engine_ledger)
-    stop = asyncio.Event()
 
     async def expire_execution_window() -> None:
         await asyncio.sleep(
@@ -2018,7 +2240,9 @@ async def run_rehearsal(
                     ),
                     "session_retrieval_reserve_ns": rehearsal.retrieval_reserve_ns,
                     "session_reserved_output_bytes": (
-                        rehearsal.reserved_output_bytes + engine_output_reserve
+                        rehearsal.reserved_output_bytes
+                        + engine_output_reserve
+                        + sglang_prepare_reserve
                     ),
                     "candidate_recipe_bindings_sha256": (
                         candidate_recipe_bindings_sha256
