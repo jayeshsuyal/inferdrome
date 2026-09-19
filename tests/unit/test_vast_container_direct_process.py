@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import sys
 from pathlib import Path
 
 import pytest
 
+import inferdrome.evaluation.direct_process_lifecycle as direct_process_lifecycle
 from inferdrome.evaluation.contracts import EvaluationError
 from inferdrome.evaluation.direct_process_lifecycle import (
     AsyncioDirectProcessRunner,
@@ -99,6 +101,15 @@ def _lifecycle(
     return lifecycle
 
 
+def test_direct_runtime_canonicalizes_a_shell_symlink_without_starting_an_engine(
+) -> None:
+    identity = resolve_direct_runtime("/bin/sh")
+
+    assert identity.path == Path("/bin/sh").resolve(strict=True)
+    assert identity.path.is_absolute()
+    assert identity.path.is_file()
+
+
 def test_vllm_direct_pair_is_gpu_isolated_and_ready_only_after_both_start(
     tmp_path: Path,
 ) -> None:
@@ -118,8 +129,9 @@ def test_vllm_direct_pair_is_gpu_isolated_and_ready_only_after_both_start(
     asyncio.run(lifecycle.prepare(trial, stop=asyncio.Event()))
     assert readiness is True
     assert len(processes.started) == 2
+    expected_executable = str(resolve_direct_runtime("/bin/sh").path)
     for index, (argv, environment, _) in enumerate(processes.started):
-        assert argv[0] == "/bin/sh"
+        assert argv[0] == expected_executable
         assert argv[1:3] == ("serve", str(tmp_path / "snapshot"))
         assert "--dtype" in argv and argv[argv.index("--dtype") + 1] == "bfloat16"
         assert "--tensor-parallel-size" in argv
@@ -198,10 +210,11 @@ def test_sglang_direct_projection_reuses_native_choice_and_gpu_isolation() -> No
         artifact_verifier=lambda _profile: None,
     )
     assert lifecycle.engine_choice_sha256 == bindings.engine_choice_sha256
+    expected_executable = str(resolve_direct_runtime("/bin/sh").path)
     for index, trial in enumerate(rehearsal.candidates[0].calibration_plan.trials[:2]):
         argv = lifecycle._engine_argv(trial, index=index)
         environment = lifecycle._engine_environment(index=index)
-        assert argv[:3] == ("/bin/sh", "-m", "sglang.launch_server")
+        assert argv[:3] == (expected_executable, "-m", "sglang.launch_server")
         assert "--dtype" in argv and argv[argv.index("--dtype") + 1] == "bfloat16"
         assert "--tp-size" in argv and argv[argv.index("--tp-size") + 1] == "1"
         assert environment["CUDA_VISIBLE_DEVICES"] == str(index)
@@ -242,6 +255,115 @@ def test_asyncio_runner_terminates_its_exact_process_group(tmp_path: Path) -> No
             await runner.terminate(lease, timeout_ns=1)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_asyncio_runner_cleans_workers_after_the_engine_leader_exits(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "engine-exited"
+    identity = resolve_direct_runtime(sys.executable)
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        f"pathlib.Path({str(marker)!r}).write_text('started')"
+    )
+
+    async def exercise() -> None:
+        runner = AsyncioDirectProcessRunner()
+        lease = await runner.start(
+            identity,
+            (str(identity.path), "-c", code),
+            environment={
+                "PATH": os.defpath,
+                "HOME": str(tmp_path),
+                "TMPDIR": str(tmp_path),
+            },
+        )
+        for _ in range(100):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert marker.exists()
+        # The supervisor stays as the exact group leader after its engine
+        # child exits, preserving a verified cleanup handle for the worker.
+        assert runner._live[lease.pid].process.returncode is None
+        assert await runner.terminate(lease, timeout_ns=2_000_000_000) is not None
+        with pytest.raises(ProcessLookupError):
+            os.killpg(lease.process_group_id, 0)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_asyncio_runner_escalates_when_term_leaves_an_owned_worker(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "worker-started"
+    identity = resolve_direct_runtime(sys.executable)
+    worker = (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(60)"
+    )
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {worker!r}]); "
+        f"pathlib.Path({str(marker)!r}).write_text('started'); time.sleep(60)"
+    )
+
+    async def exercise() -> None:
+        runner = AsyncioDirectProcessRunner()
+        lease = await runner.start(
+            identity,
+            (str(identity.path), "-c", code),
+            environment={
+                "PATH": os.defpath,
+                "HOME": str(tmp_path),
+                "TMPDIR": str(tmp_path),
+            },
+        )
+        for _ in range(100):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert marker.exists()
+        # The engine accepts TERM, the worker does not, so the still-owned
+        # supervisor group must remain available for bounded KILL escalation.
+        assert await runner.terminate(lease, timeout_ns=2_000_000_000) == -9
+        with pytest.raises(ProcessLookupError):
+            os.killpg(lease.process_group_id, 0)
+
+    asyncio.run(exercise())
+
+
+def test_asyncio_runner_never_signals_a_group_after_supervisor_identity_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _LiveButForeignProcess:
+        returncode: int | None = None
+
+        async def wait(self) -> int:
+            return 0
+
+    lease = DirectProcessLease(pid=4321, process_group_id=4321, argv_sha256="a" * 64)
+    runner = AsyncioDirectProcessRunner()
+    runner._live[lease.pid] = direct_process_lifecycle._LiveProcess(  # type: ignore[arg-type]
+        lease, _LiveButForeignProcess()
+    )
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(os, "getpgid", lambda _pid: 9999)
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda process_group_id, signal_value: signals.append(
+            (process_group_id, signal_value)
+        ),
+    )
+
+    with pytest.raises(EvaluationError, match="group identity changed"):
+        asyncio.run(runner.terminate(lease, timeout_ns=1_000_000))
+    assert signals == []
+    assert lease.pid in runner._live
 
 
 def test_direct_lifecycle_has_no_docker_runner_dependency() -> None:

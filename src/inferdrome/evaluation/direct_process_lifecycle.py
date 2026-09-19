@@ -14,6 +14,7 @@ import asyncio
 import os
 import re
 import signal
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,9 @@ _COMMAND_TIMEOUT_NS = 30_000_000_000
 _WARMUP_TIMEOUT_NS = 5_000_000_000
 _STARTUP_TIMEOUT_NS = 120_000_000_000
 _PROCESS_GRACE_NS = 5_000_000_000
+_SUPERVISOR_START_TIMEOUT_NS = 5_000_000_000
+_SUPERVISOR_MODULE = "inferdrome.evaluation.direct_process_supervisor"
+_SUPERVISOR_READY = b"READY\n"
 
 
 def executable_identity_sha256(identity: ExecutableIdentity) -> str:
@@ -136,7 +140,9 @@ class AsyncioDirectProcessRunner:
 
     Standard output and error are deliberately not captured: a serving process
     must not turn its unbounded diagnostic stream into retained evidence.  A
-    successful start is the only way a lease enters the owner lifecycle.
+    small private supervisor remains the group leader through an engine-leader
+    exit, so the controller can still verify ownership before escalation.  A
+    successful engine launch is the only way a lease enters the owner lifecycle.
     """
 
     def __init__(self) -> None:
@@ -183,17 +189,41 @@ class AsyncioDirectProcessRunner:
         ):
             raise EvaluationError("direct-process argv is invalid")
         checked_environment = self._checked_environment(environment)
+        payload = canonical_json_bytes(
+            {"argv": list(argv), "environment": checked_environment}
+        )
+        if len(payload) > 32_768:
+            raise EvaluationError("direct-process argv is too large")
+        process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
+                sys.executable,
+                "-m",
+                _SUPERVISOR_MODULE,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 env=checked_environment,
                 start_new_session=True,
             )
-        except OSError as error:
+            if process.stdin is None or process.stdout is None:
+                raise EvaluationError("direct-process supervisor is unavailable")
+            process.stdin.write(payload)
+            await process.stdin.drain()
+            process.stdin.close()
+            status = await asyncio.wait_for(
+                process.stdout.readline(), _SUPERVISOR_START_TIMEOUT_NS / 1_000_000_000
+            )
+            if status != _SUPERVISOR_READY:
+                raise EvaluationError("direct-process engine could not start")
+        except (OSError, TimeoutError) as error:
+            if process is not None:
+                await self._discard_unleased_process(process)
             raise EvaluationError("direct-process engine could not start") from error
+        except BaseException:
+            if process is not None:
+                await self._discard_unleased_process(process)
+            raise
         if process.pid is None or process.pid < 1:
             raise EvaluationError("direct-process engine did not return an exact pid")
         lease = DirectProcessLease(
@@ -203,6 +233,24 @@ class AsyncioDirectProcessRunner:
         )
         self._live[lease.pid] = _LiveProcess(lease, process)
         return lease
+
+    @staticmethod
+    async def _discard_unleased_process(process: asyncio.subprocess.Process) -> None:
+        """Bound cleanup for a just-spawned supervisor that never received a lease."""
+
+        if process.pid is None or process.returncode is not None:
+            return
+        try:
+            if os.getpgid(process.pid) == process.pid:
+                os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            return
+        try:
+            await asyncio.wait_for(
+                process.wait(), _PROCESS_GRACE_NS / 1_000_000_000
+            )
+        except (TimeoutError, OSError):
+            return
 
     async def terminate(
         self, lease: DirectProcessLease, *, timeout_ns: int
@@ -219,32 +267,24 @@ class AsyncioDirectProcessRunner:
         process = live.process
         cleanup_confirmed = False
         try:
-            if process.returncode is None:
-                try:
-                    # New-session start makes the child the group leader.  Do
-                    # not signal if that exact relation no longer holds.
-                    if os.getpgid(lease.pid) != lease.process_group_id:
-                        raise EvaluationError("direct-process group identity changed")
-                    os.killpg(lease.process_group_id, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    await asyncio.wait_for(
-                        process.wait(),
-                        timeout=min(timeout_ns, _PROCESS_GRACE_NS) / 1_000_000_000,
-                    )
-                except TimeoutError:
-                    try:
-                        if os.getpgid(lease.pid) != lease.process_group_id:
-                            raise EvaluationError(
-                                "direct-process group identity changed"
-                            )
-                        os.killpg(lease.process_group_id, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    await asyncio.wait_for(
-                        process.wait(), timeout=timeout_ns / 1_000_000_000
-                    )
+            if process.returncode is not None:
+                if self._process_group_is_absent(lease.process_group_id):
+                    cleanup_confirmed = True
+                    return process.returncode
+                raise EvaluationError(
+                    "direct-process group cleanup is unconfirmed after supervisor exit"
+                )
+            self._signal_owned_group(live, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(
+                    process.wait(),
+                    timeout=min(timeout_ns, _PROCESS_GRACE_NS) / 1_000_000_000,
+                )
+            except TimeoutError:
+                self._signal_owned_group(live, signal.SIGKILL)
+                await asyncio.wait_for(
+                    process.wait(), timeout=timeout_ns / 1_000_000_000
+                )
             if not await self._wait_for_process_group_absence(
                 lease.process_group_id, timeout_ns=timeout_ns
             ):
@@ -258,6 +298,20 @@ class AsyncioDirectProcessRunner:
         finally:
             if cleanup_confirmed:
                 self._live.pop(lease.pid, None)
+
+    @staticmethod
+    def _signal_owned_group(live: _LiveProcess, signal_value: signal.Signals) -> None:
+        lease, process = live.lease, live.process
+        if process.returncode is not None:
+            raise EvaluationError("direct-process supervisor exited before cleanup")
+        try:
+            if os.getpgid(lease.pid) != lease.process_group_id:
+                raise EvaluationError("direct-process group identity changed")
+            os.killpg(lease.process_group_id, signal_value)
+        except ProcessLookupError as error:
+            raise EvaluationError(
+                "direct-process group ownership is unavailable"
+            ) from error
 
     @staticmethod
     def _process_group_is_absent(process_group_id: int) -> bool:
