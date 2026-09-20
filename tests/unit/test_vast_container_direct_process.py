@@ -110,6 +110,27 @@ def test_direct_runtime_canonicalizes_a_shell_symlink_without_starting_an_engine
     assert identity.path.is_file()
 
 
+def test_supervisor_uses_its_resolved_source_root_not_ambient_pythonpath() -> None:
+    root, environment = AsyncioDirectProcessRunner._supervisor_context(
+        {
+            "PATH": os.defpath,
+            "HOME": "/tmp",
+            "TMPDIR": "/tmp",
+            "PYTHONPATH": "/untrusted/ambient/import-root",
+        }
+    )
+
+    expected_root = str(
+        Path(direct_process_lifecycle.__file__).resolve().parents[2]
+    )
+    assert root == expected_root
+    assert environment["PYTHONPATH"] == expected_root
+    assert environment["PYTHONPATH"] != "/untrusted/ambient/import-root"
+    assert (
+        Path(root) / "inferdrome" / "evaluation" / "direct_process_supervisor.py"
+    ).is_file()
+
+
 def test_vllm_direct_pair_is_gpu_isolated_and_ready_only_after_both_start(
     tmp_path: Path,
 ) -> None:

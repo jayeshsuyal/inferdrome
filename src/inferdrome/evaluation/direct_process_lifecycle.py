@@ -189,6 +189,9 @@ class AsyncioDirectProcessRunner:
         ):
             raise EvaluationError("direct-process argv is invalid")
         checked_environment = self._checked_environment(environment)
+        supervisor_root, supervisor_environment = self._supervisor_context(
+            checked_environment
+        )
         payload = canonical_json_bytes(
             {"argv": list(argv), "environment": checked_environment}
         )
@@ -203,7 +206,8 @@ class AsyncioDirectProcessRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                env=checked_environment,
+                env=supervisor_environment,
+                cwd=supervisor_root,
                 start_new_session=True,
             )
             if process.stdin is None or process.stdout is None:
@@ -233,6 +237,28 @@ class AsyncioDirectProcessRunner:
         )
         self._live[lease.pid] = _LiveProcess(lease, process)
         return lease
+
+    @staticmethod
+    def _supervisor_context(
+        environment: Mapping[str, str],
+    ) -> tuple[str, dict[str, str]]:
+        """Return an exact import root without inheriting ambient import paths.
+
+        CI executes the source checkout through ``src/`` on the parent
+        ``PYTHONPATH``.  The scrubbed engine environment must not inherit that
+        mutable parent value, but the supervisor itself still needs the exact
+        installed-wheel or source-tree package root to start.
+        """
+
+        root = Path(__file__).resolve().parents[2]
+        module = root / "inferdrome" / "evaluation" / "direct_process_supervisor.py"
+        if not root.is_dir() or not module.is_file():
+            raise EvaluationError(
+                "direct-process supervisor import root is unavailable"
+            )
+        value = dict(environment)
+        value["PYTHONPATH"] = str(root)
+        return str(root), value
 
     @staticmethod
     async def _discard_unleased_process(process: asyncio.subprocess.Process) -> None:
