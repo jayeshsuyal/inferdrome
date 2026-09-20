@@ -104,11 +104,10 @@ tokens, provider payloads or credentials.
 
 ## Export and independent retrieval verification
 
-After the direct session has stopped, the operator must perform the separate
-provider-destruction and exact-resource readback procedure. Inferdrome neither
-performs nor verifies that obligation. Only then copy the local output through
-a controlled transfer path. The existing bounded exporter recognizes the
-direct-process sidecars alongside the canonical study package:
+After the direct session has stopped, export and copy the local output to an
+operator-controlled destination while the host still exists. The existing
+bounded exporter recognizes the direct-process sidecars alongside the
+canonical study package:
 
 ```bash
 PYTHONPATH=src python -m inferdrome.evaluation.cli \
@@ -118,7 +117,8 @@ PYTHONPATH=src python -m inferdrome.evaluation.cli \
 ```
 
 Record the producer-printed archive digest out of band. At the receiving
-location, verify the retrieved bytes before inspecting them:
+location, verify the retrieved bytes before inspecting them and before the
+operator destroys the exact rented instance:
 
 ```bash
 PYTHONPATH=src python -m inferdrome.evaluation.cli \
@@ -133,6 +133,14 @@ inventory. It rejects a mixed Docker/direct operator output or inconsistent
 direct authorization identities. `COMPLETE` means only that the local direct
 rehearsal recorded completion; it does not claim runtime verification, evidence
 eligibility, provider termination, host absence, or campaign success.
+
+After retrieval verification, the operator must perform the separate exact
+provider-resource destruction and absence readback procedure. Inferdrome
+neither performs nor verifies that obligation. If retrieval fails or cannot
+finish before the approved cleanup deadline, that deadline takes precedence:
+do not silently extend the rental. Retain any already retrieved partial package
+and report the remaining loss or unconfirmed state through the external
+operator record.
 
 ## What this does not prove
 
