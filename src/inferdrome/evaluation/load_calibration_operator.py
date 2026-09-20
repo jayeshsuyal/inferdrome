@@ -81,6 +81,36 @@ _STUDY_DIRECTORY = re.compile(r"(?:calibration|confirmation)-[a-z][a-z0-9_-]{0,3
 _REPORT_DIRECTORY = re.compile(
     r"(?:calibration|confirmation)-[a-z][a-z0-9_-]{0,31}-report"
 )
+_DOCKER_OPERATOR_ROOT_FILES = frozenset(
+    {
+        "operator-session.json",
+        "operator-attempt-plan.json",
+        "operator-docker-receipts.json",
+        "operator-outcome.json",
+    }
+)
+_DIRECT_OPERATOR_ROOT_FILES = frozenset(
+    {
+        "operator-vast-container-session.json",
+        "operator-vast-container-attempt-plan.json",
+        "operator-vast-container-process-receipts.json",
+        "operator-vast-container-outcome.json",
+    }
+)
+_DIRECT_OPERATOR_SCHEMA_VERSIONS = {
+    "operator-vast-container-session.json": (
+        "inferdrome.load-calibration-vast-container-session.v1"
+    ),
+    "operator-vast-container-attempt-plan.json": (
+        "inferdrome.load-calibration-vast-container-attempt-plan.v1"
+    ),
+    "operator-vast-container-process-receipts.json": (
+        "inferdrome.load-calibration-vast-container-process-receipts.v1"
+    ),
+    "operator-vast-container-outcome.json": (
+        "inferdrome.load-calibration-vast-container-outcome.v1"
+    ),
+}
 _ROOT_FILE_NAMES = frozenset(
     {
         "candidate-recipe-bindings.json",
@@ -91,10 +121,8 @@ _ROOT_FILE_NAMES = frozenset(
         "confirmation-plan.json",
         "calibration-linkage.json",
         "operator-preflight.json",
-        "operator-session.json",
-        "operator-attempt-plan.json",
-        "operator-docker-receipts.json",
-        "operator-outcome.json",
+        *_DOCKER_OPERATOR_ROOT_FILES,
+        *_DIRECT_OPERATOR_ROOT_FILES,
     }
 )
 _MAX_EXPORT_FILE_BYTES = 64 * 1024 * 1024
@@ -989,6 +1017,12 @@ def _snapshot_output(root_path: Path) -> tuple[tuple[str, bytes], ...]:
 def _source_state(
     values: Mapping[str, bytes],
 ) -> Literal["COMPLETE", "PARTIAL_OR_ABORTED"]:
+    docker_roots = _DOCKER_OPERATOR_ROOT_FILES.intersection(values)
+    direct_roots = _DIRECT_OPERATOR_ROOT_FILES.intersection(values)
+    if docker_roots and direct_roots:
+        raise EvaluationError("host-local export mixes operator identities")
+    if direct_roots:
+        return _direct_source_state(values, direct_roots)
     content = values.get("operator-outcome.json")
     if content is None:
         return "PARTIAL_OR_ABORTED"
@@ -997,6 +1031,65 @@ def _source_state(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return "PARTIAL_OR_ABORTED"
     return "COMPLETE" if parsed.get("state") == "COMPLETED" else "PARTIAL_OR_ABORTED"
+
+
+def _direct_sidecar(name: str, content: bytes) -> Mapping[str, object]:
+    """Validate a retained direct-process sidecar before interpreting its state."""
+
+    try:
+        parsed = json.loads(content)
+        if (
+            not isinstance(parsed, dict)
+            or canonical_json_bytes(parsed) + b"\n" != content
+            or parsed.get("schema_version") != _DIRECT_OPERATOR_SCHEMA_VERSIONS[name]
+        ):
+            raise ValueError
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise EvaluationError("direct operator sidecar is invalid") from None
+    return parsed
+
+
+def _direct_authorization_sha256(
+    name: str, sidecar: Mapping[str, object]
+) -> str:
+    value = sidecar.get("authorization_sha256")
+    if not isinstance(value, str) or re.fullmatch(
+        r"sha256:[0-9a-f]{64}", value
+    ) is None:
+        raise EvaluationError("direct operator identity is invalid")
+    return value
+
+
+def _direct_source_state(
+    values: Mapping[str, bytes], direct_roots: frozenset[str] | set[str]
+) -> Literal["COMPLETE", "PARTIAL_OR_ABORTED"]:
+    sidecars = {
+        name: _direct_sidecar(name, values[name]) for name in direct_roots
+    }
+    session_name = "operator-vast-container-session.json"
+    plan_name = "operator-vast-container-attempt-plan.json"
+    receipts_name = "operator-vast-container-process-receipts.json"
+    outcome_name = "operator-vast-container-outcome.json"
+    session = sidecars.get(session_name)
+    plan = sidecars.get(plan_name)
+    outcome = sidecars.get(outcome_name)
+    if session is not None and plan is not None and (
+        _direct_authorization_sha256(session_name, session)
+        != _direct_authorization_sha256(plan_name, plan)
+    ):
+        raise EvaluationError("direct operator identities are inconsistent")
+    if outcome is None:
+        # A crash while a direct session is being assembled is exportable only
+        # as partial; it must never be recast as a completed local rehearsal.
+        return "PARTIAL_OR_ABORTED"
+    if session is None or plan is None or receipts_name not in sidecars:
+        raise EvaluationError("direct operator outcome is incomplete")
+    state = outcome.get("state")
+    if state == "COMPLETED":
+        return "COMPLETE"
+    if state == "FAILED":
+        return "PARTIAL_OR_ABORTED"
+    raise EvaluationError("direct operator outcome is invalid")
 
 
 def _tarinfo(name: str, size: int) -> tarfile.TarInfo:

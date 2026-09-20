@@ -102,6 +102,38 @@ session, attempt-plan, process-receipt and outcome sidecars. Receipts retain
 hashes and bounded state only—not arguments, local paths, prompts, outputs,
 tokens, provider payloads or credentials.
 
+## Export and independent retrieval verification
+
+After the direct session has stopped, the operator must perform the separate
+provider-destruction and exact-resource readback procedure. Inferdrome neither
+performs nor verifies that obligation. Only then copy the local output through
+a controlled transfer path. The existing bounded exporter recognizes the
+direct-process sidecars alongside the canonical study package:
+
+```bash
+PYTHONPATH=src python -m inferdrome.evaluation.cli \
+  load-calibration-host-export \
+  --output-root /private/outputs/vast-container-rehearsal \
+  --archive /private/retrieval/vast-container-rehearsal.tar
+```
+
+Record the producer-printed archive digest out of band. At the receiving
+location, verify the retrieved bytes before inspecting them:
+
+```bash
+PYTHONPATH=src python -m inferdrome.evaluation.cli \
+  load-calibration-host-verify-export \
+  --archive /private/retrieval/vast-container-rehearsal.tar \
+  --expected-archive-sha256 'sha256:<producer-export-digest>'
+```
+
+The exporter is no-replace and reads only the fixed regular-file grammar using
+no-follow descriptors, bounded file/count/total-byte limits, and a canonical
+inventory. It rejects a mixed Docker/direct operator output or inconsistent
+direct authorization identities. `COMPLETE` means only that the local direct
+rehearsal recorded completion; it does not claim runtime verification, evidence
+eligibility, provider termination, host absence, or campaign success.
+
 ## What this does not prove
 
 - It does not verify availability, price, host identity, GPU model/count, outer
