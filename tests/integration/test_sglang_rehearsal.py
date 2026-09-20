@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from inferdrome.dashboard.api import create_app
 from inferdrome.evaluation import sglang_execution
+from inferdrome.evaluation import sglang_rehearsal as sglang_rehearsal_module
 from inferdrome.evaluation.contracts import EndpointId, EvaluationError
 from inferdrome.evaluation.engine_binding import (
     build_sglang_engine_binding,
@@ -51,6 +52,7 @@ from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_
 from tests.integration import test_evaluation_routing_loopback as routing_loopback
 from tests.integration import test_sglang_study_loopback as sglang_loopback
 from tests.integration.test_load_calibration_rehearsal import _protocol, _recipe_configs
+from tests.native_rehearsal_executor import NativeRehearsalExecutor
 from tests.unit.test_evaluation_study_config import load
 from tests.unit.test_sglang_serving_profile import config as serving_config
 
@@ -166,19 +168,96 @@ class _Lifecycle(LoopbackTwoEndpointReadinessLifecycle):
             raise EvaluationError("synthetic cleanup uncertainty")
 
 
+class _NativeSGLangExecutor:
+    """Bind the deterministic native session to the unchanged SGLang wrapper.
+
+    The calibration/confirmation test exercises the durable rehearsal and
+    engine-binding chain, while the separate SGLang loopback study tests cover
+    the socket-level SGLang client path.  Keeping this fixture on its supplied
+    virtual clock prevents event-loop scheduling from turning the fixed 5 ms
+    freshness threshold into an accidental host-speed requirement.
+    """
+
+    def __init__(
+        self, native: NativeRehearsalExecutor, plan: Any, binding: Any
+    ) -> None:
+        self._native = native
+        self._plan = plan
+        self._binding = binding
+
+    async def __call__(self, trial: CompiledTrial, *, stop: asyncio.Event) -> Any:
+        return sglang_execution.wrap_sglang_result(
+            await self._native(trial, stop=stop), self._binding, self._plan, trial
+        )
+
+
+class _DeterministicLifecycle:
+    """Record the same durable rehearsal boundary without socket scheduling.
+
+    Socket-level SGLang request, metrics, and readiness coverage remains in
+    ``test_sglang_study_loopback``.  This fixture owns only the rehearsal's
+    pre-dispatch ledger assertions, so its exact freshness protocol is driven
+    by the supplied native virtual clock rather than host event-loop timing.
+    """
+
+    def __init__(self, origins: tuple[str, str], *, output: Path) -> None:
+        self._origins = origins
+        self.output = output
+        self.events: list[tuple[str, str]] = []
+        self.choice_contents: list[bytes] = []
+
+    async def prepare(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None:
+        assert not stop.is_set()
+        assert tuple(
+            endpoint.origin for endpoint in trial.config.foreground.endpoints
+        ) == (self._origins)
+        # Both recipe and engine choices must be durable before any dispatch.
+        assert (self.output / "candidate-recipe-bindings.json").is_file()
+        ledger = self.output / "engine-choice-bindings.json"
+        content = ledger.read_bytes()
+        assert canonical_json_bytes(json.loads(content)) + b"\n" == content
+        assert b"sglang" in content and b"confirmation" in content.lower()
+        assert b"127.0.0.1" not in content
+        self.choice_contents.append(content)
+        self.events.append(("prepare", trial.trial_id))
+
+    async def cleanup(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None:
+        assert tuple(
+            endpoint.origin for endpoint in trial.config.foreground.endpoints
+        ) == (self._origins)
+        self.events.append(("cleanup", trial.trial_id))
+
+
 def test_sglang_calibration_and_confirmation_keep_one_prebound_engine_choice(
     tmp_path: Path, synthetic_sources: list[str]
 ) -> None:
     async def exercise() -> None:
-        async with sglang_loopback._replicas() as (origins, replicas):
-            rehearsal = _rehearsal(origins)
-            profiles = _profiles(origins)
-            output = tmp_path / "rehearsal"
-            output.mkdir(mode=0o700)
-            lifecycle = _Lifecycle(origins, output=output, replicas=replicas)
+        origins = ("http://127.0.0.1:18101", "http://127.0.0.1:18102")
+        rehearsal = _rehearsal(origins)
+        profiles = _profiles(origins)
+        output = tmp_path / "rehearsal"
+        output.mkdir(mode=0o700)
+        lifecycle = _DeterministicLifecycle(origins, output=output)
+        native = NativeRehearsalExecutor()
+
+        def deterministic_executor_for(
+            bindings: Any, level_id: str, phase: Any
+        ) -> _NativeSGLangExecutor:
+            item = bindings._phase(level_id, phase)
+            return _NativeSGLangExecutor(native, item.plan, item.binding)
+
+        with pytest.MonkeyPatch.context() as patch, native.study_clock_context():
+            patch.setattr(
+                sglang_rehearsal_module.SGLangRehearsalBindings,
+                "executor_for",
+                deterministic_executor_for,
+            )
             result = await asyncio.wait_for(
                 run_rehearsal(
-                    rehearsal, output, lifecycle=lifecycle, sglang_profiles=profiles
+                    rehearsal,
+                    output,
+                    lifecycle=lifecycle,
+                    sglang_profiles=profiles,
                 ),
                 45,
             )
@@ -189,8 +268,8 @@ def test_sglang_calibration_and_confirmation_keep_one_prebound_engine_choice(
             assert len(synthetic_sources) == 24
             assert len(lifecycle.events) == 48
             assert len(set(lifecycle.choice_contents)) == 1
-            assert all(replica.foreground_requests > 0 for replica in replicas)
-            assert all(replica.active == 0 for replica in replicas)
+            assert len(native.calls) == 24
+            native.assert_quiescent()
             binding_digests = set()
             choices = set()
             for candidate in rehearsal.candidates:

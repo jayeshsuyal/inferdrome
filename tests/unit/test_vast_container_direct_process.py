@@ -320,16 +320,17 @@ def test_asyncio_runner_cleans_workers_after_the_engine_leader_exits(
 def test_asyncio_runner_escalates_when_term_leaves_an_owned_worker(
     tmp_path: Path,
 ) -> None:
-    marker = tmp_path / "worker-started"
+    marker = tmp_path / "worker-ready"
     identity = resolve_direct_runtime(sys.executable)
     worker = (
-        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        "time.sleep(60)"
+        "import os, pathlib, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(60)"
     )
     code = (
-        "import pathlib, subprocess, sys, time; "
+        "import subprocess, sys, time; "
         f"subprocess.Popen([sys.executable, '-c', {worker!r}]); "
-        f"pathlib.Path({str(marker)!r}).write_text('started'); time.sleep(60)"
+        "time.sleep(60)"
     )
 
     async def exercise() -> None:
@@ -348,11 +349,15 @@ def test_asyncio_runner_escalates_when_term_leaves_an_owned_worker(
                 break
             await asyncio.sleep(0.01)
         assert marker.exists()
+        worker_pid = int(marker.read_text(encoding="utf-8"))
+        os.kill(worker_pid, 0)
         # The engine accepts TERM, the worker does not, so the still-owned
         # supervisor group must remain available for bounded KILL escalation.
         assert await runner.terminate(lease, timeout_ns=2_000_000_000) == -9
         with pytest.raises(ProcessLookupError):
             os.killpg(lease.process_group_id, 0)
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
 
     asyncio.run(exercise())
 
