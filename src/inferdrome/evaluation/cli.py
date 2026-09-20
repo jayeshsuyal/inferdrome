@@ -63,6 +63,12 @@ from inferdrome.evaluation.study_config import (
     load_study_config_bytes,
 )
 from inferdrome.evaluation.transport import AiohttpTransport
+from inferdrome.evaluation.vast_container_operator import (
+    load_vast_container_authorization,
+    prepare_vast_container_rehearsal,
+    run_authorized_vast_container_rehearsal,
+    write_vast_container_preflight,
+)
 from inferdrome.routing_execution.canonical import canonical_json_bytes
 
 
@@ -271,6 +277,41 @@ async def _run_host_local_operator(args: argparse.Namespace) -> RehearsalResult:
             signal.signal(sig, handler)
 
 
+async def _run_vast_container_operator(args: argparse.Namespace) -> RehearsalResult:
+    """Direct-process operator command; it has no provider or Docker edge."""
+
+    session_anchor_utc = datetime.now(UTC)
+    session_started_ns = monotonic_ns()
+    prepared = prepare_vast_container_rehearsal(
+        protocol_path=args.protocol,
+        recipe_paths=tuple(args.recipe),
+        runtime=args.runtime,
+        outer_image_reference=args.outer_image_reference,
+        runtime_executable=args.runtime_executable,
+        sglang_profile_paths=tuple(args.sglang_profile),
+    )
+    authorization = load_vast_container_authorization(args.authorization)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for sig in previous:
+            loop.add_signal_handler(sig, stop.set)
+        return await run_authorized_vast_container_rehearsal(
+            prepared,
+            authorization=authorization,
+            model_snapshot_path=args.model_snapshot,
+            output_root=args.output_root,
+            stop=stop,
+            session_anchor_utc=session_anchor_utc,
+            session_started_ns=session_started_ns,
+        )
+    finally:
+        for sig, handler in previous.items():
+            loop.remove_signal_handler(sig)
+            signal.signal(sig, handler)
+
+
 def _host_local_operator_command(args: argparse.Namespace) -> int:
     if args.command == "load-calibration-host-preflight":
         prepared = prepare_host_local_rehearsal(
@@ -334,6 +375,51 @@ def _host_local_operator_command(args: argparse.Namespace) -> int:
                 "calibration_candidate_count": len(rehearsal.calibration_manifests),
                 "confirmation_manifest_written": rehearsal.confirmation_manifest
                 is not None,
+                "provider_termination_verified": False,
+                "evidence_eligible": False,
+            }
+        )
+    )
+    return 0
+
+
+def _vast_container_operator_command(args: argparse.Namespace) -> int:
+    if args.command == "load-calibration-vast-container-preflight":
+        prepared = prepare_vast_container_rehearsal(
+            protocol_path=args.protocol,
+            recipe_paths=tuple(args.recipe),
+            runtime=args.runtime,
+            outer_image_reference=args.outer_image_reference,
+            runtime_executable=args.runtime_executable,
+            sglang_profile_paths=tuple(args.sglang_profile),
+        )
+        write_vast_container_preflight(args.output, prepared.preflight)
+        print(
+            json.dumps(
+                {
+                    "status": "PREFLIGHT_WRITTEN",
+                    "runtime": prepared.preflight.runtime,
+                    "protocol_sha256": prepared.preflight.protocol_sha256,
+                    "outer_image_state": "DECLARED_BY_OPERATOR_UNVERIFIED",
+                    "provider_action_performed": False,
+                    "evidence_eligible": False,
+                }
+            )
+        )
+        return 0
+    if args.execute_approval != "I_UNDERSTAND_DIRECT_ENGINE_PROCESSES_WILL_BE_INVOKED":
+        raise ValueError(
+            "vast-container execution requires its exact local confirmation"
+        )
+    rehearsal = asyncio.run(_run_vast_container_operator(args))
+    print(
+        json.dumps(
+            {
+                "status": "REHEARSAL_COMPLETED",
+                "calibration_candidate_count": len(rehearsal.calibration_manifests),
+                "confirmation_manifest_written": rehearsal.confirmation_manifest
+                is not None,
+                "outer_image_state": "DECLARED_BY_OPERATOR_UNVERIFIED",
                 "provider_termination_verified": False,
                 "evidence_eligible": False,
             }
@@ -471,6 +557,28 @@ def main(argv: list[str] | None = None) -> int:
             )
             host_parser.add_argument("--output-root", required=True, type=Path)
             host_parser.add_argument("--execute-approval", required=True)
+    for name in (
+        "load-calibration-vast-container-preflight",
+        "load-calibration-vast-container-run",
+    ):
+        direct_parser = commands.add_parser(name)
+        direct_parser.add_argument("--protocol", required=True, type=Path)
+        direct_parser.add_argument(
+            "--recipe", required=True, action="append", type=Path
+        )
+        direct_parser.add_argument(
+            "--runtime", required=True, choices=("vllm", "sglang")
+        )
+        direct_parser.add_argument("--sglang-profile", action="append", default=[])
+        direct_parser.add_argument("--outer-image-reference", required=True)
+        direct_parser.add_argument("--runtime-executable", required=True)
+        if name == "load-calibration-vast-container-preflight":
+            direct_parser.add_argument("--output", required=True, type=Path)
+        else:
+            direct_parser.add_argument("--authorization", required=True, type=Path)
+            direct_parser.add_argument("--model-snapshot", required=True, type=Path)
+            direct_parser.add_argument("--output-root", required=True, type=Path)
+            direct_parser.add_argument("--execute-approval", required=True)
     host_export_parser = commands.add_parser("load-calibration-host-export")
     host_export_parser.add_argument("--output-root", required=True, type=Path)
     host_export_parser.add_argument("--archive", required=True, type=Path)
@@ -500,6 +608,8 @@ def main(argv: list[str] | None = None) -> int:
             return _calibration_command(args)
         if args.command.startswith("load-calibration-host-"):
             return _host_local_operator_command(args)
+        if args.command.startswith("load-calibration-vast-container-"):
+            return _vast_container_operator_command(args)
         config = (
             load_config_bytes(read_input(args.config))
             if args.command == "run"
