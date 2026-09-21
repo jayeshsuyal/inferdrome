@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
-from inferdrome.mcp import RunSummary, list_runs
+from inferdrome.mcp import (
+    RunSummary,
+    get_run,
+    list_runs,
+    verify_evidence,
+)
 
 
 def _bundle(
@@ -126,3 +132,134 @@ def test_list_runs_filters_by_model_and_status(tmp_path: Path) -> None:
 def test_list_runs_rejects_a_missing_root(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         list_runs(tmp_path / "does-not-exist")
+
+
+def _detail_bundle(root: Path, name: str) -> None:
+    run_dir = root / name
+    support = run_dir / "capture" / "support"
+    support.mkdir(parents=True)
+    (run_dir / "retrieval-receipt.json").write_bytes(
+        json.dumps({"managed_capability_profile": "p"}).encode()
+    )
+    (support / "workload-manifest.json").write_bytes(
+        json.dumps(
+            {"model_id": "Qwen/Qwen3-8B", "model_revision": "abc", "line_count": 96}
+        ).encode()
+    )
+    (run_dir / "capture.tar.gz.metadata.json").write_bytes(
+        json.dumps({"size_bytes": 321010}).encode()
+    )
+    bundle = run_dir / "capture" / "runs" / "run-xyz" / "bundle"
+    bundle.mkdir(parents=True)
+    (bundle / "environment.json").write_bytes(
+        json.dumps(
+            {
+                "fields": [
+                    {"name": "gpu.model", "value": "NVIDIA A10"},
+                    {"name": "gpu.count", "value": 1},
+                    {"name": "driver.version", "value": "580.105.08"},
+                ]
+            }
+        ).encode()
+    )
+
+
+def test_get_run_returns_typed_detail_with_gpu_and_workload(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _detail_bundle(root, "run-a")
+    detail = get_run(root, "run-a")
+    assert detail.model_id == "Qwen/Qwen3-8B"
+    assert detail.gpu_model == "NVIDIA A10"
+    assert detail.gpu_count == 1
+    assert detail.driver_version == "580.105.08"
+    assert detail.workload_line_count == 96
+    assert detail.archive_size_bytes == 321010
+
+
+def test_get_run_rejects_unknown_and_traversal(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _detail_bundle(root, "run-a")
+    with pytest.raises(KeyError):
+        get_run(root, "missing")
+    with pytest.raises(KeyError):
+        get_run(root, "../secret")
+
+
+def _archive_bundle(
+    root: Path,
+    name: str,
+    *,
+    content: bytes | None,
+    metadata_digest: str | None,
+    sidecar_digest: str | None = None,
+) -> None:
+    run_dir = root / name
+    run_dir.mkdir(parents=True)
+    (run_dir / "retrieval-receipt.json").write_bytes(json.dumps({}).encode())
+    if content is not None:
+        (run_dir / "capture.tar.gz").write_bytes(content)
+    if metadata_digest is not None:
+        (run_dir / "capture.tar.gz.metadata.json").write_bytes(
+            json.dumps({"archive_sha256": metadata_digest}).encode()
+        )
+    if sidecar_digest is not None:
+        (run_dir / "capture.tar.gz.sha256").write_text(
+            f"{sidecar_digest}  capture.tar.gz\n"
+        )
+
+
+def test_verify_evidence_recomputes_and_confirms_a_match(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    content = b"pinned archive bytes"
+    digest = hashlib.sha256(content).hexdigest()
+    _archive_bundle(
+        root,
+        "run-ok",
+        content=content,
+        metadata_digest="sha256:" + digest,
+        sidecar_digest=digest,
+    )
+    result = verify_evidence(root, "run-ok")
+    assert result.status == "VERIFIED"
+    assert result.recomputed_sha256 == digest
+    assert result.recorded_sha256 == digest
+    assert result.archive_size_bytes == len(content)
+
+
+def test_verify_evidence_flags_a_tampered_archive(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _archive_bundle(
+        root, "run-bad", content=b"tampered", metadata_digest="sha256:" + "0" * 64
+    )
+    result = verify_evidence(root, "run-bad")
+    assert result.status == "DIGEST_MISMATCH"
+    assert result.recomputed_sha256 == hashlib.sha256(b"tampered").hexdigest()
+    assert result.recorded_sha256 == "0" * 64
+
+
+def test_verify_evidence_flags_disagreeing_records(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _archive_bundle(
+        root,
+        "run-split",
+        content=b"x",
+        metadata_digest="sha256:" + "a" * 64,
+        sidecar_digest="b" * 64,
+    )
+    assert verify_evidence(root, "run-split").status == "RECORDED_DIGESTS_DISAGREE"
+
+
+def test_verify_evidence_reports_absent_and_unrecorded(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _archive_bundle(
+        root, "run-noarchive", content=None, metadata_digest="sha256:" + "a" * 64
+    )
+    assert verify_evidence(root, "run-noarchive").status == "ARCHIVE_ABSENT"
+    _archive_bundle(root, "run-nodigest", content=b"y", metadata_digest=None)
+    assert verify_evidence(root, "run-nodigest").status == "NO_RECORDED_DIGEST"

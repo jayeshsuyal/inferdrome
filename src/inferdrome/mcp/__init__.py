@@ -6,6 +6,24 @@ verifies evidence, or contacts a provider. Verification and the protocol
 surface are added in later slices.
 """
 
-from inferdrome.mcp.runs import RunStatus, RunSummary, list_runs
+from inferdrome.mcp.runs import (
+    EvidenceVerification,
+    RunDetail,
+    RunStatus,
+    RunSummary,
+    VerificationStatus,
+    get_run,
+    list_runs,
+    verify_evidence,
+)
 
-__all__ = ["RunStatus", "RunSummary", "list_runs"]
+__all__ = [
+    "EvidenceVerification",
+    "RunDetail",
+    "RunStatus",
+    "RunSummary",
+    "VerificationStatus",
+    "get_run",
+    "list_runs",
+    "verify_evidence",
+]
