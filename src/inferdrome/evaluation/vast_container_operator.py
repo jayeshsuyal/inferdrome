@@ -432,6 +432,36 @@ def _outcome_bytes(*, state: Literal["COMPLETED", "FAILED"], reason: str) -> byt
     )
 
 
+def _bounded_reason_detail(text: str) -> str:
+    """Reduce an error message to bounded, single-line, printable-ASCII text.
+
+    Sealed outcome sidecars retain only bounded state, so the diagnostic detail
+    is collapsed to one line, stripped to printable ASCII, and truncated. It
+    carries the failure's own control string, never arguments or paths beyond it.
+    """
+
+    collapsed = " ".join(text.split())
+    printable = "".join(c for c in collapsed if c.isascii() and c.isprintable())
+    return printable[:200] or "unspecified"
+
+
+def _failure_reason(error: BaseException) -> str:
+    """Map a rehearsal failure to a specific, bounded, leak-safe outcome reason.
+
+    A generic ``REHEARSAL_ABORTED`` forces an operator to re-run on a rented GPU
+    just to learn whether a launch timed out, an image was unpinned, or a GPU was
+    busy. ``EvaluationError`` messages are the operator's own curated control
+    strings, so they are emitted (bounded); any other exception contributes only
+    its type name, never its message, to avoid sealing arbitrary content.
+    """
+
+    if isinstance(error, asyncio.CancelledError):
+        return "REHEARSAL_CANCELLED"
+    if isinstance(error, EvaluationError):
+        return "REHEARSAL_ABORTED: " + _bounded_reason_detail(str(error))
+    return "REHEARSAL_ABORTED: unexpected " + type(error).__name__
+
+
 async def run_authorized_vast_container_rehearsal(
     prepared: PreparedVastContainerRehearsal,
     *,
@@ -566,14 +596,14 @@ async def run_authorized_vast_container_rehearsal(
                 session_window=session,
                 stop=stop,
             )
-    except BaseException:
+    except BaseException as error:
         _sidecar(
             output_root / "operator-vast-container-process-receipts.json",
             _process_receipts_bytes(locals().get("lifecycle")),
         )
         _sidecar(
             output_root / "operator-vast-container-outcome.json",
-            _outcome_bytes(state="FAILED", reason="REHEARSAL_ABORTED"),
+            _outcome_bytes(state="FAILED", reason=_failure_reason(error)),
         )
         raise
     _sidecar(

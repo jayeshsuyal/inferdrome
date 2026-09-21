@@ -369,6 +369,84 @@ def test_direct_authorized_execution_exports_and_reverifies_its_sidecars(
     ]
 
 
+def _run_direct_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> dict[str, object]:
+    """Drive the direct rehearsal to a failure and return the sealed outcome."""
+
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    )
+    monkeypatch.setattr(
+        operator,
+        "TwoEngineVllmDirectProcessLifecycle",
+        lambda *a, **k: SimpleNamespace(),
+    )
+
+    async def boom(*_a: object, **_k: object) -> SimpleNamespace:
+        raise error
+
+    monkeypatch.setattr(operator, "run_rehearsal", boom)
+    with pytest.raises(type(error)):
+        asyncio.run(
+            operator.run_authorized_vast_container_rehearsal(
+                prepared,
+                authorization=authorization,
+                model_snapshot_path=snapshot,
+                output_root=output,
+                session_anchor_utc=now,
+                session_started_ns=10,
+                utc_clock=lambda: now,
+                monotonic_clock=iter((11, 12)).__next__,
+                command_runner=_Commands(),
+                process_runner=_Processes(),
+            )
+        )
+    outcome = json.loads(
+        (output / "operator-vast-container-outcome.json").read_text()
+    )
+    assert isinstance(outcome, dict)
+    return outcome
+
+
+def test_direct_failure_seals_the_specific_cause_not_a_generic_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed run must record why it failed, so a rented GPU is not re-spent.
+
+    The sealed outcome carries the operator's own curated EvaluationError control
+    string instead of an opaque REHEARSAL_ABORTED.
+    """
+
+    outcome = _run_direct_failure(
+        tmp_path,
+        monkeypatch,
+        EvaluationError("vast-container outer image is not the pinned runtime"),
+    )
+    assert outcome["state"] == "FAILED"
+    assert outcome["reason"] != "REHEARSAL_ABORTED"
+    assert isinstance(outcome["reason"], str)
+    assert outcome["reason"].startswith("REHEARSAL_ABORTED: ")
+    assert "outer image is not the pinned runtime" in outcome["reason"]
+
+
+def test_direct_unexpected_failure_seals_type_only_never_the_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-EvaluationError failures contribute only a type name, never content."""
+
+    outcome = _run_direct_failure(
+        tmp_path, monkeypatch, RuntimeError("/opt/models/should-not-leak token=abc")
+    )
+    assert outcome["state"] == "FAILED"
+    assert outcome["reason"] == "REHEARSAL_ABORTED: unexpected RuntimeError"
+    assert "should-not-leak" not in outcome["reason"]
+
+
 def test_direct_export_marks_failure_or_partial_and_rejects_mixed_or_unknown_roots(
     tmp_path: Path,
 ) -> None:
