@@ -7,22 +7,30 @@ surface are added in later slices.
 """
 
 from inferdrome.mcp.runs import (
+    ConfigDifference,
     EvidenceVerification,
+    MetricDelta,
+    RunComparison,
     RunDetail,
     RunStatus,
     RunSummary,
     VerificationStatus,
+    compare_runs,
     get_run,
     list_runs,
     verify_evidence,
 )
 
 __all__ = [
+    "ConfigDifference",
     "EvidenceVerification",
+    "MetricDelta",
+    "RunComparison",
     "RunDetail",
     "RunStatus",
     "RunSummary",
     "VerificationStatus",
+    "compare_runs",
     "get_run",
     "list_runs",
     "verify_evidence",

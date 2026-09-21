@@ -10,6 +10,7 @@ import pytest
 
 from inferdrome.mcp import (
     RunSummary,
+    compare_runs,
     get_run,
     list_runs,
     verify_evidence,
@@ -263,3 +264,84 @@ def test_verify_evidence_reports_absent_and_unrecorded(tmp_path: Path) -> None:
     assert verify_evidence(root, "run-noarchive").status == "ARCHIVE_ABSENT"
     _archive_bundle(root, "run-nodigest", content=b"y", metadata_digest=None)
     assert verify_evidence(root, "run-nodigest").status == "NO_RECORDED_DIGEST"
+
+
+def _compare_bundle(
+    root: Path, name: str, *, gpu_model: str, ttft_mean: float
+) -> None:
+    run_dir = root / name
+    support = run_dir / "capture" / "support"
+    support.mkdir(parents=True)
+    (run_dir / "retrieval-receipt.json").write_bytes(json.dumps({}).encode())
+    (support / "workload-manifest.json").write_bytes(
+        json.dumps(
+            {"model_id": "Qwen/Qwen3-8B", "model_revision": "abc", "line_count": 96}
+        ).encode()
+    )
+    bundle = run_dir / "capture" / "runs" / f"run-{name}" / "bundle"
+    (bundle / "derived").mkdir(parents=True)
+    (bundle / "environment.json").write_bytes(
+        json.dumps(
+            {"fields": [{"name": "gpu.model", "value": gpu_model}]}
+        ).encode()
+    )
+    (bundle / "derived" / "measurements.json").write_bytes(
+        json.dumps(
+            {
+                "measurements": [
+                    {
+                        "metric": "ttft_ns",
+                        "aggregation": "mean",
+                        "unit": "ns",
+                        "value": ttft_mean,
+                    },
+                    {
+                        "metric": "error_rate",
+                        "aggregation": "ratio",
+                        "unit": "ratio",
+                        "value": "0.000000",
+                    },
+                ]
+            }
+        ).encode()
+    )
+
+
+def test_compare_runs_reports_comparable_with_metric_deltas(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _compare_bundle(root, "base", gpu_model="NVIDIA A10", ttft_mean=100.0)
+    _compare_bundle(root, "cand", gpu_model="NVIDIA A10", ttft_mean=150.0)
+    result = compare_runs(root, "base", "cand")
+    assert result.comparability == "COMPARABLE"
+    assert result.differences == ()
+    ttft = next(m for m in result.metric_deltas if m.metric == "ttft_ns")
+    assert ttft.baseline_value == 100.0
+    assert ttft.candidate_value == 150.0
+    assert ttft.absolute_delta == 50.0
+    assert ttft.percent_change == 50.0
+    zero = next(m for m in result.metric_deltas if m.metric == "error_rate")
+    assert zero.percent_change is None
+
+
+def test_compare_runs_flags_incomparable_gpu_but_still_returns_deltas(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _compare_bundle(root, "a10", gpu_model="NVIDIA A10", ttft_mean=100.0)
+    _compare_bundle(root, "a100", gpu_model="NVIDIA A100-SXM4-40GB", ttft_mean=40.0)
+    result = compare_runs(root, "a10", "a100")
+    assert result.comparability == "INCOMPARABLE"
+    assert [d.dimension for d in result.differences] == ["gpu_model"]
+    assert result.differences[0].baseline == "NVIDIA A10"
+    assert result.differences[0].candidate == "NVIDIA A100-SXM4-40GB"
+    assert any(m.metric == "ttft_ns" for m in result.metric_deltas)
+
+
+def test_compare_runs_rejects_an_unknown_run(tmp_path: Path) -> None:
+    root = tmp_path / "gpu-proof-retrieved"
+    root.mkdir()
+    _compare_bundle(root, "base", gpu_model="NVIDIA A10", ttft_mean=100.0)
+    with pytest.raises(KeyError):
+        compare_runs(root, "base", "missing")

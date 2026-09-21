@@ -267,6 +267,146 @@ def _recorded_archive_digests(run_dir: Path) -> set[str]:
     return recorded
 
 
+class ConfigDifference(FrozenModel):
+    """One configuration dimension that differs between two runs."""
+
+    dimension: str
+    baseline: str | None
+    candidate: str | None
+
+
+class MetricDelta(FrozenModel):
+    """A paired metric present in both runs, candidate minus baseline."""
+
+    metric: str
+    aggregation: str
+    unit: str
+    baseline_value: float
+    candidate_value: float
+    absolute_delta: float
+    percent_change: float | None
+
+
+class RunComparison(FrozenModel):
+    """A structured, guard-checked comparison of two runs.
+
+    `comparability` is `INCOMPARABLE` when any controlled dimension differs
+    (model, revision, profile, GPU, workload size); the differing dimensions are
+    listed in `differences`. Metric deltas are always returned, but a consumer
+    must heed `comparability` before attributing them: an INCOMPARABLE delta may
+    reflect the config difference, not the engine.
+    """
+
+    baseline_run_id: str
+    candidate_run_id: str
+    comparability: Literal["COMPARABLE", "INCOMPARABLE"]
+    differences: tuple[ConfigDifference, ...]
+    metric_deltas: tuple[MetricDelta, ...]
+
+
+_COMPARABILITY_DIMENSIONS = (
+    "model_id",
+    "model_revision",
+    "managed_capability_profile",
+    "gpu_model",
+    "workload_line_count",
+)
+
+
+def _numeric(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _measurements(run_dir: Path) -> dict[tuple[str, str], tuple[float, str]]:
+    for candidate in sorted(
+        run_dir.glob("capture/**/bundle/derived/measurements.json")
+    ):
+        document = _read_json_object(candidate)
+        rows = document.get("measurements") if document is not None else None
+        if not isinstance(rows, list):
+            continue
+        result: dict[tuple[str, str], tuple[float, str]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            metric = row.get("metric")
+            aggregation = row.get("aggregation")
+            unit = row.get("unit")
+            number = _numeric(row.get("value"))
+            if (
+                isinstance(metric, str)
+                and isinstance(aggregation, str)
+                and isinstance(unit, str)
+                and number is not None
+            ):
+                result[(metric, aggregation)] = (number, unit)
+        return result
+    return {}
+
+
+def compare_runs(
+    evidence_root: Path, baseline_run_id: str, candidate_run_id: str
+) -> RunComparison:
+    """Compare two runs' config and reduced metrics with a comparability guard.
+
+    Reads sealed evidence only. Raises KeyError if either run is unknown. The
+    comparison never emits a winner or verdict; it reports the differences and
+    the paired metric deltas and leaves interpretation to the caller.
+    """
+
+    baseline = get_run(evidence_root, baseline_run_id)
+    candidate = get_run(evidence_root, candidate_run_id)
+    differences: list[ConfigDifference] = []
+    for dimension in _COMPARABILITY_DIMENSIONS:
+        left = getattr(baseline, dimension)
+        right = getattr(candidate, dimension)
+        if left != right:
+            differences.append(
+                ConfigDifference(
+                    dimension=dimension,
+                    baseline=None if left is None else str(left),
+                    candidate=None if right is None else str(right),
+                )
+            )
+    baseline_metrics = _measurements(evidence_root / baseline_run_id)
+    candidate_metrics = _measurements(evidence_root / candidate_run_id)
+    deltas: list[MetricDelta] = []
+    for key in sorted(baseline_metrics.keys() & candidate_metrics.keys()):
+        base_value, unit = baseline_metrics[key]
+        cand_value, _ = candidate_metrics[key]
+        deltas.append(
+            MetricDelta(
+                metric=key[0],
+                aggregation=key[1],
+                unit=unit,
+                baseline_value=base_value,
+                candidate_value=cand_value,
+                absolute_delta=cand_value - base_value,
+                percent_change=(
+                    (cand_value - base_value) / base_value * 100.0
+                    if base_value != 0.0
+                    else None
+                ),
+            )
+        )
+    return RunComparison(
+        baseline_run_id=baseline_run_id,
+        candidate_run_id=candidate_run_id,
+        comparability="COMPARABLE" if not differences else "INCOMPARABLE",
+        differences=tuple(differences),
+        metric_deltas=tuple(deltas),
+    )
+
+
 def verify_evidence(evidence_root: Path, run_id: str) -> EvidenceVerification:
     """Recompute one run's archive digest and compare it to the sealed record.
 
