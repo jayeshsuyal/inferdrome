@@ -61,6 +61,12 @@ _OWNERSHIP = re.compile(r"^[a-z][a-z0-9-]{2,23}$")
 _COMMAND_TIMEOUT_NS = 30_000_000_000
 _WARMUP_TIMEOUT_NS = 5_000_000_000
 _STARTUP_TIMEOUT_NS = 120_000_000_000
+# The 120s default is a test-oriented floor. A real Qwen3-8B server needs far
+# longer to load bf16 weights and capture CUDA graphs before /health answers,
+# so production operators pass this budget instead. It matches
+# QWEN3_STARTUP_TIMEOUT_SECONDS (300s) and is the maximum the lifecycle
+# validator permits (startup_timeout_ns <= 300_000_000_000).
+REAL_GPU_STARTUP_TIMEOUT_NS = 300_000_000_000
 _PROCESS_GRACE_NS = 5_000_000_000
 _SUPERVISOR_START_TIMEOUT_NS = 5_000_000_000
 _SUPERVISOR_MODULE = "inferdrome.evaluation.direct_process_supervisor"

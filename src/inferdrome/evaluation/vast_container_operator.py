@@ -22,6 +22,7 @@ from pydantic import Field, model_validator
 from inferdrome.deployment.gcp_securefs import SafeDirFD, SafeDirFSError
 from inferdrome.evaluation.contracts import ClosedModel, EndpointId, EvaluationError
 from inferdrome.evaluation.direct_process_lifecycle import (
+    REAL_GPU_STARTUP_TIMEOUT_NS,
     DirectProcessRunner,
     TwoEngineSglangDirectProcessLifecycle,
     TwoEngineVllmDirectProcessLifecycle,
@@ -533,6 +534,7 @@ async def run_authorized_vast_container_rehearsal(
                 executable=executable,
                 command_runner=command_runner,
                 process_runner=process_runner,
+                startup_timeout_ns=REAL_GPU_STARTUP_TIMEOUT_NS,
             )
             result = await run_rehearsal(
                 prepared.prepared.rehearsal,
@@ -556,6 +558,7 @@ async def run_authorized_vast_container_rehearsal(
                 executable=executable,
                 command_runner=command_runner,
                 process_runner=process_runner,
+                startup_timeout_ns=REAL_GPU_STARTUP_TIMEOUT_NS,
             )
             result = await run_rehearsal(
                 prepared.prepared.rehearsal,

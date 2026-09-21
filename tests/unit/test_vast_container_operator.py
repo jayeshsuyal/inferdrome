@@ -14,7 +14,10 @@ from inferdrome.evaluation import load_calibration_operator as export_operator
 from inferdrome.evaluation import vast_container_operator as operator
 from inferdrome.evaluation.cli import main
 from inferdrome.evaluation.contracts import EvaluationError
-from inferdrome.evaluation.direct_process_lifecycle import DirectProcessLease
+from inferdrome.evaluation.direct_process_lifecycle import (
+    REAL_GPU_STARTUP_TIMEOUT_NS,
+    DirectProcessLease,
+)
 from inferdrome.evaluation.load_calibration_rehearsal import SubprocessResult
 from inferdrome.qwen3_campaign import qwen3_expected_snapshot_sha256
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
@@ -367,6 +370,61 @@ def test_direct_authorized_execution_exports_and_reverifies_its_sidecars(
     assert json.loads(capsys.readouterr().out)["archive_sha256"] == exported[
         "archive_sha256"
     ]
+
+
+def test_direct_execution_uses_the_real_gpu_startup_budget_not_the_test_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator must grant a real Qwen3-8B server enough time to load.
+
+    A real bf16 8B server needs far longer than the 120s test-oriented default
+    to load weights and capture CUDA graphs before /health answers, so the
+    operator passes REAL_GPU_STARTUP_TIMEOUT_NS (300s). Regression guard for the
+    launch failure that occurs when the default is left in place on real GPUs.
+    """
+
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    )
+    commands, processes = _Commands(), _Processes()
+    captured: list[int] = []
+
+    def fake_lifecycle(origins: tuple[str, str], **kwargs: object) -> object:
+        startup_timeout_ns = kwargs["startup_timeout_ns"]
+        assert isinstance(startup_timeout_ns, int)
+        captured.append(startup_timeout_ns)
+        return SimpleNamespace()
+
+    async def fake_run(
+        rehearsal: object, output_root: Path, **kwargs: object
+    ) -> SimpleNamespace:
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        operator, "TwoEngineVllmDirectProcessLifecycle", fake_lifecycle
+    )
+    monkeypatch.setattr(operator, "run_rehearsal", fake_run)
+    asyncio.run(
+        operator.run_authorized_vast_container_rehearsal(
+            prepared,
+            authorization=authorization,
+            model_snapshot_path=snapshot,
+            output_root=output,
+            session_anchor_utc=now,
+            session_started_ns=10,
+            utc_clock=lambda: now,
+            monotonic_clock=iter((11, 12)).__next__,
+            command_runner=commands,
+            process_runner=processes,
+        )
+    )
+    assert captured == [REAL_GPU_STARTUP_TIMEOUT_NS]
+    assert REAL_GPU_STARTUP_TIMEOUT_NS == 300_000_000_000
+    assert REAL_GPU_STARTUP_TIMEOUT_NS > 120_000_000_000
 
 
 def test_direct_export_marks_failure_or_partial_and_rejects_mixed_or_unknown_roots(
