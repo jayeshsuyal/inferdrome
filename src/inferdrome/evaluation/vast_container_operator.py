@@ -26,6 +26,7 @@ from inferdrome.evaluation.direct_process_lifecycle import (
     DirectProcessRunner,
     TwoEngineSglangDirectProcessLifecycle,
     TwoEngineVllmDirectProcessLifecycle,
+    direct_process_lifecycle_reservation,
     executable_identity_sha256,
     resolve_direct_runtime,
 )
@@ -46,6 +47,7 @@ from inferdrome.evaluation.load_calibration_rehearsal import (
     RehearsalResult,
     RehearsalSessionWindow,
     run_rehearsal,
+    validate_lifecycle_reservation_bounds,
 )
 from inferdrome.evaluation.sglang_profile import SGLANG_IMAGE_REFERENCE
 from inferdrome.evaluation.sglang_rehearsal import bind_sglang_rehearsal
@@ -253,6 +255,14 @@ def prepare_vast_container_rehearsal(
     )
     if outer_image_reference != expected_image:
         raise EvaluationError("vast-container outer image is not the pinned runtime")
+    reservation = direct_process_lifecycle_reservation(
+        startup_timeout_ns=REAL_GPU_STARTUP_TIMEOUT_NS
+    )
+    validate_lifecycle_reservation_bounds(
+        required_prepare_timeout_ns=reservation.required_prepare_timeout_ns,
+        required_cleanup_timeout_ns=reservation.required_cleanup_timeout_ns,
+        protocol=prepared.rehearsal.calibration_plan.protocol,
+    )
     if runtime == "sglang":
         assert prepared.sglang_profiles is not None
         try:

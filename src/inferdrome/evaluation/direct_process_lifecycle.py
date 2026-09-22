@@ -377,6 +377,31 @@ class DirectProcessReceipt:
     returncode: int | None
 
 
+@dataclass(frozen=True)
+class DirectProcessLifecycleReservation:
+    """Pure reservation shared by offline admission and the live lifecycle."""
+
+    required_prepare_timeout_ns: int
+    required_cleanup_timeout_ns: int
+
+
+def direct_process_lifecycle_reservation(
+    *, startup_timeout_ns: int
+) -> DirectProcessLifecycleReservation:
+    """Return the exact conservative bounds without constructing a runtime."""
+
+    if (
+        type(startup_timeout_ns) is not int
+        or startup_timeout_ns < 1
+        or startup_timeout_ns > REAL_GPU_STARTUP_TIMEOUT_NS
+    ):
+        raise EvaluationError("direct-process lifecycle reservation is invalid")
+    return DirectProcessLifecycleReservation(
+        required_prepare_timeout_ns=4 * _COMMAND_TIMEOUT_NS + startup_timeout_ns,
+        required_cleanup_timeout_ns=8 * _COMMAND_TIMEOUT_NS,
+    )
+
+
 class _TwoEngineDirectProcessLifecycle:
     """Fresh exact-owned direct process pairs for one native study trial."""
 
@@ -429,6 +454,9 @@ class _TwoEngineDirectProcessLifecycle:
         self._clock = clock
         self._readiness_timeout_ns = readiness_timeout_ns
         self._startup_timeout_ns = startup_timeout_ns
+        self._reservation = direct_process_lifecycle_reservation(
+            startup_timeout_ns=startup_timeout_ns
+        )
         self._operation_deadline_ns: int | None = None
         self._snapshot_verified = False
         self._active: list[tuple[GpuIndex, DirectProcessLease]] = []
@@ -447,13 +475,13 @@ class _TwoEngineDirectProcessLifecycle:
     def required_prepare_timeout_ns(self) -> int:
         """Port/GPU checks plus the bounded engine startup/readiness phase."""
 
-        return 4 * _COMMAND_TIMEOUT_NS + self._startup_timeout_ns
+        return self._reservation.required_prepare_timeout_ns
 
     @property
     def required_cleanup_timeout_ns(self) -> int:
         """Two terminations plus exact port/GPU absence readback."""
 
-        return 8 * _COMMAND_TIMEOUT_NS
+        return self._reservation.required_cleanup_timeout_ns
 
     @property
     def executable_identity_sha256(self) -> str:

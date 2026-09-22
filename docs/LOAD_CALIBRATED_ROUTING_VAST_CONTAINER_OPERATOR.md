@@ -106,7 +106,22 @@ preflight fails closed if the image string is mutable or is not that exact
 stock manifest,
 the executable is not an absolute regular
 executable, recipes do not compile, the two origins differ from the declared
-study pair, or a native SGLang binding is not exact.
+study pair, a native SGLang binding is not exact, or the protocol cannot fit
+the concrete lifecycle used by execution. With the conservative 300-second
+real-GPU startup allowance, that lifecycle requires at least 420 seconds of
+prepare/reset reserve and 240 seconds of cleanup reserve for every trial.
+Those values are computed by one shared source function used by both preflight
+and the live lifecycle; preflight does not construct a process or touch a GPU.
+
+The failed 16-trial pilot declared 120 seconds for prepare/reset and 30 seconds
+for cleanup. Correcting only those reservations adds 510 seconds per trial:
+the exact 3,562-second envelope becomes 11,722 seconds (3h15m22s), before any
+separately approved provider overhead. That cannot fit the original
+3,562-second runtime and USD 3.75 approval. Preserving the full two-level,
+four-policy calibration plus healthy/stale confirmation matrix therefore
+requires a new runtime/quote/cap authorization. Reducing trials, retaining
+engines across trials, or lowering safety timeouts changes the methodology or
+cold-reset/safety boundary and is not an automatic retry option.
 
 For SGLang, add exactly two `--sglang-profile endpoint-id=/absolute/profile.json`
 arguments and pass the absolute Python executable that will invoke the pinned
