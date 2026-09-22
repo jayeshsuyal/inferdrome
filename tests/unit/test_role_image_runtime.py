@@ -37,6 +37,37 @@ def test_copied_venv_retains_the_same_pinned_base_and_explicit_locked_interprete
     assert words[words.index("--python") + 1] == RUNTIME + "/bin/python"
 
 
+def test_private_engine_is_build_time_ssh_ready_without_changing_runner_role():
+    dockerfile = (ROOT / "Dockerfile.vllm-benchmark-runner").read_text()
+    assert "apt-get install -y --no-install-recommends" in dockerfile
+    assert "openssh-server util-linux" in dockerfile
+    assert "supervisor" not in dockerfile
+    assert "apt-get" not in dockerfile.split('ENTRYPOINT ["inferdrome"]', 1)[-1]
+    assert 'VAST_STARTUP_PROFILE}" = "vast-ssh-public-v1"' in dockerfile
+    assert 'VAST_STARTUP_PROFILE}" = "not-applicable"' in dockerfile
+    assert "com.inferdrome.runtime-package-bootstrap=\"forbidden\"" in dockerfile
+    assert "mv /usr/local/bin/vllm /usr/local/bin/vllm-inferdrome-real" in dockerfile
+    assert "setpriv --reuid=2000 --regid=0 --clear-groups" in dockerfile
+    assert "inferdrome-run-as-serving-user" in dockerfile
+    assert "USER 2000:0" in dockerfile
+    assert "rm -f /etc/ssh/ssh_host_*" in dockerfile
+
+
+def test_role_image_dockerfile_has_no_secret_or_private_material_inputs():
+    dockerfile = (ROOT / "Dockerfile.vllm-benchmark-runner").read_text()
+    forbidden = (
+        "PRIVATE KEY",
+        "authorized_keys",
+        "SSH_PRIVATE_KEY",
+        "HF_TOKEN",
+        "GITHUB_TOKEN",
+        "GHCR_TOKEN",
+        "password=",
+    )
+    assert all(value not in dockerfile for value in forbidden)
+    assert "ssh-keygen" not in dockerfile
+
+
 def _populate_local_application(runtime: Path) -> None:
     """Copy the already-installed core lock graph for shell smokes, not an install.
 

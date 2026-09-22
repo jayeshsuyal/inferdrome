@@ -45,6 +45,33 @@ def test_fixed_role_plans_are_distinct_and_reuse_the_verified_build_wrapper() ->
     assert runner["build"] == {**engine["build"], "runtime_role": "cpu-runner-observer"}
     assert publication.validate_plan(engine) == engine
     assert publication.validate_plan(runner) == runner
+    assert engine["required_labels"]["com.inferdrome.vast-startup-profile"] == (
+        "vast-ssh-public-v1"
+    )
+    assert engine["required_labels"]["com.inferdrome.vast-ssh-readiness-seconds"] == (
+        "180"
+    )
+    assert runner["required_labels"]["com.inferdrome.vast-startup-profile"] == (
+        "not-applicable"
+    )
+    assert runner["required_labels"]["com.inferdrome.public-pull-contract"] == (
+        "private-visibility-unchanged"
+    )
+
+
+def test_public_vast_plan_can_publish_only_the_engine_role() -> None:
+    plan = publication.plan_public_vast_engine(
+        source_commit=_COMMIT,
+        version=_VERSION,
+        workflow_run_id=_RUN_ID,
+    )
+    assert plan["publication_scope"] == "PRIVATE_ENGINE_ONLY"
+    assert plan["visibility"] == "PUBLIC_ANONYMOUS_PULL_REQUIRED"
+    assert plan["engine_plan"] == _plan("private-engine")
+    assert plan["post_build_smoke"] == "scripts/verify_vast_startup_image.py"
+    assert plan["forbidden_visibility_change"] == (
+        "ghcr.io/jayeshsuyal/inferdrome-cpu-runner-observer"
+    )
 
 
 @pytest.mark.parametrize(
@@ -58,9 +85,7 @@ def test_fixed_role_plans_are_distinct_and_reuse_the_verified_build_wrapper() ->
         ("workflow_run_id", "123/unsafe"),
     ),
 )
-def test_planner_rejects_unbounded_dispatch_identity(
-    field: str, value: str
-) -> None:
+def test_planner_rejects_unbounded_dispatch_identity(field: str, value: str) -> None:
     submitted = {
         "role": "private-engine",
         "source_commit": _COMMIT,
@@ -82,9 +107,12 @@ def test_plan_tamper_and_local_inspection_mismatch_fail_closed() -> None:
         publication.validate_plan(altered)
 
     labels = dict(plan["required_labels"])
-    assert publication.validate_local_inspection(
-        plan, labels=labels, platform="linux/amd64", user="2000:0"
-    )["verified"] is True
+    assert (
+        publication.validate_local_inspection(
+            plan, labels=labels, platform="linux/amd64", user="2000:0"
+        )["verified"]
+        is True
+    )
     for malformed_labels, platform, user in (
         (
             {**labels, "org.opencontainers.image.version": "0.0.0"},

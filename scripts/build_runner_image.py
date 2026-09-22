@@ -54,6 +54,7 @@ VLLM_RELEVANT_BUILD_INPUTS = (
     "src",
     # The wrapper is checked as a trust-root input but is not archived.
     "scripts/build_runner_image.py",
+    "scripts/verify_vast_startup_image.py",
 )
 VLLM_ARCHIVE_BUILD_INPUTS = (
     "Dockerfile.vllm-benchmark-runner",
@@ -309,6 +310,8 @@ def build_image(
         raise RunnerImageBuildError("unsupported build flavor")
     if platform != CANONICAL_PLATFORM:
         raise RunnerImageBuildError("runner image target platform must be linux/amd64")
+    relevant_inputs: Sequence[str]
+    archive_inputs: Sequence[str]
     if image_kind == "runner":
         if runtime_role is not None:
             raise RunnerImageBuildError("runner image kind has no runtime role")
@@ -353,7 +356,39 @@ def build_image(
         dockerfile,
     ]
     if runtime_role is not None:
-        command.extend(["--build-arg", f"INFERDROME_RUNTIME_ROLE={runtime_role}"])
+        startup_profile, ssh_seconds, serving_executable, serving_uid, pull = (
+            (
+                "vast-ssh-public-v1",
+                "180",
+                "/usr/local/bin/vllm",
+                "2000",
+                "anonymous-public-pull-required-unverified",
+            )
+            if runtime_role == "private-engine"
+            else (
+                "not-applicable",
+                "0",
+                "not-applicable",
+                "not-applicable",
+                "private-visibility-unchanged",
+            )
+        )
+        command.extend(
+            [
+                "--build-arg",
+                f"INFERDROME_RUNTIME_ROLE={runtime_role}",
+                "--build-arg",
+                f"VAST_STARTUP_PROFILE={startup_profile}",
+                "--build-arg",
+                f"VAST_SSH_READINESS_SECONDS={ssh_seconds}",
+                "--build-arg",
+                f"VAST_SERVING_EXECUTABLE={serving_executable}",
+                "--build-arg",
+                f"VAST_SERVING_UID={serving_uid}",
+                "--build-arg",
+                f"VAST_PUBLIC_PULL_CONTRACT={pull}",
+            ]
+        )
     if source_commit is not None and package_version is not None:
         command.extend(
             [
@@ -365,6 +400,8 @@ def build_image(
         )
     command.extend(["-t", selected_tag])
     if flavor in {"proof", "release"}:
+        if source_commit is None:
+            raise RunnerImageBuildError("source commit identity is unavailable")
         if image_kind == "runner":
             context_manager = _materialize_proof_context(source_commit)
         else:

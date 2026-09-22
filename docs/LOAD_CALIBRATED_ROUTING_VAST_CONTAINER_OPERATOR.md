@@ -15,7 +15,16 @@ replacement and it does not establish host-failure independence.
 ## The bounded topology
 
 One outer, pinned runtime image contains either the pinned vLLM runtime or the
-pinned SGLang runtime and a preloaded Qwen3-8B snapshot. A direct invocation
+pinned SGLang runtime and a preloaded Qwen3-8B snapshot. For vLLM on Vast, the
+outer image must be the public, digest-pinned Inferdrome `private-engine` image
+with the `vast-ssh-public-v1` startup profile. That image is derived from the
+exact pinned vLLM 0.26.0 base and installs `openssh-server` and the `setpriv`
+provider (`util-linux`) at image-build time. Runtime package
+installation is forbidden. The provider
+startup plane must generate per-container SSH host keys (the public image
+contains none) and may run SSH supervision with its required privileges, while the
+checked-in engine wrapper drops each serving process to UID 2000. The separate
+CPU observer image does not receive the Vast SSH layer. A direct invocation
 starts exactly two fresh serving processes per trial:
 
 ```text
@@ -38,11 +47,18 @@ trace, request accounting, selection and report formats remain unchanged.
 ## Required operator packet
 
 Before a direct engine is allowed to start, create an exact
-`inferdrome.load-calibration-vast-container-authorization.v1` packet. It binds:
+`inferdrome.load-calibration-vast-container-authorization.v2` packet. It binds:
 
 - the source commit, protocol and all candidate-recipe digests;
 - `Qwen/Qwen3-8B`, its pinned revision and preloaded snapshot digest;
-- the exact pinned vLLM or SGLang outer `repository@sha256` reference;
+- the exact operational vLLM derived-image or SGLang outer
+  `repository@sha256` reference;
+- for vLLM, an exact public
+  `ghcr.io/jayeshsuyal/inferdrome-private-engine@sha256:...` startup profile
+  binding source commit, pinned base, vLLM/model identities, non-root serving
+  UID, build-time SSH presence, direct foreground sshd startup, forbidden
+  runtime package bootstrap,
+  a 180-second SSH-readiness bound, and the existing 300-second engine bound;
 - a locally observed direct executable metadata digest;
 - a unique ownership alias, bounded session deadline and external termination
   guardian handoff; and
@@ -56,6 +72,37 @@ must be checked by the human/operator through separately authorized provider
 procedures. A completed local rehearsal is still `evidence_eligible=false` and
 is not acceptance or production-routing proof.
 
+The startup profile is a fail-closed declaration, not proof that GHCR is
+public or reachable. Before rental, an independently observed anonymous pull of
+the exact digest is required. A mutable tag, authenticated pull, label copied
+into an approval, or source-only test does not satisfy that external fact.
+Historical v1 packets remain parseable for offline inspection, but cannot
+authorize a new vLLM process start.
+
+After building and before publication, run the deterministic local image smoke
+with an expendable public-key fixture:
+
+```bash
+python scripts/verify_vast_startup_image.py \
+  --image 'sha256:<immutable-local-image-id>' \
+  --authorized-keys-file /absolute/path/to/expendable-test-key.pub \
+  --ssh-private-key-file /absolute/path/to/expendable-test-key \
+  --source-commit '<40-lowercase-hex>'
+```
+
+The smoke accepts an immutable local image ID before publication or the exact
+public `repository@sha256` identity after publication; it never accepts a tag.
+It uses `--pull never` and `--network none`, starts the checked SSH command as
+root against tmpfs runtime state, observes an SSH banner within 180
+seconds, records the generated host key only in isolated runtime `known_hosts`,
+authenticates one real root command with the expendable public-key pair, proves
+wrong-key and password-only attempts fail, proves host keys were created only
+at runtime, and separately proves the serving wrapper drops to UID 2000. The
+private key is mounted read-only only for this local smoke; its bytes are not
+printed, retained in the image, or included in the result. The smoke removes
+only the exact container it created. A
+source test or an unavailable Docker daemon does not satisfy this image gate.
+
 ## Offline preflight
 
 This command reads protocol/recipe files and local executable metadata only. It
@@ -68,13 +115,15 @@ python -m inferdrome.evaluation.cli load-calibration-vast-container-preflight \
   --recipe /private/inputs/load-low.json \
   --recipe /private/inputs/load-high.json \
   --runtime vllm \
-  --outer-image-reference 'vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52' \
+  --outer-image-reference 'ghcr.io/jayeshsuyal/inferdrome-private-engine@sha256:<reviewed-registry-digest>' \
   --runtime-executable /usr/local/bin/vllm \
   --output /private/outputs/vast-container-preflight.json
 ```
 
-Use the exact pinned reference from the versioned source contract. The
-preflight fails closed if the image string is not the pinned source reference,
+For vLLM, use the exact public derived-image digest returned by the reviewed
+publication; its startup profile separately binds the pinned upstream base.
+For SGLang, use its existing exact pinned runtime reference. The preflight
+fails closed if the image string is not the appropriate immutable reference,
 the executable is not an absolute regular
 executable, recipes do not compile, the two origins differ from the declared
 study pair, or a native SGLang binding is not exact.
@@ -147,6 +196,9 @@ operator record.
 - It does not verify availability, price, host identity, GPU model/count, outer
   OCI image provenance, snapshot immutability after preflight, or provider
   termination.
+- It does not prove an anonymous registry pull or SSH readiness. Those are
+  separately observed pre-rental/image and post-launch admission facts; the
+  declared SSH bound is 180 seconds and the engine bound remains 300 seconds.
 - It does not expose an inference endpoint beyond loopback, add a scheduler,
   platform control plane, database, queue, registry, bucket or Kubernetes.
 - It does not make Inferdrome a production router, a benchmark leaderboard, or

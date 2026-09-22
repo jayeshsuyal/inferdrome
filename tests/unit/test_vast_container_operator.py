@@ -22,10 +22,21 @@ from inferdrome.evaluation.load_calibration_rehearsal import (
     SubprocessResult,
     _validate_lifecycle_reservation,
 )
+from inferdrome.evaluation.vast_startup_ready import (
+    VAST_ENGINE_READINESS_SECONDS,
+    VAST_SSH_READINESS_SECONDS,
+)
 from inferdrome.qwen3_campaign import qwen3_expected_snapshot_sha256
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
 from inferdrome.vllm_compose import VLLM_RUNTIME_IMAGE_REFERENCE
 from tests.unit.test_load_calibration_operator import _prepared
+
+_DERIVED_IMAGE = (
+    "ghcr.io/jayeshsuyal/inferdrome-private-engine@sha256:" + "a" * 64
+)
+_OTHER_DERIVED_IMAGE = (
+    "ghcr.io/jayeshsuyal/inferdrome-private-engine@sha256:" + "b" * 64
+)
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, tuple[Path, Path]]:
@@ -46,7 +57,7 @@ def _direct_prepared(tmp_path: Path) -> operator.PreparedVastContainerRehearsal:
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=_DERIVED_IMAGE,
         runtime_executable="/bin/sh",
     )
 
@@ -65,7 +76,7 @@ def _direct_prepared_with_split_reservation(
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=_DERIVED_IMAGE,
         runtime_executable="/bin/sh",
     )
 
@@ -83,7 +94,7 @@ def _direct_authorization(
     return operator.VastContainerRehearsalAuthorization.model_validate(
         {
             "schema_version": (
-                "inferdrome.load-calibration-vast-container-authorization.v1"
+                "inferdrome.load-calibration-vast-container-authorization.v2"
             ),
             "confirmation": "AUTHORIZE_VAST_CONTAINER_TWO_A100_LOAD_CALIBRATION_V1",
             "authorization_id": "direct-run-001",
@@ -92,8 +103,29 @@ def _direct_authorization(
             "execute_not_after_utc": timestamp(now + timedelta(days=3)),
             "source_commit": prepared.preflight.source_commit,
             "runtime": "vllm",
-            "outer_image_reference": VLLM_RUNTIME_IMAGE_REFERENCE,
+            "outer_image_reference": _DERIVED_IMAGE,
             "outer_image_state": "DECLARED_BY_OPERATOR_UNVERIFIED",
+            "startup_ready_image": {
+                "schema_version": (
+                    "inferdrome.vast-startup-ready-image-profile.v1"
+                ),
+                "image_reference": _DERIVED_IMAGE,
+                "source_commit": prepared.preflight.source_commit,
+                "base_image_reference": VLLM_RUNTIME_IMAGE_REFERENCE,
+                "runtime_role": "private-engine",
+                "runtime": "vllm",
+                "runtime_version": "0.26.0",
+                "model_id": "Qwen/Qwen3-8B",
+                "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+                "startup_profile": "vast-ssh-public-v1",
+                "ssh_server_preinstalled": True,
+                "startup_supervisor": "SSHD_FOREGROUND_DIRECT_EXEC",
+                "serving_uid": 2000,
+                "runtime_package_bootstrap": "FORBIDDEN",
+                "registry_access": "ANONYMOUS_PUBLIC_PULL_REQUIRED_UNVERIFIED",
+                "ssh_readiness_seconds": 180,
+                "engine_readiness_seconds": 300,
+            },
             "runtime_executable_identity_sha256": (
                 prepared.preflight.runtime_identity.executable_identity_sha256
             ),
@@ -174,14 +206,14 @@ def test_preflight_observes_executable_but_never_constructs_engine(
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=_DERIVED_IMAGE,
         runtime_executable="/bin/sh",
     )
     second = operator.prepare_vast_container_rehearsal(
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=_DERIVED_IMAGE,
         runtime_executable="/bin/sh",
     )
     assert operator.vast_container_preflight_bytes(
@@ -190,6 +222,11 @@ def test_preflight_observes_executable_but_never_constructs_engine(
     assert (
         first.preflight.runtime_identity.outer_image_state
         == "DECLARED_BY_OPERATOR_UNVERIFIED"
+    )
+    assert first.preflight.runtime_identity.outer_image_reference == _DERIVED_IMAGE
+    assert (
+        first.preflight.runtime_identity.base_image_reference
+        == VLLM_RUNTIME_IMAGE_REFERENCE
     )
     assert (
         first.preflight.runtime_identity.executable_observation
@@ -213,6 +250,82 @@ def test_preflight_rejects_an_unpinned_outer_image_before_any_runtime(
         )
 
 
+def test_authorization_requires_exact_public_startup_ready_profile(
+    tmp_path: Path,
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime.now(UTC).replace(microsecond=0)
+    value = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    ).model_dump(mode="python")
+
+    assert value["startup_ready_image"]["ssh_readiness_seconds"] == 180
+    assert value["startup_ready_image"]["engine_readiness_seconds"] == 300
+    assert VAST_SSH_READINESS_SECONDS == 180
+    assert VAST_ENGINE_READINESS_SECONDS == 300
+    for mutation in (
+        None,
+        {**value["startup_ready_image"], "image_reference": "private:latest"},
+        {**value["startup_ready_image"], "source_commit": "b" * 40},
+        {**value["startup_ready_image"], "runtime_package_bootstrap": "ALLOWED"},
+        {**value["startup_ready_image"], "registry_access": "AUTH_REQUIRED"},
+        {**value["startup_ready_image"], "serving_uid": 0},
+    ):
+        candidate = {**value, "startup_ready_image": mutation}
+        with pytest.raises(ValueError):
+            operator.VastContainerRehearsalAuthorization.model_validate(candidate)
+
+    for candidate in (
+        {**value, "outer_image_reference": _OTHER_DERIVED_IMAGE},
+        {
+            **value,
+            "startup_ready_image": {
+                **value["startup_ready_image"],
+                "base_image_reference": _DERIVED_IMAGE,
+            },
+        },
+        {
+            **value,
+            "startup_ready_image": {
+                **value["startup_ready_image"],
+                "runtime_version": "0.25.0",
+            },
+        },
+        {**value, "model_id": "other/model"},
+    ):
+        with pytest.raises(ValueError):
+            operator.VastContainerRehearsalAuthorization.model_validate(candidate)
+
+
+def test_historical_v1_authorization_remains_parseable_but_cannot_start_vllm(
+    tmp_path: Path,
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime.now(UTC).replace(microsecond=0)
+    value = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    ).model_dump(mode="python")
+    value["schema_version"] = (
+        "inferdrome.load-calibration-vast-container-authorization.v1"
+    )
+    value["outer_image_reference"] = VLLM_RUNTIME_IMAGE_REFERENCE
+    value.pop("startup_ready_image")
+    historical = operator.VastContainerRehearsalAuthorization.model_validate(value)
+    assert historical.startup_ready_image is None
+    with pytest.raises(EvaluationError, match="unavailable or expired"):
+        operator._authorized(
+            historical,
+            prepared,
+            model_snapshot_path=snapshot,
+            output_root=output,
+            now=now,
+        )
+
+
 def test_cli_preflight_writes_only_a_canonical_offline_packet(tmp_path: Path) -> None:
     protocol, recipes = _inputs(tmp_path)
     output_root = tmp_path / "preflight-output"
@@ -231,7 +344,7 @@ def test_cli_preflight_writes_only_a_canonical_offline_packet(tmp_path: Path) ->
                 "--runtime",
                 "vllm",
                 "--outer-image-reference",
-                VLLM_RUNTIME_IMAGE_REFERENCE,
+                _DERIVED_IMAGE,
                 "--runtime-executable",
                 "/bin/sh",
                 "--output",
@@ -246,7 +359,7 @@ def test_cli_preflight_writes_only_a_canonical_offline_packet(tmp_path: Path) ->
             protocol_path=protocol,
             recipe_paths=recipes,
             runtime="vllm",
-            outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+            outer_image_reference=_DERIVED_IMAGE,
             runtime_executable="/bin/sh",
         ).preflight
     )
@@ -267,7 +380,7 @@ def test_run_requires_the_new_exact_direct_process_confirmation(tmp_path: Path) 
                 "--runtime",
                 "vllm",
                 "--outer-image-reference",
-                VLLM_RUNTIME_IMAGE_REFERENCE,
+                _DERIVED_IMAGE,
                 "--runtime-executable",
                 "/bin/sh",
                 "--authorization",

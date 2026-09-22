@@ -50,6 +50,10 @@ from inferdrome.evaluation.load_calibration_rehearsal import (
 from inferdrome.evaluation.sglang_profile import SGLANG_IMAGE_REFERENCE
 from inferdrome.evaluation.sglang_rehearsal import bind_sglang_rehearsal
 from inferdrome.evaluation.study import execute_trial
+from inferdrome.evaluation.vast_startup_ready import (
+    VastStartupReadyImageProfile,
+    is_vast_startup_ready_image_reference,
+)
 from inferdrome.external_router.contracts import Digest, OpaqueId
 from inferdrome.qwen3_campaign import (
     QWEN3_8B_MODEL_ID,
@@ -82,7 +86,8 @@ class VastContainerRehearsalAuthorization(ClosedModel):
     """
 
     schema_version: Literal[
-        "inferdrome.load-calibration-vast-container-authorization.v1"
+        "inferdrome.load-calibration-vast-container-authorization.v1",
+        "inferdrome.load-calibration-vast-container-authorization.v2",
     ]
     confirmation: Literal["AUTHORIZE_VAST_CONTAINER_TWO_A100_LOAD_CALIBRATION_V1"]
     authorization_id: OpaqueId
@@ -93,6 +98,7 @@ class VastContainerRehearsalAuthorization(ClosedModel):
     runtime: RuntimeName
     outer_image_reference: Annotated[str, Field(min_length=1, max_length=256)]
     outer_image_state: Literal["DECLARED_BY_OPERATOR_UNVERIFIED"]
+    startup_ready_image: VastStartupReadyImageProfile | None = None
     runtime_executable_identity_sha256: Digest
     model_id: Literal["Qwen/Qwen3-8B"]
     model_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
@@ -111,17 +117,48 @@ class VastContainerRehearsalAuthorization(ClosedModel):
         approved = _parse_utc(self.approved_at_utc)
         execute = _parse_utc(self.execute_not_after_utc)
         termination = _parse_utc(self.external_guardian.termination_deadline_utc)
-        expected_image = (
-            VLLM_RUNTIME_IMAGE_REFERENCE
-            if self.runtime == "vllm"
-            else SGLANG_IMAGE_REFERENCE
+        startup = self.startup_ready_image
+        startup_invalid = (
+            self.schema_version
+            == "inferdrome.load-calibration-vast-container-authorization.v2"
+            and (
+                self.runtime != "vllm"
+                or startup is None
+                or startup.source_commit != self.source_commit
+                or startup.runtime != self.runtime
+                or startup.model_id != self.model_id
+                or startup.model_revision != self.model_revision
+            )
+        ) or (
+            self.schema_version
+            == "inferdrome.load-calibration-vast-container-authorization.v1"
+            and startup is not None
         )
         if (
             not approved < execute < termination
-            or self.outer_image_reference != expected_image
+            or (
+                self.schema_version
+                == "inferdrome.load-calibration-vast-container-authorization.v1"
+                and self.outer_image_reference
+                != (
+                    VLLM_RUNTIME_IMAGE_REFERENCE
+                    if self.runtime == "vllm"
+                    else SGLANG_IMAGE_REFERENCE
+                )
+            )
+            or (
+                self.schema_version
+                == "inferdrome.load-calibration-vast-container-authorization.v2"
+                and (
+                    startup is None
+                    or self.outer_image_reference != startup.image_reference
+                    or startup.base_image_reference != VLLM_RUNTIME_IMAGE_REFERENCE
+                )
+            )
             or self.model_revision != QWEN3_8B_REVISION
             or self.model_snapshot_sha256 != qwen3_expected_snapshot_sha256()
             or len(set(self.recipe_sha256s)) != len(self.recipe_sha256s)
+            or startup_invalid
         ):
             raise ValueError("vast-container authorization bindings are invalid")
         return self
@@ -131,6 +168,7 @@ class VastContainerRuntimeIdentity(ClosedModel):
     """One observed local executable plus an honest unverified outer image claim."""
 
     outer_image_reference: Annotated[str, Field(min_length=1, max_length=256)]
+    base_image_reference: Annotated[str, Field(min_length=1, max_length=256)]
     outer_image_state: Literal["DECLARED_BY_OPERATOR_UNVERIFIED"]
     executable_identity_sha256: Digest
     executable_observation: Literal["LOCAL_METADATA_OBSERVED"]
@@ -203,10 +241,13 @@ def prepare_vast_container_rehearsal(
         runtime=runtime,
         sglang_profile_paths=sglang_profile_paths,
     )
-    expected_image = (
-        VLLM_RUNTIME_IMAGE_REFERENCE if runtime == "vllm" else SGLANG_IMAGE_REFERENCE
-    )
-    if outer_image_reference != expected_image:
+    if runtime == "vllm":
+        valid_image = is_vast_startup_ready_image_reference(outer_image_reference)
+        base_image_reference = VLLM_RUNTIME_IMAGE_REFERENCE
+    else:
+        valid_image = outer_image_reference == SGLANG_IMAGE_REFERENCE
+        base_image_reference = SGLANG_IMAGE_REFERENCE
+    if not valid_image:
         raise EvaluationError("vast-container outer image is not the pinned runtime")
     if runtime == "sglang":
         assert prepared.sglang_profiles is not None
@@ -219,6 +260,7 @@ def prepare_vast_container_rehearsal(
     executable = resolve_direct_runtime(runtime_executable)
     runtime_identity = VastContainerRuntimeIdentity(
         outer_image_reference=outer_image_reference,
+        base_image_reference=base_image_reference,
         outer_image_state="DECLARED_BY_OPERATOR_UNVERIFIED",
         executable_identity_sha256=executable_identity_sha256(executable),
         executable_observation="LOCAL_METADATA_OBSERVED",
@@ -285,6 +327,14 @@ def _authorized(
     )
     if (
         authorization.runtime != current.runtime
+        or (
+            authorization.runtime == "vllm"
+            and (
+                authorization.schema_version
+                != "inferdrome.load-calibration-vast-container-authorization.v2"
+                or authorization.startup_ready_image is None
+            )
+        )
         or authorization.source_commit != current.source_commit
         or authorization.protocol_sha256 != current.protocol_sha256
         or authorization.recipe_sha256s != current.recipe_sha256s
