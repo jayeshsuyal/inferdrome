@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from copy import deepcopy
@@ -19,6 +20,7 @@ from inferdrome.evaluation.load_calibration import (
     confirmation_plan,
     load_calibration_observations_bytes,
     load_calibration_protocol_bytes,
+    protocol_bytes,
     select_calibration_level,
 )
 from inferdrome.evaluation.policies import POLICY_IDS
@@ -165,6 +167,18 @@ def test_protocol_freezes_sweep_reset_selection_and_confirmation_order() -> None
     assert [row.scenario for row in confirmation.trials[:4]] == ["HEALTHY"] * 4
     assert [row.scenario for row in confirmation.trials[4:8]] == ["STALE_LOAD"] * 4
     assert [row.policy_id for row in confirmation.trials[4:8]] == list(POLICY_IDS)
+
+
+def test_legacy_protocol_canonical_bytes_do_not_gain_cleanup_allowance() -> None:
+    payload = protocol_payload()
+    protocol = load_calibration_protocol_bytes(json.dumps(payload).encode())
+    encoded = protocol_bytes(protocol)
+
+    assert protocol.preparation.cleanup_max_duration_ns is None
+    assert hashlib.sha256(encoded).hexdigest() == (
+        "472083071f861ccc67d002a665c85bbea9096f7b74db7650bffbb868789c1262"
+    )
+    assert b"cleanup_max_duration_ns" not in encoded
 
 
 @pytest.mark.parametrize("kind", ["slo", "incomplete"])

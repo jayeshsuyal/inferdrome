@@ -99,6 +99,12 @@ class CalibrationPreparation(ClosedModel):
     warmup_reset_max_duration_ns: Annotated[
         int, Field(ge=1, le=MAX_WARMUP_RESET_DURATION_NS)
     ]
+    # Older v1 protocols declared one symmetric prepare/cleanup allowance.
+    # Omission preserves those exact bytes and semantics; newer protocols may
+    # declare the independently bounded cleanup phase.
+    cleanup_max_duration_ns: (
+        Annotated[int, Field(ge=1, le=MAX_WARMUP_RESET_DURATION_NS)] | None
+    ) = None
     stop_rule: Literal["STOP_PHASE_ON_INCOMPLETE_TERMINAL_POPULATION"] = (
         "STOP_PHASE_ON_INCOMPLETE_TERMINAL_POPULATION"
     )
@@ -160,6 +166,11 @@ class LoadCalibrationProtocol(ClosedModel):
         confirmation = self.confirmation_repetitions * 2 * len(POLICY_IDS)
         if calibration + confirmation > MAX_PROTOCOL_TRIALS:
             raise ValueError("calibration trial budget exceeds its bound")
+        cleanup_duration_ns = (
+            self.preparation.warmup_reset_max_duration_ns
+            if self.preparation.cleanup_max_duration_ns is None
+            else self.preparation.cleanup_max_duration_ns
+        )
         worst_case = (
             sum(
                 level.worst_case_duration_ns
@@ -168,9 +179,8 @@ class LoadCalibrationProtocol(ClosedModel):
                 for level in self.levels
             )
             + max(level.worst_case_duration_ns for level in self.levels) * confirmation
-            + 2
-            * (calibration + confirmation)
-            * self.preparation.warmup_reset_max_duration_ns
+            + (calibration + confirmation)
+            * (self.preparation.warmup_reset_max_duration_ns + cleanup_duration_ns)
         )
         if worst_case > self.max_session_duration_ns:
             raise ValueError("calibration duration reserve exceeds its session bound")
@@ -213,7 +223,7 @@ class CompiledCalibrationPlan:
             "policy_order": list(self.protocol.policy_order),
             "first_content_slo_ns": self.protocol.first_content_slo_ns,
             "completion_slo_ns": self.protocol.completion_slo_ns,
-            "preparation": self.protocol.preparation.model_dump(mode="json"),
+            "preparation": json.loads(protocol_bytes(self.protocol))["preparation"],
             "selection_rule": self.protocol.selection_rule.model_dump(mode="json"),
             "max_session_duration_ns": self.protocol.max_session_duration_ns,
             "per_trial_output_bytes": self.protocol.per_trial_output_bytes,
@@ -361,7 +371,11 @@ class ConfirmationPlan(ClosedModel):
 
 
 def protocol_bytes(protocol: LoadCalibrationProtocol) -> bytes:
-    return canonical_json_bytes(protocol.model_dump(mode="json")) + b"\n"
+    payload = protocol.model_dump(mode="json")
+    if protocol.preparation.cleanup_max_duration_ns is None:
+        # Preserve the canonical identity of every historical v1 protocol.
+        payload["preparation"].pop("cleanup_max_duration_ns")
+    return canonical_json_bytes(payload) + b"\n"
 
 
 def _policy_order_for_repeat(repeat_index: int) -> tuple[PolicyId, ...]:

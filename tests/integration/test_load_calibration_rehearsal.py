@@ -105,6 +105,7 @@ def _protocol(
     configs: tuple[tuple[str, StudyConfig, StudyConfig], ...],
     *,
     lifecycle_allowance_ns: int = 500_000_000,
+    cleanup_allowance_ns: int | None = None,
 ) -> bytes:
     levels: list[dict[str, object]] = []
     for level_id, calibration, _ in configs:
@@ -140,7 +141,14 @@ def _protocol(
             "completion_slo_ns": 150_000_000,
             # This is the controller's reset/readiness allowance, distinct from
             # the frozen telemetry-freshness threshold exercised by the study.
-            "preparation": {"warmup_reset_max_duration_ns": lifecycle_allowance_ns},
+            "preparation": {
+                "warmup_reset_max_duration_ns": lifecycle_allowance_ns,
+                **(
+                    {}
+                    if cleanup_allowance_ns is None
+                    else {"cleanup_max_duration_ns": cleanup_allowance_ns}
+                ),
+            },
             "selection_rule": {},
             "per_trial_output_bytes": 2 * 1024 * 1024,
             "max_session_duration_ns": 86_400_000_000_000,

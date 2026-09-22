@@ -14,8 +14,14 @@ from inferdrome.evaluation import load_calibration_operator as export_operator
 from inferdrome.evaluation import vast_container_operator as operator
 from inferdrome.evaluation.cli import main
 from inferdrome.evaluation.contracts import EvaluationError
-from inferdrome.evaluation.direct_process_lifecycle import DirectProcessLease
-from inferdrome.evaluation.load_calibration_rehearsal import SubprocessResult
+from inferdrome.evaluation.direct_process_lifecycle import (
+    REAL_GPU_STARTUP_TIMEOUT_NS,
+    DirectProcessLease,
+)
+from inferdrome.evaluation.load_calibration_rehearsal import (
+    SubprocessResult,
+    _validate_lifecycle_reservation,
+)
 from inferdrome.qwen3_campaign import qwen3_expected_snapshot_sha256
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
 from inferdrome.vllm_compose import VLLM_RUNTIME_IMAGE_REFERENCE
@@ -36,6 +42,25 @@ def _directory(path: Path) -> Path:
 
 def _direct_prepared(tmp_path: Path) -> operator.PreparedVastContainerRehearsal:
     protocol, recipes = _inputs(tmp_path)
+    return operator.prepare_vast_container_rehearsal(
+        protocol_path=protocol,
+        recipe_paths=recipes,
+        runtime="vllm",
+        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        runtime_executable="/bin/sh",
+    )
+
+
+def _direct_prepared_with_split_reservation(
+    tmp_path: Path,
+) -> operator.PreparedVastContainerRehearsal:
+    protocol, recipes = _inputs(tmp_path)
+    value = json.loads(protocol.read_bytes())
+    value["preparation"]["warmup_reset_max_duration_ns"] = 420_000_000_000
+    value["preparation"]["cleanup_max_duration_ns"] = 240_000_000_000
+    protocol.chmod(0o600)
+    protocol.write_bytes(canonical_json_bytes(value) + b"\n")
+    protocol.chmod(0o400)
     return operator.prepare_vast_container_rehearsal(
         protocol_path=protocol,
         recipe_paths=recipes,
@@ -367,6 +392,130 @@ def test_direct_authorized_execution_exports_and_reverifies_its_sidecars(
     assert json.loads(capsys.readouterr().out)["archive_sha256"] == exported[
         "archive_sha256"
     ]
+
+
+def test_direct_execution_uses_the_real_gpu_startup_budget_not_the_test_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator grants the reviewed 300s startup allowance."""
+
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    )
+    commands, processes = _Commands(), _Processes()
+    captured: list[int] = []
+
+    def fake_lifecycle(origins: tuple[str, str], **kwargs: object) -> object:
+        startup_timeout_ns = kwargs["startup_timeout_ns"]
+        assert isinstance(startup_timeout_ns, int)
+        captured.append(startup_timeout_ns)
+        return SimpleNamespace()
+
+    async def fake_run(
+        rehearsal: object, output_root: Path, **kwargs: object
+    ) -> SimpleNamespace:
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        operator, "TwoEngineVllmDirectProcessLifecycle", fake_lifecycle
+    )
+    monkeypatch.setattr(operator, "run_rehearsal", fake_run)
+    asyncio.run(
+        operator.run_authorized_vast_container_rehearsal(
+            prepared,
+            authorization=authorization,
+            model_snapshot_path=snapshot,
+            output_root=output,
+            session_anchor_utc=now,
+            session_started_ns=10,
+            utc_clock=lambda: now,
+            monotonic_clock=iter((11, 12)).__next__,
+            command_runner=commands,
+            process_runner=processes,
+        )
+    )
+    assert captured == [REAL_GPU_STARTUP_TIMEOUT_NS]
+    assert REAL_GPU_STARTUP_TIMEOUT_NS == 300_000_000_000
+    assert REAL_GPU_STARTUP_TIMEOUT_NS > 120_000_000_000
+
+
+def test_real_direct_lifecycle_accepts_only_connected_split_reservation(
+    tmp_path: Path,
+) -> None:
+    """Exercise the actual compiler, protocol and lifecycle reservation seam."""
+
+    prepared = _direct_prepared_with_split_reservation(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    origins = operator._origins(prepared.prepared)
+    lifecycle = operator.TwoEngineVllmDirectProcessLifecycle(
+        origins,
+        ownership_id="direct-run-001",
+        model_snapshot_path=snapshot,
+        executable=operator.resolve_direct_runtime("/bin/sh"),
+        command_runner=_Commands(),
+        process_runner=_Processes(),
+        startup_timeout_ns=REAL_GPU_STARTUP_TIMEOUT_NS,
+    )
+
+    protocol = prepared.prepared.rehearsal.calibration_plan.protocol
+    assert lifecycle.required_prepare_timeout_ns == 420_000_000_000
+    assert lifecycle.required_cleanup_timeout_ns == 240_000_000_000
+    assert protocol.preparation.warmup_reset_max_duration_ns == 420_000_000_000
+    assert protocol.preparation.cleanup_max_duration_ns == 240_000_000_000
+    _validate_lifecycle_reservation(lifecycle, protocol)
+
+    legacy = protocol.model_copy(
+        update={
+            "preparation": protocol.preparation.model_copy(
+                update={
+                    "warmup_reset_max_duration_ns": 240_000_000_000,
+                    "cleanup_max_duration_ns": None,
+                }
+            )
+        }
+    )
+    with pytest.raises(
+        EvaluationError,
+        match="protocol lifecycle reserve cannot run the supplied lifecycle",
+    ):
+        _validate_lifecycle_reservation(lifecycle, legacy)
+
+
+def test_legacy_lifecycle_requirement_must_fit_prepare_and_cleanup_reserves(
+    tmp_path: Path,
+) -> None:
+    protocol = _direct_prepared_with_split_reservation(
+        tmp_path
+    ).prepared.rehearsal.calibration_plan.protocol
+    legacy = SimpleNamespace(required_operation_timeout_ns=240_000_000_000)
+
+    _validate_lifecycle_reservation(legacy, protocol)
+
+    insufficient_cleanup = protocol.model_copy(
+        update={
+            "preparation": protocol.preparation.model_copy(
+                update={"cleanup_max_duration_ns": 1}
+            )
+        }
+    )
+    with pytest.raises(
+        EvaluationError,
+        match="protocol lifecycle reserve cannot run the supplied lifecycle",
+    ):
+        _validate_lifecycle_reservation(legacy, insufficient_cleanup)
+
+    omitted_cleanup = protocol.model_copy(
+        update={
+            "preparation": protocol.preparation.model_copy(
+                update={"cleanup_max_duration_ns": None}
+            )
+        }
+    )
+    _validate_lifecycle_reservation(legacy, omitted_cleanup)
 
 
 def test_direct_export_marks_failure_or_partial_and_rejects_mixed_or_unknown_roots(

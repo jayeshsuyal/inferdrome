@@ -1049,8 +1049,13 @@ def _budgeted(
     # ``run_study`` owns a wall deadline around its injected executor.  The
     # injected lifecycle is therefore part of—not a hidden prelude to—that
     # deadline.  The protocol separately reserves the same work study-wide.
-    lifecycle_reserve = (
-        2 * len(plan.trials) * protocol.preparation.warmup_reset_max_duration_ns
+    cleanup_duration_ns = (
+        protocol.preparation.warmup_reset_max_duration_ns
+        if protocol.preparation.cleanup_max_duration_ns is None
+        else protocol.preparation.cleanup_max_duration_ns
+    )
+    lifecycle_reserve = len(plan.trials) * (
+        protocol.preparation.warmup_reset_max_duration_ns + cleanup_duration_ns
     )
     required = plan.worst_case_duration_ns + lifecycle_reserve
     if required > config.limits.max_duration_ns:
@@ -1155,10 +1160,16 @@ def compile_rehearsal(
     lifecycle_trials = sum(len(item.calibration_plan.trials) for item in bound) + max(
         len(item.confirmation_plan.trials) for item in bound
     )
+    cleanup_duration_ns = (
+        protocol.preparation.warmup_reset_max_duration_ns
+        if protocol.preparation.cleanup_max_duration_ns is None
+        else protocol.preparation.cleanup_max_duration_ns
+    )
     execution_worst_case_duration_ns = (
         calibration_duration
         + confirmation_duration
-        + 2 * lifecycle_trials * protocol.preparation.warmup_reset_max_duration_ns
+        + lifecycle_trials
+        * (protocol.preparation.warmup_reset_max_duration_ns + cleanup_duration_ns)
     )
     worst_case_duration_ns = (
         execution_worst_case_duration_ns
@@ -1708,12 +1719,38 @@ def _validate_lifecycle_reservation(
 ) -> None:
     """Reject a known lifecycle whose reset/readiness cannot fit its declaration."""
 
+    cleanup_reserve = (
+        protocol.preparation.warmup_reset_max_duration_ns
+        if protocol.preparation.cleanup_max_duration_ns is None
+        else protocol.preparation.cleanup_max_duration_ns
+    )
+    required_prepare = getattr(lifecycle, "required_prepare_timeout_ns", None)
+    required_cleanup = getattr(lifecycle, "required_cleanup_timeout_ns", None)
+    if required_prepare is not None or required_cleanup is not None:
+        if (
+            type(required_prepare) is not int
+            or required_prepare < 1
+            or type(required_cleanup) is not int
+            or required_cleanup < 1
+        ):
+            raise EvaluationError("rehearsal lifecycle reservation is invalid")
+        if (
+            required_prepare > protocol.preparation.warmup_reset_max_duration_ns
+            or required_cleanup > cleanup_reserve
+        ):
+            raise EvaluationError(
+                "protocol lifecycle reserve cannot run the supplied lifecycle"
+            )
+        return
     required = getattr(lifecycle, "required_operation_timeout_ns", None)
     if required is None:
         return
     if type(required) is not int or required < 1:
         raise EvaluationError("rehearsal lifecycle reservation is invalid")
-    if required > protocol.preparation.warmup_reset_max_duration_ns:
+    if (
+        required > protocol.preparation.warmup_reset_max_duration_ns
+        or required > cleanup_reserve
+    ):
         raise EvaluationError(
             "protocol lifecycle reserve cannot run the supplied lifecycle"
         )
@@ -1745,21 +1782,20 @@ async def _run_phase(
     lifecycle: TrialLifecycle,
     executor: StudyExecutor,
     stop: asyncio.Event,
-    lifecycle_timeout_ns: int,
+    lifecycle_prepare_timeout_ns: int,
+    lifecycle_cleanup_timeout_ns: int,
     execution_deadline_ns: int,
     hard_deadline_ns: int,
     engine_binding: EvaluationEngineBinding | None = None,
 ) -> StudyManifest:
     receipts: list[RehearsalLifecycleReceipt] = []
 
-    def remaining_timeout_seconds(deadline_ns: int) -> float:
+    def remaining_timeout_seconds(deadline_ns: int, *, timeout_ns: int) -> float:
         remaining_ns = deadline_ns - monotonic_ns()
         if remaining_ns < 1:
             stop.set()
             raise EvaluationError("rehearsal whole-session deadline expired")
-        return _operation_timeout_seconds(
-            timeout_ns=min(lifecycle_timeout_ns, remaining_ns)
-        )
+        return _operation_timeout_seconds(timeout_ns=min(timeout_ns, remaining_ns))
 
     async def owned_trial(trial: CompiledTrial, *, stop: asyncio.Event) -> TrialResult:
         prepare_started = monotonic_ns()
@@ -1770,7 +1806,10 @@ async def _run_phase(
             _set_lifecycle_deadline(lifecycle, execution_deadline_ns)
             await asyncio.wait_for(
                 lifecycle.prepare(trial, stop=stop),
-                timeout=remaining_timeout_seconds(execution_deadline_ns),
+                timeout=remaining_timeout_seconds(
+                    execution_deadline_ns,
+                    timeout_ns=lifecycle_prepare_timeout_ns,
+                ),
             )
             prepared = True
             sglang_prepare = _sglang_prepare_receipt(
@@ -1803,7 +1842,10 @@ async def _run_phase(
                 _set_lifecycle_deadline(lifecycle, hard_deadline_ns)
                 await asyncio.wait_for(
                     lifecycle.cleanup(trial, stop=stop),
-                    timeout=remaining_timeout_seconds(hard_deadline_ns),
+                    timeout=remaining_timeout_seconds(
+                        hard_deadline_ns,
+                        timeout_ns=lifecycle_cleanup_timeout_ns,
+                    ),
                 )
             except (Exception, asyncio.CancelledError):
                 receipts.append(
@@ -1951,6 +1993,11 @@ async def run_rehearsal(
     """
     protocol = rehearsal.calibration_plan.protocol
     _validate_lifecycle_reservation(lifecycle, protocol)
+    lifecycle_cleanup_timeout_ns = (
+        protocol.preparation.warmup_reset_max_duration_ns
+        if protocol.preparation.cleanup_max_duration_ns is None
+        else protocol.preparation.cleanup_max_duration_ns
+    )
     if type(containerized) is not bool:
         raise EvaluationError("rehearsal launch mapping is invalid")
     engines = None
@@ -2092,7 +2139,10 @@ async def run_rehearsal(
                 lifecycle=lifecycle,
                 executor=phase_executor,
                 stop=stop,
-                lifecycle_timeout_ns=protocol.preparation.warmup_reset_max_duration_ns,
+                lifecycle_prepare_timeout_ns=(
+                    protocol.preparation.warmup_reset_max_duration_ns
+                ),
+                lifecycle_cleanup_timeout_ns=lifecycle_cleanup_timeout_ns,
                 execution_deadline_ns=execution_deadline_ns,
                 hard_deadline_ns=hard_deadline_ns,
                 engine_binding=phase_binding,
@@ -2201,9 +2251,10 @@ async def run_rehearsal(
                 lifecycle=lifecycle,
                 executor=phase_executor,
                 stop=stop,
-                lifecycle_timeout_ns=(
+                lifecycle_prepare_timeout_ns=(
                     protocol.preparation.warmup_reset_max_duration_ns
                 ),
+                lifecycle_cleanup_timeout_ns=lifecycle_cleanup_timeout_ns,
                 execution_deadline_ns=execution_deadline_ns,
                 hard_deadline_ns=hard_deadline_ns,
                 engine_binding=phase_binding,
