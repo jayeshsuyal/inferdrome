@@ -61,11 +61,9 @@ _OWNERSHIP = re.compile(r"^[a-z][a-z0-9-]{2,23}$")
 _COMMAND_TIMEOUT_NS = 30_000_000_000
 _WARMUP_TIMEOUT_NS = 5_000_000_000
 _STARTUP_TIMEOUT_NS = 120_000_000_000
-# The 120s default is a test-oriented floor. A real Qwen3-8B server needs far
-# longer to load bf16 weights and capture CUDA graphs before /health answers,
-# so production operators pass this budget instead. It matches
-# QWEN3_STARTUP_TIMEOUT_SECONDS (300s) and is the maximum the lifecycle
-# validator permits (startup_timeout_ns <= 300_000_000_000).
+# This is an operator allowance, not a claim about observed model-load time.
+# It matches QWEN3_STARTUP_TIMEOUT_SECONDS (300s) and is the maximum the
+# lifecycle validator permits (startup_timeout_ns <= 300_000_000_000).
 REAL_GPU_STARTUP_TIMEOUT_NS = 300_000_000_000
 _PROCESS_GRACE_NS = 5_000_000_000
 _SUPERVISOR_START_TIMEOUT_NS = 5_000_000_000
@@ -438,10 +436,24 @@ class _TwoEngineDirectProcessLifecycle:
 
     @property
     def required_operation_timeout_ns(self) -> int:
+        """Legacy symmetric reservation used by older protocol adapters."""
+
         return max(
-            4 * _COMMAND_TIMEOUT_NS + self._startup_timeout_ns,
-            8 * _COMMAND_TIMEOUT_NS,
+            self.required_prepare_timeout_ns,
+            self.required_cleanup_timeout_ns,
         )
+
+    @property
+    def required_prepare_timeout_ns(self) -> int:
+        """Port/GPU checks plus the bounded engine startup/readiness phase."""
+
+        return 4 * _COMMAND_TIMEOUT_NS + self._startup_timeout_ns
+
+    @property
+    def required_cleanup_timeout_ns(self) -> int:
+        """Two terminations plus exact port/GPU absence readback."""
+
+        return 8 * _COMMAND_TIMEOUT_NS
 
     @property
     def executable_identity_sha256(self) -> str:
@@ -456,10 +468,9 @@ class _TwoEngineDirectProcessLifecycle:
             raise EvaluationError("direct-process operation deadline is invalid")
         self._operation_deadline_ns = deadline_ns
 
-    def _deadline(self) -> int:
-        return (
-            self._operation_deadline_ns
-            or self._clock() + self.required_operation_timeout_ns
+    def _deadline(self, fallback_ns: int | None = None) -> int:
+        return self._operation_deadline_ns or self._clock() + (
+            self.required_operation_timeout_ns if fallback_ns is None else fallback_ns
         )
 
     def _remaining(self, deadline_ns: int) -> int:
@@ -630,7 +641,7 @@ class _TwoEngineDirectProcessLifecycle:
         if self._active:
             raise EvaluationError("direct-process lifecycle has an active trial")
         await self._verify_artifacts(stop=stop)
-        deadline_ns = self._deadline()
+        deadline_ns = self._deadline(self.required_prepare_timeout_ns)
         await self._verify_ports_closed(deadline_ns=deadline_ns)
         await self._verify_gpu_idle(deadline_ns=deadline_ns)
         try:
@@ -676,7 +687,9 @@ class _TwoEngineDirectProcessLifecycle:
     async def cleanup(self, trial: CompiledTrial, *, stop: asyncio.Event) -> None:
         del stop
         self._bind_trial(trial)
-        await self._remove_active(deadline_ns=self._deadline())
+        await self._remove_active(
+            deadline_ns=self._deadline(self.required_cleanup_timeout_ns)
+        )
 
 
 class TwoEngineVllmDirectProcessLifecycle(_TwoEngineDirectProcessLifecycle):
