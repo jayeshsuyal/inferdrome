@@ -19,18 +19,6 @@ No GPU campaign is ready until gates 1–3 have real, independently checkable
 artifacts. Gate 4 establishes reproducibility of the controlled path; gate 5
 is a pre-launch procedure review, not a claim that a host already exists.
 
-For the Vast direct-process path, gate 2 additionally requires the engine
-digest to carry the exact `vast-ssh-public-v1` labels, to be anonymously
-pullable without registry credentials, and to contain build-time SSH and
-SSH support. Runtime `apt` or other package bootstrap is forbidden. A
-separately observed launch must reach SSH readiness within 180 seconds; engine
-readiness retains the existing 300-second bound. The direct foreground sshd
-control plane may run as root with public-key authentication only, but the
-checked-in wrapper must run vLLM as UID 2000. None of these
-facts is established merely by the source contract.
-The public-publication plan is engine-only and explicitly forbids changing the
-CPU observer package's visibility.
-
 For a future manual role-image publication, retain the dedicated worker's
 Docker/Buildx version, storage location, filesystem mapping, and bounded
 before/during/after byte and inode observations as diagnostics. They sample

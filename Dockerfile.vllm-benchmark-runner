@@ -34,11 +34,6 @@ ARG SOURCE_REPOSITORY_COMMIT=development-unpinned
 ARG INFERDROME_VERSION=0.3.0.dev0
 ARG BUILD_FLAVOR=development
 ARG INFERDROME_RUNTIME_ROLE
-ARG VAST_STARTUP_PROFILE
-ARG VAST_SSH_READINESS_SECONDS
-ARG VAST_SERVING_EXECUTABLE
-ARG VAST_SERVING_UID
-ARG VAST_PUBLIC_PULL_CONTRACT
 
 RUN case "${BUILD_FLAVOR}" in \
       development) ;; \
@@ -54,18 +49,7 @@ RUN case "${BUILD_FLAVOR}" in \
 # digest.  This required role input is persisted as a final image-config label,
 # so the two reproducible role builds cannot collapse to one digest.
 RUN case "${INFERDROME_RUNTIME_ROLE}" in \
-      private-engine) \
-        test "${VAST_STARTUP_PROFILE}" = "vast-ssh-public-v1" \
-          && test "${VAST_SSH_READINESS_SECONDS}" = "180" \
-          && test "${VAST_SERVING_EXECUTABLE}" = "/usr/local/bin/vllm" \
-          && test "${VAST_SERVING_UID}" = "2000" \
-          && test "${VAST_PUBLIC_PULL_CONTRACT}" = "anonymous-public-pull-required-unverified" ;; \
-      cpu-runner-observer) \
-        test "${VAST_STARTUP_PROFILE}" = "not-applicable" \
-          && test "${VAST_SSH_READINESS_SECONDS}" = "0" \
-          && test "${VAST_SERVING_EXECUTABLE}" = "not-applicable" \
-          && test "${VAST_SERVING_UID}" = "not-applicable" \
-          && test "${VAST_PUBLIC_PULL_CONTRACT}" = "private-visibility-unchanged" ;; \
+      private-engine|cpu-runner-observer) ;; \
       *) exit 1 ;; \
     esac
 
@@ -80,36 +64,7 @@ USER root
 COPY --from=inferdrome-dependencies --chown=2000:0 /opt/inferdrome-runtime /opt/inferdrome-runtime
 COPY --from=inferdrome-dependencies /build/LICENSE /build/THIRD_PARTY_NOTICES.md /usr/share/licenses/inferdrome/
 COPY --from=inferdrome-dependencies /build/LICENSES /usr/share/licenses/inferdrome/LICENSES
-RUN if test "${INFERDROME_RUNTIME_ROLE}" = "private-engine"; then \
-      apt-get update \
-      && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-           openssh-server util-linux \
-      && rm -rf /var/lib/apt/lists/* \
-      && install -d --mode=0755 /run/sshd \
-      && test -x /usr/local/bin/vllm \
-      && mv /usr/local/bin/vllm /usr/local/bin/vllm-inferdrome-real \
-      && printf '%s\n' \
-           '#!/bin/sh' \
-           'set -eu' \
-           'if test "$(id -u)" = 0; then' \
-           '  exec setpriv --reuid=2000 --regid=0 --clear-groups "$@"' \
-           'fi' \
-           'test "$(id -u)" = 2000' \
-           'exec "$@"' \
-           > /usr/local/bin/inferdrome-run-as-serving-user \
-      && chmod 0755 /usr/local/bin/inferdrome-run-as-serving-user \
-      && printf '%s\n' \
-           '#!/bin/sh' \
-           'set -eu' \
-           'exec /usr/local/bin/inferdrome-run-as-serving-user /usr/local/bin/vllm-inferdrome-real "$@"' \
-           > /usr/local/bin/vllm \
-      && chmod 0755 /usr/local/bin/vllm \
-      && sshd -t \
-      && rm -f /etc/ssh/ssh_host_*; \
-    else \
-      ! dpkg-query -W openssh-server >/dev/null 2>&1; \
-    fi \
-    && install -d --owner=2000 --group=0 --mode=0700 /home/vllm /workspace \
+RUN install -d --owner=2000 --group=0 --mode=0700 /home/vllm /workspace \
     && rm -rf /root/.cache/pip /opt/inferdrome-source /build
 
 LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome" \
@@ -119,15 +74,7 @@ LABEL org.opencontainers.image.source="https://github.com/jayeshsuyal/inferdrome
       com.inferdrome.runtime-role="${INFERDROME_RUNTIME_ROLE}" \
       com.inferdrome.engine-service-boundary="separate-vllm-engine-service" \
       com.inferdrome.vllm-version="0.26.0" \
-      com.inferdrome.serving-uid="${VAST_SERVING_UID}" \
-      com.inferdrome.serving-executable="${VAST_SERVING_EXECUTABLE}" \
-      com.inferdrome.engine-entrypoint="inferdrome.deployment.gcp_private_engine_adapter" \
-      com.inferdrome.vllm-base-image="vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52" \
-      com.inferdrome.vast-startup-profile="${VAST_STARTUP_PROFILE}" \
-      com.inferdrome.vast-ssh-readiness-seconds="${VAST_SSH_READINESS_SECONDS}" \
-      com.inferdrome.runtime-package-bootstrap="forbidden" \
-      com.inferdrome.vast-startup-command="/opt/inferdrome-runtime/bin/python -m inferdrome.evaluation.vast_ssh_startup" \
-      com.inferdrome.public-pull-contract="${VAST_PUBLIC_PULL_CONTRACT}"
+      com.inferdrome.engine-entrypoint="inferdrome.deployment.gcp_private_engine_adapter"
 
 USER 2000:0
 ENV HOME="/home/vllm" \

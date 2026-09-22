@@ -50,9 +50,11 @@ from inferdrome.evaluation.load_calibration_rehearsal import (
 from inferdrome.evaluation.sglang_profile import SGLANG_IMAGE_REFERENCE
 from inferdrome.evaluation.sglang_rehearsal import bind_sglang_rehearsal
 from inferdrome.evaluation.study import execute_trial
-from inferdrome.evaluation.vast_startup_ready import (
-    VastStartupReadyImageProfile,
-    is_vast_startup_ready_image_reference,
+from inferdrome.evaluation.vast_stock_vllm import (
+    VAST_STOCK_VLLM_CONFIG_DIGEST,
+    VAST_STOCK_VLLM_IMAGE_REFERENCE,
+    VastStockHostReceipt,
+    VastStockVllmProfile,
 )
 from inferdrome.external_router.contracts import Digest, OpaqueId
 from inferdrome.qwen3_campaign import (
@@ -89,7 +91,10 @@ class VastContainerRehearsalAuthorization(ClosedModel):
         "inferdrome.load-calibration-vast-container-authorization.v1",
         "inferdrome.load-calibration-vast-container-authorization.v2",
     ]
-    confirmation: Literal["AUTHORIZE_VAST_CONTAINER_TWO_A100_LOAD_CALIBRATION_V1"]
+    confirmation: Literal[
+        "AUTHORIZE_VAST_CONTAINER_TWO_A100_LOAD_CALIBRATION_V1",
+        "AUTHORIZE_VAST_STOCK_VLLM_TWO_A100_LOAD_CALIBRATION_V2",
+    ]
     authorization_id: OpaqueId
     approval_record_id: OpaqueId
     approved_at_utc: UtcTimestamp
@@ -98,7 +103,6 @@ class VastContainerRehearsalAuthorization(ClosedModel):
     runtime: RuntimeName
     outer_image_reference: Annotated[str, Field(min_length=1, max_length=256)]
     outer_image_state: Literal["DECLARED_BY_OPERATOR_UNVERIFIED"]
-    startup_ready_image: VastStartupReadyImageProfile | None = None
     runtime_executable_identity_sha256: Digest
     model_id: Literal["Qwen/Qwen3-8B"]
     model_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
@@ -111,56 +115,58 @@ class VastContainerRehearsalAuthorization(ClosedModel):
     maximum_runtime_seconds: Annotated[int, Field(ge=60, le=86_400)]
     termination_safety_margin_seconds: Annotated[int, Field(ge=30, le=3_600)]
     external_guardian: ExternalGuardianHandoff
+    provider: Literal["VAST"] | None = None
+    provider_account_alias: OpaqueId | None = None
+    region_or_zone_alias: OpaqueId | None = None
+    gpu_type: Literal["NVIDIA A100-PCIE-40GB"] | None = None
+    gpu_count: Literal[2] | None = None
+    maximum_cost_usd_micros: Annotated[int, Field(ge=1)] | None = None
+    evidence_destination_sha256: Digest | None = None
+    stock_profile: VastStockVllmProfile | None = None
+    stock_host_receipt: VastStockHostReceipt | None = None
 
     @model_validator(mode="after")
     def exact_declared_bounds(self) -> VastContainerRehearsalAuthorization:
         approved = _parse_utc(self.approved_at_utc)
         execute = _parse_utc(self.execute_not_after_utc)
         termination = _parse_utc(self.external_guardian.termination_deadline_utc)
-        startup = self.startup_ready_image
-        startup_invalid = (
-            self.schema_version
-            == "inferdrome.load-calibration-vast-container-authorization.v2"
-            and (
-                self.runtime != "vllm"
-                or startup is None
-                or startup.source_commit != self.source_commit
-                or startup.runtime != self.runtime
-                or startup.model_id != self.model_id
-                or startup.model_revision != self.model_revision
-            )
-        ) or (
-            self.schema_version
-            == "inferdrome.load-calibration-vast-container-authorization.v1"
-            and startup is not None
+        v2 = self.schema_version.endswith(".v2")
+        expected_image = (
+            VAST_STOCK_VLLM_IMAGE_REFERENCE
+            if v2 and self.runtime == "vllm"
+            else VLLM_RUNTIME_IMAGE_REFERENCE
+            if self.runtime == "vllm"
+            else SGLANG_IMAGE_REFERENCE
         )
         if (
             not approved < execute < termination
-            or (
-                self.schema_version
-                == "inferdrome.load-calibration-vast-container-authorization.v1"
-                and self.outer_image_reference
-                != (
-                    VLLM_RUNTIME_IMAGE_REFERENCE
-                    if self.runtime == "vllm"
-                    else SGLANG_IMAGE_REFERENCE
-                )
-            )
-            or (
-                self.schema_version
-                == "inferdrome.load-calibration-vast-container-authorization.v2"
-                and (
-                    startup is None
-                    or self.outer_image_reference != startup.image_reference
-                    or startup.base_image_reference != VLLM_RUNTIME_IMAGE_REFERENCE
-                )
-            )
+            or self.outer_image_reference != expected_image
             or self.model_revision != QWEN3_8B_REVISION
             or self.model_snapshot_sha256 != qwen3_expected_snapshot_sha256()
             or len(set(self.recipe_sha256s)) != len(self.recipe_sha256s)
-            or startup_invalid
         ):
             raise ValueError("vast-container authorization bindings are invalid")
+        v2_fields = (
+            self.provider,
+            self.provider_account_alias,
+            self.region_or_zone_alias,
+            self.gpu_type,
+            self.gpu_count,
+            self.maximum_cost_usd_micros,
+            self.evidence_destination_sha256,
+            self.stock_profile,
+            self.stock_host_receipt,
+        )
+        if v2:
+            if (
+                self.runtime != "vllm"
+                or self.confirmation
+                != "AUTHORIZE_VAST_STOCK_VLLM_TWO_A100_LOAD_CALIBRATION_V2"
+                or any(value is None for value in v2_fields)
+            ):
+                raise ValueError("vast stock-image authorization is incomplete")
+        elif any(value is not None for value in v2_fields):
+            raise ValueError("historical v1 authorization cannot carry v2 fields")
         return self
 
 
@@ -168,8 +174,8 @@ class VastContainerRuntimeIdentity(ClosedModel):
     """One observed local executable plus an honest unverified outer image claim."""
 
     outer_image_reference: Annotated[str, Field(min_length=1, max_length=256)]
-    base_image_reference: Annotated[str, Field(min_length=1, max_length=256)]
     outer_image_state: Literal["DECLARED_BY_OPERATOR_UNVERIFIED"]
+    image_config_digest: Digest | None = None
     executable_identity_sha256: Digest
     executable_observation: Literal["LOCAL_METADATA_OBSERVED"]
     runtime_verification: Literal["UNVERIFIED"] = "UNVERIFIED"
@@ -241,13 +247,10 @@ def prepare_vast_container_rehearsal(
         runtime=runtime,
         sglang_profile_paths=sglang_profile_paths,
     )
-    if runtime == "vllm":
-        valid_image = is_vast_startup_ready_image_reference(outer_image_reference)
-        base_image_reference = VLLM_RUNTIME_IMAGE_REFERENCE
-    else:
-        valid_image = outer_image_reference == SGLANG_IMAGE_REFERENCE
-        base_image_reference = SGLANG_IMAGE_REFERENCE
-    if not valid_image:
+    expected_image = (
+        VAST_STOCK_VLLM_IMAGE_REFERENCE if runtime == "vllm" else SGLANG_IMAGE_REFERENCE
+    )
+    if outer_image_reference != expected_image:
         raise EvaluationError("vast-container outer image is not the pinned runtime")
     if runtime == "sglang":
         assert prepared.sglang_profiles is not None
@@ -260,8 +263,10 @@ def prepare_vast_container_rehearsal(
     executable = resolve_direct_runtime(runtime_executable)
     runtime_identity = VastContainerRuntimeIdentity(
         outer_image_reference=outer_image_reference,
-        base_image_reference=base_image_reference,
         outer_image_state="DECLARED_BY_OPERATOR_UNVERIFIED",
+        image_config_digest=(
+            VAST_STOCK_VLLM_CONFIG_DIGEST if runtime == "vllm" else None
+        ),
         executable_identity_sha256=executable_identity_sha256(executable),
         executable_observation="LOCAL_METADATA_OBSERVED",
     )
@@ -327,14 +332,6 @@ def _authorized(
     )
     if (
         authorization.runtime != current.runtime
-        or (
-            authorization.runtime == "vllm"
-            and (
-                authorization.schema_version
-                != "inferdrome.load-calibration-vast-container-authorization.v2"
-                or authorization.startup_ready_image is None
-            )
-        )
         or authorization.source_commit != current.source_commit
         or authorization.protocol_sha256 != current.protocol_sha256
         or authorization.recipe_sha256s != current.recipe_sha256s
@@ -353,6 +350,33 @@ def _authorized(
         or now.timestamp() + required_seconds >= termination.timestamp()
     ):
         raise EvaluationError("vast-container authorization is unavailable or expired")
+    if prepared.preflight.runtime == "vllm":
+        profile = authorization.stock_profile
+        receipt = authorization.stock_host_receipt
+        if (
+            authorization.schema_version
+            != "inferdrome.load-calibration-vast-container-authorization.v2"
+            or profile is None
+            or receipt is None
+            or not receipt.is_fresh_at(now)
+            or profile.image_reference != current.runtime_identity.outer_image_reference
+            or profile.image_config_digest
+            != current.runtime_identity.image_config_digest
+            or receipt.image_reference != profile.image_reference
+            or receipt.image_config_digest != profile.image_config_digest
+            or receipt.source_commit != current.source_commit
+            or receipt.runtime_executable_identity_sha256
+            != current.runtime_identity.executable_identity_sha256
+            or receipt.model_snapshot_sha256
+            != authorization.model_snapshot_sha256
+            or receipt.model_snapshot_path_sha256
+            != authorization.model_snapshot_path_sha256
+            or receipt.endpoint_origins != _origins(prepared.prepared)
+            or authorization.external_guardian.provider != "VAST_MANUAL_HOST"
+        ):
+            raise EvaluationError(
+                "vast stock-image host receipt is unavailable or stale"
+            )
     if prepared.preflight.runtime == "sglang":
         profiles = prepared.prepared.sglang_profiles
         if (

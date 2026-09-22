@@ -411,18 +411,6 @@ def test_vllm_role_builds_bind_distinct_reproducible_config_inputs(
     )
 
     assert "INFERDROME_RUNTIME_ROLE=private-engine" in engine
-    assert "VAST_STARTUP_PROFILE=vast-ssh-public-v1" in engine
-    assert "VAST_SSH_READINESS_SECONDS=180" in engine
-    assert "VAST_SERVING_EXECUTABLE=/usr/local/bin/vllm" in engine
-    assert "VAST_SERVING_UID=2000" in engine
-    assert (
-        "VAST_PUBLIC_PULL_CONTRACT=anonymous-public-pull-required-unverified" in engine
-    )
-    assert "VAST_STARTUP_PROFILE=not-applicable" in runner
-    assert "VAST_SSH_READINESS_SECONDS=0" in runner
-    assert "VAST_SERVING_EXECUTABLE=not-applicable" in runner
-    assert "VAST_SERVING_UID=not-applicable" in runner
-    assert "VAST_PUBLIC_PULL_CONTRACT=private-visibility-unchanged" in runner
     assert "INFERDROME_RUNTIME_ROLE=cpu-runner-observer" in runner
     assert engine != runner
     assert len(commands) == 2

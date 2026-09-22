@@ -94,7 +94,7 @@ def _validate_run_id(value: object) -> str:
 
 
 def _expected_labels(*, role: str, source_commit: str, version: str) -> dict[str, str]:
-    labels = {
+    return {
         "org.opencontainers.image.source": _SOURCE_REPOSITORY,
         "org.opencontainers.image.revision": source_commit,
         "org.opencontainers.image.version": version,
@@ -105,39 +105,7 @@ def _expected_labels(*, role: str, source_commit: str, version: str) -> dict[str
         "com.inferdrome.engine-entrypoint": (
             "inferdrome.deployment.gcp_private_engine_adapter"
         ),
-        "com.inferdrome.vllm-base-image": (
-            "vllm/vllm-openai@sha256:"
-            "ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52"
-        ),
-        "com.inferdrome.runtime-package-bootstrap": "forbidden",
-        "com.inferdrome.vast-startup-command": (
-            "/opt/inferdrome-runtime/bin/python -m "
-            "inferdrome.evaluation.vast_ssh_startup"
-        ),
     }
-    if role == "private-engine":
-        labels.update(
-            {
-                "com.inferdrome.vast-startup-profile": "vast-ssh-public-v1",
-                "com.inferdrome.vast-ssh-readiness-seconds": "180",
-                "com.inferdrome.serving-uid": "2000",
-                "com.inferdrome.serving-executable": "/usr/local/bin/vllm",
-                "com.inferdrome.public-pull-contract": (
-                    "anonymous-public-pull-required-unverified"
-                ),
-            }
-        )
-    else:
-        labels.update(
-            {
-                "com.inferdrome.vast-startup-profile": "not-applicable",
-                "com.inferdrome.vast-ssh-readiness-seconds": "0",
-                "com.inferdrome.serving-uid": "not-applicable",
-                "com.inferdrome.serving-executable": "not-applicable",
-                "com.inferdrome.public-pull-contract": ("private-visibility-unchanged"),
-            }
-        )
-    return labels
 
 
 def plan_role_image(
@@ -178,29 +146,6 @@ def plan_role_image(
             role=validated_role,
             source_commit=validated_commit,
             version=validated_version,
-        ),
-    }
-
-
-def plan_public_vast_engine(
-    *, source_commit: object, version: object, workflow_run_id: object
-) -> dict[str, object]:
-    """Plan the sole public image; the CPU observer visibility cannot change."""
-
-    engine = plan_role_image(
-        role="private-engine",
-        source_commit=source_commit,
-        version=version,
-        workflow_run_id=workflow_run_id,
-    )
-    return {
-        "schema_version": "inferdrome.vast-public-engine-publication-plan.v1",
-        "publication_scope": "PRIVATE_ENGINE_ONLY",
-        "visibility": "PUBLIC_ANONYMOUS_PULL_REQUIRED",
-        "engine_plan": engine,
-        "post_build_smoke": "scripts/verify_vast_startup_image.py",
-        "forbidden_visibility_change": (
-            "ghcr.io/jayeshsuyal/inferdrome-cpu-runner-observer"
         ),
     }
 
@@ -355,8 +300,12 @@ def validate_publication_pair(
     )
     if any(engine[field] != runner[field] for field in shared):
         _fail("publication receipts do not share one source identity")
-    engine_image = _required_string(engine["immutable_image"], field="engine digest")
-    runner_image = _required_string(runner["immutable_image"], field="runner digest")
+    engine_image = _required_string(
+        engine["immutable_image"], field="engine digest"
+    )
+    runner_image = _required_string(
+        runner["immutable_image"], field="runner digest"
+    )
     engine_digest = engine_image.rsplit("@", maxsplit=1)[1]
     runner_digest = runner_image.rsplit("@", maxsplit=1)[1]
     if engine_digest == runner_digest:
@@ -419,11 +368,6 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--version", required=True)
     plan.add_argument("--workflow-run-id", required=True)
     plan.add_argument("--output", type=Path)
-    public_engine = commands.add_parser("plan-public-vast-engine")
-    public_engine.add_argument("--source-commit", required=True)
-    public_engine.add_argument("--version", required=True)
-    public_engine.add_argument("--workflow-run-id", required=True)
-    public_engine.add_argument("--output", type=Path)
     inspect = commands.add_parser("verify-local-inspection")
     inspect.add_argument("--plan", required=True, type=Path)
     inspect.add_argument("--labels-json", required=True, type=Path)
@@ -448,15 +392,6 @@ def main(argv: list[str] | None = None) -> int:
             _emit(
                 plan_role_image(
                     role=arguments.role,
-                    source_commit=arguments.source_commit,
-                    version=arguments.version,
-                    workflow_run_id=arguments.workflow_run_id,
-                ),
-                output=arguments.output,
-            )
-        elif arguments.command == "plan-public-vast-engine":
-            _emit(
-                plan_public_vast_engine(
                     source_commit=arguments.source_commit,
                     version=arguments.version,
                     workflow_run_id=arguments.workflow_run_id,
