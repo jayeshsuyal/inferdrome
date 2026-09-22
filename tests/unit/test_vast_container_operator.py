@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from inferdrome.evaluation import load_calibration_operator as export_operator
 from inferdrome.evaluation import vast_container_operator as operator
@@ -21,6 +22,18 @@ from inferdrome.evaluation.direct_process_lifecycle import (
 from inferdrome.evaluation.load_calibration_rehearsal import (
     SubprocessResult,
     _validate_lifecycle_reservation,
+)
+from inferdrome.evaluation.vast_stock_vllm import (
+    VAST_STOCK_CUDA_VERSION,
+    VAST_STOCK_CUDART_VERSION,
+    VAST_STOCK_UPSTREAM_IMAGE_TAG,
+    VAST_STOCK_VLLM_BUILD_COMMIT,
+    VAST_STOCK_VLLM_CONFIG_DIGEST,
+    VAST_STOCK_VLLM_ENTRYPOINT,
+    VAST_STOCK_VLLM_IMAGE_REFERENCE,
+    VAST_STOCK_VLLM_INDEX_DIGEST,
+    VAST_STOCK_VLLM_TAG,
+    VAST_STOCK_VLLM_VERSION,
 )
 from inferdrome.qwen3_campaign import qwen3_expected_snapshot_sha256
 from inferdrome.routing_execution.canonical import canonical_json_bytes, sha256_digest
@@ -46,7 +59,7 @@ def _direct_prepared(tmp_path: Path) -> operator.PreparedVastContainerRehearsal:
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=VAST_STOCK_VLLM_IMAGE_REFERENCE,
         runtime_executable="/bin/sh",
     )
 
@@ -65,7 +78,7 @@ def _direct_prepared_with_split_reservation(
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=VAST_STOCK_VLLM_IMAGE_REFERENCE,
         runtime_executable="/bin/sh",
     )
 
@@ -76,6 +89,7 @@ def _direct_authorization(
     snapshot: Path,
     output: Path,
     now: datetime,
+    gpu_model: str = "NVIDIA A100-SXM4-40GB",
 ) -> operator.VastContainerRehearsalAuthorization:
     def timestamp(value: datetime) -> str:
         return value.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -83,16 +97,18 @@ def _direct_authorization(
     return operator.VastContainerRehearsalAuthorization.model_validate(
         {
             "schema_version": (
-                "inferdrome.load-calibration-vast-container-authorization.v1"
+                "inferdrome.load-calibration-vast-container-authorization.v2"
             ),
-            "confirmation": "AUTHORIZE_VAST_CONTAINER_TWO_A100_LOAD_CALIBRATION_V1",
+            "confirmation": (
+                "AUTHORIZE_VAST_STOCK_VLLM_TWO_A100_LOAD_CALIBRATION_V2"
+            ),
             "authorization_id": "direct-run-001",
             "approval_record_id": "approval-001",
             "approved_at_utc": timestamp(now - timedelta(hours=1)),
             "execute_not_after_utc": timestamp(now + timedelta(days=3)),
             "source_commit": prepared.preflight.source_commit,
             "runtime": "vllm",
-            "outer_image_reference": VLLM_RUNTIME_IMAGE_REFERENCE,
+            "outer_image_reference": VAST_STOCK_VLLM_IMAGE_REFERENCE,
             "outer_image_state": "DECLARED_BY_OPERATOR_UNVERIFIED",
             "runtime_executable_identity_sha256": (
                 prepared.preflight.runtime_identity.executable_identity_sha256
@@ -115,6 +131,72 @@ def _direct_authorization(
                 "guardian_handoff_sha256": "sha256:" + "2" * 64,
                 "termination_deadline_utc": timestamp(now + timedelta(days=4)),
                 "state": "EXTERNALLY_ARMED_NOT_VERIFIED",
+            },
+            "provider": "VAST",
+            "provider_account_alias": "vast-account",
+            "region_or_zone_alias": "vast-location",
+            "gpu_type": gpu_model,
+            "gpu_count": 2,
+            "maximum_cost_usd_micros": 5_000_000,
+            "evidence_destination_sha256": "sha256:" + "3" * 64,
+            "stock_profile": {
+                "schema_version": "inferdrome.vast-stock-vllm-profile.v1",
+                "image_tag": VAST_STOCK_VLLM_TAG,
+                "image_reference": VAST_STOCK_VLLM_IMAGE_REFERENCE,
+                "multiarch_index_digest": VAST_STOCK_VLLM_INDEX_DIGEST,
+                "image_config_digest": VAST_STOCK_VLLM_CONFIG_DIGEST,
+                "platform": "linux/amd64",
+                "entrypoint": (VAST_STOCK_VLLM_ENTRYPOINT,),
+                "vllm_version": VAST_STOCK_VLLM_VERSION,
+                "cuda_version": VAST_STOCK_CUDA_VERSION,
+                "cudart_version": VAST_STOCK_CUDART_VERSION,
+                "upstream_image_tag": VAST_STOCK_UPSTREAM_IMAGE_TAG,
+                "vllm_build_commit": VAST_STOCK_VLLM_BUILD_COMMIT,
+                "python_series": "3.12.x",
+                "gpu_count": 2,
+                "provider_startup_boundary": (
+                    "VAST_STOCK_ENTRYPOINT_SSH_PORTAL_SUPERVISION"
+                ),
+            },
+            "stock_host_receipt": {
+                "schema_version": "inferdrome.vast-stock-host-receipt.v1",
+                "observed_at_utc": timestamp(now - timedelta(seconds=30)),
+                "valid_until_utc": timestamp(now + timedelta(minutes=4)),
+                "source_commit": prepared.preflight.source_commit,
+                "provider_instance_alias": "vast-run-001",
+                "image_reference": VAST_STOCK_VLLM_IMAGE_REFERENCE,
+                "image_config_digest": VAST_STOCK_VLLM_CONFIG_DIGEST,
+                "entrypoint": (VAST_STOCK_VLLM_ENTRYPOINT,),
+                "vllm_version": VAST_STOCK_VLLM_VERSION,
+                "cuda_version": VAST_STOCK_CUDA_VERSION,
+                "cudart_version": VAST_STOCK_CUDART_VERSION,
+                "python_version": "3.12.11",
+                "runtime_executable_identity_sha256": (
+                    prepared.preflight.runtime_identity.executable_identity_sha256
+                ),
+                "model_id": "Qwen/Qwen3-8B",
+                "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+                "model_snapshot_sha256": qwen3_expected_snapshot_sha256(),
+                "model_snapshot_path_sha256": operator._path_sha256(snapshot),
+                "endpoint_origins": operator._origins(prepared.prepared),
+                "gpus": (
+                    {
+                        "index": 0,
+                        "gpu_alias": "gpu-zero",
+                        "uuid_sha256": "sha256:" + "4" * 64,
+                        "model": gpu_model,
+                    },
+                    {
+                        "index": 1,
+                        "gpu_alias": "gpu-one",
+                        "uuid_sha256": "sha256:" + "5" * 64,
+                        "model": gpu_model,
+                    },
+                ),
+                "gpus_idle": True,
+                "ports_closed": True,
+                "runtime_install_performed": False,
+                "image_build_performed": False,
             },
         }
     )
@@ -174,14 +256,14 @@ def test_preflight_observes_executable_but_never_constructs_engine(
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=VAST_STOCK_VLLM_IMAGE_REFERENCE,
         runtime_executable="/bin/sh",
     )
     second = operator.prepare_vast_container_rehearsal(
         protocol_path=protocol,
         recipe_paths=recipes,
         runtime="vllm",
-        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        outer_image_reference=VAST_STOCK_VLLM_IMAGE_REFERENCE,
         runtime_executable="/bin/sh",
     )
     assert operator.vast_container_preflight_bytes(
@@ -213,6 +295,282 @@ def test_preflight_rejects_an_unpinned_outer_image_before_any_runtime(
         )
 
 
+def test_stock_authorization_rejects_wrong_gpu_count_and_mutable_image(
+    tmp_path: Path,
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    )
+    content = authorization.model_dump(mode="python")
+    content["gpu_count"] = 1
+    with pytest.raises(ValidationError):
+        operator.VastContainerRehearsalAuthorization.model_validate(content)
+
+
+@pytest.mark.parametrize(
+    "gpu_model",
+    ("NVIDIA A100-PCIE-40GB", "NVIDIA A100-SXM4-40GB"),
+)
+def test_stock_authorization_accepts_only_the_two_reviewed_a100_40gb_variants(
+    tmp_path: Path, gpu_model: str
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    authorization = _direct_authorization(
+        prepared,
+        snapshot=_directory(tmp_path / "snapshot"),
+        output=_directory(tmp_path / "output"),
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+        gpu_model=gpu_model,
+    )
+    assert authorization.gpu_type == gpu_model
+    assert authorization.stock_host_receipt is not None
+    assert {item.model for item in authorization.stock_host_receipt.gpus} == {
+        gpu_model
+    }
+
+
+@pytest.mark.parametrize(
+    "gpu_model",
+    (
+        "NVIDIA H100-80GB-HBM3",
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA A100-PCIE-80GB",
+        "NVIDIA A100 40GB",
+    ),
+)
+def test_stock_authorization_rejects_unsupported_or_wrong_memory_gpu(
+    tmp_path: Path, gpu_model: str
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    authorization = _direct_authorization(
+        prepared,
+        snapshot=_directory(tmp_path / "snapshot"),
+        output=_directory(tmp_path / "output"),
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    content = authorization.model_dump(mode="python")
+    content["gpu_type"] = gpu_model
+    receipt = dict(content["stock_host_receipt"])
+    receipt["gpus"] = tuple(
+        {**item, "model": gpu_model} for item in receipt["gpus"]
+    )
+    content["stock_host_receipt"] = receipt
+    with pytest.raises(ValidationError):
+        operator.VastContainerRehearsalAuthorization.model_validate(content)
+
+
+def test_stock_authorization_rejects_mixed_supported_gpu_variants(
+    tmp_path: Path,
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    authorization = _direct_authorization(
+        prepared,
+        snapshot=_directory(tmp_path / "snapshot"),
+        output=_directory(tmp_path / "output"),
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    content = authorization.model_dump(mode="python")
+    receipt = dict(content["stock_host_receipt"])
+    first, second = receipt["gpus"]
+    receipt["gpus"] = (
+        {**first, "model": "NVIDIA A100-PCIE-40GB"},
+        {**second, "model": "NVIDIA A100-SXM4-40GB"},
+    )
+    content["stock_host_receipt"] = receipt
+    with pytest.raises(ValidationError, match="one exact GPU model"):
+        operator.VastContainerRehearsalAuthorization.model_validate(content)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    (
+        ("stock_profile", "image_config_digest", "sha256:" + "0" * 64),
+        ("stock_profile", "vllm_version", "0.25.0"),
+        ("stock_host_receipt", "gpus_idle", False),
+        ("stock_host_receipt", "ports_closed", False),
+        ("stock_host_receipt", "model_id", "other/model"),
+    ),
+)
+def test_stock_authorization_rejects_wrong_runtime_or_host_fact(
+    tmp_path: Path, section: str, field: str, value: object
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=datetime(2030, 1, 1, tzinfo=UTC)
+    )
+    content = authorization.model_dump(mode="python")
+    nested = dict(content[section])
+    nested[field] = value
+    content[section] = nested
+    with pytest.raises(ValidationError):
+        operator.VastContainerRehearsalAuthorization.model_validate(content)
+    content = authorization.model_dump(mode="python")
+    content["outer_image_reference"] = VAST_STOCK_VLLM_TAG
+    with pytest.raises(ValidationError):
+        operator.VastContainerRehearsalAuthorization.model_validate(content)
+
+
+def test_historical_v1_remains_parseable_but_cannot_launch_stock_vllm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    current = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    ).model_dump(mode="python")
+    current.update(
+        schema_version="inferdrome.load-calibration-vast-container-authorization.v1",
+        confirmation="AUTHORIZE_VAST_CONTAINER_TWO_A100_LOAD_CALIBRATION_V1",
+        outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+        provider=None,
+        provider_account_alias=None,
+        region_or_zone_alias=None,
+        gpu_type=None,
+        gpu_count=None,
+        maximum_cost_usd_micros=None,
+        evidence_destination_sha256=None,
+        stock_profile=None,
+        stock_host_receipt=None,
+    )
+    historical = operator.VastContainerRehearsalAuthorization.model_validate(current)
+
+    monkeypatch.setattr(
+        operator,
+        "TwoEngineVllmDirectProcessLifecycle",
+        lambda *args, **kwargs: pytest.fail("lifecycle constructed"),
+    )
+    with pytest.raises(EvaluationError, match="authorization is unavailable"):
+        asyncio.run(
+            operator.run_authorized_vast_container_rehearsal(
+                prepared,
+                authorization=historical,
+                model_snapshot_path=snapshot,
+                output_root=output,
+                session_anchor_utc=now,
+                session_started_ns=10,
+                utc_clock=lambda: now,
+                monotonic_clock=iter((11,)).__next__,
+            )
+        )
+
+
+def test_stale_stock_host_receipt_fails_before_engine_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    )
+    assert authorization.stock_host_receipt is not None
+    stale = authorization.model_copy(
+        update={
+            "stock_host_receipt": authorization.stock_host_receipt.model_copy(
+                update={
+                    "observed_at_utc": "2029-12-31T23:50:00Z",
+                    "valid_until_utc": "2029-12-31T23:54:00Z",
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(
+        operator,
+        "TwoEngineVllmDirectProcessLifecycle",
+        lambda *args, **kwargs: pytest.fail("lifecycle constructed"),
+    )
+    with pytest.raises(EvaluationError, match="receipt is unavailable or stale"):
+        asyncio.run(
+            operator.run_authorized_vast_container_rehearsal(
+                prepared,
+                authorization=stale,
+                model_snapshot_path=snapshot,
+                output_root=output,
+                session_anchor_utc=now,
+                session_started_ns=10,
+                utc_clock=lambda: now,
+                monotonic_clock=iter((11,)).__next__,
+            )
+        )
+
+
+def test_wrong_stock_receipt_source_fails_before_engine_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    )
+    assert authorization.stock_host_receipt is not None
+    wrong_source = authorization.model_copy(
+        update={
+            "stock_host_receipt": authorization.stock_host_receipt.model_copy(
+                update={"source_commit": "f" * 40}
+            )
+        }
+    )
+    monkeypatch.setattr(
+        operator,
+        "TwoEngineVllmDirectProcessLifecycle",
+        lambda *args, **kwargs: pytest.fail("lifecycle constructed"),
+    )
+    with pytest.raises(EvaluationError, match="receipt is unavailable or stale"):
+        asyncio.run(
+            operator.run_authorized_vast_container_rehearsal(
+                prepared,
+                authorization=wrong_source,
+                model_snapshot_path=snapshot,
+                output_root=output,
+                session_anchor_utc=now,
+                session_started_ns=10,
+                utc_clock=lambda: now,
+                monotonic_clock=iter((11,)).__next__,
+            )
+        )
+
+
+def test_authorized_gpu_variant_must_match_both_observed_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    ).model_copy(update={"gpu_type": "NVIDIA A100-PCIE-40GB"})
+    monkeypatch.setattr(
+        operator,
+        "TwoEngineVllmDirectProcessLifecycle",
+        lambda *args, **kwargs: pytest.fail("lifecycle constructed"),
+    )
+    with pytest.raises(EvaluationError, match="receipt is unavailable or stale"):
+        asyncio.run(
+            operator.run_authorized_vast_container_rehearsal(
+                prepared,
+                authorization=authorization,
+                model_snapshot_path=snapshot,
+                output_root=output,
+                session_anchor_utc=now,
+                session_started_ns=10,
+                utc_clock=lambda: now,
+                monotonic_clock=iter((11,)).__next__,
+            )
+        )
+
+
 def test_cli_preflight_writes_only_a_canonical_offline_packet(tmp_path: Path) -> None:
     protocol, recipes = _inputs(tmp_path)
     output_root = tmp_path / "preflight-output"
@@ -231,7 +589,7 @@ def test_cli_preflight_writes_only_a_canonical_offline_packet(tmp_path: Path) ->
                 "--runtime",
                 "vllm",
                 "--outer-image-reference",
-                VLLM_RUNTIME_IMAGE_REFERENCE,
+                VAST_STOCK_VLLM_IMAGE_REFERENCE,
                 "--runtime-executable",
                 "/bin/sh",
                 "--output",
@@ -246,7 +604,7 @@ def test_cli_preflight_writes_only_a_canonical_offline_packet(tmp_path: Path) ->
             protocol_path=protocol,
             recipe_paths=recipes,
             runtime="vllm",
-            outer_image_reference=VLLM_RUNTIME_IMAGE_REFERENCE,
+            outer_image_reference=VAST_STOCK_VLLM_IMAGE_REFERENCE,
             runtime_executable="/bin/sh",
         ).preflight
     )
@@ -267,7 +625,7 @@ def test_run_requires_the_new_exact_direct_process_confirmation(tmp_path: Path) 
                 "--runtime",
                 "vllm",
                 "--outer-image-reference",
-                VLLM_RUNTIME_IMAGE_REFERENCE,
+                VAST_STOCK_VLLM_IMAGE_REFERENCE,
                 "--runtime-executable",
                 "/bin/sh",
                 "--authorization",

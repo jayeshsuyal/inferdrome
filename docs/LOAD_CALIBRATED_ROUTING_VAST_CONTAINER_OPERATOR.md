@@ -14,9 +14,26 @@ replacement and it does not establish host-failure independence.
 
 ## The bounded topology
 
-One outer, pinned runtime image contains either the pinned vLLM runtime or the
-pinned SGLang runtime and a preloaded Qwen3-8B snapshot. A direct invocation
-starts exactly two fresh serving processes per trial:
+For the vLLM path, the provider launch image is the public Vast stock image
+`vastai/vllm:v0.26.0-cuda-12.9`, pinned for `linux/amd64` to
+`vastai/vllm@sha256:39f2f782305dd7bf8478b748140a2ed719de2824bed51d1862f355dde9891f77`.
+Its public OCI config digest is
+`sha256:6f07455f6e17001ad04d1ddc7f8331cc29167e748269bfcf6ecb4d23ba24bc0d`.
+That config declares Vast's `/opt/instance-tools/bin/entrypoint.sh`, vLLM
+`0.26.0`, CUDA `12.9.1`, CUDART `12.9.79-1`, upstream image tag
+`vllm/vllm-openai:v0.26.0-cu129`, and vLLM build commit
+`ffd46bfab2128bb84146050e98b51a617c6575ab`. The provider entrypoint owns SSH,
+portal and supervision startup. Inferdrome does not replace it, build an image,
+install a runtime, or inject a second init system.
+
+The exact Python patch is not declared by the public OCI config. The host
+receipt therefore requires an observed `3.12.x` patch value instead of
+inventing one. The historical raw upstream vLLM digest remains provenance for
+older v1 records only; it is not the provider launch image for this path.
+
+After the stock entrypoint is ready and an operator has separately placed the
+verified Qwen3-8B snapshot, a direct invocation starts exactly two fresh
+serving processes per trial:
 
 ```text
 ordinary outer container, already supplied by the operator
@@ -37,18 +54,29 @@ trace, request accounting, selection and report formats remain unchanged.
 
 ## Required operator packet
 
-Before a direct engine is allowed to start, create an exact
-`inferdrome.load-calibration-vast-container-authorization.v1` packet. It binds:
+Before a stock vLLM engine is allowed to start, create an exact
+`inferdrome.load-calibration-vast-container-authorization.v2` packet. It binds:
 
 - the source commit, protocol and all candidate-recipe digests;
 - `Qwen/Qwen3-8B`, its pinned revision and preloaded snapshot digest;
-- the exact pinned vLLM or SGLang outer `repository@sha256` reference;
+- the exact stock Vast vLLM manifest and config identities above;
 - a locally observed direct executable metadata digest;
+- a five-minute-or-shorter host receipt for the exact Python patch and two
+  distinct observed devices of one authorized model: either
+  `NVIDIA A100-PCIE-40GB` or `NVIDIA A100-SXM4-40GB`; mixed variants, 80 GB
+  variants, and other accelerator names are rejected. The receipt also binds
+  idle state, closed
+  loopback ports, source/model/path identities, and absence of runtime install
+  or image build activity;
+- provider/account/location aliases, GPU type/count, maximum runtime, USD cap,
+  cleanup deadline/guardian and evidence-destination digest; and
 - a unique ownership alias, bounded session deadline and external termination
   guardian handoff; and
 - hashes of the selected snapshot path and initially empty output directory.
 
-`outer_image_state=DECLARED_BY_OPERATOR_UNVERIFIED` is intentional. The local
+The previous v1 packet remains parseable as a historical record but cannot
+authorize a vLLM launch. `outer_image_state=DECLARED_BY_OPERATOR_UNVERIFIED`
+is intentional. The local
 executable metadata proves only a file observed in the current container; it
 does not prove which OCI image started that container. The outer launch image,
 two-A100 allocation, rental identity, external guardian and final destruction
@@ -68,13 +96,14 @@ python -m inferdrome.evaluation.cli load-calibration-vast-container-preflight \
   --recipe /private/inputs/load-low.json \
   --recipe /private/inputs/load-high.json \
   --runtime vllm \
-  --outer-image-reference 'vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52' \
+  --outer-image-reference 'vastai/vllm@sha256:39f2f782305dd7bf8478b748140a2ed719de2824bed51d1862f355dde9891f77' \
   --runtime-executable /usr/local/bin/vllm \
   --output /private/outputs/vast-container-preflight.json
 ```
 
-Use the exact pinned reference from the versioned source contract. The
-preflight fails closed if the image string is not the pinned source reference,
+Use the exact pinned provider image from the versioned source contract. The
+preflight fails closed if the image string is mutable or is not that exact
+stock manifest,
 the executable is not an absolute regular
 executable, recipes do not compile, the two origins differ from the declared
 study pair, or a native SGLang binding is not exact.
@@ -95,6 +124,13 @@ image. It fails closed if the executable identity changed after preflight, the
 approval/deadline/path hashes differ, GPU/port readback fails, one engine fails
 to start, both engines are not ready before the fixed deadline, or cleanup
 cannot be confirmed.
+
+Immediately before dispatch, the v2 authorization must still be live and the
+stock-host receipt must still be within its bounded validity interval. The
+receipt, executable identity, model/path hashes, source commit, image/config,
+two loopback origins and provider guardian are all re-bound before any engine
+lifecycle is constructed. GPU idleness and closed ports are then observed
+again by the existing lifecycle before each pair is spawned.
 
 The output directory must be private and empty. The producer writes the
 existing canonical request-level study artifacts plus no-replace direct-process
@@ -144,14 +180,21 @@ operator record.
 
 ## What this does not prove
 
-- It does not verify availability, price, host identity, GPU model/count, outer
-  OCI image provenance, snapshot immutability after preflight, or provider
+- It does not verify availability, price, provider-reported host identity,
+  outer OCI image provenance, snapshot immutability after preflight, or provider
   termination.
 - It does not expose an inference endpoint beyond loopback, add a scheduler,
   platform control plane, database, queue, registry, bucket or Kubernetes.
 - It does not make Inferdrome a production router, a benchmark leaderboard, or
   a PASS/FAIL/NOT_PROVEN authority.
 
-The next safe gate before any real operation is an explicitly approved,
-read-only provider/capacity/identity check. A separate exact authorization must
-cover any actual rental, registry pull, model acquisition, GPU use or spend.
+Public image facts above come from the anonymous Docker Hub tag/manifest/config
+endpoints ([`vastai/vllm` tags](https://hub.docker.com/r/vastai/vllm/tags))
+and Vast's public
+[`vast-ai/base-image`](https://github.com/vast-ai/base-image) documentation.
+They do not
+prove what a future rental actually runs. The next safe gate before any real
+operation is an explicitly approved, read-only provider/capacity/identity
+check. A separate exact authorization must supply the exact commit,
+provider/account/location, GPU type/count, image/model/runtime identities,
+maximum runtime, USD cap, cleanup deadline/watchdog, and evidence destination.
