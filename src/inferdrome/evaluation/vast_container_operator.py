@@ -53,6 +53,7 @@ from inferdrome.evaluation.study import execute_trial
 from inferdrome.evaluation.vast_stock_vllm import (
     VAST_STOCK_VLLM_CONFIG_DIGEST,
     VAST_STOCK_VLLM_IMAGE_REFERENCE,
+    SupportedVastA100Model,
     VastStockHostReceipt,
     VastStockVllmProfile,
 )
@@ -118,7 +119,7 @@ class VastContainerRehearsalAuthorization(ClosedModel):
     provider: Literal["VAST"] | None = None
     provider_account_alias: OpaqueId | None = None
     region_or_zone_alias: OpaqueId | None = None
-    gpu_type: Literal["NVIDIA A100-PCIE-40GB"] | None = None
+    gpu_type: SupportedVastA100Model | None = None
     gpu_count: Literal[2] | None = None
     maximum_cost_usd_micros: Annotated[int, Field(ge=1)] | None = None
     evidence_destination_sha256: Digest | None = None
@@ -372,6 +373,8 @@ def _authorized(
             or receipt.model_snapshot_path_sha256
             != authorization.model_snapshot_path_sha256
             or receipt.endpoint_origins != _origins(prepared.prepared)
+            or authorization.gpu_type is None
+            or any(item.model != authorization.gpu_type for item in receipt.gpus)
             or authorization.external_guardian.provider != "VAST_MANUAL_HOST"
         ):
             raise EvaluationError(

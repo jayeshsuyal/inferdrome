@@ -61,8 +61,11 @@ Before a stock vLLM engine is allowed to start, create an exact
 - `Qwen/Qwen3-8B`, its pinned revision and preloaded snapshot digest;
 - the exact stock Vast vLLM manifest and config identities above;
 - a locally observed direct executable metadata digest;
-- a five-minute-or-shorter host receipt for the exact Python patch, two
-  distinct observed `NVIDIA A100-PCIE-40GB` devices, idle state, closed
+- a five-minute-or-shorter host receipt for the exact Python patch and two
+  distinct observed devices of one authorized model: either
+  `NVIDIA A100-PCIE-40GB` or `NVIDIA A100-SXM4-40GB`; mixed variants, 80 GB
+  variants, and other accelerator names are rejected. The receipt also binds
+  idle state, closed
   loopback ports, source/model/path identities, and absence of runtime install
   or image build activity;
 - provider/account/location aliases, GPU type/count, maximum runtime, USD cap,

@@ -89,6 +89,7 @@ def _direct_authorization(
     snapshot: Path,
     output: Path,
     now: datetime,
+    gpu_model: str = "NVIDIA A100-SXM4-40GB",
 ) -> operator.VastContainerRehearsalAuthorization:
     def timestamp(value: datetime) -> str:
         return value.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -134,7 +135,7 @@ def _direct_authorization(
             "provider": "VAST",
             "provider_account_alias": "vast-account",
             "region_or_zone_alias": "vast-location",
-            "gpu_type": "NVIDIA A100-PCIE-40GB",
+            "gpu_type": gpu_model,
             "gpu_count": 2,
             "maximum_cost_usd_micros": 5_000_000,
             "evidence_destination_sha256": "sha256:" + "3" * 64,
@@ -183,13 +184,13 @@ def _direct_authorization(
                         "index": 0,
                         "gpu_alias": "gpu-zero",
                         "uuid_sha256": "sha256:" + "4" * 64,
-                        "model": "NVIDIA A100-PCIE-40GB",
+                        "model": gpu_model,
                     },
                     {
                         "index": 1,
                         "gpu_alias": "gpu-one",
                         "uuid_sha256": "sha256:" + "5" * 64,
-                        "model": "NVIDIA A100-PCIE-40GB",
+                        "model": gpu_model,
                     },
                 ),
                 "gpus_idle": True,
@@ -307,6 +308,80 @@ def test_stock_authorization_rejects_wrong_gpu_count_and_mutable_image(
     content = authorization.model_dump(mode="python")
     content["gpu_count"] = 1
     with pytest.raises(ValidationError):
+        operator.VastContainerRehearsalAuthorization.model_validate(content)
+
+
+@pytest.mark.parametrize(
+    "gpu_model",
+    ("NVIDIA A100-PCIE-40GB", "NVIDIA A100-SXM4-40GB"),
+)
+def test_stock_authorization_accepts_only_the_two_reviewed_a100_40gb_variants(
+    tmp_path: Path, gpu_model: str
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    authorization = _direct_authorization(
+        prepared,
+        snapshot=_directory(tmp_path / "snapshot"),
+        output=_directory(tmp_path / "output"),
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+        gpu_model=gpu_model,
+    )
+    assert authorization.gpu_type == gpu_model
+    assert authorization.stock_host_receipt is not None
+    assert {item.model for item in authorization.stock_host_receipt.gpus} == {
+        gpu_model
+    }
+
+
+@pytest.mark.parametrize(
+    "gpu_model",
+    (
+        "NVIDIA H100-80GB-HBM3",
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA A100-PCIE-80GB",
+        "NVIDIA A100 40GB",
+    ),
+)
+def test_stock_authorization_rejects_unsupported_or_wrong_memory_gpu(
+    tmp_path: Path, gpu_model: str
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    authorization = _direct_authorization(
+        prepared,
+        snapshot=_directory(tmp_path / "snapshot"),
+        output=_directory(tmp_path / "output"),
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    content = authorization.model_dump(mode="python")
+    content["gpu_type"] = gpu_model
+    receipt = dict(content["stock_host_receipt"])
+    receipt["gpus"] = tuple(
+        {**item, "model": gpu_model} for item in receipt["gpus"]
+    )
+    content["stock_host_receipt"] = receipt
+    with pytest.raises(ValidationError):
+        operator.VastContainerRehearsalAuthorization.model_validate(content)
+
+
+def test_stock_authorization_rejects_mixed_supported_gpu_variants(
+    tmp_path: Path,
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    authorization = _direct_authorization(
+        prepared,
+        snapshot=_directory(tmp_path / "snapshot"),
+        output=_directory(tmp_path / "output"),
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    content = authorization.model_dump(mode="python")
+    receipt = dict(content["stock_host_receipt"])
+    first, second = receipt["gpus"]
+    receipt["gpus"] = (
+        {**first, "model": "NVIDIA A100-PCIE-40GB"},
+        {**second, "model": "NVIDIA A100-SXM4-40GB"},
+    )
+    content["stock_host_receipt"] = receipt
+    with pytest.raises(ValidationError, match="one exact GPU model"):
         operator.VastContainerRehearsalAuthorization.model_validate(content)
 
 
@@ -456,6 +531,36 @@ def test_wrong_stock_receipt_source_fails_before_engine_lifecycle(
             operator.run_authorized_vast_container_rehearsal(
                 prepared,
                 authorization=wrong_source,
+                model_snapshot_path=snapshot,
+                output_root=output,
+                session_anchor_utc=now,
+                session_started_ns=10,
+                utc_clock=lambda: now,
+                monotonic_clock=iter((11,)).__next__,
+            )
+        )
+
+
+def test_authorized_gpu_variant_must_match_both_observed_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _direct_prepared(tmp_path)
+    snapshot = _directory(tmp_path / "snapshot")
+    output = _directory(tmp_path / "output")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authorization = _direct_authorization(
+        prepared, snapshot=snapshot, output=output, now=now
+    ).model_copy(update={"gpu_type": "NVIDIA A100-PCIE-40GB"})
+    monkeypatch.setattr(
+        operator,
+        "TwoEngineVllmDirectProcessLifecycle",
+        lambda *args, **kwargs: pytest.fail("lifecycle constructed"),
+    )
+    with pytest.raises(EvaluationError, match="receipt is unavailable or stale"):
+        asyncio.run(
+            operator.run_authorized_vast_container_rehearsal(
+                prepared,
+                authorization=authorization,
                 model_snapshot_path=snapshot,
                 output_root=output,
                 session_anchor_utc=now,

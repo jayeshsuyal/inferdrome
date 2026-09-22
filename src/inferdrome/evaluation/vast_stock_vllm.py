@@ -36,6 +36,10 @@ VAST_STOCK_VLLM_BUILD_COMMIT: Final = (
     "ffd46bfab2128bb84146050e98b51a617c6575ab"
 )
 VAST_STOCK_RECEIPT_MAX_AGE_SECONDS: Final = 300
+SupportedVastA100Model = Literal[
+    "NVIDIA A100-PCIE-40GB",
+    "NVIDIA A100-SXM4-40GB",
+]
 
 UtcTimestamp = Annotated[
     str,
@@ -73,7 +77,7 @@ class VastStockGpuObservation(ClosedModel):
     index: Literal[0, 1]
     gpu_alias: OpaqueId
     uuid_sha256: Digest
-    model: Literal["NVIDIA A100-PCIE-40GB"]
+    model: SupportedVastA100Model
 
 
 class VastStockHostReceipt(ClosedModel):
@@ -120,6 +124,8 @@ class VastStockHostReceipt(ClosedModel):
             raise ValueError("stock-host receipt requires ordered GPU 0/1")
         if len({item.uuid_sha256 for item in self.gpus}) != 2:
             raise ValueError("stock-host receipt requires distinct GPU identities")
+        if len({item.model for item in self.gpus}) != 1:
+            raise ValueError("stock-host receipt requires one exact GPU model")
         if len(set(self.endpoint_origins)) != 2 or any(
             not origin.startswith("http://127.0.0.1:")
             for origin in self.endpoint_origins
