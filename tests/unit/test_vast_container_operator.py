@@ -41,10 +41,22 @@ from inferdrome.vllm_compose import VLLM_RUNTIME_IMAGE_REFERENCE
 from tests.unit.test_load_calibration_operator import _prepared
 
 
-def _inputs(tmp_path: Path) -> tuple[Path, tuple[Path, Path]]:
+def _inputs(
+    tmp_path: Path,
+    *,
+    prepare_ns: int = 420_000_000_000,
+    cleanup_ns: int = 240_000_000_000,
+) -> tuple[Path, tuple[Path, Path]]:
     _prepared(tmp_path)
     root = tmp_path / "inputs"
-    return root / "protocol.json", (root / "load-low.json", root / "load-high.json")
+    protocol = root / "protocol.json"
+    value = json.loads(protocol.read_bytes())
+    value["preparation"]["warmup_reset_max_duration_ns"] = prepare_ns
+    value["preparation"]["cleanup_max_duration_ns"] = cleanup_ns
+    protocol.chmod(0o600)
+    protocol.write_bytes(canonical_json_bytes(value) + b"\n")
+    protocol.chmod(0o400)
+    return protocol, (root / "load-low.json", root / "load-high.json")
 
 
 def _directory(path: Path) -> Path:
@@ -68,12 +80,6 @@ def _direct_prepared_with_split_reservation(
     tmp_path: Path,
 ) -> operator.PreparedVastContainerRehearsal:
     protocol, recipes = _inputs(tmp_path)
-    value = json.loads(protocol.read_bytes())
-    value["preparation"]["warmup_reset_max_duration_ns"] = 420_000_000_000
-    value["preparation"]["cleanup_max_duration_ns"] = 240_000_000_000
-    protocol.chmod(0o600)
-    protocol.write_bytes(canonical_json_bytes(value) + b"\n")
-    protocol.chmod(0o400)
     return operator.prepare_vast_container_rehearsal(
         protocol_path=protocol,
         recipe_paths=recipes,
@@ -293,6 +299,71 @@ def test_preflight_rejects_an_unpinned_outer_image_before_any_runtime(
             outer_image_reference="vllm/vllm-openai:latest",
             runtime_executable="/bin/sh",
         )
+
+
+def test_preflight_rejects_the_failed_120s_30s_pilot_before_executable_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    protocol, recipes = _inputs(
+        tmp_path,
+        prepare_ns=120_000_000_000,
+        cleanup_ns=30_000_000_000,
+    )
+
+    def unexpected_executable(_value: str) -> None:
+        raise AssertionError("reservation failure read the runtime executable")
+
+    monkeypatch.setattr(operator, "resolve_direct_runtime", unexpected_executable)
+    with pytest.raises(
+        EvaluationError,
+        match="protocol lifecycle reserve cannot run the supplied lifecycle",
+    ):
+        operator.prepare_vast_container_rehearsal(
+            protocol_path=protocol,
+            recipe_paths=recipes,
+            runtime="vllm",
+            outer_image_reference=VAST_STOCK_VLLM_IMAGE_REFERENCE,
+            runtime_executable="/not-observed/vllm",
+        )
+
+
+def test_cli_preflight_rejects_impossible_reservation_without_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    protocol, recipes = _inputs(
+        tmp_path,
+        prepare_ns=120_000_000_000,
+        cleanup_ns=30_000_000_000,
+    )
+    output = tmp_path / "must-not-exist.json"
+
+    def unexpected_executable(_value: str) -> None:
+        raise AssertionError("reservation failure read the runtime executable")
+
+    monkeypatch.setattr(operator, "resolve_direct_runtime", unexpected_executable)
+    assert (
+        main(
+            [
+                "load-calibration-vast-container-preflight",
+                "--protocol",
+                str(protocol),
+                "--recipe",
+                str(recipes[0]),
+                "--recipe",
+                str(recipes[1]),
+                "--runtime",
+                "vllm",
+                "--outer-image-reference",
+                VAST_STOCK_VLLM_IMAGE_REFERENCE,
+                "--runtime-executable",
+                "/not-observed/vllm",
+                "--output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert not output.exists()
 
 
 def test_stock_authorization_rejects_wrong_gpu_count_and_mutable_image(

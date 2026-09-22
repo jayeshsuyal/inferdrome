@@ -1714,6 +1714,36 @@ def _operation_timeout_seconds(*, timeout_ns: int) -> float:
     return timeout_ns / 1_000_000_000
 
 
+def validate_lifecycle_reservation_bounds(
+    *,
+    required_prepare_timeout_ns: object,
+    required_cleanup_timeout_ns: object,
+    protocol: LoadCalibrationProtocol,
+) -> None:
+    """Validate explicit phase bounds without constructing a lifecycle."""
+
+    cleanup_reserve = (
+        protocol.preparation.warmup_reset_max_duration_ns
+        if protocol.preparation.cleanup_max_duration_ns is None
+        else protocol.preparation.cleanup_max_duration_ns
+    )
+    if (
+        type(required_prepare_timeout_ns) is not int
+        or required_prepare_timeout_ns < 1
+        or type(required_cleanup_timeout_ns) is not int
+        or required_cleanup_timeout_ns < 1
+    ):
+        raise EvaluationError("rehearsal lifecycle reservation is invalid")
+    if (
+        required_prepare_timeout_ns
+        > protocol.preparation.warmup_reset_max_duration_ns
+        or required_cleanup_timeout_ns > cleanup_reserve
+    ):
+        raise EvaluationError(
+            "protocol lifecycle reserve cannot run the supplied lifecycle"
+        )
+
+
 def _validate_lifecycle_reservation(
     lifecycle: TrialLifecycle, protocol: LoadCalibrationProtocol
 ) -> None:
@@ -1727,20 +1757,11 @@ def _validate_lifecycle_reservation(
     required_prepare = getattr(lifecycle, "required_prepare_timeout_ns", None)
     required_cleanup = getattr(lifecycle, "required_cleanup_timeout_ns", None)
     if required_prepare is not None or required_cleanup is not None:
-        if (
-            type(required_prepare) is not int
-            or required_prepare < 1
-            or type(required_cleanup) is not int
-            or required_cleanup < 1
-        ):
-            raise EvaluationError("rehearsal lifecycle reservation is invalid")
-        if (
-            required_prepare > protocol.preparation.warmup_reset_max_duration_ns
-            or required_cleanup > cleanup_reserve
-        ):
-            raise EvaluationError(
-                "protocol lifecycle reserve cannot run the supplied lifecycle"
-            )
+        validate_lifecycle_reservation_bounds(
+            required_prepare_timeout_ns=required_prepare,
+            required_cleanup_timeout_ns=required_cleanup,
+            protocol=protocol,
+        )
         return
     required = getattr(lifecycle, "required_operation_timeout_ns", None)
     if required is None:
