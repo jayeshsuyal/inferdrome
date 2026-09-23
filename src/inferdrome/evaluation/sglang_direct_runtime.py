@@ -10,6 +10,7 @@ import hashlib
 import importlib.metadata
 import os
 import platform
+import re
 import stat
 import subprocess
 import zipfile
@@ -112,6 +113,22 @@ CUTLASS_COMPILER_SHA256 = (
     "sha256:73b760621e35910305e7bdf8f4c2c0d928c10527a243f8f11a76046edba4f6d8"
 )
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+NVIDIA_DRIVER_VERSION_PATTERN = r"^[0-9]{3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?$"
+CUDA_13_MINIMUM_LINUX_DRIVER = (580, 65, 6)
+CUDA_13_MINIMUM_LINUX_DRIVER_TEXT = "580.65.06"
+
+
+def cuda_13_driver_is_compatible(value: str) -> bool:
+    """Apply NVIDIA's CUDA 13 Linux compatibility floor to a driver release."""
+    if (
+        type(value) is not str
+        or re.fullmatch(NVIDIA_DRIVER_VERSION_PATTERN, value) is None
+    ):
+        return False
+    components = [int(component) for component in value.split(".")]
+    if len(components) == 2:
+        components.append(0)
+    return tuple(components) >= CUDA_13_MINIMUM_LINUX_DRIVER
 
 
 class _RuntimeModel(ClosedModel):
@@ -163,7 +180,18 @@ class SglangDirectRuntimeManifest(_RuntimeModel):
     )
     platform: Literal["linux/x86_64"] = "linux/x86_64"
     python_version: Annotated[str, Field(pattern=r"^3\.12\.[0-9]{1,2}$")]
-    driver_version: Literal["595.84"] = "595.84"
+    driver_version: Annotated[
+        str,
+        Field(
+            pattern=NVIDIA_DRIVER_VERSION_PATTERN,
+            min_length=5,
+            max_length=11,
+            description=(
+                "Exact observed NVIDIA Linux driver release; runtime validation "
+                "requires the CUDA 13.0 GA compatibility floor 580.65.06 or newer."
+            ),
+        ),
+    ] = "595.84"
     gpu_model: Literal["NVIDIA A100-SXM4-40GB"] = "NVIDIA A100-SXM4-40GB"
     gpu_uuids: tuple[
         Annotated[
@@ -186,6 +214,11 @@ class SglangDirectRuntimeManifest(_RuntimeModel):
 
     @model_validator(mode="after")
     def identities(self) -> Self:
+        if not cuda_13_driver_is_compatible(self.driver_version):
+            raise ValueError(
+                "runtime NVIDIA driver is below the CUDA 13.0 Linux minimum "
+                + CUDA_13_MINIMUM_LINUX_DRIVER_TEXT
+            )
         device_paths = {d.path for d in self.devices}
         if (
             len(set(self.gpu_uuids)) != 2
