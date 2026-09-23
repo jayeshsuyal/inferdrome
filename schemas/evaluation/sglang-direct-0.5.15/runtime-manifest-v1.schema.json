@@ -1,0 +1,228 @@
+{
+  "$defs": {
+    "RuntimeDevice": {
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "maximum": 4095,
+          "minimum": 1,
+          "title": "Major",
+          "type": "integer"
+        },
+        "minor": {
+          "maximum": 1048575,
+          "minimum": 0,
+          "title": "Minor",
+          "type": "integer"
+        },
+        "path": {
+          "enum": [
+            "/dev/nvidia0",
+            "/dev/nvidia1",
+            "/dev/nvidiactl",
+            "/dev/nvidia-uvm",
+            "/dev/nvidia-uvm-tools"
+          ],
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "major",
+        "minor"
+      ],
+      "title": "RuntimeDevice",
+      "type": "object"
+    },
+    "RuntimeFile": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 4096,
+          "minLength": 2,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "title": "RuntimeFile",
+      "type": "object"
+    },
+    "RuntimeWheel": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 2,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "name",
+        "version"
+      ],
+      "title": "RuntimeWheel",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cuda_home": {
+      "title": "Cuda Home",
+      "type": "string"
+    },
+    "devices": {
+      "items": {
+        "$ref": "#/$defs/RuntimeDevice"
+      },
+      "maxItems": 5,
+      "minItems": 4,
+      "title": "Devices",
+      "type": "array"
+    },
+    "driver_version": {
+      "const": "595.84",
+      "default": "595.84",
+      "title": "Driver Version",
+      "type": "string"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/RuntimeFile"
+      },
+      "maxItems": 20000,
+      "minItems": 16,
+      "title": "Files",
+      "type": "array"
+    },
+    "gpu_model": {
+      "const": "NVIDIA A100-SXM4-40GB",
+      "default": "NVIDIA A100-SXM4-40GB",
+      "title": "Gpu Model",
+      "type": "string"
+    },
+    "gpu_uuids": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "pattern": "^GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        {
+          "pattern": "^GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      ],
+      "title": "Gpu Uuids",
+      "type": "array"
+    },
+    "host_toolkit": {
+      "const": "CUDA_13_1_UPDATE_1",
+      "default": "CUDA_13_1_UPDATE_1",
+      "title": "Host Toolkit",
+      "type": "string"
+    },
+    "packages": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "maxProperties": 512,
+      "minProperties": 1,
+      "title": "Packages",
+      "type": "object"
+    },
+    "platform": {
+      "const": "linux/x86_64",
+      "default": "linux/x86_64",
+      "title": "Platform",
+      "type": "string"
+    },
+    "producer_version": {
+      "const": "0.5.15",
+      "default": "0.5.15",
+      "title": "Producer Version",
+      "type": "string"
+    },
+    "python_version": {
+      "pattern": "^3\\.12\\.[0-9]{1,2}$",
+      "title": "Python Version",
+      "type": "string"
+    },
+    "roles": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Roles",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "inferdrome.sglang-direct-runtime.v1",
+      "default": "inferdrome.sglang-direct-runtime.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "site_packages": {
+      "title": "Site Packages",
+      "type": "string"
+    },
+    "source_commit": {
+      "const": "f63458b5beaceabbd9d749b9fc956370e1b649e6",
+      "default": "f63458b5beaceabbd9d749b9fc956370e1b649e6",
+      "title": "Source Commit",
+      "type": "string"
+    },
+    "wheels": {
+      "items": {
+        "$ref": "#/$defs/RuntimeWheel"
+      },
+      "maxItems": 512,
+      "minItems": 1,
+      "title": "Wheels",
+      "type": "array"
+    }
+  },
+  "required": [
+    "python_version",
+    "gpu_uuids",
+    "devices",
+    "cuda_home",
+    "site_packages",
+    "packages",
+    "wheels",
+    "roles",
+    "files"
+  ],
+  "title": "SglangDirectRuntimeManifest",
+  "type": "object"
+}

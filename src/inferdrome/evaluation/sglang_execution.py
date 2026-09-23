@@ -13,7 +13,7 @@ from collections.abc import Mapping
 
 from inferdrome.evaluation.contracts import EndpointId, EvaluationError
 from inferdrome.evaluation.engine_binding import (
-    EvaluationEngineBinding,
+    SglangEngineBinding,
     engine_binding_bytes,
     load_engine_binding_bytes,
     validate_engine_binding_trial,
@@ -96,8 +96,8 @@ class _SGLangFaultSession(_Trial):
 
 
 def _bound_trial(
-    plan: CompiledStudy, trial: CompiledTrial, binding: EvaluationEngineBinding
-) -> EvaluationEngineBinding:
+    plan: CompiledStudy, trial: CompiledTrial, binding: SglangEngineBinding
+) -> SglangEngineBinding:
     validate_engine_binding_trial(binding, plan, trial)
     return load_engine_binding_bytes(engine_binding_bytes(binding), plan)
 
@@ -105,7 +105,7 @@ def _bound_trial(
 async def run_sglang_trial(
     plan: CompiledStudy,
     trial: CompiledTrial,
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
     foreground_transport: Transport,
     router_probe: ProbeTransport,
     observer_probe: ProbeTransport,
@@ -164,7 +164,7 @@ class SGLangStudyExecutor:
     def __init__(
         self,
         plan: CompiledStudy,
-        binding: EvaluationEngineBinding,
+        binding: SglangEngineBinding,
         profiles: Mapping[EndpointId, SglangServingConfig],
     ) -> None:
         self.plan = plan

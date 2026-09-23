@@ -1,0 +1,2197 @@
+{
+  "$defs": {
+    "DispatchLag": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "method": {
+          "const": "NEAREST_RANK",
+          "title": "Method",
+          "type": "string"
+        },
+        "p50": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P50"
+        },
+        "p90": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P90"
+        },
+        "p95": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P95"
+        },
+        "p99": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P99"
+        },
+        "p99_min_successes": {
+          "const": 1000,
+          "title": "P99 Min Successes",
+          "type": "integer"
+        },
+        "p99_status": {
+          "enum": [
+            "NOT_A_SUCCESS_LATENCY_POPULATION",
+            "DESCRIPTIVE_ONLY",
+            "BELOW_REPORTING_FLOOR"
+          ],
+          "title": "P99 Status",
+          "type": "string"
+        },
+        "population": {
+          "const": "ALL_DISPATCHED_OUTCOMES",
+          "title": "Population",
+          "type": "string"
+        }
+      },
+      "required": [
+        "count",
+        "method",
+        "p50",
+        "p90",
+        "p95",
+        "p99",
+        "p99_status",
+        "p99_min_successes",
+        "population"
+      ],
+      "title": "DispatchLag",
+      "type": "object"
+    },
+    "EngineEndpointBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_id": {
+          "enum": [
+            "endpoint-a",
+            "endpoint-b"
+          ],
+          "title": "Endpoint Id",
+          "type": "string"
+        },
+        "origin_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Origin Sha256",
+          "type": "string"
+        },
+        "profile_config_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Profile Config Sha256",
+          "type": "string"
+        },
+        "projected_launch_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Projected Launch Sha256"
+        }
+      },
+      "required": [
+        "endpoint_id",
+        "origin_sha256",
+        "profile_config_sha256"
+      ],
+      "title": "EngineEndpointBinding",
+      "type": "object"
+    },
+    "OfferCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "offers_in_aborted_trials_without_measurements": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Offers In Aborted Trials Without Measurements",
+          "type": "integer"
+        },
+        "offers_in_not_run_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Offers In Not Run Trials",
+          "type": "integer"
+        },
+        "planned_offers": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Planned Offers",
+          "type": "integer"
+        },
+        "returned_records": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Returned Records",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "planned_offers",
+        "returned_records",
+        "offers_in_aborted_trials_without_measurements",
+        "offers_in_not_run_trials"
+      ],
+      "title": "OfferCoverage",
+      "type": "object"
+    },
+    "OutcomeCount": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "offered_fraction": {
+          "$ref": "#/$defs/Ratio"
+        }
+      },
+      "required": [
+        "count",
+        "offered_fraction"
+      ],
+      "title": "OutcomeCount",
+      "type": "object"
+    },
+    "PartialTiming": {
+      "additionalProperties": false,
+      "properties": {
+        "offered_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Offered Count",
+          "type": "integer"
+        },
+        "scheduled_to_first_content_ns": {
+          "$ref": "#/$defs/Quantiles"
+        }
+      },
+      "required": [
+        "offered_count",
+        "scheduled_to_first_content_ns"
+      ],
+      "title": "PartialTiming",
+      "type": "object"
+    },
+    "PolicySummary": {
+      "additionalProperties": false,
+      "properties": {
+        "completed_trials": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Completed Trials",
+          "type": "integer"
+        },
+        "mean_goodput_rps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ratio"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_max_goodput_rps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ratio"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_min_goodput_rps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ratio"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy_id": {
+          "enum": [
+            "evaluation_round_robin_v1",
+            "evaluation_least_reported_load_v1",
+            "evaluation_freshness_fallback_v1",
+            "evaluation_fail_closed_v1"
+          ],
+          "title": "Policy Id",
+          "type": "string"
+        },
+        "returned_trials": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Returned Trials",
+          "type": "integer"
+        },
+        "slo_good_counts_by_trial": {
+          "items": {
+            "maximum": 100000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 64,
+          "title": "Slo Good Counts By Trial",
+          "type": "array"
+        }
+      },
+      "required": [
+        "policy_id",
+        "returned_trials",
+        "completed_trials",
+        "slo_good_counts_by_trial",
+        "mean_goodput_rps",
+        "observed_min_goodput_rps",
+        "observed_max_goodput_rps"
+      ],
+      "title": "PolicySummary",
+      "type": "object"
+    },
+    "PopulationCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "arrival_observed_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Arrival Observed Count",
+          "type": "integer"
+        },
+        "cancelled": {
+          "title": "Cancelled",
+          "type": "boolean"
+        },
+        "dispatched_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Dispatched Count",
+          "type": "integer"
+        },
+        "elapsed_ns": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Elapsed Ns",
+          "type": "integer"
+        },
+        "offered_count": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Offered Count",
+          "type": "integer"
+        },
+        "outcomes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutcomeCount"
+          },
+          "propertyNames": {
+            "enum": [
+              "SUCCESS",
+              "REJECTED_CAPACITY",
+              "REJECTED_ROUTE",
+              "TIMEOUT",
+              "HTTP_ERROR",
+              "STREAM_ERROR",
+              "STREAM_LIMIT",
+              "INCOMPLETE_STREAM",
+              "TRANSPORT_ERROR",
+              "CANCELLED",
+              "DRAIN_TIMEOUT",
+              "INTERNAL_ERROR"
+            ]
+          },
+          "title": "Outcomes",
+          "type": "object"
+        },
+        "peak_active": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Peak Active",
+          "type": "integer"
+        },
+        "peak_queue": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Peak Queue",
+          "type": "integer"
+        },
+        "successful_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Successful Count",
+          "type": "integer"
+        },
+        "usage_other_outcomes": {
+          "$ref": "#/$defs/Usage"
+        },
+        "usage_success": {
+          "$ref": "#/$defs/Usage"
+        }
+      },
+      "required": [
+        "offered_count",
+        "successful_count",
+        "outcomes",
+        "arrival_observed_count",
+        "dispatched_count",
+        "peak_active",
+        "peak_queue",
+        "elapsed_ns",
+        "cancelled",
+        "usage_success",
+        "usage_other_outcomes"
+      ],
+      "title": "PopulationCounts",
+      "type": "object"
+    },
+    "PopulationSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "arrival_observed_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Arrival Observed Count",
+          "type": "integer"
+        },
+        "cancelled": {
+          "title": "Cancelled",
+          "type": "boolean"
+        },
+        "dispatch_lag_ns": {
+          "$ref": "#/$defs/DispatchLag"
+        },
+        "dispatch_rate_rps": {
+          "$ref": "#/$defs/Ratio"
+        },
+        "dispatched_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Dispatched Count",
+          "type": "integer"
+        },
+        "drain_ns": {
+          "maximum": 60000000000,
+          "minimum": 1,
+          "title": "Drain Ns",
+          "type": "integer"
+        },
+        "elapsed_ns": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Elapsed Ns",
+          "type": "integer"
+        },
+        "fixed_offered_window_ns": {
+          "maximum": 300000000000,
+          "minimum": 1,
+          "title": "Fixed Offered Window Ns",
+          "type": "integer"
+        },
+        "last_offer_ns": {
+          "maximum": 300000000000,
+          "minimum": 0,
+          "title": "Last Offer Ns",
+          "type": "integer"
+        },
+        "offered_count": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Offered Count",
+          "type": "integer"
+        },
+        "offered_rate_rps": {
+          "$ref": "#/$defs/Ratio"
+        },
+        "outcomes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutcomeCount"
+          },
+          "propertyNames": {
+            "enum": [
+              "SUCCESS",
+              "REJECTED_CAPACITY",
+              "REJECTED_ROUTE",
+              "TIMEOUT",
+              "HTTP_ERROR",
+              "STREAM_ERROR",
+              "STREAM_LIMIT",
+              "INCOMPLETE_STREAM",
+              "TRANSPORT_ERROR",
+              "CANCELLED",
+              "DRAIN_TIMEOUT",
+              "INTERNAL_ERROR"
+            ]
+          },
+          "title": "Outcomes",
+          "type": "object"
+        },
+        "partial_timing_by_outcome": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PartialTiming"
+          },
+          "propertyNames": {
+            "enum": [
+              "SUCCESS",
+              "REJECTED_CAPACITY",
+              "REJECTED_ROUTE",
+              "TIMEOUT",
+              "HTTP_ERROR",
+              "STREAM_ERROR",
+              "STREAM_LIMIT",
+              "INCOMPLETE_STREAM",
+              "TRANSPORT_ERROR",
+              "CANCELLED",
+              "DRAIN_TIMEOUT",
+              "INTERNAL_ERROR"
+            ]
+          },
+          "title": "Partial Timing By Outcome",
+          "type": "object"
+        },
+        "peak_active": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Peak Active",
+          "type": "integer"
+        },
+        "peak_queue": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Peak Queue",
+          "type": "integer"
+        },
+        "slo_good_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Slo Good Count",
+          "type": "integer"
+        },
+        "slo_goodput_rps": {
+          "$ref": "#/$defs/Ratio"
+        },
+        "slo_success_fraction": {
+          "$ref": "#/$defs/Ratio"
+        },
+        "successful_completions_during_drain": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Successful Completions During Drain",
+          "type": "integer"
+        },
+        "successful_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Successful Count",
+          "type": "integer"
+        },
+        "successful_latency_ns": {
+          "$ref": "#/$defs/SuccessfulLatency"
+        },
+        "usage_other_outcomes": {
+          "$ref": "#/$defs/Usage"
+        },
+        "usage_success": {
+          "$ref": "#/$defs/Usage"
+        }
+      },
+      "required": [
+        "offered_count",
+        "successful_count",
+        "outcomes",
+        "arrival_observed_count",
+        "dispatched_count",
+        "peak_active",
+        "peak_queue",
+        "elapsed_ns",
+        "cancelled",
+        "usage_success",
+        "usage_other_outcomes",
+        "slo_good_count",
+        "slo_success_fraction",
+        "slo_goodput_rps",
+        "offered_rate_rps",
+        "dispatch_rate_rps",
+        "fixed_offered_window_ns",
+        "drain_ns",
+        "last_offer_ns",
+        "successful_completions_during_drain",
+        "dispatch_lag_ns",
+        "successful_latency_ns",
+        "partial_timing_by_outcome"
+      ],
+      "title": "PopulationSummary",
+      "type": "object"
+    },
+    "Quantiles": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "method": {
+          "const": "NEAREST_RANK",
+          "title": "Method",
+          "type": "string"
+        },
+        "p50": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P50"
+        },
+        "p90": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P90"
+        },
+        "p95": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P95"
+        },
+        "p99": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "P99"
+        },
+        "p99_min_successes": {
+          "const": 1000,
+          "title": "P99 Min Successes",
+          "type": "integer"
+        },
+        "p99_status": {
+          "enum": [
+            "NOT_A_SUCCESS_LATENCY_POPULATION",
+            "DESCRIPTIVE_ONLY",
+            "BELOW_REPORTING_FLOOR"
+          ],
+          "title": "P99 Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "count",
+        "method",
+        "p50",
+        "p90",
+        "p95",
+        "p99",
+        "p99_status",
+        "p99_min_successes"
+      ],
+      "title": "Quantiles",
+      "type": "object"
+    },
+    "Ratio": {
+      "additionalProperties": false,
+      "properties": {
+        "decimal": {
+          "pattern": "^(0|[1-9][0-9]{0,31})\\.[0-9]{6}$",
+          "title": "Decimal",
+          "type": "string"
+        },
+        "denominator": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "numerator": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Numerator",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator",
+        "decimal"
+      ],
+      "title": "Ratio",
+      "type": "object"
+    },
+    "RatioInterval": {
+      "additionalProperties": false,
+      "properties": {
+        "lower": {
+          "$ref": "#/$defs/SignedRatio"
+        },
+        "upper": {
+          "$ref": "#/$defs/SignedRatio"
+        }
+      },
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "title": "RatioInterval",
+      "type": "object"
+    },
+    "Recovery": {
+      "additionalProperties": false,
+      "properties": {
+        "actual_restore_ns": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actual Restore Ns"
+        },
+        "applicability": {
+          "enum": [
+            "NOT_APPLICABLE_SCENARIO",
+            "NOT_APPLICABLE_POLICY",
+            "APPLICABLE"
+          ],
+          "title": "Applicability",
+          "type": "string"
+        },
+        "background_active_at_restore": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Background Active At Restore"
+        },
+        "fault_actual_overload": {
+          "enum": [
+            "NOT_ESTABLISHED_BY_FAULT_SCHEDULE",
+            "NOT_APPLICABLE"
+          ],
+          "title": "Fault Actual Overload",
+          "type": "string"
+        },
+        "intervals": {
+          "$ref": "#/$defs/RecoveryIntervals"
+        },
+        "origin": {
+          "const": "ACTUAL_TELEMETRY_RESTORED_EVENT",
+          "title": "Origin",
+          "type": "string"
+        },
+        "planned_restore_ns": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Planned Restore Ns"
+        }
+      },
+      "required": [
+        "applicability",
+        "origin",
+        "planned_restore_ns",
+        "actual_restore_ns",
+        "intervals",
+        "background_active_at_restore",
+        "fault_actual_overload"
+      ],
+      "title": "Recovery",
+      "type": "object"
+    },
+    "RecoveryCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "applicable_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Applicable Trials",
+          "type": "integer"
+        },
+        "censored_or_restore_unobserved_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Censored Or Restore Unobserved Trials",
+          "type": "integer"
+        },
+        "not_applicable_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Not Applicable Trials",
+          "type": "integer"
+        },
+        "observed_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Observed Trials",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "applicable_trials",
+        "observed_trials",
+        "censored_or_restore_unobserved_trials",
+        "not_applicable_trials"
+      ],
+      "title": "RecoveryCounts",
+      "type": "object"
+    },
+    "RecoveryCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/RecoveryCounts"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/RecoveryCounts"
+        },
+        "publication": {
+          "$ref": "#/$defs/RecoveryCounts"
+        }
+      },
+      "required": [
+        "publication",
+        "decision",
+        "dispatch"
+      ],
+      "title": "RecoveryCoverage",
+      "type": "object"
+    },
+    "RecoveryInterval": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ns": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duration Ns"
+        },
+        "observation_horizon_ns": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Observation Horizon Ns"
+        },
+        "status": {
+          "enum": [
+            "NOT_APPLICABLE",
+            "RESTORE_NOT_OBSERVED",
+            "UNOBSERVED_OR_CENSORED",
+            "OBSERVED"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "duration_ns",
+        "status",
+        "observation_horizon_ns"
+      ],
+      "title": "RecoveryInterval",
+      "type": "object"
+    },
+    "RecoveryIntervals": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/RecoveryInterval"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/RecoveryInterval"
+        },
+        "publication": {
+          "$ref": "#/$defs/RecoveryInterval"
+        }
+      },
+      "required": [
+        "publication",
+        "decision",
+        "dispatch"
+      ],
+      "title": "RecoveryIntervals",
+      "type": "object"
+    },
+    "SglangDirectEngineBinding": {
+      "additionalProperties": false,
+      "description": "Additive 0.5.15 native binding; v1 and its image declarations stay frozen.",
+      "properties": {
+        "cache_preparation": {
+          "const": "WARMUP_DRAIN_FLUSH",
+          "default": "WARMUP_DRAIN_FLUSH",
+          "title": "Cache Preparation",
+          "type": "string"
+        },
+        "cache_state": {
+          "const": "DECLARED_COLD",
+          "default": "DECLARED_COLD",
+          "title": "Cache State",
+          "type": "string"
+        },
+        "config_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Config Sha256",
+          "type": "string"
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/EngineEndpointBinding"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Endpoints",
+          "type": "array"
+        },
+        "engine": {
+          "const": "sglang",
+          "default": "sglang",
+          "title": "Engine",
+          "type": "string"
+        },
+        "evidence_eligible": {
+          "const": false,
+          "default": false,
+          "title": "Evidence Eligible",
+          "type": "boolean"
+        },
+        "execution_mode": {
+          "const": "NATIVE_PROCESS",
+          "default": "NATIVE_PROCESS",
+          "title": "Execution Mode",
+          "type": "string"
+        },
+        "generation_health_path": {
+          "const": "/health_generate",
+          "default": "/health_generate",
+          "title": "Generation Health Path",
+          "type": "string"
+        },
+        "health_path": {
+          "const": "/health",
+          "default": "/health",
+          "title": "Health Path",
+          "type": "string"
+        },
+        "model_identity": {
+          "$ref": "#/$defs/SglangModelIdentity"
+        },
+        "model_identity_path": {
+          "const": "/model_info",
+          "default": "/model_info",
+          "title": "Model Identity Path",
+          "type": "string"
+        },
+        "plan_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Plan Sha256",
+          "type": "string"
+        },
+        "producer_version": {
+          "const": "0.5.15",
+          "default": "0.5.15",
+          "title": "Producer Version",
+          "type": "string"
+        },
+        "profile": {
+          "const": "SGLANG_0_5_15_DIRECT_SINGLE_DEVICE_BF16",
+          "default": "SGLANG_0_5_15_DIRECT_SINGLE_DEVICE_BF16",
+          "title": "Profile",
+          "type": "string"
+        },
+        "readiness_identity": {
+          "const": "SERVER_DECLARED_MATCH",
+          "default": "SERVER_DECLARED_MATCH",
+          "title": "Readiness Identity",
+          "type": "string"
+        },
+        "runtime_manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runtime Manifest Sha256",
+          "type": "string"
+        },
+        "runtime_verification": {
+          "const": "UNVERIFIED",
+          "default": "UNVERIFIED",
+          "title": "Runtime Verification",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.evaluation-engine-binding.v2",
+          "default": "inferdrome.evaluation-engine-binding.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/SglangEngineSettings"
+        },
+        "source_commit": {
+          "const": "f63458b5beaceabbd9d749b9fc956370e1b649e6",
+          "default": "f63458b5beaceabbd9d749b9fc956370e1b649e6",
+          "title": "Source Commit",
+          "type": "string"
+        },
+        "source_repository": {
+          "const": "https://github.com/sgl-project/sglang",
+          "default": "https://github.com/sgl-project/sglang",
+          "title": "Source Repository",
+          "type": "string"
+        },
+        "stream_path": {
+          "const": "/v1/chat/completions",
+          "default": "/v1/chat/completions",
+          "title": "Stream Path",
+          "type": "string"
+        },
+        "telemetry_freshness": {
+          "const": "ACQUISITION_START_AGE_ONLY",
+          "default": "ACQUISITION_START_AGE_ONLY",
+          "title": "Telemetry Freshness",
+          "type": "string"
+        },
+        "telemetry_semantics": {
+          "const": "SGLANG_0_5_15_SCHEDULER_GAUGES",
+          "default": "SGLANG_0_5_15_SCHEDULER_GAUGES",
+          "title": "Telemetry Semantics",
+          "type": "string"
+        },
+        "telemetry_source_age": {
+          "const": "UNAVAILABLE",
+          "default": "UNAVAILABLE",
+          "title": "Telemetry Source Age",
+          "type": "string"
+        }
+      },
+      "required": [
+        "config_sha256",
+        "plan_sha256",
+        "runtime_manifest_sha256",
+        "endpoints",
+        "model_identity",
+        "settings"
+      ],
+      "title": "SglangDirectEngineBinding",
+      "type": "object"
+    },
+    "SglangEngineSettings": {
+      "additionalProperties": false,
+      "description": "Variable settings within the fixed single-device BF16 serving profile.",
+      "properties": {
+        "chunked_prefill_size": {
+          "const": -1,
+          "default": -1,
+          "title": "Chunked Prefill Size",
+          "type": "integer"
+        },
+        "context_length": {
+          "maximum": 32768,
+          "minimum": 2,
+          "title": "Context Length",
+          "type": "integer"
+        },
+        "decode_log_interval": {
+          "const": 40,
+          "default": 40,
+          "title": "Decode Log Interval",
+          "type": "integer"
+        },
+        "kv_cache_dtype": {
+          "const": "bfloat16",
+          "default": "bfloat16",
+          "title": "Kv Cache Dtype",
+          "type": "string"
+        },
+        "max_queued_requests": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Max Queued Requests",
+          "type": "integer"
+        },
+        "max_running_requests": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Running Requests",
+          "type": "integer"
+        },
+        "mem_fraction_static_millis": {
+          "maximum": 950,
+          "minimum": 100,
+          "title": "Mem Fraction Static Millis",
+          "type": "integer"
+        },
+        "prefix_cache": {
+          "enum": [
+            "RADIX_ENABLED",
+            "RADIX_DISABLED"
+          ],
+          "title": "Prefix Cache",
+          "type": "string"
+        },
+        "random_seed": {
+          "maximum": 2147483647,
+          "minimum": 0,
+          "title": "Random Seed",
+          "type": "integer"
+        },
+        "schedule_policy": {
+          "const": "fcfs",
+          "default": "fcfs",
+          "title": "Schedule Policy",
+          "type": "string"
+        },
+        "stream_interval": {
+          "const": 1,
+          "default": 1,
+          "title": "Stream Interval",
+          "type": "integer"
+        },
+        "weight_dtype": {
+          "const": "bfloat16",
+          "default": "bfloat16",
+          "title": "Weight Dtype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_length",
+        "max_running_requests",
+        "max_queued_requests",
+        "mem_fraction_static_millis",
+        "random_seed",
+        "prefix_cache"
+      ],
+      "title": "SglangEngineSettings",
+      "type": "object"
+    },
+    "SglangModelIdentity": {
+      "additionalProperties": false,
+      "description": "Declared artifact identity; names, snapshot paths and prompts are absent.",
+      "properties": {
+        "attestation": {
+          "const": "DECLARED_NOT_ARTIFACT_VERIFIED",
+          "default": "DECLARED_NOT_ARTIFACT_VERIFIED",
+          "title": "Attestation",
+          "type": "string"
+        },
+        "chat_template_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Chat Template Sha256",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "model_snapshot_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Model Snapshot Sha256",
+          "type": "string"
+        },
+        "served_model_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Served Model Sha256",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        },
+        "tokenizer_snapshot_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Tokenizer Snapshot Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "served_model_sha256",
+        "model_revision",
+        "tokenizer_revision",
+        "model_snapshot_sha256",
+        "tokenizer_snapshot_sha256",
+        "chat_template_sha256"
+      ],
+      "title": "SglangModelIdentity",
+      "type": "object"
+    },
+    "SignedRatio": {
+      "additionalProperties": false,
+      "properties": {
+        "decimal": {
+          "pattern": "^-?(0|[1-9][0-9]{0,31})\\.[0-9]{6}$",
+          "title": "Decimal",
+          "type": "string"
+        },
+        "denominator": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "magnitude_numerator": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Magnitude Numerator",
+          "type": "integer"
+        },
+        "sign": {
+          "enum": [
+            -1,
+            0,
+            1
+          ],
+          "title": "Sign",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sign",
+        "magnitude_numerator",
+        "denominator",
+        "decimal"
+      ],
+      "title": "SignedRatio",
+      "type": "object"
+    },
+    "StudyContrast": {
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap_resamples": {
+          "const": 2000,
+          "title": "Bootstrap Resamples",
+          "type": "integer"
+        },
+        "bootstrap_seed": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Bootstrap Seed",
+          "type": "integer"
+        },
+        "complete_blocks": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Complete Blocks",
+          "type": "integer"
+        },
+        "confidence_percent": {
+          "const": 90,
+          "title": "Confidence Percent",
+          "type": "integer"
+        },
+        "interval_rps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RatioInterval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interval_status": {
+          "enum": [
+            "INCOMPLETE_STUDY",
+            "INSUFFICIENT_TRIAL_REPLICATION",
+            "AVAILABLE"
+          ],
+          "title": "Interval Status",
+          "type": "string"
+        },
+        "mean_goodput_difference_rps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignedRatio"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "percentile_ranks": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "const": 5,
+              "type": "integer"
+            },
+            {
+              "const": 95,
+              "type": "integer"
+            }
+          ],
+          "title": "Percentile Ranks",
+          "type": "array"
+        },
+        "policy_id": {
+          "enum": [
+            "evaluation_round_robin_v1",
+            "evaluation_least_reported_load_v1",
+            "evaluation_freshness_fallback_v1",
+            "evaluation_fail_closed_v1"
+          ],
+          "title": "Policy Id",
+          "type": "string"
+        },
+        "reference_policy_id": {
+          "const": "evaluation_round_robin_v1",
+          "title": "Reference Policy Id",
+          "type": "string"
+        },
+        "replication_unit": {
+          "const": "MATCHED_TRIAL_BLOCK",
+          "title": "Replication Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_id",
+        "reference_policy_id",
+        "replication_unit",
+        "complete_blocks",
+        "mean_goodput_difference_rps",
+        "interval_status",
+        "confidence_percent",
+        "percentile_ranks",
+        "bootstrap_resamples",
+        "bootstrap_seed",
+        "interval_rps"
+      ],
+      "title": "StudyContrast",
+      "type": "object"
+    },
+    "StudyCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "aborted_trials": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Aborted Trials",
+          "type": "integer"
+        },
+        "background": {
+          "$ref": "#/$defs/OfferCoverage"
+        },
+        "cancelled_results": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Cancelled Results",
+          "type": "integer"
+        },
+        "completed_trial_results": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Completed Trial Results",
+          "type": "integer"
+        },
+        "foreground": {
+          "$ref": "#/$defs/OfferCoverage"
+        },
+        "not_run_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Not Run Trials",
+          "type": "integer"
+        },
+        "planned_trials": {
+          "maximum": 256,
+          "minimum": 4,
+          "title": "Planned Trials",
+          "type": "integer"
+        },
+        "returned_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Returned Trials",
+          "type": "integer"
+        },
+        "started_trials": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Started Trials",
+          "type": "integer"
+        },
+        "warmup_failed_results": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Warmup Failed Results",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "planned_trials",
+        "started_trials",
+        "returned_trials",
+        "aborted_trials",
+        "not_run_trials",
+        "completed_trial_results",
+        "warmup_failed_results",
+        "cancelled_results",
+        "foreground",
+        "background"
+      ],
+      "title": "StudyCoverage",
+      "type": "object"
+    },
+    "StudyPreparation": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_state": {
+          "enum": [
+            "UNKNOWN",
+            "DECLARED_COLD",
+            "DECLARED_WARM"
+          ],
+          "title": "Cache State",
+          "type": "string"
+        },
+        "cost": {
+          "const": "UNAVAILABLE",
+          "title": "Cost",
+          "type": "string"
+        },
+        "model_warmup": {
+          "const": "EXTERNALLY_PREPARED_UNMEASURED",
+          "title": "Model Warmup",
+          "type": "string"
+        },
+        "model_warmup_reference": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Model Warmup Reference",
+          "type": "string"
+        },
+        "prefix_caching": {
+          "enum": [
+            "UNKNOWN",
+            "DECLARED_ENABLED",
+            "DECLARED_DISABLED"
+          ],
+          "title": "Prefix Caching",
+          "type": "string"
+        },
+        "runtime_verification": {
+          "const": "UNVERIFIED",
+          "title": "Runtime Verification",
+          "type": "string"
+        },
+        "serving_image_reference": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Serving Image Reference"
+        }
+      },
+      "required": [
+        "cache_state",
+        "prefix_caching",
+        "model_warmup",
+        "model_warmup_reference",
+        "serving_image_reference",
+        "runtime_verification",
+        "cost"
+      ],
+      "title": "StudyPreparation",
+      "type": "object"
+    },
+    "StudyReport": {
+      "additionalProperties": false,
+      "properties": {
+        "calibration": {
+          "const": "UNCALIBRATED_REHEARSAL",
+          "title": "Calibration",
+          "type": "string"
+        },
+        "comparative_headline": {
+          "enum": [
+            "DESCRIPTIVE_UNCALIBRATED_REHEARSAL",
+            "SUPPRESSED_INCOMPLETE_STUDY"
+          ],
+          "title": "Comparative Headline",
+          "type": "string"
+        },
+        "config_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Config Sha256",
+          "type": "string"
+        },
+        "cost": {
+          "const": "UNAVAILABLE",
+          "title": "Cost",
+          "type": "string"
+        },
+        "coverage": {
+          "$ref": "#/$defs/StudyCoverage"
+        },
+        "duplicate_payload_hash_groups": {
+          "maximum": 128,
+          "minimum": 0,
+          "title": "Duplicate Payload Hash Groups",
+          "type": "integer"
+        },
+        "evidence_class": {
+          "enum": [
+            "LOCAL_MEASUREMENT_ONLY",
+            "SYNTHETIC_ONLY"
+          ],
+          "title": "Evidence Class",
+          "type": "string"
+        },
+        "evidence_eligible": {
+          "const": false,
+          "title": "Evidence Eligible",
+          "type": "boolean"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 8,
+          "title": "Limitations",
+          "type": "array"
+        },
+        "model_warmup": {
+          "const": "EXTERNALLY_PREPARED_UNMEASURED",
+          "title": "Model Warmup",
+          "type": "string"
+        },
+        "plan_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Plan Sha256",
+          "type": "string"
+        },
+        "preparation": {
+          "$ref": "#/$defs/StudyPreparation"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "CANCELLED",
+                "STUDY_DEADLINE",
+                "WARMUP_FAILED",
+                "CONTROLLER_OR_CLEANUP_FAILED",
+                "RESULT_VALIDATION_FAILED",
+                "OUTPUT_FAILED"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reason"
+        },
+        "reporting": {
+          "$ref": "#/$defs/StudyReporting"
+        },
+        "runtime_identity": {
+          "const": "UNVERIFIED",
+          "title": "Runtime Identity",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.evaluation-study-report.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "COMPLETED",
+            "CANCELLED",
+            "ABORTED"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "strata": {
+          "items": {
+            "$ref": "#/$defs/StudyStratum"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Strata",
+          "type": "array"
+        },
+        "study_elapsed_ns": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Study Elapsed Ns",
+          "type": "integer"
+        },
+        "study_elapsed_semantics": {
+          "const": "WHOLE_OPERATION_INCLUDING_TRIALS_COOLDOWNS_AND_IO",
+          "title": "Study Elapsed Semantics",
+          "type": "string"
+        },
+        "trials": {
+          "items": {
+            "$ref": "#/$defs/TrialSummary"
+          },
+          "maxItems": 256,
+          "title": "Trials",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "config_sha256",
+        "plan_sha256",
+        "status",
+        "reason",
+        "study_elapsed_ns",
+        "study_elapsed_semantics",
+        "comparative_headline",
+        "coverage",
+        "reporting",
+        "strata",
+        "trials",
+        "evidence_class",
+        "evidence_eligible",
+        "runtime_identity",
+        "calibration",
+        "cost",
+        "model_warmup",
+        "preparation",
+        "duplicate_payload_hash_groups",
+        "limitations"
+      ],
+      "title": "StudyReport",
+      "type": "object"
+    },
+    "StudyReporting": {
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap_resamples": {
+          "const": 2000,
+          "title": "Bootstrap Resamples",
+          "type": "integer"
+        },
+        "bootstrap_seed": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Bootstrap Seed",
+          "type": "integer"
+        },
+        "confidence_percent": {
+          "const": 90,
+          "title": "Confidence Percent",
+          "type": "integer"
+        },
+        "minimum_complete_blocks": {
+          "const": 8,
+          "title": "Minimum Complete Blocks",
+          "type": "integer"
+        },
+        "p99_min_successes": {
+          "const": 1000,
+          "title": "P99 Min Successes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "p99_min_successes",
+        "bootstrap_resamples",
+        "confidence_percent",
+        "minimum_complete_blocks",
+        "bootstrap_seed"
+      ],
+      "title": "StudyReporting",
+      "type": "object"
+    },
+    "StudyStratum": {
+      "additionalProperties": false,
+      "properties": {
+        "complete_blocks": {
+          "maximum": 64,
+          "minimum": 0,
+          "title": "Complete Blocks",
+          "type": "integer"
+        },
+        "fixed_window_ns": {
+          "maximum": 300000000000,
+          "minimum": 1,
+          "title": "Fixed Window Ns",
+          "type": "integer"
+        },
+        "paired_contrasts": {
+          "items": {
+            "$ref": "#/$defs/StudyContrast"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Paired Contrasts",
+          "type": "array"
+        },
+        "planned_blocks": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Planned Blocks",
+          "type": "integer"
+        },
+        "policies": {
+          "items": {
+            "$ref": "#/$defs/PolicySummary"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Policies",
+          "type": "array"
+        },
+        "profile_id": {
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "recovery_coverage": {
+          "$ref": "#/$defs/RecoveryCoverage"
+        },
+        "scenario": {
+          "enum": [
+            "HEALTHY",
+            "STALE_LOAD"
+          ],
+          "title": "Scenario",
+          "type": "string"
+        },
+        "target_endpoint_id": {
+          "anyOf": [
+            {
+              "enum": [
+                "endpoint-a",
+                "endpoint-b"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Endpoint Id"
+        }
+      },
+      "required": [
+        "scenario",
+        "profile_id",
+        "target_endpoint_id",
+        "planned_blocks",
+        "complete_blocks",
+        "fixed_window_ns",
+        "policies",
+        "paired_contrasts",
+        "recovery_coverage"
+      ],
+      "title": "StudyStratum",
+      "type": "object"
+    },
+    "SuccessfulLatency": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "dispatch_to_first_content": {
+          "$ref": "#/$defs/Quantiles"
+        },
+        "dispatch_to_terminal": {
+          "$ref": "#/$defs/Quantiles"
+        },
+        "population": {
+          "const": "ALL_SUCCESS_INCLUDING_SLO_MISSES",
+          "title": "Population",
+          "type": "string"
+        },
+        "scheduled_to_first_content": {
+          "$ref": "#/$defs/Quantiles"
+        },
+        "scheduled_to_terminal": {
+          "$ref": "#/$defs/Quantiles"
+        }
+      },
+      "required": [
+        "population",
+        "count",
+        "scheduled_to_first_content",
+        "scheduled_to_terminal",
+        "dispatch_to_first_content",
+        "dispatch_to_terminal"
+      ],
+      "title": "SuccessfulLatency",
+      "type": "object"
+    },
+    "TrialSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "background": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PopulationCounts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "background_offered_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Background Offered Count",
+          "type": "integer"
+        },
+        "block_id": {
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+          "title": "Block Id",
+          "type": "string"
+        },
+        "calibration": {
+          "const": "UNCALIBRATED_REHEARSAL",
+          "title": "Calibration",
+          "type": "string"
+        },
+        "completion_slo_ns": {
+          "maximum": 60000000000,
+          "minimum": 1,
+          "title": "Completion Slo Ns",
+          "type": "integer"
+        },
+        "config_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Config Sha256",
+          "type": "string"
+        },
+        "cooldown_ns": {
+          "maximum": 60000000000,
+          "minimum": 0,
+          "title": "Cooldown Ns",
+          "type": "integer"
+        },
+        "cost": {
+          "const": "UNAVAILABLE",
+          "title": "Cost",
+          "type": "string"
+        },
+        "evidence_class": {
+          "enum": [
+            "LOCAL_MEASUREMENT_ONLY",
+            "SYNTHETIC_ONLY"
+          ],
+          "title": "Evidence Class",
+          "type": "string"
+        },
+        "evidence_eligible": {
+          "const": false,
+          "title": "Evidence Eligible",
+          "type": "boolean"
+        },
+        "first_content_slo_ns": {
+          "maximum": 60000000000,
+          "minimum": 1,
+          "title": "First Content Slo Ns",
+          "type": "integer"
+        },
+        "foreground": {
+          "$ref": "#/$defs/PopulationSummary"
+        },
+        "foreground_offered_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Foreground Offered Count",
+          "type": "integer"
+        },
+        "model_warmup": {
+          "const": "EXTERNALLY_PREPARED_UNMEASURED",
+          "title": "Model Warmup",
+          "type": "string"
+        },
+        "order_seed": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Order Seed",
+          "type": "integer"
+        },
+        "policy_id": {
+          "enum": [
+            "evaluation_round_robin_v1",
+            "evaluation_least_reported_load_v1",
+            "evaluation_freshness_fallback_v1",
+            "evaluation_fail_closed_v1"
+          ],
+          "title": "Policy Id",
+          "type": "string"
+        },
+        "profile_id": {
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "recovery": {
+          "$ref": "#/$defs/Recovery"
+        },
+        "repeat_index": {
+          "maximum": 63,
+          "minimum": 0,
+          "title": "Repeat Index",
+          "type": "integer"
+        },
+        "result_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "runtime_identity": {
+          "const": "UNVERIFIED",
+          "title": "Runtime Identity",
+          "type": "string"
+        },
+        "scenario": {
+          "enum": [
+            "HEALTHY",
+            "STALE_LOAD"
+          ],
+          "title": "Scenario",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.evaluation-study-trial-summary.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "COMPLETED",
+            "WARMUP_FAILED",
+            "CANCELLED"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "target_endpoint_id": {
+          "anyOf": [
+            {
+              "enum": [
+                "endpoint-a",
+                "endpoint-b"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Endpoint Id"
+        },
+        "timing_semantics": {
+          "const": "CONTENT_EVENTS_NOT_EXACT_TOKENS_OR_WIRE_TIMING",
+          "title": "Timing Semantics",
+          "type": "string"
+        },
+        "trial_elapsed_ns": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Trial Elapsed Ns",
+          "type": "integer"
+        },
+        "trial_id": {
+          "pattern": "^trial-[0-9]{4}$",
+          "title": "Trial Id",
+          "type": "string"
+        },
+        "window_end_ns": {
+          "maximum": 300000000000,
+          "minimum": 1,
+          "title": "Window End Ns",
+          "type": "integer"
+        },
+        "window_start_ns": {
+          "maximum": 300000000000,
+          "minimum": 0,
+          "title": "Window Start Ns",
+          "type": "integer"
+        },
+        "workload_seed": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Workload Seed",
+          "type": "integer"
+        },
+        "workload_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Workload Sha256",
+          "type": "string"
+        },
+        "worst_case_duration_ns": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Worst Case Duration Ns",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "trial_id",
+        "block_id",
+        "profile_id",
+        "scenario",
+        "target_endpoint_id",
+        "repeat_index",
+        "workload_seed",
+        "order_seed",
+        "policy_id",
+        "config_sha256",
+        "workload_sha256",
+        "window_start_ns",
+        "window_end_ns",
+        "first_content_slo_ns",
+        "completion_slo_ns",
+        "cooldown_ns",
+        "worst_case_duration_ns",
+        "foreground_offered_count",
+        "background_offered_count",
+        "result_sha256",
+        "status",
+        "evidence_class",
+        "evidence_eligible",
+        "calibration",
+        "runtime_identity",
+        "cost",
+        "timing_semantics",
+        "foreground",
+        "background",
+        "model_warmup",
+        "trial_elapsed_ns",
+        "recovery"
+      ],
+      "title": "TrialSummary",
+      "type": "object"
+    },
+    "Usage": {
+      "additionalProperties": false,
+      "properties": {
+        "completion_tokens_total_decimal": {
+          "pattern": "^(0|[1-9][0-9]{0,31})$",
+          "title": "Completion Tokens Total Decimal",
+          "type": "string"
+        },
+        "missing_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Missing Count",
+          "type": "integer"
+        },
+        "population_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Population Count",
+          "type": "integer"
+        },
+        "prompt_tokens_total_decimal": {
+          "pattern": "^(0|[1-9][0-9]{0,31})$",
+          "title": "Prompt Tokens Total Decimal",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "SERVER_REPORTED_STREAM_USAGE_ONLY",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "reported_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Reported Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "population_count",
+        "reported_count",
+        "missing_count",
+        "prompt_tokens_total_decimal",
+        "completion_tokens_total_decimal",
+        "provenance"
+      ],
+      "title": "Usage",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Closed self-contained report, retaining explicit engine and source claims.",
+  "properties": {
+    "dashboard_projection": {
+      "const": "UNSUPPORTED_ENGINE_BINDING",
+      "title": "Dashboard Projection",
+      "type": "string"
+    },
+    "engine": {
+      "const": "sglang",
+      "title": "Engine",
+      "type": "string"
+    },
+    "engine_binding": {
+      "$ref": "#/$defs/SglangDirectEngineBinding"
+    },
+    "engine_binding_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Engine Binding Sha256",
+      "type": "string"
+    },
+    "evidence_class": {
+      "enum": [
+        "LOCAL_MEASUREMENT_ONLY",
+        "SYNTHETIC_ONLY"
+      ],
+      "title": "Evidence Class",
+      "type": "string"
+    },
+    "evidence_eligible": {
+      "const": false,
+      "title": "Evidence Eligible",
+      "type": "boolean"
+    },
+    "runtime_verification": {
+      "const": "UNVERIFIED",
+      "title": "Runtime Verification",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "inferdrome.evaluation-study-report.v3",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "statistical_report": {
+      "$ref": "#/$defs/StudyReport"
+    },
+    "statistical_report_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Statistical Report Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "engine",
+    "engine_binding",
+    "engine_binding_sha256",
+    "statistical_report",
+    "statistical_report_sha256",
+    "evidence_class",
+    "runtime_verification",
+    "evidence_eligible",
+    "dashboard_projection"
+  ],
+  "title": "SglangDirectStudyReport",
+  "type": "object"
+}

@@ -1,0 +1,409 @@
+{
+  "$defs": {
+    "EngineEndpointBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_id": {
+          "enum": [
+            "endpoint-a",
+            "endpoint-b"
+          ],
+          "title": "Endpoint Id",
+          "type": "string"
+        },
+        "origin_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Origin Sha256",
+          "type": "string"
+        },
+        "profile_config_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Profile Config Sha256",
+          "type": "string"
+        },
+        "projected_launch_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Projected Launch Sha256"
+        }
+      },
+      "required": [
+        "endpoint_id",
+        "origin_sha256",
+        "profile_config_sha256"
+      ],
+      "title": "EngineEndpointBinding",
+      "type": "object"
+    },
+    "SglangDirectEngineBinding": {
+      "additionalProperties": false,
+      "description": "Additive 0.5.15 native binding; v1 and its image declarations stay frozen.",
+      "properties": {
+        "cache_preparation": {
+          "const": "WARMUP_DRAIN_FLUSH",
+          "default": "WARMUP_DRAIN_FLUSH",
+          "title": "Cache Preparation",
+          "type": "string"
+        },
+        "cache_state": {
+          "const": "DECLARED_COLD",
+          "default": "DECLARED_COLD",
+          "title": "Cache State",
+          "type": "string"
+        },
+        "config_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Config Sha256",
+          "type": "string"
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/EngineEndpointBinding"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Endpoints",
+          "type": "array"
+        },
+        "engine": {
+          "const": "sglang",
+          "default": "sglang",
+          "title": "Engine",
+          "type": "string"
+        },
+        "evidence_eligible": {
+          "const": false,
+          "default": false,
+          "title": "Evidence Eligible",
+          "type": "boolean"
+        },
+        "execution_mode": {
+          "const": "NATIVE_PROCESS",
+          "default": "NATIVE_PROCESS",
+          "title": "Execution Mode",
+          "type": "string"
+        },
+        "generation_health_path": {
+          "const": "/health_generate",
+          "default": "/health_generate",
+          "title": "Generation Health Path",
+          "type": "string"
+        },
+        "health_path": {
+          "const": "/health",
+          "default": "/health",
+          "title": "Health Path",
+          "type": "string"
+        },
+        "model_identity": {
+          "$ref": "#/$defs/SglangModelIdentity"
+        },
+        "model_identity_path": {
+          "const": "/model_info",
+          "default": "/model_info",
+          "title": "Model Identity Path",
+          "type": "string"
+        },
+        "plan_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Plan Sha256",
+          "type": "string"
+        },
+        "producer_version": {
+          "const": "0.5.15",
+          "default": "0.5.15",
+          "title": "Producer Version",
+          "type": "string"
+        },
+        "profile": {
+          "const": "SGLANG_0_5_15_DIRECT_SINGLE_DEVICE_BF16",
+          "default": "SGLANG_0_5_15_DIRECT_SINGLE_DEVICE_BF16",
+          "title": "Profile",
+          "type": "string"
+        },
+        "readiness_identity": {
+          "const": "SERVER_DECLARED_MATCH",
+          "default": "SERVER_DECLARED_MATCH",
+          "title": "Readiness Identity",
+          "type": "string"
+        },
+        "runtime_manifest_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Runtime Manifest Sha256",
+          "type": "string"
+        },
+        "runtime_verification": {
+          "const": "UNVERIFIED",
+          "default": "UNVERIFIED",
+          "title": "Runtime Verification",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "inferdrome.evaluation-engine-binding.v2",
+          "default": "inferdrome.evaluation-engine-binding.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/SglangEngineSettings"
+        },
+        "source_commit": {
+          "const": "f63458b5beaceabbd9d749b9fc956370e1b649e6",
+          "default": "f63458b5beaceabbd9d749b9fc956370e1b649e6",
+          "title": "Source Commit",
+          "type": "string"
+        },
+        "source_repository": {
+          "const": "https://github.com/sgl-project/sglang",
+          "default": "https://github.com/sgl-project/sglang",
+          "title": "Source Repository",
+          "type": "string"
+        },
+        "stream_path": {
+          "const": "/v1/chat/completions",
+          "default": "/v1/chat/completions",
+          "title": "Stream Path",
+          "type": "string"
+        },
+        "telemetry_freshness": {
+          "const": "ACQUISITION_START_AGE_ONLY",
+          "default": "ACQUISITION_START_AGE_ONLY",
+          "title": "Telemetry Freshness",
+          "type": "string"
+        },
+        "telemetry_semantics": {
+          "const": "SGLANG_0_5_15_SCHEDULER_GAUGES",
+          "default": "SGLANG_0_5_15_SCHEDULER_GAUGES",
+          "title": "Telemetry Semantics",
+          "type": "string"
+        },
+        "telemetry_source_age": {
+          "const": "UNAVAILABLE",
+          "default": "UNAVAILABLE",
+          "title": "Telemetry Source Age",
+          "type": "string"
+        }
+      },
+      "required": [
+        "config_sha256",
+        "plan_sha256",
+        "runtime_manifest_sha256",
+        "endpoints",
+        "model_identity",
+        "settings"
+      ],
+      "title": "SglangDirectEngineBinding",
+      "type": "object"
+    },
+    "SglangEngineSettings": {
+      "additionalProperties": false,
+      "description": "Variable settings within the fixed single-device BF16 serving profile.",
+      "properties": {
+        "chunked_prefill_size": {
+          "const": -1,
+          "default": -1,
+          "title": "Chunked Prefill Size",
+          "type": "integer"
+        },
+        "context_length": {
+          "maximum": 32768,
+          "minimum": 2,
+          "title": "Context Length",
+          "type": "integer"
+        },
+        "decode_log_interval": {
+          "const": 40,
+          "default": 40,
+          "title": "Decode Log Interval",
+          "type": "integer"
+        },
+        "kv_cache_dtype": {
+          "const": "bfloat16",
+          "default": "bfloat16",
+          "title": "Kv Cache Dtype",
+          "type": "string"
+        },
+        "max_queued_requests": {
+          "maximum": 1024,
+          "minimum": 0,
+          "title": "Max Queued Requests",
+          "type": "integer"
+        },
+        "max_running_requests": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Running Requests",
+          "type": "integer"
+        },
+        "mem_fraction_static_millis": {
+          "maximum": 950,
+          "minimum": 100,
+          "title": "Mem Fraction Static Millis",
+          "type": "integer"
+        },
+        "prefix_cache": {
+          "enum": [
+            "RADIX_ENABLED",
+            "RADIX_DISABLED"
+          ],
+          "title": "Prefix Cache",
+          "type": "string"
+        },
+        "random_seed": {
+          "maximum": 2147483647,
+          "minimum": 0,
+          "title": "Random Seed",
+          "type": "integer"
+        },
+        "schedule_policy": {
+          "const": "fcfs",
+          "default": "fcfs",
+          "title": "Schedule Policy",
+          "type": "string"
+        },
+        "stream_interval": {
+          "const": 1,
+          "default": 1,
+          "title": "Stream Interval",
+          "type": "integer"
+        },
+        "weight_dtype": {
+          "const": "bfloat16",
+          "default": "bfloat16",
+          "title": "Weight Dtype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_length",
+        "max_running_requests",
+        "max_queued_requests",
+        "mem_fraction_static_millis",
+        "random_seed",
+        "prefix_cache"
+      ],
+      "title": "SglangEngineSettings",
+      "type": "object"
+    },
+    "SglangModelIdentity": {
+      "additionalProperties": false,
+      "description": "Declared artifact identity; names, snapshot paths and prompts are absent.",
+      "properties": {
+        "attestation": {
+          "const": "DECLARED_NOT_ARTIFACT_VERIFIED",
+          "default": "DECLARED_NOT_ARTIFACT_VERIFIED",
+          "title": "Attestation",
+          "type": "string"
+        },
+        "chat_template_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Chat Template Sha256",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "model_snapshot_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Model Snapshot Sha256",
+          "type": "string"
+        },
+        "served_model_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Served Model Sha256",
+          "type": "string"
+        },
+        "tokenizer_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Tokenizer Revision",
+          "type": "string"
+        },
+        "tokenizer_snapshot_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Tokenizer Snapshot Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "served_model_sha256",
+        "model_revision",
+        "tokenizer_revision",
+        "model_snapshot_sha256",
+        "tokenizer_snapshot_sha256",
+        "chat_template_sha256"
+      ],
+      "title": "SglangModelIdentity",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "block_id": {
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+      "title": "Block Id",
+      "type": "string"
+    },
+    "config_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Config Sha256",
+      "type": "string"
+    },
+    "engine_binding": {
+      "$ref": "#/$defs/SglangDirectEngineBinding"
+    },
+    "engine_binding_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Engine Binding Sha256",
+      "type": "string"
+    },
+    "plan_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Plan Sha256",
+      "type": "string"
+    },
+    "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "inferdrome.evaluation-study-trial-result.v3",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "trial_id": {
+      "pattern": "^trial-[0-9]{4}$",
+      "title": "Trial Id",
+      "type": "string"
+    },
+    "workload_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Workload Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_sha256",
+    "trial_id",
+    "block_id",
+    "workload_sha256",
+    "config_sha256",
+    "engine_binding",
+    "engine_binding_sha256",
+    "result"
+  ],
+  "title": "_DirectTrialEnvelope",
+  "type": "object"
+}
