@@ -19,6 +19,8 @@ from inferdrome.evaluation.contracts import ClosedModel, EvaluationError
 from inferdrome.evaluation.engine_binding import (
     SGLANG_TELEMETRY_SEMANTICS,
     EvaluationEngineBinding,
+    SglangDirectEngineBinding,
+    SglangEngineBinding,
     engine_binding_bytes,
     engine_binding_sha256,
     load_engine_binding_bytes,
@@ -62,11 +64,23 @@ class _TrialEnvelope(ClosedModel):
     result: dict[str, object]
 
 
+class _DirectTrialEnvelope(ClosedModel):
+    schema_version: Literal["inferdrome.evaluation-study-trial-result.v3"]
+    plan_sha256: Digest
+    trial_id: Annotated[str, Field(pattern=r"^trial-[0-9]{4}$")]
+    block_id: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
+    workload_sha256: Digest
+    config_sha256: Digest
+    engine_binding: SglangDirectEngineBinding
+    engine_binding_sha256: Digest
+    result: dict[str, object]
+
+
 @dataclass(frozen=True)
 class SGLangTrialResult:
     """Validated engine-bound result; statistical replay input remains private."""
 
-    binding: EvaluationEngineBinding
+    binding: SglangEngineBinding
     engine_binding_sha256: str
     result_sha256: str
     _raw_bytes: bytes = field(repr=False)
@@ -87,8 +101,8 @@ class SGLangTrialResult:
 
 
 def _context(
-    binding: EvaluationEngineBinding, plan: CompiledStudy, trial: CompiledTrial
-) -> EvaluationEngineBinding:
+    binding: SglangEngineBinding, plan: CompiledStudy, trial: CompiledTrial
+) -> SglangEngineBinding:
     validate_engine_binding_trial(binding, plan, trial)
     validated = load_engine_binding_bytes(engine_binding_bytes(binding), plan)
     return validated
@@ -130,16 +144,16 @@ def _schema(trial: CompiledTrial, version: int) -> str:
 
 def _validate_raw(
     raw: dict[str, Any],
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
     trial: CompiledTrial,
     *,
     result_digest: str | None = None,
 ) -> SGLangTrialResult:
     binding_digest = engine_binding_sha256(binding)
     if (
-        raw.get("schema_version") != _schema(trial, 2)
+        raw.get("schema_version") != _schema(trial, _version(binding))
         or raw.get("engine_binding_sha256") != binding_digest
-        or any(raw.get(name) != value for name, value in _SEMANTICS.items())
+        or any(raw.get(name) != value for name, value in _semantics(binding).items())
     ):
         raise ValueError
     encoded = canonical_json_bytes(raw) + b"\n"
@@ -163,7 +177,7 @@ def _validate_raw(
 
 def wrap_sglang_result(
     native_result: HealthyRoutingResult | RoutingFaultResult,
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
     plan: CompiledStudy,
     trial: CompiledTrial,
 ) -> SGLangTrialResult:
@@ -181,8 +195,8 @@ def wrap_sglang_result(
         if raw["schema_version"] != _schema(trial, 1):
             raise ValueError
         _convert_counts(raw, to_sglang=True)
-        raw.update(_SEMANTICS)
-        raw["schema_version"] = _schema(trial, 2)
+        raw.update(_semantics(binding))
+        raw["schema_version"] = _schema(trial, _version(binding))
         raw["engine_binding_sha256"] = engine_binding_sha256(binding)
         return _validate_raw(raw, binding, trial)
     except (ValueError, TypeError, AttributeError, KeyError, RecursionError):
@@ -195,7 +209,7 @@ def sglang_trial_bytes(
     plan: CompiledStudy,
     trial: CompiledTrial,
     result: SGLangTrialResult,
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
 ) -> bytes:
     """Serialize a revalidated v2 envelope with its full pre-dispatch binding."""
     try:
@@ -205,16 +219,23 @@ def sglang_trial_bytes(
         validated = _validate_raw(result.to_dict(), binding, trial)
         if result.engine_binding_sha256 != validated.engine_binding_sha256:
             raise ValueError
-        artifact = _TrialEnvelope(
-            schema_version="inferdrome.evaluation-study-trial-result.v2",
-            plan_sha256=binding.plan_sha256,
-            trial_id=trial.trial_id,
-            block_id=trial.block_id,
-            workload_sha256=trial.workload_sha256,
-            config_sha256=trial.config_sha256,
-            engine_binding=binding,
-            engine_binding_sha256=validated.engine_binding_sha256,
-            result=validated.to_dict(),
+        model = (
+            _DirectTrialEnvelope
+            if isinstance(binding, SglangDirectEngineBinding)
+            else _TrialEnvelope
+        )
+        artifact = model.model_validate(
+            dict(
+                schema_version=f"inferdrome.evaluation-study-trial-result.v{_version(binding)}",
+                plan_sha256=binding.plan_sha256,
+                trial_id=trial.trial_id,
+                block_id=trial.block_id,
+                workload_sha256=trial.workload_sha256,
+                config_sha256=trial.config_sha256,
+                engine_binding=binding,
+                engine_binding_sha256=validated.engine_binding_sha256,
+                result=validated.to_dict(),
+            )
         )
         content = canonical_json_bytes(artifact.model_dump(mode="json")) + b"\n"
         if not 1 <= len(content) <= plan.config.limits.per_trial_result_bytes:
@@ -230,7 +251,7 @@ def load_sglang_trial_bytes(
     content: bytes,
     plan: CompiledStudy,
     trial: CompiledTrial,
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
 ) -> SGLangTrialResult:
     """Check bounded closed identities and selected semantics before policy replay."""
     try:
@@ -241,7 +262,12 @@ def load_sglang_trial_bytes(
         ):
             raise ValueError
         validate_json_structure(content.decode("utf-8"), limits=_LIMITS)
-        artifact = _TrialEnvelope.model_validate_json(content)
+        model = (
+            _DirectTrialEnvelope
+            if isinstance(binding, SglangDirectEngineBinding)
+            else _TrialEnvelope
+        )
+        artifact = model.model_validate_json(content)
         if (
             canonical_json_bytes(artifact.model_dump(mode="json")) + b"\n" != content
             or artifact.plan_sha256 != binding.plan_sha256
@@ -267,3 +293,11 @@ def load_sglang_trial_bytes(
         raise EvaluationError(
             "SGLang trial artifact violates its expected binding"
         ) from None
+
+
+def _version(binding: SglangEngineBinding) -> int:
+    return 3 if isinstance(binding, SglangDirectEngineBinding) else 2
+
+
+def _semantics(binding: SglangEngineBinding) -> dict[str, str]:
+    return {**_SEMANTICS, "telemetry_semantics": binding.telemetry_semantics}

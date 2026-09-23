@@ -18,6 +18,8 @@ from inferdrome.evaluation.contracts import ClosedModel, EvaluationError
 from inferdrome.evaluation.engine_binding import (
     MAX_ENGINE_BINDING_BYTES,
     EvaluationEngineBinding,
+    SglangDirectEngineBinding,
+    SglangEngineBinding,
     engine_binding_bytes,
     engine_binding_sha256,
     load_engine_binding_bytes,
@@ -54,6 +56,31 @@ class SglangStudyReport(ClosedModel):
     runtime_verification: Literal["UNVERIFIED"]
     evidence_eligible: Literal[False]
     dashboard_projection: Literal["UNSUPPORTED_ENGINE_BINDING", "ENGINE_BOUND_V2"]
+
+    @field_validator("evidence_eligible", mode="before")
+    @classmethod
+    def exact_false(cls, value: object) -> object:
+        if type(value) is not bool:
+            raise ValueError("eligibility requires a boolean primitive")
+        return value
+
+
+class SglangDirectStudyReport(ClosedModel):
+    """Closed self-contained report, retaining explicit engine and source claims."""
+
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, hide_input_in_errors=True
+    )
+    schema_version: Literal["inferdrome.evaluation-study-report.v3"]
+    engine: Literal["sglang"]
+    engine_binding: SglangDirectEngineBinding
+    engine_binding_sha256: Digest
+    statistical_report: StudyReport
+    statistical_report_sha256: Digest
+    evidence_class: Literal["LOCAL_MEASUREMENT_ONLY", "SYNTHETIC_ONLY"]
+    runtime_verification: Literal["UNVERIFIED"]
+    evidence_eligible: Literal[False]
+    dashboard_projection: Literal["UNSUPPORTED_ENGINE_BINDING"]
 
     @field_validator("evidence_eligible", mode="before")
     @classmethod
@@ -153,7 +180,7 @@ def _checked_statistics(value: dict[str, Any], plan: CompiledStudy) -> StudyRepo
 
 def bind_sglang_report(
     statistical_report: dict[str, Any],
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
     plan: CompiledStudy,
 ) -> dict[str, Any]:
     """Wrap existing statistics without changing their values or evidence class.
@@ -164,19 +191,26 @@ def bind_sglang_report(
     try:
         checked_binding = load_engine_binding_bytes(engine_binding_bytes(binding), plan)
         checked_report = _checked_statistics(statistical_report, plan)
-        report = SglangStudyReport(
-            schema_version="inferdrome.evaluation-study-report.v2",
-            engine="sglang",
-            engine_binding=checked_binding,
-            engine_binding_sha256=engine_binding_sha256(checked_binding),
-            statistical_report=checked_report,
-            statistical_report_sha256=sha256_digest(
-                canonical_json_bytes(checked_report.model_dump(mode="json")) + b"\n"
-            ),
-            evidence_class=checked_report.evidence_class,
-            runtime_verification="UNVERIFIED",
-            evidence_eligible=False,
-            dashboard_projection="ENGINE_BOUND_V2",
+        direct = isinstance(checked_binding, SglangDirectEngineBinding)
+        model = SglangDirectStudyReport if direct else SglangStudyReport
+        schema = f"inferdrome.evaluation-study-report.v{3 if direct else 2}"
+        report = model.model_validate(
+            dict(
+                schema_version=schema,
+                engine="sglang",
+                engine_binding=checked_binding,
+                engine_binding_sha256=engine_binding_sha256(checked_binding),
+                statistical_report=checked_report,
+                statistical_report_sha256=sha256_digest(
+                    canonical_json_bytes(checked_report.model_dump(mode="json")) + b"\n"
+                ),
+                evidence_class=checked_report.evidence_class,
+                runtime_verification="UNVERIFIED",
+                evidence_eligible=False,
+                dashboard_projection="UNSUPPORTED_ENGINE_BINDING"
+                if direct
+                else "ENGINE_BOUND_V2",
+            )
         ).model_dump(mode="json")
         if len(canonical_json_bytes(report)) + 1 > MAX_SGLANG_REPORT_BYTES:
             raise ValueError
@@ -187,7 +221,9 @@ def bind_sglang_report(
         ) from None
 
 
-def read_sglang_report_bytes(content: bytes) -> SglangStudyReport:
+def _read_sglang_report_bytes(
+    content: bytes,
+) -> SglangStudyReport | SglangDirectStudyReport:
     """Read a self-contained envelope without replaying a private study or sources.
 
     Validate both exact component digests and their shared study identities. This
@@ -198,7 +234,12 @@ def read_sglang_report_bytes(content: bytes) -> SglangStudyReport:
         raw = _json_object(content, MAX_SGLANG_REPORT_BYTES)
         if canonical_json_bytes(raw) + b"\n" != content:
             raise ValueError
-        report = SglangStudyReport.model_validate_json(content)
+        model = (
+            SglangDirectStudyReport
+            if raw.get("schema_version") == "inferdrome.evaluation-study-report.v3"
+            else SglangStudyReport
+        )
+        report = model.model_validate_json(content)
         if canonical_json_bytes(report.model_dump(mode="json")) + b"\n" != content:
             raise ValueError
         statistics = load_evaluation_report_bytes(
@@ -222,7 +263,11 @@ def read_sglang_report_bytes(content: bytes) -> SglangStudyReport:
             or statistics.preparation.cache_state != binding.cache_state
             or statistics.preparation.prefix_caching != expected_prefix
             or statistics.preparation.serving_image_reference
-            not in (None, binding.image_reference.split("@", 1)[1])
+            not in (
+                (None,)
+                if isinstance(binding, SglangDirectEngineBinding)
+                else (None, binding.image_reference.split("@", 1)[1])
+            )
         ):
             raise ValueError
         return report
@@ -242,11 +287,11 @@ def read_sglang_report_bytes(content: bytes) -> SglangStudyReport:
 def load_sglang_report_bytes(
     content: bytes,
     plan: CompiledStudy,
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
 ) -> dict[str, Any]:
     """Validate exact canonical bytes, both component digests and bound summaries."""
     try:
-        report = read_sglang_report_bytes(content)
+        report = _read_sglang_report_bytes(content)
         rebuilt = bind_sglang_report(
             report.statistical_report.model_dump(mode="json"), binding, plan
         )
@@ -271,7 +316,7 @@ def load_sglang_report_bytes(
 def render_sglang_markdown(
     report: dict[str, Any],
     plan: CompiledStudy,
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
 ) -> str:
     """Render the unchanged statistics with inseparable SGLang claim boundaries."""
     try:
@@ -290,7 +335,7 @@ def render_sglang_markdown(
             "SGLang report violates its bound study contract"
         ) from None
     lines = [
-        "# SGLang 0.5.18 native study",
+        f"# SGLang {binding.producer_version} native study",
         "",
         f"Engine binding: `{checked['engine_binding_sha256']}`. "
         f"Statistical report: `{checked['statistical_report_sha256']}`.",
@@ -298,7 +343,7 @@ def render_sglang_markdown(
         f"Source population evidence class: **{checked['evidence_class']}**. "
         "Runtime: **UNVERIFIED**; evidence eligible: **false**.",
         "",
-        "Telemetry semantics: **SGLANG_0_5_18_SCHEDULER_GAUGES**. "
+        f"Telemetry semantics: **{binding.telemetry_semantics}**. "
         "Acquisition freshness uses scrape start time; scheduler-state age is "
         "**UNAVAILABLE**. These gauges do not establish vLLM load equivalence.",
         "",
@@ -312,3 +357,19 @@ def render_sglang_markdown(
         "",
     ]
     return "\n".join(lines) + "\n" + render_markdown(checked["statistical_report"])
+
+
+def read_sglang_report_bytes(content: bytes) -> SglangStudyReport:
+    """Preserve the closed 0.5.18 dashboard reader boundary."""
+    report = _read_sglang_report_bytes(content)
+    if type(report) is not SglangStudyReport:
+        raise EvaluationError("SGLang report is unsupported by the v2 reader")
+    return report
+
+
+def read_sglang_direct_report_bytes(content: bytes) -> SglangDirectStudyReport:
+    """Read the distinct native 0.5.15 report; dashboard projection is withheld."""
+    report = _read_sglang_report_bytes(content)
+    if type(report) is not SglangDirectStudyReport:
+        raise EvaluationError("SGLang report is unsupported by the direct reader")
+    return report

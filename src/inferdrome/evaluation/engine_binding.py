@@ -20,6 +20,7 @@ from pydantic import (
 
 from inferdrome.evaluation.contracts import ClosedModel, EndpointId, EvaluationError
 from inferdrome.evaluation.sglang_container import build_sglang_container_profile
+from inferdrome.evaluation.sglang_direct_profile import build_sglang_direct_profile
 from inferdrome.evaluation.sglang_profile import (
     SGLANG_IMAGE_REFERENCE,
     SGLANG_IMAGE_TAG,
@@ -190,6 +191,73 @@ class EvaluationEngineBinding(_BindingModel):
         return self
 
 
+class SglangDirectEngineBinding(_BindingModel):
+    """Additive 0.5.15 native binding; v1 and its image declarations stay frozen."""
+
+    schema_version: Literal["inferdrome.evaluation-engine-binding.v2"] = (
+        "inferdrome.evaluation-engine-binding.v2"
+    )
+    engine: Literal["sglang"] = "sglang"
+    execution_mode: Literal["NATIVE_PROCESS"] = "NATIVE_PROCESS"
+    profile: Literal["SGLANG_0_5_15_DIRECT_SINGLE_DEVICE_BF16"] = (
+        "SGLANG_0_5_15_DIRECT_SINGLE_DEVICE_BF16"
+    )
+    config_sha256: Digest
+    plan_sha256: Digest
+    producer_version: Literal["0.5.15"] = "0.5.15"
+    source_repository: Literal["https://github.com/sgl-project/sglang"] = (
+        "https://github.com/sgl-project/sglang"
+    )
+    source_commit: Literal["f63458b5beaceabbd9d749b9fc956370e1b649e6"] = (
+        "f63458b5beaceabbd9d749b9fc956370e1b649e6"
+    )
+    runtime_manifest_sha256: Digest
+    endpoints: Annotated[
+        tuple[EngineEndpointBinding, ...], Field(min_length=2, max_length=2)
+    ]
+    model_identity: SglangModelIdentity
+    settings: SglangEngineSettings
+    stream_path: Literal["/v1/chat/completions"] = "/v1/chat/completions"
+    health_path: Literal["/health"] = "/health"
+    generation_health_path: Literal["/health_generate"] = "/health_generate"
+    model_identity_path: Literal["/model_info"] = "/model_info"
+    readiness_identity: Literal["SERVER_DECLARED_MATCH"] = "SERVER_DECLARED_MATCH"
+    telemetry_semantics: Literal["SGLANG_0_5_15_SCHEDULER_GAUGES"] = (
+        "SGLANG_0_5_15_SCHEDULER_GAUGES"
+    )
+    telemetry_freshness: Literal["ACQUISITION_START_AGE_ONLY"] = (
+        "ACQUISITION_START_AGE_ONLY"
+    )
+    telemetry_source_age: Literal["UNAVAILABLE"] = "UNAVAILABLE"
+    cache_preparation: Literal["WARMUP_DRAIN_FLUSH"] = "WARMUP_DRAIN_FLUSH"
+    cache_state: Literal["DECLARED_COLD"] = "DECLARED_COLD"
+    runtime_verification: Literal["UNVERIFIED"] = "UNVERIFIED"
+    evidence_eligible: Literal[False] = False
+
+    @field_validator("evidence_eligible", mode="before")
+    @classmethod
+    def strict_false(cls, value: object) -> object:
+        if type(value) is not bool:
+            raise ValueError("engine eligibility requires a boolean primitive")
+        return value
+
+    @model_validator(mode="after")
+    def direct_endpoints(self) -> Self:
+        if (
+            tuple(e.endpoint_id for e in self.endpoints) != _ENDPOINT_IDS
+            or len({e.origin_sha256 for e in self.endpoints}) != 2
+            or len({e.profile_config_sha256 for e in self.endpoints}) != 2
+            or any(e.projected_launch_sha256 is not None for e in self.endpoints)
+        ):
+            raise ValueError(
+                "native binding requires two distinct unprojected endpoints"
+            )
+        return self
+
+
+SglangEngineBinding = EvaluationEngineBinding | SglangDirectEngineBinding
+
+
 def _validated_plan(study: StudyConfig | CompiledStudy) -> CompiledStudy:
     config = study.config if type(study) is CompiledStudy else study
     if type(config) is not StudyConfig:
@@ -246,7 +314,7 @@ def _settings(config: SglangServingConfig) -> SglangEngineSettings:
     )
 
 
-def _check_plan(binding: EvaluationEngineBinding, plan: CompiledStudy) -> None:
+def _check_plan(binding: SglangEngineBinding, plan: CompiledStudy) -> None:
     foreground = plan.config.blocks[0].foreground
     preparation = plan.config.preparation
     expected_prefix = (
@@ -266,7 +334,11 @@ def _check_plan(binding: EvaluationEngineBinding, plan: CompiledStudy) -> None:
         or preparation.cache_state != binding.cache_state
         or preparation.prefix_caching != expected_prefix
         or preparation.serving_image_reference
-        not in (None, SGLANG_IMAGE_REFERENCE.split("@", 1)[1])
+        not in (
+            (None,)
+            if isinstance(binding, SglangDirectEngineBinding)
+            else (None, SGLANG_IMAGE_REFERENCE.split("@", 1)[1])
+        )
     ):
         raise ValueError
 
@@ -350,12 +422,44 @@ def build_sglang_engine_binding(
         ) from None
 
 
-def engine_binding_bytes(binding: EvaluationEngineBinding) -> bytes:
+def build_sglang_direct_binding(
+    study: StudyConfig | CompiledStudy,
+    profiles: Mapping[EndpointId, SglangServingConfig],
+    *,
+    runtime_manifest_sha256: str,
+) -> SglangDirectEngineBinding:
+    """Reuse plan/settings validation without exporting an old-version binding."""
+    try:
+        common = build_sglang_engine_binding(study, profiles)
+        binding = SglangDirectEngineBinding(
+            config_sha256=common.config_sha256,
+            plan_sha256=common.plan_sha256,
+            model_identity=common.model_identity,
+            settings=common.settings,
+            runtime_manifest_sha256=runtime_manifest_sha256,
+            endpoints=tuple(
+                endpoint.model_copy(
+                    update={
+                        "profile_config_sha256": build_sglang_direct_profile(
+                            profiles[endpoint.endpoint_id]
+                        ).config_sha256
+                    }
+                )
+                for endpoint in common.endpoints
+            ),
+        )
+        _check_plan(binding, _validated_plan(study))
+        return binding
+    except (ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        raise EvaluationError("direct SGLang binding violates its contract") from None
+
+
+def engine_binding_bytes(binding: SglangEngineBinding) -> bytes:
     """Revalidate constructed/copied instances and return exact canonical bytes."""
     try:
-        if type(binding) is not EvaluationEngineBinding:
+        if type(binding) not in (EvaluationEngineBinding, SglangDirectEngineBinding):
             raise ValueError
-        value = EvaluationEngineBinding.model_validate(
+        value = type(binding).model_validate(
             binding.model_dump(mode="python", warnings=False)
         )
         raw = canonical_json_bytes(value.model_dump(mode="json"))
@@ -366,21 +470,20 @@ def engine_binding_bytes(binding: EvaluationEngineBinding) -> bytes:
         raise EvaluationError("engine binding violates its contract") from None
 
 
-def engine_binding_sha256(binding: EvaluationEngineBinding) -> str:
+def engine_binding_sha256(binding: SglangEngineBinding) -> str:
     """Bind the complete pre-dispatch artifact, including its native study plan."""
     return sha256_digest(engine_binding_bytes(binding))
 
 
-def engine_choice_sha256(binding: EvaluationEngineBinding) -> str:
+def engine_choice_sha256(binding: SglangEngineBinding) -> str:
     """Compare engine choice across calibration and confirmation study plans.
 
     Callers must require this digest unchanged for every phase before dispatch.
     Only the two native study digests are excluded; endpoint, snapshot, serving,
     preparation and telemetry identities remain bound. This is not attestation.
     """
-    validated = EvaluationEngineBinding.model_validate_json(
-        engine_binding_bytes(binding)
-    )
+    content = engine_binding_bytes(binding)
+    validated = type(binding).model_validate_json(content)
     return sha256_digest(
         canonical_json_bytes(
             validated.model_dump(mode="json", exclude={"config_sha256", "plan_sha256"})
@@ -394,7 +497,7 @@ def load_engine_binding_bytes(
     study: StudyConfig | CompiledStudy,
     *,
     profiles: Mapping[EndpointId, SglangServingConfig] | None = None,
-) -> EvaluationEngineBinding:
+) -> SglangEngineBinding:
     """Reject noncanonical, malformed, mismatched or unsupported declarations.
 
     Supplying profiles also verifies every selected launch declaration. Without
@@ -408,16 +511,36 @@ def load_engine_binding_bytes(
         ):
             raise ValueError
         validate_json_structure(content.decode("utf-8"), limits=_BINDING_LIMITS)
-        binding = EvaluationEngineBinding.model_validate_json(content)
+        import json
+
+        schema = json.loads(content).get("schema_version")
+        model = (
+            SglangDirectEngineBinding
+            if schema == "inferdrome.evaluation-engine-binding.v2"
+            else EvaluationEngineBinding
+        )
+        binding = model.model_validate_json(content)
         # Exact canonical bytes reject duplicate keys, omitted fields, extra
         # whitespace, alternate numeric encodings, BOMs and trailing JSON.
         if engine_binding_bytes(binding) != content:
             raise ValueError
         _check_plan(binding, _validated_plan(study))
-        if profiles is not None and binding != build_sglang_engine_binding(
-            study, profiles, containerized=binding.execution_mode == "DOCKER_BRIDGE"
-        ):
-            raise ValueError
+        if profiles is not None:
+            expected = (
+                build_sglang_direct_binding(
+                    study,
+                    profiles,
+                    runtime_manifest_sha256=binding.runtime_manifest_sha256,
+                )
+                if isinstance(binding, SglangDirectEngineBinding)
+                else build_sglang_engine_binding(
+                    study,
+                    profiles,
+                    containerized=binding.execution_mode == "DOCKER_BRIDGE",
+                )
+            )
+            if binding != expected:
+                raise ValueError
         return binding
     except (ValueError, TypeError, AttributeError, UnicodeError, RecursionError):
         raise EvaluationError(
@@ -426,7 +549,7 @@ def load_engine_binding_bytes(
 
 
 def validate_engine_binding_trial(
-    binding: EvaluationEngineBinding,
+    binding: SglangEngineBinding,
     plan: CompiledStudy,
     trial: CompiledTrial,
 ) -> None:

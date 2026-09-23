@@ -17,7 +17,7 @@ from pydantic import Field, ValidationError
 from inferdrome.evaluation.contracts import ClosedModel, EvaluationError
 from inferdrome.evaluation.engine_binding import (
     MAX_ENGINE_BINDING_BYTES,
-    EvaluationEngineBinding,
+    SglangEngineBinding,
     engine_binding_bytes,
     load_engine_binding_bytes,
 )
@@ -192,7 +192,7 @@ def _encoded(manifest: StudyManifest) -> bytes:
 
 
 def preflight_metadata(
-    plan: CompiledStudy, engine_binding: EvaluationEngineBinding | None = None
+    plan: CompiledStudy, engine_binding: SglangEngineBinding | None = None
 ) -> None:
     # Reserve the largest ledger shape, plus slack for finite failure categories
     # and the elapsed clock. This happens before creating clients or a directory.
@@ -293,7 +293,7 @@ async def run_study(
     executor: StudyExecutor = execute_trial,
     stop: asyncio.Event | None = None,
     clock: Clock | None = None,
-    engine_binding: EvaluationEngineBinding | None = None,
+    engine_binding: SglangEngineBinding | None = None,
 ) -> StudyManifest:
     """Publish each completed local result once; abort later trials on failure.
 
@@ -546,7 +546,7 @@ def report_study(
     study_dir: Path,
     output_dir: Path,
     *,
-    engine_binding: EvaluationEngineBinding | None = None,
+    engine_binding: SglangEngineBinding | None = None,
 ) -> dict[str, object]:
     """Validate one expected artifact at a time; publish bounded offline reports."""
     from inferdrome.evaluation.study_report import (
