@@ -193,6 +193,71 @@ do not silently extend the rental. Retain any already retrieved partial package
 and report the remaining loss or unconfirmed state through the external
 operator record.
 
+## Authoring SGLang serving profiles
+
+`--runtime sglang` needs a serving profile per endpoint, and it fails closed
+against the study contract long before any GPU is touched. Author these offline
+and run the preflight (above) until it passes; every requirement below is a
+`prepare_vast_container_rehearsal`/`build_sglang_engine_binding` guard, not a
+runtime check, so a rented box is never required to get them right.
+
+### Pass the profiles as an endpoint mapping, not bare paths
+
+`--sglang-profile` is repeatable and expects `endpoint-<x>=<path>`, exactly two
+entries:
+
+```bash
+python -m inferdrome.evaluation.cli load-calibration-vast-container-preflight \
+  --protocol   /private/inputs/protocol.json \
+  --recipe     /private/inputs/load-low.json \
+  --recipe     /private/inputs/load-high.json \
+  --runtime    sglang \
+  --sglang-profile endpoint-a=/private/inputs/sglang-endpoint-a.json \
+  --sglang-profile endpoint-b=/private/inputs/sglang-endpoint-b.json \
+  --outer-image-reference 'lmsysorg/sglang@sha256:<pinned digest from source>' \
+  --runtime-executable /usr/local/bin/python \
+  --output /private/outputs/vast-container-preflight-sglang.json
+```
+
+A bare path (`--sglang-profile /path.json`) is rejected as
+`SGLang profile mapping is invalid`.
+
+### The study must be authored for SGLang, not reused from vLLM
+
+This is the non-obvious gate. The engine binding compares each profile against
+the compiled study's `preparation`, and a vLLM-shaped recipe leaves the SGLang
+serving state `UNKNOWN`, which can never match. Each recipe's `preparation`
+must declare:
+
+- `cache_state: "DECLARED_COLD"`;
+- `prefix_caching: "DECLARED_ENABLED"` or `"DECLARED_DISABLED"`.
+
+A recipe that omits these produces `engine binding violates its study/profile
+contract` at preflight even when the profiles themselves are well-formed.
+
+### Each `SglangServingConfig` must match the study exactly
+
+For the pair to bind, both endpoint profiles must be identical except for
+`origin`, and each must satisfy:
+
+- `served_model_name` equals the study model (`Qwen/Qwen3-8B`);
+- `origin` equals that endpoint's declared study origin (endpoint-a → the first
+  study endpoint, endpoint-b → the second);
+- `context_length` is strictly greater than the study's `max_tokens`;
+- `prefix_cache` is `RADIX_ENABLED` when the recipe declares
+  `prefix_caching: DECLARED_ENABLED`, otherwise `RADIX_DISABLED`;
+- `model_revision`, `tokenizer_revision`, `model_snapshot_sha256`,
+  `tokenizer_snapshot_sha256` and `chat_template_sha256` are the real digests of
+  the preloaded Qwen3-8B snapshot (identity is bound into the sealed evidence);
+- the study `preparation.serving_image_reference` is either absent or the pinned
+  SGLang image digest (the `sha256:...` portion of the outer image reference).
+
+A passing SGLang preflight writes the same non-executing
+`inferdrome.load-calibration-vast-container-preflight.v1` packet the vLLM path
+does, with `provider_action_performed=false`, `evidence_eligible=false` and the
+runtime left `UNVERIFIED`. It confirms only that the inputs compile and bind; it
+still proves nothing about a real server, GPU, or model.
+
 ## What this does not prove
 
 - It does not verify availability, price, provider-reported host identity,
