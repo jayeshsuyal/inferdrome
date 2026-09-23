@@ -1,7 +1,14 @@
 # SGLang 0.5.15 direct-host compatibility contract
 
 This additive path targets one already available Linux x86_64 host with exactly two A100-SXM4-40GB cards
-and NVIDIA driver **595.84**. It creates two independent BF16, TP=1 replicas,
+and an NVIDIA Linux driver at or above the official CUDA 13.0 GA compatibility floor
+**580.65.06**. The floor follows NVIDIA's
+[CUDA 13.0 release notes](https://docs.nvidia.com/cuda/archive/13.0.3/cuda-toolkit-release-notes/index.html)
+and [minor-version compatibility policy](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html);
+the manifest and live inventory still retain and compare the exact observed driver release.
+This admits the reviewed current `580.159.03` and `580.178.04` lanes as well as newer
+compatible releases; it does not by itself prove GPU/runtime behavior. The path creates
+two independent BF16, TP=1 replicas,
 one per visible GPU, on distinct literal loopback origins. It contains no provider,
 SSH, rental, installation, image, registry, Kubernetes or upload operation.
 

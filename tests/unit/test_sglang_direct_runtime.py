@@ -69,7 +69,7 @@ def test_manifest_cannot_weaken_release_identity(change):
     elif change == "source":
         value["source_commit"] = "1" * 40
     elif change == "driver":
-        value["driver_version"] = "580.65.06"
+        value["driver_version"] = "580.65.05"
     elif change == "python":
         value["python_version"] = "3.13.1"
     else:
@@ -81,6 +81,40 @@ def test_manifest_cannot_weaken_release_identity(change):
     if change != "image":
         with pytest.raises(EvaluationError):
             runtime.runtime_manifest_bytes(manifest.model_construct(**value))
+
+
+@pytest.mark.parametrize(
+    "driver",
+    ["580.65.06", "580.159.03", "580.178.04", "595.84"],
+)
+def test_cuda_13_compatible_driver_lane_retains_exact_observation(driver):
+    manifest = synthetic_runtime().model_copy(update={"driver_version": driver})
+    content = runtime.runtime_manifest_bytes(manifest)
+    loaded = runtime.load_runtime_manifest(content)
+    assert loaded.driver_version == driver
+    assert b'"driver_version":"' + driver.encode() + b'"' in content
+
+
+@pytest.mark.parametrize(
+    "driver",
+    [
+        "580.65.05",
+        "579.999.999",
+        "580",
+        "580.65.06.1",
+        "580.65-beta",
+        "580.65.06 ",
+        " 580.65.06",
+        "",
+    ],
+)
+def test_cuda_13_driver_lane_rejects_old_or_malformed_inventory(driver):
+    value = synthetic_runtime().model_dump(mode="python")
+    value["driver_version"] = driver
+    from inferdrome.routing_execution.canonical import canonical_json_bytes
+
+    with pytest.raises(EvaluationError):
+        runtime.load_runtime_manifest(canonical_json_bytes(value) + b"\n")
 
 
 def test_real_file_hash_mutation_alias_and_access_time(tmp_path):

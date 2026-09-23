@@ -44,8 +44,10 @@ class Commands:
         return SubprocessResult(argv, 0, output, b"")
 
 
-def owner(monkeypatch, processes, driver="595.84"):
-    manifest = synthetic_runtime()
+def owner(monkeypatch, processes, driver="595.84", manifest_driver="595.84"):
+    manifest = synthetic_runtime().model_copy(
+        update={"driver_version": manifest_driver}
+    )
     executable = resolve_direct_runtime("/bin/sh")
     old = manifest.roles["python"]
     roles = dict(manifest.roles, python=str(executable.path))
@@ -84,7 +86,7 @@ def owner(monkeypatch, processes, driver="595.84"):
 def test_pair_isolation_and_exact_cleanup(monkeypatch, failure):
     processes = _Processes(fail_start=failure if type(failure) is int else None)
     lifecycle, plan = owner(
-        monkeypatch, processes, "580.65.06" if failure == "driver" else "595.84"
+        monkeypatch, processes, "580.159.03" if failure == "driver" else "595.84"
     )
 
     async def run():
@@ -110,6 +112,21 @@ def test_pair_isolation_and_exact_cleanup(monkeypatch, failure):
         assert lease in processes.terminated
     if len(processes.started) == 2:
         assert processes.started[0][1]["HOME"] != processes.started[1][1]["HOME"]
+
+
+@pytest.mark.parametrize("driver", ["580.159.03", "580.178.04"])
+def test_current_cuda_13_driver_inventory_is_admitted_and_exact(monkeypatch, driver):
+    processes = _Processes()
+    lifecycle, plan = owner(
+        monkeypatch, processes, driver=driver, manifest_driver=driver
+    )
+
+    async def run():
+        await lifecycle.prepare(plan.trials[0], stop=asyncio.Event())
+        await lifecycle.cleanup(plan.trials[0], stop=asyncio.Event())
+
+    asyncio.run(run())
+    assert len(processes.started) == 2
 
 
 def test_worker_is_retained_across_cancellation_until_cleanup(monkeypatch):
