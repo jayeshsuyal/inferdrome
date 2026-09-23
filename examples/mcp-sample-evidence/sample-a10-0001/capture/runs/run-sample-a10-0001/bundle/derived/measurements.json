@@ -1,0 +1,23 @@
+{
+  "schema_version": "inferdrome.sample-evidence.v1",
+  "measurements": [
+    {
+      "metric": "ttft_ns",
+      "aggregation": "mean",
+      "unit": "ns",
+      "value": 95000000.0
+    },
+    {
+      "metric": "output_token_throughput_per_s",
+      "aggregation": "rate",
+      "unit": "tokens/s",
+      "value": 1180.0
+    },
+    {
+      "metric": "error_rate",
+      "aggregation": "ratio",
+      "unit": "ratio",
+      "value": "0.000000"
+    }
+  ]
+}
