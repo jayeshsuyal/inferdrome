@@ -123,6 +123,12 @@ requires a new runtime/quote/cap authorization. Reducing trials, retaining
 engines across trials, or lowering safety timeouts changes the methodology or
 cold-reset/safety boundary and is not an automatic retry option.
 
+The separately declared [fixed four-cell budget pilot](VAST_BUDGET_PILOT_V1.md)
+is the reviewed reduction path: one lower load, round robin plus freshness
+fallback, and one `HEALTHY`/`STALE_LOAD` trial per policy. It remains an
+uncalibrated, low-replication declaration and does not change this full
+calibration protocol.
+
 For SGLang, add exactly two `--sglang-profile endpoint-id=/absolute/profile.json`
 arguments and pass the absolute Python executable that will invoke the pinned
 `sglang.launch_server` module. SGLang artifacts are rehashed immediately before

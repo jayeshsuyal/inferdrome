@@ -10,6 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic_ns
 
+from inferdrome.evaluation.budget_pilot import (
+    budget_pilot_plan_bytes,
+    compile_budget_pilot,
+    load_budget_pilot_protocol_bytes,
+    load_budget_pilot_recipe_bytes,
+)
 from inferdrome.evaluation.cache import (
     CacheCellManifest,
     CachePreparation,
@@ -236,6 +242,28 @@ def _calibration_command(args: argparse.Namespace) -> int:
                 "confirmation_status": confirmation.status,
                 "planned_confirmation_trials": len(confirmation.trials),
                 "protocol_sha256": plan.protocol_sha256,
+                "evidence_eligible": False,
+            }
+        )
+    )
+    return 0
+
+
+def _budget_pilot_command(args: argparse.Namespace) -> int:
+    """Compile the fixed four-cell declaration without opening a transport."""
+    protocol = load_budget_pilot_protocol_bytes(read_input(args.protocol))
+    recipe = load_budget_pilot_recipe_bytes(read_input(args.recipe))
+    plan = compile_budget_pilot(protocol, recipe)
+    with OutputFile(args.output) as destination:
+        destination.write(budget_pilot_plan_bytes(plan))
+    print(
+        json.dumps(
+            {
+                "status": "PREFLIGHT_WRITTEN",
+                "trial_count": plan.trial_count,
+                "worst_case_duration_ns": plan.worst_case_duration_ns,
+                "reserved_output_bytes": plan.reserved_output_bytes,
+                "provider_action_performed": False,
                 "evidence_eligible": False,
             }
         )
@@ -538,6 +566,10 @@ def main(argv: list[str] | None = None) -> int:
     calibration_select_parser.add_argument(
         "--confirmation-output", required=True, type=Path
     )
+    pilot_parser = commands.add_parser("vast-budget-pilot-preflight")
+    pilot_parser.add_argument("--protocol", required=True, type=Path)
+    pilot_parser.add_argument("--recipe", required=True, type=Path)
+    pilot_parser.add_argument("--output", required=True, type=Path)
     for name in (
         "load-calibration-host-preflight",
         "load-calibration-host-run",
@@ -606,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
             return _study_command(args)
         if args.command in {"load-calibration-plan", "load-calibration-select"}:
             return _calibration_command(args)
+        if args.command == "vast-budget-pilot-preflight":
+            return _budget_pilot_command(args)
         if args.command.startswith("load-calibration-host-"):
             return _host_local_operator_command(args)
         if args.command.startswith("load-calibration-vast-container-"):
