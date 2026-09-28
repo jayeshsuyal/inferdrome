@@ -31,7 +31,9 @@ pinned Qwen3 tokenizer files and `tokenizers==0.22.1`. Exploratory local
 tokenization of 10,000 offers with the available 0.23.1 package yielded 277
 rendered input tokens for every prompt; that check is not the pinned
 certificate. A measured run refuses to start without a certificate matching
-its plan and trace hashes.
+its plan and trace hashes. The certificate is a local integrity record, not
+remote attestation of the serving model; PR3 must compare live usage and
+runtime identity before making a GPU claim.
 
 ```sh
 python -m inferdrome.vllm_router_study prepare \
