@@ -77,7 +77,11 @@ def _fake_engine(
 
 
 async def _fake_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reset_success: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reset_success: bool,
+    fault: str | None = None,
 ) -> tuple[Path, list[int]]:
     ports = (_port(), _port())
     monkeypatch.setattr(gpu, "ENGINE_PORTS", ports)
@@ -94,6 +98,22 @@ async def _fake_run(
         return None
 
     monkeypatch.setattr(gpu, "_ready", ready)
+    if fault == "metrics":
+
+        async def fail_metrics(*_args: object) -> None:
+            raise gpu.StudyError("post-trial metrics unavailable")
+
+        monkeypatch.setattr(gpu, "_after_metrics", fail_metrics)
+    if fault == "interrupted":
+        original_trial = gpu.run_trial
+
+        async def interrupted_trial(*args: object, **kwargs: object) -> dict:
+            result = await original_trial(*args, **kwargs)
+            result["status"] = "INTERRUPTED"
+            result["comparison_valid"] = False
+            return result
+
+        monkeypatch.setattr(gpu, "run_trial", interrupted_trial)
 
     plans = {}
     for phase, seeds in gpu.PHASE_SEEDS:
@@ -132,7 +152,15 @@ async def _fake_run(
         instance_id="123",
     )
     try:
-        if reset_success:
+        if fault == "metrics":
+            with pytest.raises(gpu.StudyError, match="post-trial metrics unavailable"):
+                await gpu.run(args)
+        elif fault == "interrupted":
+            with pytest.raises(
+                gpu.TrialInterrupted, match="trial returned INTERRUPTED"
+            ):
+                await gpu.run(args)
+        elif reset_success:
             await gpu.run(args)
         else:
             with pytest.raises(gpu.StudyError, match="reset did not return success"):
@@ -153,10 +181,13 @@ def test_full_fake_lifecycle_and_report(
     assert len(session["conditions"]) == 19
     assert len(resets) == 38
     assert all(item["comparison_valid"] for item in session["conditions"])
+    assert session["evaluation_schedule_sha256"].startswith("sha256:")
+    assert (raw / "progress-03-selection.json").is_file()
     gpu.report(raw, tmp_path / "report")
     report = json.loads((tmp_path / "report/report.json").read_text())
     assert report["status"] == "COMPLETE_DESCRIPTIVE"
     assert len(report["conditions"]) == 19
+    assert report["evaluation_schedule_valid"] is True
     assert (tmp_path / "report/goodput.svg").is_file()
 
 
@@ -181,6 +212,82 @@ def test_report_rejects_tampered_raw_ledger(
     ledger.write_text(ledger.read_text() + "{}\n")
     with pytest.raises(gpu.StudyError, match="raw artifact hash mismatch"):
         gpu.report(raw, tmp_path / "report")
+
+
+def test_metrics_failure_keeps_completed_trial_in_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, _ = asyncio.run(
+        _fake_run(tmp_path, monkeypatch, reset_success=True, fault="metrics")
+    )
+    session = json.loads((raw / "session.json").read_text())
+    assert session["status"] == "FAILED"
+    assert len(session["conditions"]) == 1
+    assert session["conditions"][0]["engine_metrics_status"] == "FAILED"
+    assert (raw / "calibration-17-1-client.json").is_file()
+    assert (raw / "calibration-17-1-router.jsonl").is_file()
+    gpu.report(raw, tmp_path / "report")
+    report = json.loads((tmp_path / "report/report.json").read_text())
+    assert report["status"] == "INCOMPLETE"
+    assert len(report["conditions"]) == 1
+    assert (
+        "post-trial metrics unavailable"
+        in report["conditions"][0]["engine_metrics_error"]
+    )
+    assert "post-trial metrics unavailable" in report["session_error"]
+
+
+def test_interrupted_trial_is_retained_and_stops_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, resets = asyncio.run(
+        _fake_run(tmp_path, monkeypatch, reset_success=True, fault="interrupted")
+    )
+    session = json.loads((raw / "session.json").read_text())
+    assert session["status"] == "INTERRUPTED"
+    assert len(session["conditions"]) == 1
+    assert session["conditions"][0]["trial_status"] == "INTERRUPTED"
+    assert len(resets) == 2
+    gpu.report(raw, tmp_path / "report")
+    report = json.loads((tmp_path / "report/report.json").read_text())
+    assert report["status"] == "INCOMPLETE"
+    assert report["conditions"][0]["trial_status"] == "INTERRUPTED"
+
+
+def test_missing_or_duplicate_condition_cannot_claim_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, _ = asyncio.run(_fake_run(tmp_path, monkeypatch, reset_success=True))
+    session_path = raw / "session.json"
+    session = json.loads(session_path.read_text())
+    final = session["conditions"].pop()
+    session_path.write_text(json.dumps(session))
+    gpu.report(raw, tmp_path / "missing-report")
+    missing = json.loads((tmp_path / "missing-report/report.json").read_text())
+    assert missing["status"] == "INCOMPLETE"
+    session["conditions"].append(session["conditions"][0])
+    session_path.write_text(json.dumps(session))
+    with pytest.raises(gpu.StudyError, match="duplicate condition identity"):
+        gpu.report(raw, tmp_path / "duplicate-report")
+    assert final["label"].startswith("evaluation-")
+
+
+def test_quiescent_metrics_waits_for_gauges_to_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations = iter(
+        [
+            "vllm:num_requests_running 1\nvllm:num_requests_waiting 0\n",
+            "vllm:num_requests_running 0\nvllm:num_requests_waiting 0\n",
+        ]
+    )
+
+    async def get(*_args: object) -> tuple[int, str]:
+        return 200, next(observations)
+
+    monkeypatch.setattr(gpu, "_get", get)
+    metrics = asyncio.run(gpu._quiescent_metrics(None, 8001))
+    assert metrics["vllm:num_requests_running"] == 0
 
 
 def test_owned_process_group_is_reaped(tmp_path: Path) -> None:

@@ -44,7 +44,8 @@ cache_plus_load, round_robin, cache_only, least_busy
 
 Both engines remain loaded between conditions. Before every condition, the
 coordinator sends a disjoint synthetic warmup directly to each engine, checks
-zero running and waiting requests from `/metrics`, and POSTs
+zero running and waiting requests from `/metrics` after a bounded five-second
+settling window, and POSTs
 `/reset_prefix_cache` to each engine. The pinned vLLM 0.26.0 development route
 must return **HTTP 200 and exact `{"success":true}`** on both replicas; HTTP
 200 alone is insufficient. The route is enabled only for loopback servers by
@@ -96,13 +97,16 @@ and readback with the private run record.
 
 On the already-rented, image-verified stock container, place the reviewed
 source and 30 plan/certificate JSON files in private paths. Check the stock
-Python has the Inferdrome dependencies (`aiohttp`, `pydantic`, `rfc8785`) before
-the run; any missing dependency is a setup error to resolve before measuring.
+image's `/venv/main/bin/python` has the Inferdrome dependencies (`aiohttp`,
+`pydantic`, `rfc8785`, `jsonschema`, `PyYAML`) before the run; any missing
+dependency is a setup error to resolve before measuring. The pinned image's
+`/usr/local/bin/vllm` entry point uses `/venv/main/bin/python`; verify both
+paths on the actual host before launching engines.
 Download the one pinned Qwen snapshot to a shared directory with visible byte
 progress. For example, using the image's Hugging Face client:
 
 ```sh
-python - <<'PY'
+/venv/main/bin/python - <<'PY'
 from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id="Qwen/Qwen3-8B",
@@ -120,7 +124,7 @@ has recorded the actual quote, billing start, dollar cap, exact instance ID
 and source commit; substitute those observed values literally:
 
 ```sh
-PYTHONPATH=/private/source/src python -m inferdrome.vllm_router_gpu run \
+PYTHONPATH=/private/source/src /venv/main/bin/python -m inferdrome.vllm_router_gpu run \
   --plans-dir /private/inputs/router-plans \
   --model-dir /private/model/qwen3-8b \
   --vllm-executable /usr/local/bin/vllm \
@@ -139,8 +143,11 @@ A100s, closed ports and the declared cost envelope. It prints engine readiness
 progress while the processes load. For each condition it writes reset,
 per-offer client, router ledger, metrics and progress files. On a fatal error,
 the session records the cause and stops owned process groups; any router ledger
-rows already written remain in the private output. A missing `session.json` with a
-`preflight-error.json` means no engine was started. Any
+rows already written remain in the private output. A completed client trial is
+recorded before the post-trial metrics read; if that read fails, the report
+retains the trial and its explicit metrics error. The selected calibration rate
+and evaluation schedule are saved before evaluation begins. A missing
+`session.json` with a `preflight-error.json` means no engine was started. Any
 `CLEANUP_UNCONFIRMED` status requires immediate operator inspection and
 provider termination.
 

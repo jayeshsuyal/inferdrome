@@ -78,6 +78,10 @@ class StudyError(Exception):
     """A specific condition, reset, or local lifecycle failure."""
 
 
+class TrialInterrupted(StudyError):
+    """The client returned a retained interrupted trial."""
+
+
 def _save(path: Path, value: object) -> str:
     data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     with path.open("xb") as stream:
@@ -357,14 +361,26 @@ def _metrics(text: str) -> dict[str, float]:
 async def _quiescent_metrics(
     session: aiohttp.ClientSession, port: int
 ) -> dict[str, float]:
-    status, content = await _get(session, f"http://127.0.0.1:{port}/metrics")
-    if status != 200:
-        raise StudyError(f"engine {port} metrics HTTP {status}")
-    metrics = _metrics(content)
-    for key in ("vllm:num_requests_running", "vllm:num_requests_waiting"):
-        if key not in metrics or metrics[key] != 0:
-            raise StudyError(f"engine {port} is not provably quiescent: {key}")
-    return metrics
+    deadline = asyncio.get_running_loop().time() + 5
+    while True:
+        status, content = await _get(session, f"http://127.0.0.1:{port}/metrics")
+        if status != 200:
+            raise StudyError(f"engine {port} metrics HTTP {status}")
+        metrics = _metrics(content)
+        keys = ("vllm:num_requests_running", "vllm:num_requests_waiting")
+        missing = [key for key in keys if key not in metrics]
+        if missing:
+            raise StudyError(
+                f"engine {port} metrics missing quiescence gauges: {missing}"
+            )
+        if all(metrics[key] == 0 for key in keys):
+            return metrics
+        if asyncio.get_running_loop().time() >= deadline:
+            raise StudyError(
+                f"engine {port} remained active after metrics settling: "
+                f"running={metrics[keys[0]]}, waiting={metrics[keys[1]]}"
+            )
+        await asyncio.sleep(0.2)
 
 
 async def _warm_and_reset(
@@ -478,6 +494,7 @@ async def _condition(
         "plan_sha256": plan["plan_sha256"],
         "result_sha256": result_digest,
         "ledger_sha256": _file_digest(ledger),
+        "trial_status": result["status"],
         "comparison_valid": result["comparison_valid"],
         "summary": result["summary"],
     }
@@ -526,6 +543,61 @@ def _select_rate(results: list[dict[str, Any]]) -> int:
     return max(qualified)
 
 
+def _evaluation_schedule(selected: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "block": block,
+            "seed": seed,
+            "position": position,
+            "policy": policy,
+            "label": f"evaluation-b{block}-p{position}-{policy}",
+            "offered_count": selected,
+        }
+        for block, (seed, order) in enumerate(
+            zip(EVALUATION_SEEDS, ORDERS, strict=True), 1
+        )
+        for position, policy in enumerate(order, 1)
+    ]
+
+
+async def _record_condition(
+    session: aiohttp.ClientSession,
+    out: Path,
+    session_record: dict[str, Any],
+    label: str,
+    policy: str,
+    plan: dict[str, Any],
+    certificate: dict[str, Any],
+    reset: dict[str, Any],
+) -> dict[str, Any]:
+    item = await _condition(session, out, label, policy, plan, certificate)
+    item["engine_metrics_status"] = "NOT_COLLECTED"
+    session_record["conditions"].append(item)
+    number = len(session_record["conditions"])
+    _save(out / f"progress-{number:02}-client.json", session_record)
+    if item["trial_status"] != "COMPLETED":
+        item["engine_metrics_status"] = "SKIPPED_TRIAL_STATUS"
+        if item["trial_status"] == "INTERRUPTED":
+            raise TrialInterrupted(f"{label} trial returned INTERRUPTED")
+        raise StudyError(f"{label} trial returned {item['trial_status']}")
+    if not item["comparison_valid"]:
+        item["engine_metrics_status"] = "SKIPPED_INVALID_COMPARISON"
+        raise StudyError(f"{label} failed comparison validity")
+    try:
+        item["engine_metrics"] = await _after_metrics(session, out, label, reset)
+        item["engine_metrics_status"] = "CAPTURED"
+    except BaseException as error:
+        item["engine_metrics_status"] = "FAILED"
+        item["engine_metrics_error"] = f"{type(error).__name__}: {str(error)[:300]}"
+        _save(
+            out / f"metrics-error-{label}.json",
+            {"label": label, "reason": item["engine_metrics_error"]},
+        )
+        raise
+    _save(out / f"progress-{number:02}.json", session_record)
+    return item
+
+
 def report(raw_root: Path, output_root: Path) -> None:
     """Verify the retained raw population and render a descriptive report."""
     session = json.loads((raw_root / "session.json").read_text())
@@ -534,6 +606,9 @@ def report(raw_root: Path, output_root: Path) -> None:
     conditions = session.get("conditions")
     if not isinstance(conditions, list):
         raise StudyError("session has no condition list")
+    labels = [item["label"] for item in conditions]
+    if len(set(labels)) != len(labels):
+        raise StudyError("duplicate condition identity in session")
     values: list[dict[str, Any]] = []
     inventory: dict[str, str] = {}
     for item in conditions:
@@ -553,6 +628,7 @@ def report(raw_root: Path, output_root: Path) -> None:
         if (
             client["plan_sha256"] != item["plan_sha256"]
             or client["comparison_valid"] != item["comparison_valid"]
+            or client["status"] != item["trial_status"]
         ):
             raise StudyError(f"client/condition mismatch: {label}")
         summary = client["summary"]
@@ -561,7 +637,10 @@ def report(raw_root: Path, output_root: Path) -> None:
             {
                 "label": label,
                 "policy": item["policy"],
+                "trial_status": item["trial_status"],
                 "valid": item["comparison_valid"],
+                "engine_metrics_status": item.get("engine_metrics_status"),
+                "engine_metrics_error": item.get("engine_metrics_error"),
                 "offered": all_offered["offered"],
                 "outcomes": all_offered["outcomes"],
                 "goodput_rps": all_offered["slo_goodput_rps"],
@@ -579,18 +658,49 @@ def report(raw_root: Path, output_root: Path) -> None:
             inventory[path.name] = _file_digest(path)
     output_root.mkdir(parents=True, exist_ok=False)
     evaluation = [value for value in values if value["label"].startswith("evaluation-")]
+    selected = session.get("selected_offers")
+    schedule = session.get("evaluation_schedule")
+    expected_schedule = _evaluation_schedule(selected) if selected in COUNTS else None
+    schedule_valid = (
+        expected_schedule is not None
+        and schedule == expected_schedule
+        and inventory.get("evaluation-schedule.json")
+        == session.get("evaluation_schedule_sha256")
+    )
+    if schedule_valid:
+        saved_schedule = json.loads((raw_root / "evaluation-schedule.json").read_text())
+        schedule_valid = saved_schedule == {
+            "selected_offers": selected,
+            "conditions": expected_schedule,
+        }
+    expected_conditions = [
+        (f"calibration-17-{count}", "round_robin") for count in COUNTS
+    ] + (
+        [(item["label"], item["policy"]) for item in expected_schedule]
+        if expected_schedule is not None
+        else []
+    )
     complete = (
         session["status"] == "COMPLETED"
-        and len(values) == 19
+        and schedule_valid
+        and [(item["label"], item["policy"]) for item in values] == expected_conditions
         and len(evaluation) == 16
-        and all(value["valid"] for value in values)
+        and all(
+            value["valid"]
+            and value["trial_status"] == "COMPLETED"
+            and value["engine_metrics_status"] == "CAPTURED"
+            for value in values
+        )
     )
     result = {
         "schema": "inferdrome.vllm-router-gpu-report.v1",
         "status": "COMPLETE_DESCRIPTIVE" if complete else "INCOMPLETE",
         "raw_session_sha256": inventory["session.json"],
         "raw_inventory": inventory,
-        "selected_offers": session.get("selected_offers"),
+        "session_status": session["status"],
+        "session_error": session.get("error"),
+        "selected_offers": selected,
+        "evaluation_schedule_valid": schedule_valid,
         "conditions": values,
         "limitations": [
             "Synthetic two-document trace; no production representativeness claim.",
@@ -604,16 +714,19 @@ def report(raw_root: Path, output_root: Path) -> None:
         "",
         f"Status: **{result['status']}**. "
         f"Raw session SHA-256: `{inventory['session.json']}`.",
+        f"Session status: `{session['status']}`; error: `{session.get('error')}`.",
         "",
-        "| Condition | Policy | Valid | Offered | SLO goodput (req/s) | Outcomes |",
-        "| --- | --- | --- | ---: | ---: | --- |",
+        "| Condition | Policy | Trial | Metrics | Valid | Offered | "
+        "SLO goodput (req/s) | Outcomes |",
+        "| --- | --- | --- | --- | --- | ---: | ---: | --- |",
     ]
     for value in values:
         outcomes = ", ".join(
             f"{key}={count}" for key, count in sorted(value["outcomes"].items())
         )
         lines.append(
-            f"| {value['label']} | {value['policy']} | {value['valid']} | "
+            f"| {value['label']} | {value['policy']} | {value['trial_status']} | "
+            f"{value['engine_metrics_status']} | {value['valid']} | "
             f"{value['offered']} | {value['goodput_rps']:.3f} | {outcomes} |"
         )
     lines.extend(
@@ -726,44 +839,48 @@ async def run(args: argparse.Namespace) -> None:
                 label = f"calibration-17-{count}"
                 reset = await _warm_and_reset(session, out, label)
                 plan, cert = plans[("calibration", 17, count)]
-                item = await _condition(session, out, label, "round_robin", plan, cert)
-                item["engine_metrics"] = await _after_metrics(
-                    session, out, label, reset
-                )
-                session_record["conditions"].append(item)
-                calibration.append(item)
-                _save(
-                    out / f"progress-{len(session_record['conditions']):02}.json",
+                item = await _record_condition(
+                    session,
+                    out,
                     session_record,
+                    label,
+                    "round_robin",
+                    plan,
+                    cert,
+                    reset,
                 )
-                if not item["comparison_valid"]:
-                    raise StudyError(f"{label} failed comparison validity")
+                calibration.append(item)
             selected = _select_rate(calibration)
             session_record["selected_offers"] = selected
-            for block, (seed, order) in enumerate(
-                zip(EVALUATION_SEEDS, ORDERS, strict=True), 1
-            ):
-                for position, policy in enumerate(order, 1):
-                    budget.require(420)
-                    label = f"evaluation-b{block}-p{position}-{policy}"
-                    reset = await _warm_and_reset(session, out, label)
-                    plan, cert = plans[("evaluation", seed, selected)]
-                    item = await _condition(session, out, label, policy, plan, cert)
-                    item["engine_metrics"] = await _after_metrics(
-                        session, out, label, reset
-                    )
-                    session_record["conditions"].append(item)
-                    _save(
-                        out / f"progress-{len(session_record['conditions']):02}.json",
-                        session_record,
-                    )
-                    if not item["comparison_valid"]:
-                        raise StudyError(f"{label} failed comparison validity")
+            schedule = _evaluation_schedule(selected)
+            session_record["evaluation_schedule"] = schedule
+            session_record["evaluation_schedule_sha256"] = _save(
+                out / "evaluation-schedule.json",
+                {"selected_offers": selected, "conditions": schedule},
+            )
+            _save(out / "progress-03-selection.json", session_record)
+            for planned in schedule:
+                budget.require(420)
+                label = planned["label"]
+                reset = await _warm_and_reset(session, out, label)
+                plan, cert = plans[("evaluation", planned["seed"], selected)]
+                await _record_condition(
+                    session,
+                    out,
+                    session_record,
+                    label,
+                    planned["policy"],
+                    plan,
+                    cert,
+                    reset,
+                )
             session_record["status"] = "COMPLETED"
     except BaseException as error:
         session_record["status"] = (
             "INTERRUPTED"
-            if isinstance(error, KeyboardInterrupt | asyncio.CancelledError)
+            if isinstance(
+                error, KeyboardInterrupt | asyncio.CancelledError | TrialInterrupted
+            )
             else "FAILED"
         )
         session_record["error"] = f"{type(error).__name__}: {str(error)[:300]}"
