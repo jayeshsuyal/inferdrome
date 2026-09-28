@@ -75,6 +75,8 @@ class Router:
         self.offered = 0
         self.terminal = 0
         self.outcomes: dict[str, int] = {}
+        self.accounting_failed = False
+        self.ledger_rows = 0
         self.session: aiohttp.ClientSession | None = None
 
     async def start(self, _app: web.Application) -> None:
@@ -98,8 +100,14 @@ class Router:
         outcome = str(row["outcome"])
         self.outcomes[outcome] = self.outcomes.get(outcome, 0) + 1
         self.terminal += 1
-        self._ledger_file.write(json.dumps(row, separators=(",", ":")) + "\n")
-        self._ledger_file.flush()
+        if not self.accounting_failed:
+            try:
+                self._ledger_file.write(json.dumps(row, separators=(",", ":")) + "\n")
+                self._ledger_file.flush()
+            except (OSError, ValueError):
+                self.accounting_failed = True
+            else:
+                self.ledger_rows += 1
 
     def _choose(self) -> int:
         if self.policy == "round_robin":
@@ -119,6 +127,8 @@ class Router:
                 "busy": self.busy,
                 "outcomes": self.outcomes,
                 "policy": self.policy,
+                "accounting_failed": self.accounting_failed,
+                "ledger_rows": self.ledger_rows,
             }
         )
 
@@ -139,9 +149,19 @@ class Router:
             "upstream_status": None,
             "outcome": "error",
         }
+        task = asyncio.current_task()
+        assert task is not None
+        monitor = asyncio.create_task(self._watch_disconnect(request, task))
+        deadline = asyncio.get_running_loop().time() + self.request_timeout_s
         admitted = False
         index: int | None = None
         try:
+            if self.accounting_failed:
+                row["outcome"] = "rejected_accounting"
+                row["http_status"] = 503
+                return web.json_response(
+                    {"error": "router ledger unavailable"}, status=503
+                )
             if sum(self.busy) + self.pending >= self.max_active + self.max_queue:
                 row["outcome"] = "rejected_capacity"
                 row["http_status"] = 503
@@ -150,30 +170,41 @@ class Router:
                 )
             self.pending += 1
             admitted = True
-            try:
-                await asyncio.wait_for(self.sem.acquire(), self.queue_timeout_s)
-            except TimeoutError:
-                row["outcome"] = "rejected_queue_timeout"
-                row["http_status"] = 503
-                return web.json_response({"error": "router queue timeout"}, status=503)
-            self.pending -= 1
-            admitted = False
-            row["queued_ms"] = (time.monotonic_ns() - arrived_ns) / 1e6
-            index = self._choose()
-            self.busy[index] += 1
-            row["replica"] = index
-            if (
-                request.content_length is not None
-                and request.content_length > self.max_body_bytes
-            ):
-                row["outcome"] = "rejected_body"
-                row["http_status"] = 413
-                return web.json_response({"error": "request too large"}, status=413)
-            body = await request.content.read(self.max_body_bytes + 1)
-            if len(body) > self.max_body_bytes:
-                row["outcome"] = "rejected_body"
-                row["http_status"] = 413
-                return web.json_response({"error": "request too large"}, status=413)
+            async with asyncio.timeout_at(deadline):
+                try:
+                    async with asyncio.timeout(self.queue_timeout_s):
+                        await self.sem.acquire()
+                except TimeoutError:
+                    row["outcome"] = "rejected_queue_timeout"
+                    row["http_status"] = 503
+                    return web.json_response(
+                        {"error": "router queue timeout"}, status=503
+                    )
+                self.pending -= 1
+                admitted = False
+                row["queued_ms"] = (time.monotonic_ns() - arrived_ns) / 1e6
+                index = self._choose()
+                self.busy[index] += 1
+                row["replica"] = index
+                if (
+                    request.content_length is not None
+                    and request.content_length > self.max_body_bytes
+                ):
+                    row["outcome"] = "rejected_body"
+                    row["http_status"] = 413
+                    return web.json_response({"error": "request too large"}, status=413)
+                # A single read(n) may return only the first TCP/chunked fragment.
+                body = bytearray()
+                while chunk := await request.content.read(
+                    min(16_384, self.max_body_bytes + 1 - len(body))
+                ):
+                    body.extend(chunk)
+                    if len(body) > self.max_body_bytes:
+                        row["outcome"] = "rejected_body"
+                        row["http_status"] = 413
+                        return web.json_response(
+                            {"error": "request too large"}, status=413
+                        )
             try:
                 payload = json.loads(body)
             except (ValueError, UnicodeDecodeError):
@@ -184,9 +215,13 @@ class Router:
                 return web.json_response(
                     {"error": "stream: true is required"}, status=400
                 )
-            return await self._proxy(request, body, index, row, arrived_ns)
+            return await self._proxy(
+                request, bytes(body), index, row, arrived_ns, deadline
+            )
         except asyncio.CancelledError:
-            row["outcome"] = "cancelled"
+            row["outcome"] = (
+                "disconnected" if self._disconnected(request) else "cancelled"
+            )
             raise
         except TimeoutError:
             row["outcome"] = "timeout"
@@ -197,6 +232,8 @@ class Router:
             row["http_status"] = 502
             return web.json_response({"error": "replica unavailable"}, status=502)
         finally:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
             if admitted:
                 self.pending -= 1
             if index is not None:
@@ -205,6 +242,18 @@ class Router:
             row["terminal_ms"] = (time.monotonic_ns() - arrived_ns) / 1e6
             self._record(row)
 
+    @staticmethod
+    def _disconnected(request: web.Request) -> bool:
+        return request.transport is None or request.transport.is_closing()
+
+    async def _watch_disconnect(
+        self, request: web.Request, task: asyncio.Task[web.StreamResponse]
+    ) -> None:
+        # Covers admission, upload, idle upstream and downstream backpressure.
+        while not self._disconnected(request):
+            await asyncio.sleep(0.05)
+        task.cancel()
+
     async def _proxy(
         self,
         request: web.Request,
@@ -212,84 +261,86 @@ class Router:
         index: int,
         row: dict[str, object],
         arrived_ns: int,
+        deadline: float,
     ) -> web.StreamResponse:
         assert self.session is not None
-        async with self.session.post(
-            self.origins[index] + "/v1/chat/completions",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            allow_redirects=False,
-            timeout=aiohttp.ClientTimeout(total=self.request_timeout_s),
-        ) as upstream:
-            if upstream.status != 200:
-                row["outcome"] = "upstream_http_error"
-                row["upstream_status"] = upstream.status
-                row["http_status"] = 502
-                return web.json_response(
-                    {"error": "replica rejected request"}, status=502
-                )
-            if upstream.content_type != "text/event-stream":
-                row["outcome"] = "upstream_protocol_error"
-                row["http_status"] = 502
-                return web.json_response(
-                    {"error": "replica did not stream"}, status=502
-                )
-            response = web.StreamResponse(
-                status=200,
-                headers={
-                    "Content-Type": "text/event-stream",
-                    "Cache-Control": "no-cache",
-                },
-            )
-            await response.prepare(request)
-            row["http_status"] = 200
-            row["upstream_status"] = 200
-            total = 0
-            parser = StreamParser(
-                max_stream_bytes=self.max_stream_bytes,
-                max_event_bytes=262_144,
-                max_content_events=65_536,
-            )
-            try:
-                while True:
-                    # Poll the downstream transport while upstream is idle. Closing the
-                    # upstream response cancels vLLM generation on client disconnect.
-                    if request.transport is None or request.transport.is_closing():
-                        row["outcome"] = "disconnected"
-                        break
-                    try:
-                        chunk = await asyncio.wait_for(
-                            upstream.content.read(16_384), 0.1
+        # A row can fail while this request is waiting for admission or uploading.
+        if self.accounting_failed:
+            row["outcome"] = "rejected_accounting"
+            row["http_status"] = 503
+            return web.json_response({"error": "router ledger unavailable"}, status=503)
+        response = web.StreamResponse(
+            status=200,
+            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+        )
+        try:
+            # The same absolute deadline covers admission, upload, connect, reads
+            # and writes. A terminal timeout cannot be mistaken for an idle poll.
+            async with asyncio.timeout_at(deadline):
+                async with self.session.post(
+                    self.origins[index] + "/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    allow_redirects=False,
+                ) as upstream:
+                    row["upstream_status"] = upstream.status
+                    if upstream.status != 200:
+                        row["outcome"] = "upstream_http_error"
+                        row["http_status"] = 502
+                        return web.json_response(
+                            {"error": "replica rejected request"}, status=502
                         )
-                    except TimeoutError:
-                        continue
-                    if not chunk:
-                        parser.finish()
-                        row["outcome"] = "completed"
-                        break
-                    total += len(chunk)
-                    if total > self.max_stream_bytes:
-                        row["outcome"] = "stream_limit"
-                        break
-                    parser.feed(chunk, time.monotonic_ns())
-                    if row["first_byte_ms"] is None:
-                        row["first_byte_ms"] = (time.monotonic_ns() - arrived_ns) / 1e6
-                    await response.write(chunk)  # aiohttp awaits downstream drain.
-                    row["stream_bytes"] = total
-            except (ConnectionResetError, BrokenPipeError):
-                row["outcome"] = "disconnected"
-            except TimeoutError:
-                row["outcome"] = "timeout"
-            except StreamError:
-                row["outcome"] = "upstream_protocol_error"
-            except (aiohttp.ClientError, OSError):
-                row["outcome"] = "upstream_error"
-            if row["outcome"] == "completed":
-                try:
+                    if upstream.content_type != "text/event-stream":
+                        row["outcome"] = "upstream_protocol_error"
+                        row["http_status"] = 502
+                        return web.json_response(
+                            {"error": "replica did not stream"}, status=502
+                        )
+                    await response.prepare(request)
+                    row["http_status"] = 200
+                    total = 0
+                    parser = StreamParser(
+                        max_stream_bytes=self.max_stream_bytes,
+                        max_event_bytes=262_144,
+                        max_content_events=65_536,
+                    )
+                    while chunk := await upstream.content.read(16_384):
+                        total += len(chunk)
+                        if total > self.max_stream_bytes:
+                            row["outcome"] = "stream_limit"
+                            return response
+                        parser.feed(chunk, time.monotonic_ns())
+                        if row["first_byte_ms"] is None:
+                            row["first_byte_ms"] = (
+                                time.monotonic_ns() - arrived_ns
+                            ) / 1e6
+                        await response.write(chunk)  # aiohttp awaits downstream drain.
+                        row["stream_bytes"] = total
+                    parser.finish()
                     await response.write_eof()
-                except (ConnectionResetError, BrokenPipeError):
-                    row["outcome"] = "disconnected"
-            return response
+                    row["outcome"] = "completed"
+        except (ConnectionResetError, BrokenPipeError):
+            if not response.prepared:
+                raise
+            row["outcome"] = "disconnected"
+        except TimeoutError:
+            if not response.prepared:
+                raise
+            row["outcome"] = "timeout"
+        except StreamError:
+            row["outcome"] = "upstream_protocol_error"
+        except (aiohttp.ClientError, OSError):
+            if not response.prepared:
+                raise
+            row["outcome"] = "upstream_error"
+        finally:
+            # An incomplete stream must end as a broken connection, never a clean
+            # HTTP EOF or a second HTTP response after the 200 headers were sent.
+            if response.prepared and row["outcome"] != "completed":
+                response.force_close()
+                if request.transport is not None:
+                    request.transport.close()
+        return response
 
 
 def make_app(router: Router) -> web.Application:

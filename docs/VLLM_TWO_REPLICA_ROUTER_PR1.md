@@ -26,21 +26,30 @@ terminal row per offered request, including rejections and disconnects. Rows
 include a random request ID, selected replica, monotonic arrival-to-first-byte
 and terminal times, queued time, HTTP status, byte count, and outcome. The
 router does not log prompts, generated text, or raw upstream errors. Protect
-the ledger as experiment data. A full disk or ledger write failure is fatal to
-accounting and must invalidate a run.
+the ledger as experiment data. A full disk or ledger write failure sets
+`accounting_failed: true` in stats and stops new upstream dispatches with HTTP
+503. It invalidates the run. `ledger_rows` counts successfully flushed rows in
+this process; terminal counts include requests whose rows could not be saved.
+Use a fresh ledger for each experiment and require `accounting_failed: false`
+and `offered == terminal == ledger_rows` after all requests finish.
 
 Admission is bounded by `max-active + max-queue`; waiting requests time out
 after five seconds by default. The proxy reads at most 16 KiB per upstream
 operation and awaits downstream writes, so a slow client applies backpressure.
 A closed downstream socket closes the upstream response, cancelling generation.
-Requests have a 120-second upstream deadline; input and stream byte limits are
-256 KiB and 16 MiB. The router checks successful SSE framing using the existing
+Requests have a 120-second deadline from arrival, including admission, upload,
+upstream reads and downstream writes; input and stream byte limits are 256 KiB
+and 16 MiB. Disconnect checks cover queued requests as well as active streams.
+The router checks successful SSE framing using the existing
 evaluation parser. A failure after HTTP 200 begins is recorded in the ledger;
-HTTP status alone cannot describe a partial stream.
+the connection is aborted, because HTTP status alone cannot describe a partial
+stream. Success requires one text completion with `stop` or `length`, followed
+by `[DONE]`; tool-call completions and multiple choices are outside this pilot.
 
 Local socket tests use fake SSE replicas and cover byte-for-byte forwarding,
-both policies, capacity and queue rejection, disconnect propagation, and
-one-row-per-offered accounting. This PR establishes a runnable software path,
+both policies, capacity and queue rejection, active and queued disconnects,
+fragmented uploads and their size limit, deadlines during upload and before/after
+response headers, and visible accounting failure. This PR establishes a runnable software path,
 not a GPU latency result. PR2 will add cache policies, changing-hotspot trace,
 and frozen evaluation rules; PR3 will run balanced, repeated real-GPU blocks.
 The earlier one-A100 capacity sweep remains separate evidence and cannot
