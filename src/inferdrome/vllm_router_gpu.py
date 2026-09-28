@@ -664,6 +664,7 @@ def report(raw_root: Path, output_root: Path) -> None:
     schedule_valid = (
         expected_schedule is not None
         and schedule == expected_schedule
+        and "evaluation-schedule.json" in inventory
         and inventory.get("evaluation-schedule.json")
         == session.get("evaluation_schedule_sha256")
     )

@@ -265,7 +265,16 @@ def test_missing_or_duplicate_condition_cannot_claim_complete(
     gpu.report(raw, tmp_path / "missing-report")
     missing = json.loads((tmp_path / "missing-report/report.json").read_text())
     assert missing["status"] == "INCOMPLETE"
-    session["conditions"].append(session["conditions"][0])
+    session["conditions"].append(final)
+    (raw / "evaluation-schedule.json").unlink()
+    session.pop("evaluation_schedule_sha256")
+    session_path.write_text(json.dumps(session))
+    gpu.report(raw, tmp_path / "missing-schedule-report")
+    no_schedule = json.loads(
+        (tmp_path / "missing-schedule-report/report.json").read_text()
+    )
+    assert no_schedule["status"] == "INCOMPLETE"
+    session["conditions"][-1] = session["conditions"][0]
     session_path.write_text(json.dumps(session))
     with pytest.raises(gpu.StudyError, match="duplicate condition identity"):
         gpu.report(raw, tmp_path / "duplicate-report")
