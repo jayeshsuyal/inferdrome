@@ -39,6 +39,12 @@ async def _serve(app: web.Application) -> tuple[web.AppRunner, str]:
     return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
 
+async def _wait_terminal(router: Router, expected: int) -> None:
+    async with asyncio.timeout(2):
+        while router.terminal != expected:
+            await asyncio.sleep(0.01)
+
+
 def _body() -> dict[str, object]:
     return {
         "stream": True,
@@ -100,6 +106,7 @@ async def _escape_case(tmp_path: Path, policy: str) -> list[dict[str, object]]:
                 proxy_url + "/v1/chat/completions", json=_body()
             ) as warm:
                 assert await warm.read() == _sse()
+            await _wait_terminal(router, 1)
             gate.clear()
             first = await client.post(proxy_url + "/v1/chat/completions", json=_body())
             second = await client.post(proxy_url + "/v1/chat/completions", json=_body())
@@ -147,6 +154,7 @@ async def _cache_input_rejection(tmp_path: Path) -> None:
                 proxy_url + "/v1/chat/completions", json={"stream": False}
             ) as invalid:
                 assert invalid.status == 400
+            await _wait_terminal(router, 1)
             async with client.post(
                 proxy_url + "/v1/chat/completions", json=_body()
             ) as valid:
@@ -196,6 +204,8 @@ async def _study_case(
             expected_prompt_tokens=200,
             duration_ns=180_000_000,
             max_tokens=4,
+            first_content_slo_ns=5_000_000_000,
+            completion_slo_ns=10_000_000_000,
         )
         result = await run_trial(
             plan, router_origin=proxy_url, model="fake", expected_policy="round_robin"
