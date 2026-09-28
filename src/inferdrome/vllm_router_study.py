@@ -59,7 +59,7 @@ class Offer:
 
 def trace(seed: int, count: int, duration_ns: int) -> tuple[Offer, ...]:
     """70% current hotspot, 20% other shared document, 10% unique control."""
-    if not 0 <= seed < 2**32 or not 1 <= count <= 10_000 or duration_ns <= 0:
+    if not 0 <= seed < 2**32 or not 1 <= count <= 10_000 or duration_ns < 3:
         raise ValueError("trace settings are outside bounds")
     rng = random.Random(seed)
     offers: list[Offer] = []
@@ -452,24 +452,81 @@ async def run_trial(
                     completion_tokens,
                 )
 
-        tasks = [asyncio.create_task(one(offer)) for offer in offers]
-        _, pending = await asyncio.wait(
-            tasks, timeout=(plan["duration_ns"] + plan["drain_ns"]) / 1e9
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if any(row is None for row in results):
-            raise RuntimeError("study lost a planned request terminal")
+        tasks = [
+            asyncio.create_task(one(offer), name=f"inferdrome-offer-{offer.index}")
+            for offer in offers
+        ]
+        interrupted = False
+        drain_exceeded = False
+        try:
+            _, pending = await asyncio.wait(
+                tasks, timeout=(plan["duration_ns"] + plan["drain_ns"]) / 1e9
+            )
+            drain_exceeded = bool(pending)
+        except asyncio.CancelledError:
+            interrupted = True
+        finally:
+            # Includes offers still sleeping until their scheduled arrival.
+            # Await every child before the session can close or a result is saved.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            settlement = asyncio.gather(*tasks, return_exceptions=True)
+            while not settlement.done():
+                try:
+                    await asyncio.shield(settlement)
+                except asyncio.CancelledError:
+                    interrupted = True
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+            settlement.result()
+        for offer in offers:
+            if results[offer.index] is None:
+                results[offer.index] = RequestResult(
+                    offer.index,
+                    offer.scheduled_ns,
+                    offer.epoch,
+                    offer.traffic_class,
+                    offer.tenant,
+                    None,
+                    None,
+                    None,
+                    None,
+                    time.monotonic_ns() - start_ns,
+                    None,
+                    "cancelled",
+                    None,
+                    None,
+                    None,
+                )
         rows = [row for row in results if row is not None]
         summary = summarize(plan, rows)
-        try:
-            async with session.get(
-                origin + "/router/stats", timeout=aiohttp.ClientTimeout(total=5)
-            ) as response:
-                after = await response.json()
-        except (aiohttp.ClientError, OSError, TimeoutError, ValueError):
-            after = {"error": "router stats unavailable after trial"}
+        status = (
+            "INTERRUPTED"
+            if interrupted
+            else "DRAIN_TIMEOUT"
+            if drain_exceeded
+            else "COMPLETED"
+        )
+        after: dict[str, Any] = {"error": "router stats unavailable after trial"}
+        settlement_deadline = asyncio.get_running_loop().time() + 0.5
+        while True:
+            try:
+                async with session.get(
+                    origin + "/router/stats", timeout=aiohttp.ClientTimeout(total=0.25)
+                ) as response:
+                    candidate = await response.json()
+                if isinstance(candidate, dict):
+                    after = candidate
+            except (aiohttp.ClientError, OSError, TimeoutError, ValueError):
+                break
+            if (
+                after.get("in_flight") == 0
+                and after.get("terminal") == after.get("offered")
+            ) or asyncio.get_running_loop().time() >= settlement_deadline:
+                break
+            await asyncio.sleep(0.05)
         accounting_valid = isinstance(after, dict) and (
             after.get("policy") == expected_policy
             and after.get("offered") == len(offers)
@@ -498,7 +555,9 @@ async def run_trial(
             if plan["phase"] == "fixture"
             else "LOCAL_MEASUREMENT_ONLY",
             "router_accounting_valid": accounting_valid,
-            "comparison_valid": accounting_valid
+            "status": status,
+            "comparison_valid": status == "COMPLETED"
+            and accounting_valid
             and not any(
                 row.outcome in {"prompt_length_mismatch", "output_length_mismatch"}
                 for row in rows
@@ -523,9 +582,14 @@ def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]
         range(len(rows))
     ):
         raise ValueError("incomplete offered population")
-    window_ns = plan["duration_ns"]
+    window_ns = int(plan["duration_ns"])
 
-    def group(part: list[RequestResult]) -> dict[str, Any]:
+    def metric(values: list[int]) -> dict[str, int | None]:
+        return {"count": len(values), "p95_ns": _quantile(values, 0.95)}
+
+    def group(
+        part: list[RequestResult], denominator_ns: int, scope: str
+    ) -> dict[str, Any]:
         completed = [r for r in part if r.outcome == "completed"]
         good = [
             r
@@ -538,45 +602,66 @@ def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]
             "offered": len(part),
             "outcomes": dict(Counter(r.outcome for r in part)),
             "slo_good": len(good),
-            "slo_goodput_rps": len(good) * 1e9 / window_ns,
-            "scheduled_to_first_content_p95_ns": _quantile(
-                [
-                    r.first_content_ns - r.scheduled_ns
-                    for r in completed
-                    if r.first_content_ns is not None
-                ],
-                0.95,
-            ),
-            "scheduled_to_terminal_p95_ns": _quantile(
-                [r.terminal_ns - r.scheduled_ns for r in completed],
-                0.95,
-            ),
-            "max_content_gap_p95_ns": _quantile(
-                [
-                    r.max_content_gap_ns
-                    for r in completed
-                    if r.max_content_gap_ns is not None
-                ],
-                0.95,
-            ),
+            "slo_goodput_rps": len(good) * 1e9 / denominator_ns,
+            "goodput_denominator_ns": denominator_ns,
+            "goodput_scope": scope,
+            "successful_only": {
+                "population": "COMPLETED_REQUESTS_ONLY",
+                "completed_count": len(completed),
+                "scheduled_to_first_content": metric(
+                    [
+                        r.first_content_ns - r.scheduled_ns
+                        for r in completed
+                        if r.first_content_ns is not None
+                    ]
+                ),
+                "scheduled_to_terminal": metric(
+                    [r.terminal_ns - r.scheduled_ns for r in completed]
+                ),
+                "max_content_gap": metric(
+                    [
+                        r.max_content_gap_ns
+                        for r in completed
+                        if r.max_content_gap_ns is not None
+                    ]
+                ),
+            },
             "completion_tokens_total": sum(r.completion_tokens or 0 for r in completed),
         }
 
+    def epoch_window_ns(epoch: int) -> int:
+        # trace() assigns epoch=floor(3*scheduled_ns/duration_ns).
+        start = (epoch * window_ns + 2) // 3
+        end = ((epoch + 1) * window_ns + 2) // 3
+        return end - start
+
     return {
-        "all_offered": group(rows),
+        "all_offered": group(rows, window_ns, "FULL_OFFERED_WINDOW"),
         "by_epoch": {
-            str(e): group([r for r in rows if r.epoch == e]) for e in range(3)
+            str(e): group(
+                [r for r in rows if r.epoch == e],
+                epoch_window_ns(e),
+                "EPOCH_OFFERED_WINDOW",
+            )
+            for e in range(3)
         },
         "by_class": {
-            c: group([r for r in rows if r.traffic_class == c])
+            c: group(
+                [r for r in rows if r.traffic_class == c],
+                window_ns,
+                "FULL_OFFERED_WINDOW_CONTRIBUTION",
+            )
             for c in ("hot", "warm", "unique")
         },
         "by_tenant": {
-            t: group([r for r in rows if r.tenant == t])
+            t: group(
+                [r for r in rows if r.tenant == t],
+                window_ns,
+                "FULL_OFFERED_WINDOW_CONTRIBUTION",
+            )
             for t in ("tenant-a", "tenant-b", "tenant-control")
         },
         "latency_origin": "SCHEDULED_ARRIVAL_INCLUDES_CLIENT_AND_ROUTER_WAIT",
-        "goodput_denominator_ns": window_ns,
         "content_timing": "COMPLETE_SSE_CONTENT_FRAMES_NOT_WIRE_OR_TOKEN_TIMING",
     }
 
@@ -604,31 +689,34 @@ def main() -> None:
     run.add_argument("--token-certificate", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.command == "prepare":
-        content = make_plan(
-            phase=args.phase,
-            seed=args.seed,
-            count=args.offers,
-            expected_prompt_tokens=args.expected_prompt_tokens,
-        )
-    elif args.command == "verify-tokens":
-        plan = json.loads(args.plan.read_text())
-        content = verify_token_lengths(plan, args.tokenizer_root)
-    else:
-        plan = json.loads(args.plan.read_text())
-        certificate = json.loads(args.token_certificate.read_text())
-        content = asyncio.run(
-            run_trial(
-                plan,
-                router_origin=args.router,
-                model=args.model,
-                expected_policy=args.policy,
-                token_certificate=certificate,
-            )
-        )
+    # Reserve the no-replace destination before any request can be dispatched.
     with args.output.open("x", encoding="utf-8") as stream:
+        if args.command == "prepare":
+            content = make_plan(
+                phase=args.phase,
+                seed=args.seed,
+                count=args.offers,
+                expected_prompt_tokens=args.expected_prompt_tokens,
+            )
+        elif args.command == "verify-tokens":
+            plan = json.loads(args.plan.read_text())
+            content = verify_token_lengths(plan, args.tokenizer_root)
+        else:
+            plan = json.loads(args.plan.read_text())
+            certificate = json.loads(args.token_certificate.read_text())
+            content = asyncio.run(
+                run_trial(
+                    plan,
+                    router_origin=args.router,
+                    model=args.model,
+                    expected_policy=args.policy,
+                    token_certificate=certificate,
+                )
+            )
         json.dump(content, stream, sort_keys=True, separators=(",", ":"))
         stream.write("\n")
+    if args.command == "run" and not content["comparison_valid"]:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

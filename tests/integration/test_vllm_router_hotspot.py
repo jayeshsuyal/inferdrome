@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import aiohttp
@@ -21,6 +22,7 @@ from inferdrome.vllm_affinity import (
 from inferdrome.vllm_router import Router, make_app
 from inferdrome.vllm_router_study import (
     RequestResult,
+    main,
     make_plan,
     run_trial,
     summarize,
@@ -229,6 +231,57 @@ def test_scheduled_arrival_client_accounts_for_all_offers(tmp_path: Path) -> Non
     assert all(row["first_content_ns"] >= row["scheduled_ns"] for row in result["rows"])
 
 
+async def _interrupted_study(tmp_path: Path) -> None:
+    seen: list[str] = []
+    a, a_url = await _serve(_replica("a", seen, None))
+    b, b_url = await _serve(_replica("b", seen, None))
+    router = Router((a_url, b_url), tmp_path / "interrupted.jsonl")
+    proxy, proxy_url = await _serve(make_app(router))
+    try:
+        plan = make_plan(
+            phase="fixture",
+            seed=17,
+            count=9,
+            expected_prompt_tokens=200,
+            duration_ns=5_000_000_000,
+            max_tokens=4,
+            first_content_slo_ns=5_000_000_000,
+            completion_slo_ns=10_000_000_000,
+        )
+        trial = asyncio.create_task(
+            run_trial(
+                plan,
+                router_origin=proxy_url,
+                model="fake",
+                expected_policy="round_robin",
+            )
+        )
+        await _wait_terminal(router, 1)
+        trial.cancel()
+        result = await trial
+        assert result["status"] == "INTERRUPTED"
+        assert result["comparison_valid"] is False
+        assert result["summary"]["all_offered"]["offered"] == 9
+        assert len(result["rows"]) == 9
+        assert any(row["outcome"] == "cancelled" for row in result["rows"])
+        assert not any(
+            task.get_name().startswith("inferdrome-offer-") and not task.done()
+            for task in asyncio.all_tasks()
+        )
+        offered = router.offered
+        await asyncio.sleep(0.8)
+        assert router.offered == offered
+        assert router.active == 0 and router.busy == [0, 0]
+    finally:
+        await proxy.cleanup()
+        await a.cleanup()
+        await b.cleanup()
+
+
+def test_parent_interruption_settles_all_offer_tasks(tmp_path: Path) -> None:
+    asyncio.run(_interrupted_study(tmp_path))
+
+
 def test_output_length_and_prompt_length_are_checked(tmp_path: Path) -> None:
     result = asyncio.run(_study_case(tmp_path / "prompt", 199))
     assert result["summary"]["all_offered"]["outcomes"] == {"prompt_length_mismatch": 9}
@@ -313,7 +366,123 @@ def test_certificate_binding_and_scheduled_origin() -> None:
     )
     measured = summarize(plan, [row])["all_offered"]
     assert measured["slo_good"] == 0
-    assert measured["scheduled_to_first_content_p95_ns"] == 600_000_000
+    first = measured["successful_only"]["scheduled_to_first_content"]
+    assert first == {"count": 1, "p95_ns": 600_000_000}
+
+
+def _measured_row(index: int, epoch: int, outcome: str) -> RequestResult:
+    scheduled = epoch * 100_000_000_000
+    completed = outcome == "completed"
+    return RequestResult(
+        index=index,
+        scheduled_ns=scheduled,
+        epoch=epoch,
+        traffic_class="hot",
+        tenant="tenant-a",
+        dispatch_ns=scheduled if completed else None,
+        response_headers_ns=scheduled if completed else None,
+        first_body_byte_ns=scheduled + 1_000_000 if completed else None,
+        first_content_ns=scheduled + 1_000_000 if completed else None,
+        terminal_ns=scheduled + (2_000_000 if completed else 60_000_000_000),
+        max_content_gap_ns=0 if completed else None,
+        outcome=outcome,
+        http_status=200 if completed else None,
+        prompt_tokens=277 if completed else None,
+        completion_tokens=128 if completed else None,
+    )
+
+
+def test_mixed_outcomes_label_successful_only_latency() -> None:
+    plan = make_plan(phase="evaluation", seed=29, count=100, expected_prompt_tokens=277)
+    rows = [_measured_row(0, 0, "completed")]
+    rows.extend(_measured_row(i, 0, "timeout") for i in range(1, 100))
+    measured = summarize(plan, rows)["all_offered"]
+    assert measured["offered"] == 100
+    assert measured["outcomes"] == {"completed": 1, "timeout": 99}
+    assert measured["slo_good"] == 1
+    assert measured["successful_only"]["completed_count"] == 1
+    assert measured["successful_only"]["scheduled_to_first_content"] == {
+        "count": 1,
+        "p95_ns": 1_000_000,
+    }
+    assert "scheduled_to_first_content_p95_ns" not in measured
+
+
+def test_epoch_goodput_uses_each_scheduled_epoch_window() -> None:
+    plan = make_plan(phase="evaluation", seed=29, count=3, expected_prompt_tokens=277)
+    summary = summarize(plan, [_measured_row(i, i, "completed") for i in range(3)])
+    assert summary["all_offered"]["goodput_denominator_ns"] == 300_000_000_000
+    for epoch in range(3):
+        group = summary["by_epoch"][str(epoch)]
+        assert group["goodput_denominator_ns"] == 100_000_000_000
+        assert group["goodput_scope"] == "EPOCH_OFFERED_WINDOW"
+        assert group["slo_goodput_rps"] == 0.01
+    assert summary["by_class"]["hot"]["goodput_denominator_ns"] == 300_000_000_000
+
+
+def test_cli_output_errors_prevent_trial_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = tmp_path / "plan.json"
+    certificate = tmp_path / "certificate.json"
+    plan.write_text("{}")
+    certificate.write_text("{}")
+
+    async def unexpected_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("trial dispatched before output reservation")
+
+    monkeypatch.setattr("inferdrome.vllm_router_study.run_trial", unexpected_run)
+    arguments = [
+        "vllm_router_study",
+        "run",
+        "--plan",
+        str(plan),
+        "--token-certificate",
+        str(certificate),
+        "--router",
+        "http://127.0.0.1:8090",
+        "--model",
+        "fake",
+        "--policy",
+        "round_robin",
+        "--output",
+    ]
+    existing = tmp_path / "existing.json"
+    existing.write_text("old")
+    monkeypatch.setattr(sys, "argv", [*arguments, str(existing)])
+    with pytest.raises(FileExistsError):
+        main()
+    assert existing.read_text() == "old"
+    monkeypatch.setattr(
+        sys, "argv", [*arguments, str(tmp_path / "missing" / "out.json")]
+    )
+    with pytest.raises(FileNotFoundError):
+        main()
+
+    denied = tmp_path / "denied.json"
+    original_open = Path.open
+
+    def denied_open(path: Path, *args: object, **kwargs: object) -> object:
+        if path == denied:
+            raise PermissionError("output destination is unwritable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_open)
+    monkeypatch.setattr(sys, "argv", [*arguments, str(denied)])
+    with pytest.raises(PermissionError):
+        main()
+    monkeypatch.setattr(Path, "open", original_open)
+
+    async def interrupted_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"status": "INTERRUPTED", "comparison_valid": False, "rows": []}
+
+    monkeypatch.setattr("inferdrome.vllm_router_study.run_trial", interrupted_run)
+    output = tmp_path / "interrupted-result.json"
+    monkeypatch.setattr(sys, "argv", [*arguments, str(output)])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 2
+    assert json.loads(output.read_text())["status"] == "INTERRUPTED"
 
 
 def test_history_is_hashed_bounded_and_expires() -> None:

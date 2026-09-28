@@ -59,8 +59,12 @@ failure or in-flight requests. A failed post-run check remains visible in the
 result as `router_accounting_valid: false` and invalidates that condition.
 `comparison_valid` also fails if any successful stream reports a mismatched
 input or output length. The client retains all request rows even when the
-post-run stats endpoint is unavailable.
-Client output files use exclusive creation, and the client refuses a router
+post-run stats endpoint is unavailable. On parent interruption, it cancels and
+joins every scheduled offer task, writes an `INTERRUPTED` result with all
+planned rows, and exits nonzero.
+Client output files are reserved with exclusive creation **before dispatch**;
+an existing file, missing parent, or unwritable path prevents a paid run. The
+client refuses a router
 whose ledger had prior bytes at startup; keep raw files and their hashes for
 PR3. The router ledger records hashed document keys, affinity
 scores, active-request counts at decision, selected replica, and route reason.
@@ -72,6 +76,9 @@ scores, active-request counts at decision, selected replica, and route reason.
   timeout, rejection, cancellation, protocol error, and length mismatch stay
   in the denominator. Goodput divides SLO-good requests by the fixed 300-second
   offered window, not drain time or a configured rate mislabeled as throughput.
+  Each epoch's goodput uses its own scheduled 100-second window. Class and
+  tenant goodput values are contributions over the full 300 seconds. Every
+  group exposes its exact denominator and scope.
 - First-content and terminal latency start at **scheduled arrival**, including
   client queue, upload, router queue, replica work, and streaming. The parser
   timestamps complete SSE content frames. Response-header and first-body-byte
@@ -89,9 +96,11 @@ scores, active-request counts at decision, selected replica, and route reason.
   admits `ignore_eos`; calibration still has to confirm Qwen3 actually emits
   the requested count under this configuration.
 - The primary all-offered SLO uses first content within 500 ms and terminal
-  completion within 5,000 ms. Reports also retain all-offered outcomes and
-  p95 latency/stall summaries by epoch, traffic class, and tenant. No missing
-  request is dropped to improve a percentile. The plan hash freezes seed,
+  completion within 5,000 ms. Reports retain outcomes for every offered
+  request. Latency and stall p95 values describe **completed requests only**;
+  each metric gives its sample count. Failures and missing timings are never
+  assigned fabricated latency or silently counted as fast completions. The
+  plan hash freezes seed,
   trace, token settings, affinity parameters, concurrency, deadline, and SLOs.
 
 PR3 must freeze a separate calibration trace and selection rule, replica
