@@ -19,6 +19,7 @@ import aiohttp
 from aiohttp import web
 
 from inferdrome.evaluation.stream import StreamError, StreamParser
+from inferdrome.vllm_affinity import AffinityHistory, choose, document_digest
 
 
 def _origin(value: str) -> str:
@@ -51,7 +52,12 @@ class Router:
         max_body_bytes: int = 262_144,
         max_stream_bytes: int = 16_777_216,
     ) -> None:
-        if policy not in {"round_robin", "least_busy"}:
+        if policy not in {
+            "round_robin",
+            "least_busy",
+            "cache_only",
+            "cache_plus_load",
+        }:
             raise ValueError("unsupported router policy")
         if min(max_active, max_body_bytes, max_stream_bytes) <= 0 or max_queue < 0:
             raise ValueError("router bounds are invalid")
@@ -70,7 +76,9 @@ class Router:
         self.max_stream_bytes = max_stream_bytes
         self.sem = asyncio.Semaphore(max_active)
         self.pending = 0
+        self.active = 0
         self.busy = [0, 0]
+        self.history = AffinityHistory()
         self.turn = 0
         self.offered = 0
         self.terminal = 0
@@ -81,6 +89,9 @@ class Router:
 
     async def start(self, _app: web.Application) -> None:
         self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.initial_ledger_bytes = (
+            self.ledger.stat().st_size if self.ledger.exists() else 0
+        )
         self._ledger_file = self.ledger.open("a", encoding="utf-8")
         self.session = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=self.max_active, use_dns_cache=False),
@@ -109,13 +120,13 @@ class Router:
             else:
                 self.ledger_rows += 1
 
-    def _choose(self) -> int:
-        if self.policy == "round_robin":
-            index = self.turn % 2
-        else:
-            index = min(range(2), key=lambda i: (self.busy[i], (i - self.turn) % 2))
+    def _choose(self, digest: str | None) -> tuple[int, str, tuple[int, int]]:
+        now_ns = time.monotonic_ns()
+        scores = self.history.scores(digest, now_ns)
+        decision = choose(self.policy, (self.busy[0], self.busy[1]), self.turn, scores)
         self.turn += 1
-        return index
+        self.history.record(digest, decision.replica, now_ns)
+        return decision.replica, decision.reason, scores
 
     async def stats(self, _request: web.Request) -> web.Response:
         return web.json_response(
@@ -124,11 +135,14 @@ class Router:
                 "terminal": self.terminal,
                 "in_flight": self.offered - self.terminal,
                 "pending": self.pending,
+                "active": self.active,
                 "busy": self.busy,
+                "affinity_history_keys": self.history.size,
                 "outcomes": self.outcomes,
                 "policy": self.policy,
                 "accounting_failed": self.accounting_failed,
                 "ledger_rows": self.ledger_rows,
+                "initial_ledger_bytes": self.initial_ledger_bytes,
             }
         )
 
@@ -147,6 +161,10 @@ class Router:
             "stream_bytes": 0,
             "http_status": None,
             "upstream_status": None,
+            "document_sha256": None,
+            "estimated_affinity": None,
+            "busy_at_decision": None,
+            "route_reason": None,
             "outcome": "error",
         }
         task = asyncio.current_task()
@@ -154,6 +172,7 @@ class Router:
         monitor = asyncio.create_task(self._watch_disconnect(request, task))
         deadline = asyncio.get_running_loop().time() + self.request_timeout_s
         admitted = False
+        slot_owned = False
         index: int | None = None
         try:
             if self.accounting_failed:
@@ -162,7 +181,7 @@ class Router:
                 return web.json_response(
                     {"error": "router ledger unavailable"}, status=503
                 )
-            if sum(self.busy) + self.pending >= self.max_active + self.max_queue:
+            if self.active + self.pending >= self.max_active + self.max_queue:
                 row["outcome"] = "rejected_capacity"
                 row["http_status"] = 503
                 return web.json_response(
@@ -182,10 +201,16 @@ class Router:
                     )
                 self.pending -= 1
                 admitted = False
+                self.active += 1
+                slot_owned = True
                 row["queued_ms"] = (time.monotonic_ns() - arrived_ns) / 1e6
-                index = self._choose()
-                self.busy[index] += 1
-                row["replica"] = index
+                if self.policy in {"round_robin", "least_busy"}:
+                    row["busy_at_decision"] = list(self.busy)
+                    index, reason, affinity = self._choose(None)
+                    self.busy[index] += 1
+                    row["replica"] = index
+                    row["route_reason"] = reason
+                    row["estimated_affinity"] = list(affinity)
                 if (
                     request.content_length is not None
                     and request.content_length > self.max_body_bytes
@@ -215,6 +240,15 @@ class Router:
                 return web.json_response(
                     {"error": "stream: true is required"}, status=400
                 )
+            digest = document_digest(payload)
+            row["document_sha256"] = digest
+            if index is None:
+                row["busy_at_decision"] = list(self.busy)
+                index, reason, affinity = self._choose(digest)
+                self.busy[index] += 1
+                row["replica"] = index
+                row["route_reason"] = reason
+                row["estimated_affinity"] = list(affinity)
             return await self._proxy(
                 request, bytes(body), index, row, arrived_ns, deadline
             )
@@ -238,6 +272,8 @@ class Router:
                 self.pending -= 1
             if index is not None:
                 self.busy[index] -= 1
+            if slot_owned:
+                self.active -= 1
                 self.sem.release()
             row["terminal_ms"] = (time.monotonic_ns() - arrived_ns) / 1e6
             self._record(row)
@@ -358,7 +394,9 @@ def main() -> None:
     parser.add_argument("--replica-b", required=True)
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument(
-        "--policy", choices=("round_robin", "least_busy"), default="round_robin"
+        "--policy",
+        choices=("round_robin", "least_busy", "cache_only", "cache_plus_load"),
+        default="round_robin",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
