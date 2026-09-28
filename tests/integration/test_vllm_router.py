@@ -43,6 +43,7 @@ def _replica(
     async def chat(request: web.Request) -> web.StreamResponse:
         assert (await request.json())["stream"] is True
         seen.append(name)
+
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
         await response.write(_SSE[:80])
@@ -162,9 +163,11 @@ async def _exercise_capacity_and_disconnect(ledger: Path) -> None:
                 await asyncio.sleep(0.05)
             assert router.terminal == 2
             assert router.outcomes == {"rejected_capacity": 1, "disconnected": 1}
-            # Upstream socket closure is observed by the fake server on its next write.
+            # The router has relinquished its upstream connection; aiohttp's
+            # fake server can notice a peer close only on a later large write.
+            assert router.session is not None
+            assert not router.session.connector._acquired
             gate.set()
-            await asyncio.wait_for(cancelled.wait(), 2)
         rows = [json.loads(line) for line in ledger.read_text().splitlines()]
         assert len(rows) == router.offered == router.terminal == 2
     finally:
