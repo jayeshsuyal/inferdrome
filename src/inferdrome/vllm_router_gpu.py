@@ -251,7 +251,7 @@ def _engine_argv(executable: Path, model_dir: Path, port: int) -> list[str]:
         "127.0.0.1",
         "--port",
         str(port),
-        "--disable-log-requests",
+        "--no-enable-log-requests",
     ]
 
 
