@@ -462,6 +462,10 @@ def report(raw_root: Path, output_root: Path) -> None:
             or client["comparison_valid"] != item["comparison_valid"]
             or client["summary"] != item["summary"]
             or len(client["rows"]) != plan["offered_count"]
+            or {row.get("index") for row in client["rows"]}
+            != set(range(plan["offered_count"]))
+            or sum(client["summary"]["all_offered"]["outcomes"].values())
+            != plan["offered_count"]
         ):
             raise gpu.StudyError(f"capacity client binding mismatch: {label}")
         diagnostics = _ledger_diagnostics(ledger_path, plan)
@@ -1132,6 +1136,10 @@ async def _run_condition(
     try:
         item["engine_metrics"] = await gpu._after_metrics(session, out, label, reset)
         item["engine_metrics_status"] = "CAPTURED"
+        if _counter_deltas(item)["status"] != "VALID":
+            raise gpu.StudyError(
+                f"{label} prefix-cache counters are missing or invalid"
+            )
         item["capacity_diagnostics"] = _ledger_diagnostics(
             out / f"{label}-router.jsonl", plan
         )

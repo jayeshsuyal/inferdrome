@@ -881,7 +881,16 @@ async def run_trial(
                 for row in rows
             ),
             "router_stats_after": after,
-            "rows": [asdict(row) for row in rows],
+            "rows": [
+                asdict(row)
+                if capacity
+                else {
+                    key: value
+                    for key, value in asdict(row).items()
+                    if key not in {"ready_ns", "document_id"}
+                }
+                for row in rows
+            ],
             "summary": summary,
         }
         result["result_sha256"] = _digest(result)

@@ -181,6 +181,9 @@ def test_full_fake_lifecycle_and_report(
     assert len(session["conditions"]) == 19
     assert len(resets) == 38
     assert all(item["comparison_valid"] for item in session["conditions"])
+    original_client = json.loads((raw / "calibration-17-1-client.json").read_text())
+    assert "ready_ns" not in original_client["rows"][0]
+    assert "document_id" not in original_client["rows"][0]
     assert session["evaluation_schedule_sha256"].startswith("sha256:")
     assert (raw / "progress-03-selection.json").is_file()
     gpu.report(raw, tmp_path / "report")

@@ -452,7 +452,9 @@ def test_complete_offline_report_verifies_matched_raw_population(
             "status": "COMPLETED",
             "comparison_valid": True,
             "summary": summary,
-            "rows": [{}] * count,
+            "rows": [
+                {"index": index, "outcome": "completed"} for index in range(count)
+            ],
         }
         result_sha = gpu._save(raw / f"{label}-client.json", client)
         metrics = {
