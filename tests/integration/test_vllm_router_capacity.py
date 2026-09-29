@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -221,16 +224,25 @@ def test_capacity_candidate_uses_observed_log_size(tmp_path: Path) -> None:
 def test_pinned_cli_flags_for_apc_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    def help_result(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        assert argv[-1] == "--help=all"
+        return SimpleNamespace(
+            stdout="--enable-prefix-caching --no-enable-prefix-caching "
+            "--no-enable-log-requests --max-model-len",
+            stderr="",
+        )
+
+    monkeypatch.setattr(capacity.subprocess, "run", help_result)
+    assert all(capacity._verify_cli_flags(tmp_path / "vllm").values())
     monkeypatch.setattr(
         capacity.subprocess,
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(
-            stdout="--enable-prefix-caching --no-enable-prefix-caching "
-            "--no-enable-log-requests --max-model-len",
-            stderr="",
+            stdout="Config Groups: model, scheduler, cache", stderr=""
         ),
     )
-    assert all(capacity._verify_cli_flags(tmp_path / "vllm").values())
+    with pytest.raises(gpu.StudyError, match="missing required flags"):
+        capacity._verify_cli_flags(tmp_path / "vllm")
     argv = gpu._engine_argv(
         tmp_path / "vllm",
         tmp_path / "model",
@@ -241,6 +253,58 @@ def test_pinned_cli_flags_for_apc_diagnostic(
     assert "--no-enable-prefix-caching" in argv
     assert "--no-enable-log-requests" in argv
     assert argv[argv.index("--max-model-len") + 1] == "8192"
+
+
+@pytest.mark.parametrize("command", ["run", "diagnostic", "report"])
+def test_documented_module_entry_fails_safely_before_gpu(
+    tmp_path: Path, command: str
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    common = [
+        "--prepared-dir",
+        str(tmp_path / "missing-prepared"),
+        "--model-dir",
+        str(tmp_path / "missing-model"),
+        "--vllm-executable",
+        str(tmp_path / "missing-vllm"),
+        "--image-reference",
+        gpu.IMAGE,
+        "--instance-id",
+        "123",
+        "--billing-start-utc",
+        datetime.now(UTC).isoformat(),
+        "--hourly-rate-usd",
+        "1",
+        "--cap-usd",
+        "10",
+        "--reserve-usd",
+        "1",
+        "--output-root",
+        str(tmp_path / command),
+    ]
+    arguments = (
+        [
+            "--raw-root",
+            str(tmp_path / "missing-raw"),
+            "--output-root",
+            str(tmp_path / command),
+        ]
+        if command == "report"
+        else common + (["--source-commit", "a" * 40] if command == "run" else [])
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "inferdrome.vllm_router_capacity", command, *arguments],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "vllm-router-capacity:" in result.stderr
+    assert "NameError" not in result.stderr
+    if command == "run":
+        assert (tmp_path / "run/preflight-error.json").is_file()
 
 
 def test_incomplete_report_and_tampered_input_manifest(

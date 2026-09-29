@@ -1033,13 +1033,9 @@ def main() -> None:
         raise SystemExit(2) from error
 
 
-if __name__ == "__main__":
-    main()
-
-
 def _verify_cli_flags(executable: Path) -> dict[str, bool]:
     completed = subprocess.run(
-        [str(executable), "serve", "--help"],
+        [str(executable), "serve", "--help=all"],
         capture_output=True,
         text=True,
         check=True,
@@ -1323,3 +1319,7 @@ async def run(args: argparse.Namespace) -> None:
         gpu._save(out / "session.json", record)
         if cleanup_error is not None:
             raise gpu.StudyError(f"owned process cleanup unconfirmed: {cleanup_error}")
+
+
+if __name__ == "__main__":
+    main()

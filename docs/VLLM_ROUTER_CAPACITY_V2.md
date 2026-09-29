@@ -121,7 +121,7 @@ The previous instance was destroyed; its old SSH endpoint is not a run target.
 
 On an already-rented host, first check two idle GPUs with `nvidia-smi` and a
 CUDA allocation smoke on both devices. Verify `/usr/local/bin/vllm --version`
-reports 0.26.0 and `vllm serve --help` contains
+reports 0.26.0 and `vllm serve --help=all` contains
 `--enable-prefix-caching`, `--no-enable-prefix-caching`,
 `--no-enable-log-requests`, and `--max-model-len`. These flags are also listed
 in the [pinned vLLM 0.26.0 CLI reference](https://docs.vllm.ai/en/v0.26.0/cli/serve/).
