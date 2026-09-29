@@ -225,7 +225,14 @@ def _budget(args: argparse.Namespace) -> Budget:
     return Budget(started, rate, cap, reserve)
 
 
-def _engine_argv(executable: Path, model_dir: Path, port: int) -> list[str]:
+def _engine_argv(
+    executable: Path,
+    model_dir: Path,
+    port: int,
+    *,
+    context_length: int = 2048,
+    prefix_caching: bool = True,
+) -> list[str]:
     return [
         str(executable),
         "serve",
@@ -245,8 +252,8 @@ def _engine_argv(executable: Path, model_dir: Path, port: int) -> list[str]:
         "--gpu-memory-utilization",
         "0.90",
         "--max-model-len",
-        "2048",
-        "--enable-prefix-caching",
+        str(context_length),
+        "--enable-prefix-caching" if prefix_caching else "--no-enable-prefix-caching",
         "--host",
         "127.0.0.1",
         "--port",
@@ -266,7 +273,12 @@ def _ports_closed() -> bool:
 
 
 def _start_engines(
-    executable: Path, model_dir: Path, out: Path
+    executable: Path,
+    model_dir: Path,
+    out: Path,
+    *,
+    context_length: int = 2048,
+    prefix_caching: bool = True,
 ) -> tuple[list[subprocess.Popen[bytes]], list[Any]]:
     processes: list[subprocess.Popen[bytes]] = []
     logs: list[Any] = []
@@ -283,7 +295,13 @@ def _start_engines(
                 }
             )
             process = subprocess.Popen(
-                _engine_argv(executable, model_dir, port),
+                _engine_argv(
+                    executable,
+                    model_dir,
+                    port,
+                    context_length=context_length,
+                    prefix_caching=prefix_caching,
+                ),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 env=env,
@@ -452,6 +470,9 @@ async def _condition(
     policy: str,
     plan: dict[str, Any],
     certificate: dict[str, Any],
+    *,
+    router_max_active: int = 32,
+    router_max_queue: int = 32,
 ) -> dict[str, Any]:
     ledger = out / f"{label}-router.jsonl"
     router = Router(
@@ -461,6 +482,8 @@ async def _condition(
         ),
         ledger,
         policy=policy,
+        max_active=router_max_active,
+        max_queue=router_max_queue,
     )
     app = make_app(router)
     runner = web.AppRunner(app)
@@ -569,8 +592,20 @@ async def _record_condition(
     plan: dict[str, Any],
     certificate: dict[str, Any],
     reset: dict[str, Any],
+    *,
+    router_max_active: int = 32,
+    router_max_queue: int = 32,
 ) -> dict[str, Any]:
-    item = await _condition(session, out, label, policy, plan, certificate)
+    item = await _condition(
+        session,
+        out,
+        label,
+        policy,
+        plan,
+        certificate,
+        router_max_active=router_max_active,
+        router_max_queue=router_max_queue,
+    )
     item["engine_metrics_status"] = "NOT_COLLECTED"
     session_record["conditions"].append(item)
     number = len(session_record["conditions"])
