@@ -35,6 +35,7 @@ from inferdrome.routing_execution.canonical import canonical_json_bytes
 from inferdrome.vllm_affinity import ESCAPE_BUSY_DELTA, HISTORY_KEYS, HISTORY_TTL_NS
 
 POLICIES = ("round_robin", "least_busy", "cache_only", "cache_plus_load")
+FOLLOWUP_POLICIES = ("round_robin", "cache_only", "cache_plus_load", "cache_saturation")
 DOCUMENT_SENTENCE = (
     "This archived incident describes a request, its queue wait, a model "
     "response, and a measured completion time. "
@@ -83,6 +84,11 @@ def capacity_trace(
     prefix_lengths = workload["document_prefix_tokens"]
     target = workload["target_prefix_tokens"]
     hot_size = workload["hot_group_size"]
+    pattern = workload.get("pattern_version")
+    if pattern not in (None, "control.v1", "burst-hot-shift.v1"):
+        raise ValueError("unknown capacity traffic pattern")
+    burst = pattern == "burst-hot-shift.v1"
+    cycle_percent = 20 if burst else 60
     if (
         not 0 <= seed < 2**32
         or not 1 <= count <= 20_000
@@ -97,8 +103,17 @@ def capacity_trace(
         or not 512 <= workload["context_length"] <= 16384
         or not 1 <= workload["output_tokens"] <= 256
         or max(prefix_lengths) + workload["output_tokens"] > workload["context_length"]
-        or workload.get("cycle_percent") != 60
+        or workload.get("cycle_percent") != cycle_percent
         or workload.get("hotspot_epochs") != ["A", "B", "A"]
+        or (
+            burst
+            and (
+                workload.get("burst_size") != 8
+                or workload.get("burst_window_ns") != 200_000_000
+                or hot_size != 2
+            )
+        )
+        or (not burst and ("burst_size" in workload or "burst_window_ns" in workload))
     ):
         raise ValueError("capacity trace settings are outside bounds")
     rng = random.Random(seed)
@@ -110,9 +125,17 @@ def capacity_trace(
     cycle = 0
     hot_cycle = 0
     for index in range(count):
-        scheduled_ns = int((index + rng.random()) * duration_ns / count)
+        if burst:
+            group = index // 8
+            position = index % 8
+            scheduled_ns = int(
+                group * 8 * duration_ns / count
+                + (position + rng.random()) * 200_000_000 / 8
+            )
+        else:
+            scheduled_ns = int((index + rng.random()) * duration_ns / count)
         epoch = min(2, scheduled_ns * 3 // duration_ns)
-        if rng.randrange(100) < 60:
+        if rng.randrange(100) < cycle_percent:
             document_id = cycle % document_count
             cycle += 1
             traffic_class = "cycle"
@@ -616,7 +639,7 @@ async def run_trial(
         else:
             validate_token_certificate(plan, token_certificate)
     origin = _origin(router_origin)
-    if expected_policy not in POLICIES:
+    if expected_policy not in (*POLICIES, "cache_saturation"):
         raise ValueError("study policy is unsupported")
     if not model or len(model) > 200:
         raise ValueError("model identifier is invalid")

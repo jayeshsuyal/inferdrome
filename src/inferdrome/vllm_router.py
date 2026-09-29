@@ -19,7 +19,14 @@ import aiohttp
 from aiohttp import web
 
 from inferdrome.evaluation.stream import StreamError, StreamParser
-from inferdrome.vllm_affinity import AffinityHistory, choose, document_digest
+from inferdrome.vllm_affinity import (
+    ESCAPE_BUSY_DELTA,
+    SATURATION_RULE_VERSION,
+    AffinityDecision,
+    AffinityHistory,
+    choose,
+    document_digest,
+)
 
 
 def _origin(value: str) -> str:
@@ -51,18 +58,26 @@ class Router:
         request_timeout_s: float = 120.0,
         max_body_bytes: int = 262_144,
         max_stream_bytes: int = 16_777_216,
+        saturation_active: int | None = None,
     ) -> None:
         if policy not in {
             "round_robin",
             "least_busy",
             "cache_only",
             "cache_plus_load",
+            "cache_saturation",
         }:
             raise ValueError("unsupported router policy")
         if min(max_active, max_body_bytes, max_stream_bytes) <= 0 or max_queue < 0:
             raise ValueError("router bounds are invalid")
         if queue_timeout_s <= 0 or request_timeout_s <= 0:
             raise ValueError("router timeouts must be positive")
+        if policy == "cache_saturation" and (
+            saturation_active is None or not 1 <= saturation_active <= max_active
+        ):
+            raise ValueError("candidate threshold must be within router active bound")
+        if policy != "cache_saturation" and saturation_active is not None:
+            raise ValueError("candidate threshold applies only to cache_saturation")
         self.origins = tuple(_origin(value) for value in origins)
         if self.origins[0] == self.origins[1]:
             raise ValueError("replicas must have distinct origins")
@@ -74,6 +89,7 @@ class Router:
         self.request_timeout_s = request_timeout_s
         self.max_body_bytes = max_body_bytes
         self.max_stream_bytes = max_stream_bytes
+        self.saturation_active = saturation_active
         self.sem = asyncio.Semaphore(max_active)
         self.pending = 0
         self.active = 0
@@ -120,13 +136,27 @@ class Router:
             else:
                 self.ledger_rows += 1
 
-    def _choose(self, digest: str | None) -> tuple[int, str, tuple[int, int]]:
+    def _choose(self, digest: str | None) -> AffinityDecision:
         now_ns = time.monotonic_ns()
         scores = self.history.scores(digest, now_ns)
-        decision = choose(self.policy, (self.busy[0], self.busy[1]), self.turn, scores)
+        decision = choose(
+            self.policy,
+            (self.busy[0], self.busy[1]),
+            self.turn,
+            scores,
+            saturation_active=self.saturation_active,
+        )
         self.turn += 1
         self.history.record(digest, decision.replica, now_ns)
-        return decision.replica, decision.reason, scores
+        return decision
+
+    @staticmethod
+    def _record_decision(row: dict[str, object], decision: AffinityDecision) -> None:
+        row["route_reason"] = decision.reason
+        row["estimated_affinity"] = list(decision.estimated_affinity)
+        row["preferred_replica"] = decision.preferred_replica
+        row["saturation_reached"] = decision.saturation_reached
+        row["relative_imbalance_reached"] = decision.relative_imbalance_reached
 
     async def stats(self, _request: web.Request) -> web.Response:
         return web.json_response(
@@ -140,6 +170,12 @@ class Router:
                 "affinity_history_keys": self.history.size,
                 "outcomes": self.outcomes,
                 "policy": self.policy,
+                "saturation_active": self.saturation_active,
+                "saturation_rule_version": (
+                    SATURATION_RULE_VERSION
+                    if self.saturation_active is not None
+                    else None
+                ),
                 "accounting_failed": self.accounting_failed,
                 "ledger_rows": self.ledger_rows,
                 "initial_ledger_bytes": self.initial_ledger_bytes,
@@ -165,6 +201,15 @@ class Router:
             "estimated_affinity": None,
             "busy_at_decision": None,
             "route_reason": None,
+            "preferred_replica": None,
+            "saturation_threshold_active": self.saturation_active,
+            "saturation_rule_version": (
+                SATURATION_RULE_VERSION if self.saturation_active is not None else None
+            ),
+            "escape_busy_delta": ESCAPE_BUSY_DELTA,
+            "saturation_reached": None,
+            "relative_imbalance_reached": None,
+            "turn_at_decision": None,
             "outcome": "error",
         }
         task = asyncio.current_task()
@@ -206,11 +251,12 @@ class Router:
                 row["queued_ms"] = (time.monotonic_ns() - arrived_ns) / 1e6
                 if self.policy in {"round_robin", "least_busy"}:
                     row["busy_at_decision"] = list(self.busy)
-                    index, reason, affinity = self._choose(None)
+                    decision = self._choose(None)
+                    row["turn_at_decision"] = self.turn - 1
+                    index = decision.replica
                     self.busy[index] += 1
                     row["replica"] = index
-                    row["route_reason"] = reason
-                    row["estimated_affinity"] = list(affinity)
+                    self._record_decision(row, decision)
                 if (
                     request.content_length is not None
                     and request.content_length > self.max_body_bytes
@@ -244,11 +290,12 @@ class Router:
             row["document_sha256"] = digest
             if index is None:
                 row["busy_at_decision"] = list(self.busy)
-                index, reason, affinity = self._choose(digest)
+                decision = self._choose(digest)
+                row["turn_at_decision"] = self.turn - 1
+                index = decision.replica
                 self.busy[index] += 1
                 row["replica"] = index
-                row["route_reason"] = reason
-                row["estimated_affinity"] = list(affinity)
+                self._record_decision(row, decision)
             return await self._proxy(
                 request, bytes(body), index, row, arrived_ns, deadline
             )
@@ -395,13 +442,20 @@ def main() -> None:
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument(
         "--policy",
-        choices=("round_robin", "least_busy", "cache_only", "cache_plus_load"),
+        choices=(
+            "round_robin",
+            "least_busy",
+            "cache_only",
+            "cache_plus_load",
+            "cache_saturation",
+        ),
         default="round_robin",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--max-active", type=int, default=32)
     parser.add_argument("--max-queue", type=int, default=32)
+    parser.add_argument("--saturation-active", type=int)
     args = parser.parse_args()
     router = Router(
         (args.replica_a, args.replica_b),
@@ -409,6 +463,7 @@ def main() -> None:
         policy=args.policy,
         max_active=args.max_active,
         max_queue=args.max_queue,
+        saturation_active=args.saturation_active,
     )
     web.run_app(make_app(router), host=args.host, port=args.port)
 
