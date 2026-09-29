@@ -62,11 +62,14 @@ rates have passed. The coordinator then freezes those two passing rates and
 the first failing rate. If every ladder rate passes, it reports
 `UNBRACKETED` and does not call the highest tested rate a maximum. A failure
 at the first or second rate reports `INSUFFICIENT_BELOW`. Client scheduling
-lag, client queueing, missing dispatches, router capacity rejection or router
-queue timeout report `HARNESS_LIMIT`; they cannot establish an engine
-boundary. Token/accounting failure or missing metrics stops as invalid
-evidence. These stop rules depend on measurement validity and SLOs, not on a
-preferred policy winning.
+lag or client queue p95 above 50 ms, missing dispatches, router capacity
+rejection or router queue timeout, or router queue p95 above 50 ms report
+`HARNESS_LIMIT`; they cannot establish an engine boundary. The 50 ms limits
+are frozen in the prepared manifest alongside active 128 and queue 256.
+Missing, nonfinite, decreasing, or impossible prefix-cache counter deltas
+stop as `INVALID_EVIDENCE`; token or accounting failure also invalidates the
+comparison. These stop rules depend on measurement validity and SLOs, not on
+a preferred policy winning.
 
 Once bracketed, a saved schedule crosses three frozen rates with the four
 existing policies in four balanced policy-order blocks. The new evaluation

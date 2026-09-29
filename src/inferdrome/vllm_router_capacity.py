@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,10 +31,13 @@ from inferdrome.qwen3_campaign import QWEN3_8B_MODEL_ID
 from inferdrome.vllm_affinity import HISTORY_TTL_NS
 from inferdrome.vllm_router_study import (
     POLICIES,
+    RequestResult,
+    _digest,
     capacity_trace,
     capacity_workload,
     certify_capacity_plan,
     make_capacity_plan,
+    summarize,
     validate_capacity_certificate,
     validate_capacity_plan,
 )
@@ -45,6 +50,8 @@ EVALUATION_SEEDS = (101, 103, 107, 109)
 ORDERS = gpu.ORDERS
 DEFAULT_RATES = (2, 4, 6, 8, 12, 16)
 MAX_CONDITIONS = 64
+HARNESS_LAG_LIMIT_NS = 50_000_000
+ROUTER_QUEUE_LIMIT_MS = 50
 
 
 def _rate_list(value: str) -> tuple[int, ...]:
@@ -148,6 +155,11 @@ def prepare(
             "client_concurrency": client_concurrency,
             "router_max_active": router_max_active,
             "router_max_queue": router_max_queue,
+            "harness_limits": {
+                "scheduling_lag_p95_ns": HARNESS_LAG_LIMIT_NS,
+                "client_queue_p95_ns": HARNESS_LAG_LIMIT_NS,
+                "router_queue_p95_ms": ROUTER_QUEUE_LIMIT_MS,
+            },
             "pilot_seed": PILOT_SEED,
             "evaluation_seeds": EVALUATION_SEEDS,
             "policy_orders": ORDERS,
@@ -167,6 +179,12 @@ def _prepared(
         or manifest.get("pilot_seed") != PILOT_SEED
         or tuple(manifest.get("evaluation_seeds", ())) != EVALUATION_SEEDS
         or tuple(tuple(row) for row in manifest.get("policy_orders", ())) != ORDERS
+        or manifest.get("harness_limits")
+        != {
+            "scheduling_lag_p95_ns": HARNESS_LAG_LIMIT_NS,
+            "client_queue_p95_ns": HARNESS_LAG_LIMIT_NS,
+            "router_queue_p95_ms": ROUTER_QUEUE_LIMIT_MS,
+        }
     ):
         raise gpu.StudyError("capacity manifest is invalid")
     expected_names = {
@@ -300,15 +318,20 @@ def _condition_assessment(item: dict[str, Any], count: int) -> dict[str, Any]:
     ledger = item["capacity_diagnostics"]
     generator_limited = (
         lag is None
-        or lag > 50_000_000
+        or lag > HARNESS_LAG_LIMIT_NS
         or client_queue is None
-        or client_queue > 50_000_000
+        or client_queue > HARNESS_LAG_LIMIT_NS
         or timing["never_dispatched"] > 0
         or ledger["router_ledger_rows"] != count
     )
-    admission_limited = any(
-        ledger["router_outcomes"].get(outcome, 0) > 0
-        for outcome in ("rejected_capacity", "rejected_queue_timeout")
+    admission_limited = (
+        any(
+            ledger["router_outcomes"].get(outcome, 0) > 0
+            for outcome in ("rejected_capacity", "rejected_queue_timeout")
+        )
+        or ledger["router_queue_observed"] != count
+        or ledger["router_queue_p95_ms"] is None
+        or ledger["router_queue_p95_ms"] > ROUTER_QUEUE_LIMIT_MS
     )
     first_p95 = all_offered["successful_only"]["scheduled_to_first_content"]["p95_ns"]
     completion_p95 = all_offered["successful_only"]["scheduled_to_terminal"]["p95_ns"]
@@ -340,7 +363,8 @@ def _condition_assessment(item: dict[str, Any], count: int) -> dict[str, Any]:
         "completion_p95_ns": completion_p95,
         "rule": (
             "95% SLO-good and completed; <=1% rejected; completed-only "
-            "p95 first <=500ms and terminal <=5s; no harness limit"
+            "p95 first <=500ms and terminal <=5s; scheduling/client queue "
+            "p95 <=50ms, router queue p95 <=50ms, no admission rejects"
         ),
     }
 
@@ -369,18 +393,21 @@ def _counter_deltas(item: dict[str, Any]) -> dict[str, Any]:
     if item.get("engine_metrics_status") != "CAPTURED":
         return {"status": "MISSING", "replicas": []}
     replicas: list[dict[str, Any]] = []
-    for replica in item["engine_metrics"]["replicas"]:
-        deltas = replica["prefix_counter_deltas"]
+    for replica in item.get("engine_metrics", {}).get("replicas", []):
+        deltas = replica.get("prefix_counter_deltas", {})
         hits = deltas.get("vllm:prefix_cache_hits_total")
         queries = deltas.get("vllm:prefix_cache_queries_total")
         valid = (
             isinstance(hits, int | float)
             and isinstance(queries, int | float)
+            and math.isfinite(hits)
+            and math.isfinite(queries)
             and 0 <= hits <= queries
+            and queries > 0
         )
         replicas.append(
             {
-                "port": replica["port"],
+                "port": replica.get("port"),
                 "hits": hits,
                 "queries": queries,
                 "hit_fraction": hits / queries if valid and queries else None,
@@ -390,11 +417,106 @@ def _counter_deltas(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": (
             "VALID"
-            if len(replicas) == 2 and all(r["valid"] for r in replicas)
+            if len(replicas) == 2
+            and sorted(r["port"] for r in replicas) == sorted(gpu.ENGINE_PORTS)
+            and all(r["valid"] for r in replicas)
             else "INVALID_OR_MISSING"
         ),
         "replicas": replicas,
     }
+
+
+def _validate_client_population(
+    client: dict[str, Any],
+    plan: dict[str, Any],
+    cert: dict[str, Any],
+    item: dict[str, Any],
+) -> None:
+    """Recompute the client evidence from every offered request."""
+    count = plan["offered_count"]
+    if (
+        client.get("schema") != "inferdrome.vllm-router-capacity-result.v2"
+        or client.get("plan_sha256") != plan["plan_sha256"]
+        or client.get("trace_sha256") != plan["trace_sha256"]
+        or client.get("token_certificate_sha256") != cert["certificate_sha256"]
+        or client.get("policy") != item["policy"]
+        or client.get("status") != item["trial_status"]
+        or client.get("comparison_valid") != item["comparison_valid"]
+        or client.get("result_sha256")
+        != _digest({k: v for k, v in client.items() if k != "result_sha256"})
+    ):
+        raise gpu.StudyError("capacity client identity or digest mismatch")
+    raw_rows = client.get("rows")
+    if not isinstance(raw_rows, list) or len(raw_rows) != count:
+        raise gpu.StudyError("capacity client population size mismatch")
+    allowed_fields = {field.name for field in fields(RequestResult)}
+    offers = validate_capacity_plan(plan)
+    rows: list[RequestResult] = []
+    for index, (raw, offer) in enumerate(zip(raw_rows, offers, strict=True)):
+        if not isinstance(raw, dict) or set(raw) != allowed_fields:
+            raise gpu.StudyError("capacity client row fields mismatch")
+        try:
+            row = RequestResult(**raw)
+        except TypeError as error:
+            raise gpu.StudyError("capacity client row shape mismatch") from error
+        if (
+            row.index != index
+            or row.scheduled_ns != offer.scheduled_ns
+            or row.epoch != offer.epoch
+            or row.traffic_class != offer.traffic_class
+            or row.tenant != offer.tenant
+            or row.document_id != offer.document_id
+            or not isinstance(row.terminal_ns, int)
+            or row.terminal_ns < row.scheduled_ns
+        ):
+            raise gpu.StudyError("capacity client row trace mismatch")
+        stamps = [
+            row.ready_ns,
+            row.dispatch_ns,
+            row.response_headers_ns,
+            row.first_body_byte_ns,
+            row.first_content_ns,
+            row.terminal_ns,
+        ]
+        if any(
+            value is not None and (not isinstance(value, int) or value < 0)
+            for value in stamps
+        ):
+            raise gpu.StudyError("capacity client row timing invalid")
+        observed = [value for value in stamps if value is not None]
+        if observed != sorted(observed):
+            raise gpu.StudyError("capacity client row timing order invalid")
+        if row.ready_ns is not None and row.ready_ns < row.scheduled_ns:
+            raise gpu.StudyError("capacity client row scheduling invalid")
+        if row.outcome == "completed" and (
+            row.http_status != 200
+            or row.first_content_ns is None
+            or row.prompt_tokens != plan["prompt_tokens_by_index"][index]
+            or row.completion_tokens != plan["max_tokens"]
+        ):
+            raise gpu.StudyError("capacity completed row token or HTTP mismatch")
+        rows.append(row)
+    computed = summarize(plan, rows)
+    if client.get("summary") != computed or item.get("summary") != computed:
+        raise gpu.StudyError("capacity client summary mismatch")
+    if client["comparison_valid"]:
+        after = client.get("router_stats_after")
+        if (
+            not isinstance(after, dict)
+            or not client.get("router_accounting_valid")
+            or (
+                after.get("policy") != item["policy"]
+                or after.get("offered") != count
+                or after.get("terminal") != count
+                or after.get("ledger_rows") != count
+                or after.get("in_flight") != 0
+                or after.get("pending") != 0
+                or after.get("active") != 0
+                or after.get("busy") != [0, 0]
+                or after.get("accounting_failed") is not False
+            )
+        ):
+            raise gpu.StudyError("capacity router accounting mismatch")
 
 
 def report(raw_root: Path, output_root: Path) -> None:
@@ -455,19 +577,7 @@ def report(raw_root: Path, output_root: Path) -> None:
         ):
             raise gpu.StudyError(f"capacity raw artifact hash mismatch: {label}")
         client = json.loads(client_path.read_text())
-        if (
-            client["plan_sha256"] != plan["plan_sha256"]
-            or client["token_certificate_sha256"] != cert["certificate_sha256"]
-            or client["status"] != item["trial_status"]
-            or client["comparison_valid"] != item["comparison_valid"]
-            or client["summary"] != item["summary"]
-            or len(client["rows"]) != plan["offered_count"]
-            or {row.get("index") for row in client["rows"]}
-            != set(range(plan["offered_count"]))
-            or sum(client["summary"]["all_offered"]["outcomes"].values())
-            != plan["offered_count"]
-        ):
-            raise gpu.StudyError(f"capacity client binding mismatch: {label}")
+        _validate_client_population(client, plan, cert, item)
         diagnostics = _ledger_diagnostics(ledger_path, plan)
         if item.get("capacity_diagnostics") not in (None, diagnostics):
             raise gpu.StudyError(f"capacity ledger diagnostics mismatch: {label}")
@@ -546,8 +656,10 @@ def report(raw_root: Path, output_root: Path) -> None:
     ]
     evaluation = [value for value in values if value["phase"] == "evaluation"]
     pilot_items = conditions[:pilot_count]
-    boundary_valid = isinstance(boundary, dict) and boundary == _pilot_boundary(
-        pilot_items, tuple(manifest["rates_rps"])
+    boundary_valid = (
+        isinstance(boundary, dict)
+        and all(item.get("capacity_assessment") is not None for item in pilot_items)
+        and boundary == _pilot_boundary(pilot_items, tuple(manifest["rates_rps"]))
     )
     complete = (
         record["status"] == "COMPLETED"
@@ -1133,9 +1245,16 @@ async def _run_condition(
         item["engine_metrics"] = await gpu._after_metrics(session, out, label, reset)
         item["engine_metrics_status"] = "CAPTURED"
         if _counter_deltas(item)["status"] != "VALID":
-            raise gpu.StudyError(
+            item["engine_metrics_status"] = "INVALID_COUNTERS"
+            item["analysis_error"] = (
                 f"{label} prefix-cache counters are missing or invalid"
             )
+            gpu._save(
+                out / f"analysis-error-{label}.json",
+                {"label": label, "reason": item["analysis_error"]},
+            )
+            gpu._save(out / f"progress-{number:02}.json", record)
+            return item
         item["capacity_diagnostics"] = _ledger_diagnostics(
             out / f"{label}-router.jsonl", plan
         )
@@ -1244,6 +1363,9 @@ async def run(args: argparse.Namespace) -> None:
                     router_max_queue=manifest["router_max_queue"],
                 )
                 pilot.append(item)
+                if item["engine_metrics_status"] != "CAPTURED":
+                    record["status"] = "INVALID_EVIDENCE"
+                    return
                 assessment = item["capacity_assessment"]
                 if assessment["generator_limited"] or assessment["admission_limited"]:
                     record["status"] = "HARNESS_LIMIT"
@@ -1282,6 +1404,9 @@ async def run(args: argparse.Namespace) -> None:
                     router_max_active=manifest["router_max_active"],
                     router_max_queue=manifest["router_max_queue"],
                 )
+                if item["engine_metrics_status"] != "CAPTURED":
+                    record["status"] = "INVALID_EVIDENCE"
+                    return
                 if (
                     not item["comparison_valid"]
                     or item["trial_status"] != "COMPLETED"

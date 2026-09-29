@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +72,8 @@ def _item(*, first_ns: int = 100_000_000, lag_ns: int = 1_000_000) -> dict:
         "capacity_diagnostics": {
             "router_ledger_rows": 100,
             "router_outcomes": {"completed": 100},
+            "router_queue_p95_ms": 1.0,
+            "router_queue_observed": 100,
         },
     }
 
@@ -124,6 +127,99 @@ def test_generator_and_router_admission_limits_are_explicit() -> None:
     admitted = capacity._condition_assessment(item, 100)
     assert admitted["admission_limited"] is True
     assert admitted["passed"] is False
+    item = _item(first_ns=700_000_000)
+    item["capacity_diagnostics"]["router_queue_p95_ms"] = 600.0
+    queued = capacity._condition_assessment(item, 100)
+    assert queued["admission_limited"] is True
+    assert (
+        capacity._pilot_boundary(
+            [
+                {"capacity_assessment": _condition_assessment}
+                for _condition_assessment in [
+                    capacity._condition_assessment(_item(), 100)
+                ]
+                * 2
+                + [queued]
+            ],
+            (2, 4, 6),
+        )["status"]
+        == "HARNESS_LIMIT"
+    )
+
+
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        {},
+        {"vllm:prefix_cache_hits_total": -1, "vllm:prefix_cache_queries_total": 2},
+        {"vllm:prefix_cache_hits_total": 3, "vllm:prefix_cache_queries_total": 2},
+        {
+            "vllm:prefix_cache_hits_total": float("inf"),
+            "vllm:prefix_cache_queries_total": 2,
+        },
+    ],
+)
+def test_prefix_cache_counter_failures_are_invalid_evidence(deltas: dict) -> None:
+    item = {
+        "engine_metrics_status": "CAPTURED",
+        "engine_metrics": {
+            "replicas": [
+                {"port": port, "prefix_counter_deltas": deltas}
+                for port in gpu.ENGINE_PORTS
+            ]
+        },
+    }
+    assert capacity._counter_deltas(item)["status"] == "INVALID_OR_MISSING"
+
+
+def test_online_missing_counters_preserves_trial_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def reset(*_args: object) -> dict:
+        return {"replicas": []}
+
+    async def condition(
+        _session: object,
+        out: Path,
+        label: str,
+        _policy: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict:
+        gpu._save(out / f"{label}-client.json", {"rows": [{"index": 0}]})
+        (out / f"{label}-router.jsonl").write_text("{}\n")
+        return {"label": label, "trial_status": "COMPLETED", "comparison_valid": True}
+
+    async def metrics(*_args: object) -> dict:
+        return {
+            "replicas": [
+                {"port": port, "prefix_counter_deltas": {}} for port in gpu.ENGINE_PORTS
+            ]
+        }
+
+    monkeypatch.setattr(gpu, "_warm_and_reset", reset)
+    monkeypatch.setattr(gpu, "_condition", condition)
+    monkeypatch.setattr(gpu, "_after_metrics", metrics)
+    record: dict = {"conditions": []}
+    result = asyncio.run(
+        capacity._run_condition(
+            None,  # type: ignore[arg-type]
+            tmp_path,
+            record,
+            label="pilot-71-2rps",
+            policy="least_busy",
+            plan={"offered_count": 1},
+            certificate={},
+            router_max_active=128,
+            router_max_queue=256,
+        )
+    )
+    assert result["engine_metrics_status"] == "INVALID_COUNTERS"
+    assert len(record["conditions"]) == 1
+    assert (tmp_path / "pilot-71-2rps-client.json").is_file()
+    assert (tmp_path / "pilot-71-2rps-router.jsonl").is_file()
+    assert (tmp_path / "progress-01.json").is_file()
+    assert (tmp_path / "analysis-error-pilot-71-2rps.json").is_file()
 
 
 def test_exact_prompt_and_context_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -295,7 +391,12 @@ def test_documented_module_entry_fails_safely_before_gpu(
     result = subprocess.run(
         [sys.executable, "-m", "inferdrome.vllm_router_capacity", command, *arguments],
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str(root / "src")},
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, (str(root / "src"), os.environ.get("PYTHONPATH")))
+            ),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -412,6 +513,7 @@ def test_pilot_freezes_schedule_or_reports_unbracketed(
             "policy": policy,
             "comparison_valid": True,
             "trial_status": "COMPLETED",
+            "engine_metrics_status": "CAPTURED",
             "capacity_assessment": {
                 "passed": passed,
                 "generator_limited": False,
@@ -474,25 +576,30 @@ def test_complete_offline_report_verifies_matched_raw_population(
         count = plan["offered_count"]
         failed_pilot = phase == "pilot" and rate == 3
         first_ns = 600_000_000 if failed_pilot else 100_000_000
-        good = int(count * 0.9) if failed_pilot else count
-        summary = {
-            "all_offered": {
-                "offered": count,
-                "slo_good": good,
-                "slo_goodput_rps": good / 60,
-                "goodput_denominator_ns": 60_000_000_000,
-                "outcomes": {"completed": count},
-                "successful_only": {
-                    "scheduled_to_first_content": {"p95_ns": first_ns},
-                    "scheduled_to_terminal": {"p95_ns": 4_000_000_000},
-                },
-            },
-            "client_timing": {
-                "scheduling_lag": {"p95_ns": 1_000_000},
-                "client_queue_delay": {"p95_ns": 1_000_000},
-                "never_dispatched": 0,
-            },
-        }
+        offers = study.validate_capacity_plan(plan)
+        rows = [
+            study.RequestResult(
+                index=offer.index,
+                scheduled_ns=offer.scheduled_ns,
+                epoch=offer.epoch,
+                traffic_class=offer.traffic_class,
+                tenant=offer.tenant,
+                ready_ns=offer.scheduled_ns + 1_000_000,
+                dispatch_ns=offer.scheduled_ns + 2_000_000,
+                response_headers_ns=offer.scheduled_ns + 10_000_000,
+                first_body_byte_ns=offer.scheduled_ns + 20_000_000,
+                first_content_ns=offer.scheduled_ns + first_ns,
+                terminal_ns=offer.scheduled_ns + 4_000_000_000,
+                max_content_gap_ns=100_000_000,
+                outcome="completed",
+                http_status=200,
+                prompt_tokens=plan["prompt_tokens_by_index"][offer.index],
+                completion_tokens=plan["max_tokens"],
+                document_id=offer.document_id,
+            )
+            for offer in offers
+        ]
+        summary = study.summarize(plan, rows)
         ledger = raw / f"{label}-router.jsonl"
         ledger.write_text(
             "".join(
@@ -511,15 +618,29 @@ def test_complete_offline_report_verifies_matched_raw_population(
             )
         )
         client = {
+            "schema": "inferdrome.vllm-router-capacity-result.v2",
             "plan_sha256": plan["plan_sha256"],
+            "trace_sha256": plan["trace_sha256"],
             "token_certificate_sha256": cert["certificate_sha256"],
+            "policy": policy,
             "status": "COMPLETED",
             "comparison_valid": True,
+            "router_accounting_valid": True,
+            "router_stats_after": {
+                "policy": policy,
+                "offered": count,
+                "terminal": count,
+                "ledger_rows": count,
+                "in_flight": 0,
+                "pending": 0,
+                "active": 0,
+                "busy": [0, 0],
+                "accounting_failed": False,
+            },
             "summary": summary,
-            "rows": [
-                {"index": index, "outcome": "completed"} for index in range(count)
-            ],
+            "rows": [asdict(row) for row in rows],
         }
+        client["result_sha256"] = study._digest(client)
         result_sha = gpu._save(raw / f"{label}-client.json", client)
         metrics = {
             "label": label,
@@ -605,6 +726,52 @@ def test_complete_offline_report_verifies_matched_raw_population(
     assert all(
         row["difference_vs_least_busy"] == "TIE"
         for row in result["policy_rate_summary"]
+    )
+    client_path = raw / f"{schedule[0]['label']}-client.json"
+    original_client = client_path.read_text()
+    malformed_client = json.loads(original_client)
+    malformed_client["rows"][0]["document_id"] = 999
+    malformed_client["result_sha256"] = study._digest(
+        {k: v for k, v in malformed_client.items() if k != "result_sha256"}
+    )
+    client_path.write_text(json.dumps(malformed_client))
+    items[3]["result_sha256"] = gpu._file_digest(client_path)
+    (raw / "session.json").write_text(
+        json.dumps(
+            {**json.loads((raw / "session.json").read_text()), "conditions": items}
+        )
+    )
+    with pytest.raises(gpu.StudyError, match="row trace mismatch"):
+        capacity.report(raw, tmp_path / "malformed-report")
+    client_path.write_text(original_client)
+    items[3]["result_sha256"] = gpu._file_digest(client_path)
+    (raw / "session.json").write_text(
+        json.dumps(
+            {**json.loads((raw / "session.json").read_text()), "conditions": items}
+        )
+    )
+    mismatched_client = json.loads(original_client)
+    mismatched_client["summary"]["all_offered"]["slo_good"] -= 1
+    mismatched_client["result_sha256"] = study._digest(
+        {k: v for k, v in mismatched_client.items() if k != "result_sha256"}
+    )
+    client_path.write_text(json.dumps(mismatched_client))
+    items[3]["result_sha256"] = gpu._file_digest(client_path)
+    items[3]["summary"] = mismatched_client["summary"]
+    (raw / "session.json").write_text(
+        json.dumps(
+            {**json.loads((raw / "session.json").read_text()), "conditions": items}
+        )
+    )
+    with pytest.raises(gpu.StudyError, match="summary mismatch"):
+        capacity.report(raw, tmp_path / "summary-mismatch-report")
+    client_path.write_text(original_client)
+    items[3]["result_sha256"] = gpu._file_digest(client_path)
+    items[3]["summary"] = json.loads(original_client)["summary"]
+    (raw / "session.json").write_text(
+        json.dumps(
+            {**json.loads((raw / "session.json").read_text()), "conditions": items}
+        )
     )
     ledger = raw / f"{schedule[0]['label']}-router.jsonl"
     ledger.write_text(ledger.read_text() + "{}\n")
