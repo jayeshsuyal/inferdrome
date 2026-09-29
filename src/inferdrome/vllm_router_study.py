@@ -41,6 +41,12 @@ DOCUMENT_SENTENCE = (
 )
 SCHEMA = "inferdrome.vllm-router-study-plan.v1"
 RESULT_SCHEMA = "inferdrome.vllm-router-study-result.v1"
+CAPACITY_SCHEMA = "inferdrome.vllm-router-capacity-plan.v2"
+CAPACITY_CERT_SCHEMA = "inferdrome.vllm-router-capacity-certificate.v2"
+CAPACITY_DOCUMENT_SENTENCE = (
+    "The archived event records a request identifier, intake time, queue state, "
+    "operator note, intermediate observation, and final resolution. "
+)
 
 
 def _digest(value: object) -> str:
@@ -55,6 +61,84 @@ class Offer:
     traffic_class: str
     tenant: str
     prompt: str
+    document_id: int | None = None
+
+
+def capacity_document(document_id: int, repeats: int) -> str:
+    signature = hashlib.sha256(
+        f"capacity-document-{document_id:04d}".encode()
+    ).hexdigest()
+    return (
+        f"D{document_id:04d}-{signature[:16]} | archived event record\n"
+        + CAPACITY_DOCUMENT_SENTENCE * repeats
+    )
+
+
+def capacity_trace(
+    seed: int, count: int, duration_ns: int, workload: dict[str, Any]
+) -> tuple[Offer, ...]:
+    """Cycle all documents and shift a predeclared hotspot A→B→A."""
+    document_count = workload["document_count"]
+    repeats = workload["document_repeats"]
+    prefix_lengths = workload["document_prefix_tokens"]
+    target = workload["target_prefix_tokens"]
+    hot_size = workload["hot_group_size"]
+    if (
+        not 0 <= seed < 2**32
+        or not 1 <= count <= 20_000
+        or duration_ns < 3
+        or not 8 <= document_count <= 96
+        or len(repeats) != document_count
+        or len(prefix_lengths) != document_count
+        or any(not isinstance(value, int) or not 1 <= value <= 512 for value in repeats)
+        or not 256 <= target <= 6144
+        or any(abs(value - target) > 32 for value in prefix_lengths)
+        or not 1 <= hot_size <= document_count // 4
+        or not 512 <= workload["context_length"] <= 16384
+        or not 1 <= workload["output_tokens"] <= 256
+        or max(prefix_lengths) + workload["output_tokens"] > workload["context_length"]
+        or workload.get("cycle_percent") != 60
+        or workload.get("hotspot_epochs") != ["A", "B", "A"]
+    ):
+        raise ValueError("capacity trace settings are outside bounds")
+    rng = random.Random(seed)
+    documents = tuple(
+        capacity_document(document_id, repeats[document_id])
+        for document_id in range(document_count)
+    )
+    offers: list[Offer] = []
+    cycle = 0
+    hot_cycle = 0
+    for index in range(count):
+        scheduled_ns = int((index + rng.random()) * duration_ns / count)
+        epoch = min(2, scheduled_ns * 3 // duration_ns)
+        if rng.randrange(100) < 60:
+            document_id = cycle % document_count
+            cycle += 1
+            traffic_class = "cycle"
+        else:
+            group = 0 if epoch != 1 else document_count // 2
+            document_id = group + hot_cycle % hot_size
+            hot_cycle += 1
+            traffic_class = "hot"
+        tenant = f"tenant-{document_id % 4}"
+        document = documents[document_id]
+        question = (
+            f"\n\nQuestion:\nFor request {index:06d}, identify observation "
+            f"{(index * 7 + seed) % 997:03d} and summarize the resolution."
+        )
+        offers.append(
+            Offer(
+                index,
+                scheduled_ns,
+                epoch,
+                traffic_class,
+                tenant,
+                document + question,
+                document_id,
+            )
+        )
+    return tuple(offers)
 
 
 def trace(seed: int, count: int, duration_ns: int) -> tuple[Offer, ...]:
@@ -164,6 +248,8 @@ def make_plan(
 
 
 def validate_plan(plan: dict[str, Any]) -> tuple[Offer, ...]:
+    if plan.get("schema") == CAPACITY_SCHEMA:
+        return validate_capacity_plan(plan)
     if set(plan) != set(
         make_plan(
             phase=plan["phase"],
@@ -263,6 +349,217 @@ def validate_token_certificate(
         raise ValueError("token certificate does not bind the study plan")
 
 
+def _capacity_tokenizer(tokenizer_root: Path) -> Any:
+    files = load_verified_qwen3_tokenizer_files(tokenizer_root)
+    if importlib.metadata.version("tokenizers") != QWEN3_TOKENIZERS_VERSION:
+        raise ValueError("pinned tokenizers version is unavailable")
+    tokenizers = importlib.import_module("tokenizers")
+    return tokenizers.Tokenizer.from_str(files.tokenizer_json.decode("utf-8"))
+
+
+def capacity_workload(
+    tokenizer_root: Path,
+    *,
+    document_count: int = 48,
+    target_prefix_tokens: int = 4096,
+    context_length: int = 8192,
+    output_tokens: int = 128,
+) -> dict[str, Any]:
+    """Choose deterministic repeat counts nearest the requested prefix size."""
+    if (
+        not 8 <= document_count <= 96
+        or not 256 <= target_prefix_tokens <= 6144
+        or not 512 <= context_length <= 16384
+        or not 1 <= output_tokens <= 256
+        or target_prefix_tokens + output_tokens > context_length
+    ):
+        raise ValueError("capacity workload bounds are invalid")
+    tokenizer = _capacity_tokenizer(tokenizer_root)
+    repeats: list[int] = []
+    prefix_lengths: list[int] = []
+    first_tokens: set[tuple[int, ...]] = set()
+    for document_id in range(document_count):
+
+        def length(repeat: int, document_id: int = document_id) -> int:
+            return len(
+                tokenizer.encode(
+                    capacity_document(document_id, repeat), add_special_tokens=False
+                ).ids
+            )
+
+        low, high = 1, 512
+        while low < high:
+            middle = (low + high) // 2
+            if length(middle) < target_prefix_tokens:
+                low = middle + 1
+            else:
+                high = middle
+        selected = min(
+            (max(1, low - 1), low),
+            key=lambda repeat: (abs(length(repeat) - target_prefix_tokens), repeat),
+        )
+        encoded = tokenizer.encode(
+            capacity_document(document_id, selected), add_special_tokens=False
+        ).ids
+        repeats.append(selected)
+        prefix_lengths.append(len(encoded))
+        first_tokens.add(tuple(encoded[:16]))
+    if (
+        max(abs(value - target_prefix_tokens) for value in prefix_lengths) > 32
+        or len(first_tokens) != document_count
+    ):
+        raise ValueError("document prefixes missed target or do not diverge early")
+    return {
+        "document_count": document_count,
+        "target_prefix_tokens": target_prefix_tokens,
+        "document_repeats": repeats,
+        "document_prefix_tokens": prefix_lengths,
+        "hot_group_size": max(1, document_count // 6),
+        "cycle_percent": 60,
+        "hotspot_epochs": ["A", "B", "A"],
+        "context_length": context_length,
+        "output_tokens": output_tokens,
+    }
+
+
+def make_capacity_plan(
+    *,
+    phase: str,
+    seed: int,
+    count: int,
+    duration_ns: int,
+    workload: dict[str, Any],
+    prompt_tokens_by_index: list[int],
+    max_client_concurrency: int = 256,
+    first_content_slo_ns: int = 500_000_000,
+    completion_slo_ns: int = 5_000_000_000,
+) -> dict[str, Any]:
+    if phase not in {"pilot", "evaluation", "fixture"}:
+        raise ValueError("capacity phase is invalid")
+    if (
+        not 1 <= max_client_concurrency <= 1024
+        or not 0 < first_content_slo_ns <= completion_slo_ns <= 60_000_000_000
+        or len(prompt_tokens_by_index) != count
+        or any(
+            not isinstance(value, int)
+            or value < 1
+            or value + workload["output_tokens"] > workload["context_length"]
+            for value in prompt_tokens_by_index
+        )
+    ):
+        raise ValueError("capacity plan bounds are invalid")
+    offers = capacity_trace(seed, count, duration_ns, workload)
+    trace_rows = [
+        {
+            "index": offer.index,
+            "scheduled_ns": offer.scheduled_ns,
+            "epoch": offer.epoch,
+            "traffic_class": offer.traffic_class,
+            "document_id": offer.document_id,
+            "prompt_sha256": hashlib.sha256(offer.prompt.encode()).hexdigest(),
+        }
+        for offer in offers
+    ]
+    plan: dict[str, Any] = {
+        "schema": CAPACITY_SCHEMA,
+        "phase": phase,
+        "seed": seed,
+        "offered_count": count,
+        "duration_ns": duration_ns,
+        "trace_sha256": _digest(trace_rows),
+        "workload": workload,
+        "prompt_tokens_by_index": prompt_tokens_by_index,
+        "max_tokens": workload["output_tokens"],
+        "context_length": workload["context_length"],
+        "max_client_concurrency": max_client_concurrency,
+        "request_deadline_ns": 60_000_000_000,
+        "drain_ns": 60_000_000_000,
+        "first_content_slo_ns": first_content_slo_ns,
+        "completion_slo_ns": completion_slo_ns,
+        "affinity": {
+            "claim": "ESTIMATED_FROM_PRIOR_ROUTING_NOT_KV_RESIDENCY",
+            "history_keys": HISTORY_KEYS,
+            "ttl_ns": HISTORY_TTL_NS,
+            "escape_busy_delta": ESCAPE_BUSY_DELTA,
+        },
+    }
+    plan["plan_sha256"] = _digest(plan)
+    return plan
+
+
+def certify_capacity_plan(plan: dict[str, Any], tokenizer_root: Path) -> dict[str, Any]:
+    offers = validate_capacity_plan(plan)
+    tokenizer = _capacity_tokenizer(tokenizer_root)
+    lengths = [
+        len(
+            tokenizer.encode(
+                qwen3_rendered_prompt(offer.prompt), add_special_tokens=False
+            ).ids
+        )
+        for offer in offers
+    ]
+    if lengths != plan["prompt_tokens_by_index"]:
+        raise ValueError("capacity prompt lengths differ from plan")
+    certificate: dict[str, Any] = {
+        "schema": CAPACITY_CERT_SCHEMA,
+        "plan_sha256": plan["plan_sha256"],
+        "trace_sha256": plan["trace_sha256"],
+        "offered_count": len(offers),
+        "prompt_lengths_sha256": _digest(lengths),
+        "prompt_tokens_min": min(lengths),
+        "prompt_tokens_max": max(lengths),
+        "max_tokens": plan["max_tokens"],
+        "context_length": plan["context_length"],
+        "tokenizers_version": QWEN3_TOKENIZERS_VERSION,
+        "tokenizer_json_sha256": QWEN3_TOKENIZER_JSON_SHA256,
+        "tokenizer_config_sha256": QWEN3_TOKENIZER_CONFIG_SHA256,
+    }
+    certificate["certificate_sha256"] = _digest(certificate)
+    return certificate
+
+
+def validate_capacity_plan(plan: dict[str, Any]) -> tuple[Offer, ...]:
+    expected = make_capacity_plan(
+        phase=plan["phase"],
+        seed=plan["seed"],
+        count=plan["offered_count"],
+        duration_ns=plan["duration_ns"],
+        workload=plan["workload"],
+        prompt_tokens_by_index=plan["prompt_tokens_by_index"],
+        max_client_concurrency=plan["max_client_concurrency"],
+        first_content_slo_ns=plan["first_content_slo_ns"],
+        completion_slo_ns=plan["completion_slo_ns"],
+    )
+    if plan != expected:
+        raise ValueError("capacity plan differs from frozen deterministic recipe")
+    return capacity_trace(
+        plan["seed"], plan["offered_count"], plan["duration_ns"], plan["workload"]
+    )
+
+
+def validate_capacity_certificate(
+    plan: dict[str, Any], certificate: dict[str, Any]
+) -> None:
+    unsigned = {
+        key: value for key, value in certificate.items() if key != "certificate_sha256"
+    }
+    if certificate.get("certificate_sha256") != _digest(unsigned) or unsigned != {
+        "schema": CAPACITY_CERT_SCHEMA,
+        "plan_sha256": plan["plan_sha256"],
+        "trace_sha256": plan["trace_sha256"],
+        "offered_count": plan["offered_count"],
+        "prompt_lengths_sha256": _digest(plan["prompt_tokens_by_index"]),
+        "prompt_tokens_min": min(plan["prompt_tokens_by_index"]),
+        "prompt_tokens_max": max(plan["prompt_tokens_by_index"]),
+        "max_tokens": plan["max_tokens"],
+        "context_length": plan["context_length"],
+        "tokenizers_version": QWEN3_TOKENIZERS_VERSION,
+        "tokenizer_json_sha256": QWEN3_TOKENIZER_JSON_SHA256,
+        "tokenizer_config_sha256": QWEN3_TOKENIZER_CONFIG_SHA256,
+    }:
+        raise ValueError("capacity certificate does not bind the study plan")
+
+
 @dataclass(frozen=True)
 class RequestResult:
     index: int
@@ -280,6 +577,8 @@ class RequestResult:
     http_status: int | None
     prompt_tokens: int | None
     completion_tokens: int | None
+    ready_ns: int | None = None
+    document_id: int | None = None
 
 
 def _origin(value: str) -> str:
@@ -308,10 +607,14 @@ async def run_trial(
 ) -> dict[str, Any]:
     """Run one policy condition; caller resets and warms replicas separately."""
     offers = validate_plan(plan)
+    capacity = plan["schema"] == CAPACITY_SCHEMA
     if plan["phase"] != "fixture":
         if token_certificate is None:
             raise ValueError("measured runs require verified prompt lengths")
-        validate_token_certificate(plan, token_certificate)
+        if capacity:
+            validate_capacity_certificate(plan, token_certificate)
+        else:
+            validate_token_certificate(plan, token_certificate)
     origin = _origin(router_origin)
     if expected_policy not in POLICIES:
         raise ValueError("study policy is unsupported")
@@ -355,6 +658,7 @@ async def run_trial(
             status: int | None = None
             prompt_tokens: int | None = None
             completion_tokens: int | None = None
+            ready_ns: int | None = None
             outcome = "error"
             parser = StreamParser(
                 max_stream_bytes=1_048_576,
@@ -365,6 +669,7 @@ async def run_trial(
                 delay = (scheduled_at - time.monotonic_ns()) / 1e9
                 if delay > 0:
                     await asyncio.sleep(delay)
+                ready_ns = time.monotonic_ns() - start_ns
                 deadline = (scheduled_at + plan["request_deadline_ns"]) / 1e9
                 async with asyncio.timeout_at(deadline):
                     async with semaphore:
@@ -406,7 +711,12 @@ async def run_trial(
                                 )
                                 prompt_tokens = parser.prompt_tokens
                                 completion_tokens = parser.completion_tokens
-                                if prompt_tokens != plan["expected_prompt_tokens"]:
+                                expected_prompt_tokens = (
+                                    plan["prompt_tokens_by_index"][offer.index]
+                                    if capacity
+                                    else plan["expected_prompt_tokens"]
+                                )
+                                if prompt_tokens != expected_prompt_tokens:
                                     outcome = "prompt_length_mismatch"
                                 elif completion_tokens != plan["max_tokens"]:
                                     outcome = "output_length_mismatch"
@@ -450,6 +760,8 @@ async def run_trial(
                     status,
                     prompt_tokens,
                     completion_tokens,
+                    ready_ns,
+                    offer.document_id,
                 )
 
         tasks = [
@@ -499,6 +811,8 @@ async def run_trial(
                     None,
                     None,
                     None,
+                    None,
+                    offer.document_id,
                 )
         rows = [row for row in results if row is not None]
         summary = summarize(plan, rows)
@@ -539,7 +853,11 @@ async def run_trial(
             and after.get("accounting_failed") is False
         )
         result = {
-            "schema": RESULT_SCHEMA,
+            "schema": (
+                "inferdrome.vllm-router-capacity-result.v2"
+                if capacity
+                else RESULT_SCHEMA
+            ),
             "plan_sha256": plan["plan_sha256"],
             "trace_sha256": plan["trace_sha256"],
             "token_certificate_sha256": (
@@ -563,7 +881,16 @@ async def run_trial(
                 for row in rows
             ),
             "router_stats_after": after,
-            "rows": [asdict(row) for row in rows],
+            "rows": [
+                asdict(row)
+                if capacity
+                else {
+                    key: value
+                    for key, value in asdict(row).items()
+                    if key not in {"ready_ns", "document_id"}
+                }
+                for row in rows
+            ],
             "summary": summary,
         }
         result["result_sha256"] = _digest(result)
@@ -583,6 +910,7 @@ def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]
     ):
         raise ValueError("incomplete offered population")
     window_ns = int(plan["duration_ns"])
+    capacity = plan["schema"] == CAPACITY_SCHEMA
 
     def metric(values: list[int]) -> dict[str, int | None]:
         return {"count": len(values), "p95_ns": _quantile(values, 0.95)}
@@ -635,7 +963,7 @@ def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]
         end = ((epoch + 1) * window_ns + 2) // 3
         return end - start
 
-    return {
+    result = {
         "all_offered": group(rows, window_ns, "FULL_OFFERED_WINDOW"),
         "by_epoch": {
             str(e): group(
@@ -651,7 +979,7 @@ def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]
                 window_ns,
                 "FULL_OFFERED_WINDOW_CONTRIBUTION",
             )
-            for c in ("hot", "warm", "unique")
+            for c in (("hot", "cycle") if capacity else ("hot", "warm", "unique"))
         },
         "by_tenant": {
             t: group(
@@ -659,11 +987,33 @@ def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]
                 window_ns,
                 "FULL_OFFERED_WINDOW_CONTRIBUTION",
             )
-            for t in ("tenant-a", "tenant-b", "tenant-control")
+            for t in (
+                tuple(f"tenant-{i}" for i in range(4))
+                if capacity
+                else ("tenant-a", "tenant-b", "tenant-control")
+            )
         },
         "latency_origin": "SCHEDULED_ARRIVAL_INCLUDES_CLIENT_AND_ROUTER_WAIT",
         "content_timing": "COMPLETE_SSE_CONTENT_FRAMES_NOT_WIRE_OR_TOKEN_TIMING",
     }
+    if capacity:
+        lag = [
+            max(0, row.ready_ns - row.scheduled_ns)
+            for row in rows
+            if row.ready_ns is not None
+        ]
+        client_queue = [
+            max(0, row.dispatch_ns - row.ready_ns)
+            for row in rows
+            if row.dispatch_ns is not None and row.ready_ns is not None
+        ]
+        result["client_timing"] = {
+            "scheduling_lag": metric(lag),
+            "client_queue_delay": metric(client_queue),
+            "never_dispatched": sum(row.dispatch_ns is None for row in rows),
+            "population": "ALL_OFFERS_WITH_OBSERVED_STAGE_TIMES",
+        }
+    return result
 
 
 def main() -> None:
