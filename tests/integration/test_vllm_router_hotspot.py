@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -136,6 +137,69 @@ def test_hotspot_overload_escape_is_functional_only(tmp_path: Path) -> None:
     cache_load = asyncio.run(_escape_case(tmp_path, "cache_plus_load"))
     assert all(row["replica"] == 0 for row in cache_only)
     assert any(row["route_reason"] == "overload_escape" for row in cache_load)
+
+
+async def _candidate_unavailable_and_cancelled(tmp_path: Path) -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        unavailable = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    seen: list[str] = []
+    gate = asyncio.Event()
+    a, a_url = await _serve(_replica("a", seen, gate))
+    b, b_url = await _serve(_replica("b", seen, None))
+    # First, a selected but unavailable replica must release all router work.
+    absent_router = Router(
+        (unavailable, b_url),
+        tmp_path / "candidate-absent.jsonl",
+        policy="cache_saturation",
+        saturation_active=3,
+        max_active=4,
+    )
+    absent_proxy, absent_url = await _serve(make_app(absent_router))
+    try:
+        async with (
+            aiohttp.ClientSession() as client,
+            client.post(absent_url + "/v1/chat/completions", json=_body()) as response,
+        ):
+            assert response.status == 502
+        await _wait_terminal(absent_router, 1)
+        assert absent_router.active == 0 and absent_router.busy == [0, 0]
+        assert absent_router.pending == 0 and absent_router.ledger_rows == 1
+    finally:
+        await absent_proxy.cleanup()
+    # A downstream disconnect after response headers must also free work.
+    cancel_router = Router(
+        (a_url, b_url),
+        tmp_path / "candidate-cancel.jsonl",
+        policy="cache_saturation",
+        saturation_active=3,
+        max_active=4,
+    )
+    cancel_proxy, cancel_url = await _serve(make_app(cancel_router))
+    try:
+        async with aiohttp.ClientSession() as client:
+            response = await client.post(
+                cancel_url + "/v1/chat/completions", json=_body()
+            )
+            assert response.status == 200
+            response.close()
+            await _wait_terminal(cancel_router, 1)
+        assert cancel_router.active == 0 and cancel_router.busy == [0, 0]
+        assert cancel_router.pending == 0 and cancel_router.ledger_rows == 1
+        row = json.loads((tmp_path / "candidate-cancel.jsonl").read_text())
+        assert row["outcome"] in {"disconnected", "cancelled"}
+        assert row["saturation_threshold_active"] == 3
+    finally:
+        gate.set()
+        await cancel_proxy.cleanup()
+        await a.cleanup()
+        await b.cleanup()
+
+
+def test_candidate_accounts_for_unavailable_replica_and_disconnect(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_candidate_unavailable_and_cancelled(tmp_path))
 
 
 async def _cache_input_rejection(tmp_path: Path) -> None:

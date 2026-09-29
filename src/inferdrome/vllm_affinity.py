@@ -14,6 +14,7 @@ DOCUMENT_SEPARATOR = "\n\nQuestion:\n"
 HISTORY_KEYS = 4096
 HISTORY_TTL_NS = 60_000_000_000
 ESCAPE_BUSY_DELTA = 2
+SATURATION_RULE_VERSION = "active-request-gate.v1"
 
 
 def _recent(value: int | None, now_ns: int) -> int:
@@ -49,6 +50,10 @@ class AffinityDecision:
     reason: str
     estimated_affinity: tuple[int, int]
     busy_at_decision: tuple[int, int]
+    preferred_replica: int | None = None
+    saturation_active: int | None = None
+    saturation_reached: bool | None = None
+    relative_imbalance_reached: bool | None = None
 
 
 class AffinityHistory:
@@ -87,8 +92,14 @@ def choose(
     busy: tuple[int, int],
     turn: int,
     affinity: tuple[int, int],
+    *,
+    saturation_active: int | None = None,
 ) -> AffinityDecision:
-    """Use an explicit load escape only for the cache-plus-load policy."""
+    """Keep legacy choices; gate the opt-in escape by absolute active work."""
+    if policy == "cache_saturation" and (
+        saturation_active is None or not 1 <= saturation_active <= 512
+    ):
+        raise ValueError("cache_saturation needs a bounded active threshold")
     ring = turn % 2
     if policy == "round_robin":
         return AffinityDecision(ring, "round_robin", affinity, busy)
@@ -98,10 +109,31 @@ def choose(
     preferred = (
         ring if affinity[0] == affinity[1] else (0 if affinity[0] > affinity[1] else 1)
     )
-    if (
-        policy == "cache_plus_load"
-        and busy[preferred] >= busy[1 - preferred] + ESCAPE_BUSY_DELTA
+    imbalance = busy[preferred] >= busy[1 - preferred] + ESCAPE_BUSY_DELTA
+    saturated = (
+        busy[preferred] >= saturation_active if saturation_active is not None else None
+    )
+    if imbalance and (
+        policy == "cache_plus_load" or (policy == "cache_saturation" and saturated)
     ):
-        return AffinityDecision(1 - preferred, "overload_escape", affinity, busy)
+        return AffinityDecision(
+            1 - preferred,
+            "overload_escape" if policy == "cache_plus_load" else "saturated_escape",
+            affinity,
+            busy,
+            preferred,
+            saturation_active,
+            saturated,
+            imbalance,
+        )
     reason = "estimated_affinity" if affinity[0] != affinity[1] else "affinity_tie"
-    return AffinityDecision(preferred, reason, affinity, busy)
+    return AffinityDecision(
+        preferred,
+        reason,
+        affinity,
+        busy,
+        preferred,
+        saturation_active,
+        saturated,
+        imbalance,
+    )

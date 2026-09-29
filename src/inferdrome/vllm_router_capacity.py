@@ -1223,6 +1223,8 @@ async def _run_condition(
     certificate: dict[str, Any],
     router_max_active: int,
     router_max_queue: int,
+    saturation_active: int | None = None,
+    condition_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     reset = await gpu._warm_and_reset(session, out, label)
     item = await gpu._condition(
@@ -1234,8 +1236,11 @@ async def _run_condition(
         certificate,
         router_max_active=router_max_active,
         router_max_queue=router_max_queue,
+        saturation_active=saturation_active,
     )
     item["engine_metrics_status"] = "NOT_COLLECTED"
+    if condition_metadata is not None:
+        item.update(condition_metadata)
     record["conditions"].append(item)
     number = len(record["conditions"])
     gpu._save(out / f"progress-{number:02}-client.json", record)

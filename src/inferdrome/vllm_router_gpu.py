@@ -473,6 +473,7 @@ async def _condition(
     *,
     router_max_active: int = 32,
     router_max_queue: int = 32,
+    saturation_active: int | None = None,
 ) -> dict[str, Any]:
     ledger = out / f"{label}-router.jsonl"
     router = Router(
@@ -484,6 +485,7 @@ async def _condition(
         policy=policy,
         max_active=router_max_active,
         max_queue=router_max_queue,
+        saturation_active=saturation_active,
     )
     app = make_app(router)
     runner = web.AppRunner(app)
