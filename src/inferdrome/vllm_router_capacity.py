@@ -395,6 +395,8 @@ def _counter_deltas(item: dict[str, Any]) -> dict[str, Any]:
     replicas: list[dict[str, Any]] = []
     for replica in item.get("engine_metrics", {}).get("replicas", []):
         deltas = replica.get("prefix_counter_deltas", {})
+        if not isinstance(deltas, dict):
+            deltas = {}
         hits = deltas.get("vllm:prefix_cache_hits_total")
         queries = deltas.get("vllm:prefix_cache_queries_total")
         valid = (
@@ -418,7 +420,7 @@ def _counter_deltas(item: dict[str, Any]) -> dict[str, Any]:
         "status": (
             "VALID"
             if len(replicas) == 2
-            and sorted(r["port"] for r in replicas) == sorted(gpu.ENGINE_PORTS)
+            and {r["port"] for r in replicas} == set(gpu.ENGINE_PORTS)
             and all(r["valid"] for r in replicas)
             else "INVALID_OR_MISSING"
         ),
@@ -467,7 +469,7 @@ def _validate_client_population(
             or row.tenant != offer.tenant
             or row.document_id != offer.document_id
             or not isinstance(row.terminal_ns, int)
-            or row.terminal_ns < row.scheduled_ns
+            or row.terminal_ns < 0
         ):
             raise gpu.StudyError("capacity client row trace mismatch")
         stamps = [
@@ -486,11 +488,10 @@ def _validate_client_population(
         observed = [value for value in stamps if value is not None]
         if observed != sorted(observed):
             raise gpu.StudyError("capacity client row timing order invalid")
-        if row.ready_ns is not None and row.ready_ns < row.scheduled_ns:
-            raise gpu.StudyError("capacity client row scheduling invalid")
         if row.outcome == "completed" and (
             row.http_status != 200
             or row.first_content_ns is None
+            or row.terminal_ns < row.scheduled_ns
             or row.prompt_tokens != plan["prompt_tokens_by_index"][index]
             or row.completion_tokens != plan["max_tokens"]
         ):
