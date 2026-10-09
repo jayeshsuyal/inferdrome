@@ -1,0 +1,20 @@
+{
+  "schema_version": "inferdrome.sample-evidence.v1",
+  "fields": [
+    {
+      "name": "gpu.model",
+      "value": "NVIDIA A100-SXM4-40GB",
+      "provenance": "SAMPLE_SYNTHETIC"
+    },
+    {
+      "name": "gpu.count",
+      "value": 1,
+      "provenance": "SAMPLE_SYNTHETIC"
+    },
+    {
+      "name": "driver.version",
+      "value": "580.105.08",
+      "provenance": "SAMPLE_SYNTHETIC"
+    }
+  ]
+}
