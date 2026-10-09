@@ -112,6 +112,15 @@ def test_sglang_native_study_keeps_populations_bound_through_offline_report(
     async def exercise() -> None:
         async with _replicas() as (origins, replicas):
             value = _payload(origins)
+            # This test checks population binding, not healthy-path timer jitter.
+            # Give the healthy block a full-window load freshness margin. The
+            # fault block keeps its 100 ms threshold and deliberate stale period.
+            for block in value["blocks"]:
+                if block["scenario"] == "HEALTHY":
+                    block["telemetry"] = {
+                        **block["telemetry"],
+                        "load_freshness_ns": 800_000_000,
+                    }
             value["preparation"].update(
                 cache_state="DECLARED_COLD",
                 prefix_caching="DECLARED_ENABLED",
@@ -236,7 +245,24 @@ def test_sglang_native_study_keeps_populations_bound_through_offline_report(
                         for row in rejected
                     )
                 else:
-                    assert not rejected
+                    assert not rejected, {
+                        "trial_id": trial.trial_id,
+                        "policy": trial.policy_id,
+                        "scenario": type(trial.config).__name__,
+                        "rejected": rejected,
+                        "decisions": [
+                            {
+                                "request_index": decision.request_index,
+                                "mode": decision.mode,
+                                "reason": decision.reason,
+                                "load_ages_ns": decision.load_ages_ns,
+                                "load_states": decision.load_states,
+                            }
+                            for decision in native.decisions
+                            if decision.request_index
+                            in {row["request_index"] for row in rejected}
+                        ],
+                    }
                 assert all(
                     row["scheduled_ns"]
                     <= row["arrival_observed_ns"]

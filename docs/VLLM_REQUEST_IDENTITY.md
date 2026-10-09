@@ -18,7 +18,8 @@ recorded. Requests without a header retain the router's generated-ID behavior.
 
 The client writes `inferdrome.vllm-router-correlated-result.v1`:
 
-- `measurement`: the unchanged, hashed study-result v1 or capacity-result v2.
+- `measurement`: a hashed study-result v1, capacity-result v2, or the separate
+  [timed-result v1](VLLM_ARRIVAL_TIMING.md). Existing v1/v2 measurements remain unchanged.
 - `request_links`: one indexed client ID and observed response ID per offer.
 - `result_sha256`: the canonical JSON digest of the wrapper without this field.
 
@@ -78,6 +79,8 @@ separate ledger verification above.
   `comparison_valid` value is carried separately as
   `measurement_comparison_valid`; identity verification does not recalculate
   scientific metrics or establish a valid performance comparison.
+  Timed measurements additionally require the timing/client-accounting check
+  described in [controlled arrival timing](VLLM_ARRIVAL_TIMING.md).
 - IDs and hashes provide correlation and consistency checks, not authentication,
   execution attestation, customer acceptance, or a causal explanation. The router
   does not maintain a global registry of IDs; duplicate IDs in a supplied trial
