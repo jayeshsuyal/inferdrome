@@ -215,6 +215,12 @@ def make_timing(
 
 def validate_timing(plan: dict[str, Any], timing: dict[str, Any]) -> tuple[Offer, ...]:
     """Regenerate the full descriptor; arbitrary supplied arrival times fail closed."""
+    if isinstance(timing, dict) and timing.get("schema") == (
+        "inferdrome.vllm-router-reduced-timing.v1"
+    ):
+        from inferdrome.vllm_reduced_timing import validate_reduced_timing
+
+        return validate_reduced_timing(plan, timing)
     try:
         if not isinstance(timing, dict) or not isinstance(
             timing.get("parameters"), dict

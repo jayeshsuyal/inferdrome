@@ -234,6 +234,13 @@ def make_protocol(
 
 def validate_protocol(protocol: dict[str, Any], plans: list[dict[str, Any]]) -> None:
     """Rebuild the full declared design; a rehashed edited schedule is invalid."""
+    if isinstance(protocol, dict) and protocol.get("schema") == (
+        "inferdrome.vllm-router-reduced-protocol.v1"
+    ):
+        from inferdrome.vllm_reduced_protocol import validate_reduced_protocol
+
+        validate_reduced_protocol(protocol, plans)
+        return
     try:
         if not isinstance(protocol, dict):
             raise ValueError("paired protocol must be an object")
