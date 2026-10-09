@@ -27,6 +27,9 @@ from inferdrome.vllm_affinity import (
     choose,
     document_digest,
 )
+from inferdrome.vllm_request_identity import REQUEST_ID_HEADER, valid_request_id
+
+_REQUEST_ID_KEY = "inferdrome_request_id"
 
 
 def _origin(value: str) -> str:
@@ -184,7 +187,11 @@ class Router:
 
     async def chat(self, request: web.Request) -> web.StreamResponse:
         arrived_ns = time.monotonic_ns()
-        request_id = uuid.uuid4().hex
+        supplied_ids = request.headers.getall(REQUEST_ID_HEADER, [])
+        accepted_id = len(supplied_ids) == 1 and valid_request_id(supplied_ids[0])
+        request_id = supplied_ids[0] if accepted_id else uuid.uuid4().hex
+        # Only a validated or generated value may reach the ledger or response.
+        request[_REQUEST_ID_KEY] = request_id
         self.offered += 1
         row: dict[str, object] = {
             "request_id": request_id,
@@ -220,6 +227,13 @@ class Router:
         slot_owned = False
         index: int | None = None
         try:
+            if supplied_ids and not accepted_id:
+                row["outcome"] = "rejected_request_id"
+                row["http_status"] = 400
+                return web.json_response(
+                    {"error": "request identity must be one lowercase 32-hex value"},
+                    status=400,
+                )
             if self.accounting_failed:
                 row["outcome"] = "rejected_accounting"
                 row["http_status"] = 503
@@ -427,11 +441,20 @@ class Router:
 
 
 def make_app(router: Router) -> web.Application:
+    async def echo_request_id(
+        request: web.Request, response: web.StreamResponse
+    ) -> None:
+        # A prepare hook also covers streamed responses and aiohttp error replies.
+        request_id = request.get(_REQUEST_ID_KEY)
+        if request_id is not None:
+            response.headers[REQUEST_ID_HEADER] = request_id
+
     app = web.Application(client_max_size=router.max_body_bytes)
     app.router.add_post("/v1/chat/completions", router.chat)
     app.router.add_get("/router/stats", router.stats)
     app.on_startup.append(router.start)
     app.on_cleanup.append(router.stop)
+    app.on_response_prepare.append(echo_request_id)
     return app
 
 

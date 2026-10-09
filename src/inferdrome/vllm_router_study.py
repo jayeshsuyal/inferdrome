@@ -14,6 +14,7 @@ import importlib.metadata
 import json
 import random
 import time
+import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
 from itertools import pairwise
@@ -33,6 +34,12 @@ from inferdrome.qwen3_tokenizer import (
 )
 from inferdrome.routing_execution.canonical import canonical_json_bytes
 from inferdrome.vllm_affinity import ESCAPE_BUSY_DELTA, HISTORY_KEYS, HISTORY_TTL_NS
+from inferdrome.vllm_request_identity import (
+    REQUEST_ID_HEADER,
+    correlated_result,
+    valid_request_id,
+    validate_correlated_result,
+)
 
 POLICIES = ("round_robin", "least_busy", "cache_only", "cache_plus_load")
 FOLLOWUP_POLICIES = ("round_robin", "cache_only", "cache_plus_load", "cache_saturation")
@@ -627,8 +634,9 @@ async def run_trial(
     model: str,
     expected_policy: str,
     token_certificate: dict[str, Any] | None = None,
+    correlate_requests: bool = False,
 ) -> dict[str, Any]:
-    """Run one policy condition; caller resets and warms replicas separately."""
+    """Run one condition, optionally wrapping its legacy measurement with ID links."""
     offers = validate_plan(plan)
     capacity = plan["schema"] == CAPACITY_SCHEMA
     if plan["phase"] != "fixture":
@@ -645,6 +653,20 @@ async def run_trial(
         raise ValueError("model identifier is invalid")
     semaphore = asyncio.Semaphore(plan["max_client_concurrency"])
     results: list[RequestResult | None] = [None] * len(offers)
+    # Allocate before tasks start so even offers cancelled before dispatch keep
+    # their own identity. This is a per-trial join key, not a routing input.
+    request_links: list[dict[str, Any]] = (
+        [
+            {
+                "index": offer.index,
+                "request_id": uuid.uuid4().hex,
+                "response_request_id": None,
+            }
+            for offer in offers
+        ]
+        if correlate_requests
+        else []
+    )
     timeout = aiohttp.ClientTimeout(total=None)
     async with aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(limit=plan["max_client_concurrency"]),
@@ -711,10 +733,26 @@ async def run_trial(
                         async with session.post(
                             origin + "/v1/chat/completions",
                             json=body,
+                            headers={
+                                REQUEST_ID_HEADER: request_links[offer.index][
+                                    "request_id"
+                                ]
+                            }
+                            if correlate_requests
+                            else None,
                             allow_redirects=False,
                         ) as response:
                             status = response.status
                             response_headers_ns = time.monotonic_ns() - start_ns
+                            if correlate_requests:
+                                echoes = response.headers.getall(REQUEST_ID_HEADER, [])
+                                # Invalid or duplicated values are never copied into
+                                # artifacts. Observed headers plus a null echo fail
+                                # identity verification without storing raw input.
+                                if len(echoes) == 1 and valid_request_id(echoes[0]):
+                                    request_links[offer.index][
+                                        "response_request_id"
+                                    ] = echoes[0]
                             if status != 200:
                                 outcome = "rejected" if status == 503 else "http_error"
                             elif response.content_type != "text/event-stream":
@@ -917,7 +955,9 @@ async def run_trial(
             "summary": summary,
         }
         result["result_sha256"] = _digest(result)
-        return result
+        return (
+            correlated_result(result, request_links) if correlate_requests else result
+        )
 
 
 def _quantile(values: list[int], fraction: float) -> int | None:
@@ -1061,6 +1101,11 @@ def main() -> None:
     run.add_argument("--policy", choices=POLICIES, required=True)
     run.add_argument("--token-certificate", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
+    run.add_argument(
+        "--correlate-requests",
+        action="store_true",
+        help="write a versioned wrapper with request IDs for offline ledger joins",
+    )
     args = parser.parse_args()
     # Reserve the no-replace destination before any request can be dispatched.
     with args.output.open("x", encoding="utf-8") as stream:
@@ -1084,12 +1129,22 @@ def main() -> None:
                     model=args.model,
                     expected_policy=args.policy,
                     token_certificate=certificate,
+                    correlate_requests=args.correlate_requests,
                 )
             )
         json.dump(content, stream, sort_keys=True, separators=(",", ":"))
         stream.write("\n")
-    if args.command == "run" and not content["comparison_valid"]:
-        raise SystemExit(2)
+    if args.command == "run":
+        measurement = content
+        if args.correlate_requests:
+            measurement = content["measurement"]
+            try:
+                validate_correlated_result(content)
+            except ValueError as error:
+                # Retain the failed identity observation for inspection.
+                parser.exit(2, f"request identity incomplete: {error}\n")
+        if not measurement["comparison_valid"]:
+            raise SystemExit(2)
 
 
 if __name__ == "__main__":

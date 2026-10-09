@@ -4,6 +4,9 @@ This is the former long-form README, retained for implementation, release, and
 operator context. Start with the [short project overview](README.md) or the
 [two-replica results](docs/VLLM_ROUTER_RESULTS.md) for the current public entry points.
 
+Current development: [request identity for routing studies](docs/VLLM_REQUEST_IDENTITY.md)
+adds opt-in client/router correlation as the first step toward Breakpoint.
+
 Inferdrome is a reproducible evidence pipeline for LLM-serving experiments.
 
 It resolves experiment inputs, invokes a pinned benchmark tool, preserves the
