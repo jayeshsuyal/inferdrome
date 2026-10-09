@@ -25,9 +25,11 @@ limitations contract](docs/V0_3_CAPABILITIES.md) is deliberately explicit:
 local two-endpoint routing execution is proven only at loopback socket level;
 the `llm-d-attached-v1` profile is local-fixture validation rather than a live
 router integration; historical A10 serving evidence is preserved as
-`EXTERNAL_ONLY`; no two-A100 multi-endpoint campaign has executed; and GCP or
-Kubernetes production operation is not claimed. Inspect the active closed
-claim boundary with `python -m inferdrome capabilities`. The
+`EXTERNAL_ONLY`; and GCP or Kubernetes production operation is not claimed.
+Those contracts and `python -m inferdrome capabilities` describe their frozen
+release boundary. A later, separately scoped manual-host two-A100 vLLM study
+**did execute**; see the [public routing and capacity results](docs/VLLM_ROUTER_RESULTS.md)
+for the method, measured populations, source revisions, and limits. The
 [v0.2.0 changelog](CHANGELOG.md) records the stable release boundary.
 Repository source does not itself authorize an annotated tag or GitHub Release.
 
