@@ -68,8 +68,9 @@ screens and controls.
 The v0.2/v0.3 contracts describe their historical release boundaries. The
 later two-A100 manual-host study does not turn the separate GCP guarded
 campaign or Kubernetes production operation into an executed claim. The
-dashboard is local and read-only; Inferdrome produces measurements rather than
-customer acceptance verdicts.
+dashboard is local and read-only; it was outside the v0.1 release gate.
+Cloud examples remain dry-run/reference.
+Inferdrome produces measurements. ExitSpec owns customer acceptance.
 
 Repository-authored code is [Apache-2.0 licensed](LICENSE). Model weights,
 workloads, generated output, and private evidence have separate terms.
