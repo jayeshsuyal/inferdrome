@@ -3,8 +3,9 @@
 **Step 3:** an offline, reproducible noise screen for one proposed timing change.
 It consumes [timed client results](VLLM_ARRIVAL_TIMING.md) and
 [router request receipts](VLLM_REQUEST_IDENTITY.md). It does not launch trials.
-Automated search, reduction, held-out confirmation and GPU validation follow in
-later steps. The historical [capacity result](VLLM_ROUTER_RESULTS.md) is unchanged.
+[Bounded search](VLLM_BOUNDED_SEARCH.md) now consumes this comparison.
+Reduction, held-out confirmation and GPU validation follow in later steps.
+The historical [capacity result](VLLM_ROUTER_RESULTS.md) is unchanged.
 
 ## The experiment
 
