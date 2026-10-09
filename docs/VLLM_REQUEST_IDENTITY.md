@@ -60,8 +60,12 @@ offer marked undispatched are rejected.
 
 The report preserves client and router outcomes separately: a disconnect or
 cancellation race can give them different terminal observations. It binds the
-measurement digest, wrapper digest, canonical ledger rows, and exact ledger
-file bytes. Output files are created exclusively and never overwritten.
+measurement digest, wrapper digest, serialized ledger rows, and exact ledger
+file bytes. The row digest uses Python JSON with sorted keys, compact separators,
+UTF-8 (`ensure_ascii=False`), and `allow_nan=False`, identified by
+`PYTHON_JSON_SORTED_COMPACT_UTF8_V1`. This preserves the ledger's absolute
+nanosecond integers even on long-running hosts. Other canonical digests use
+RFC 8785. Output files are created exclusively and never overwritten.
 Incomplete dispatch coverage writes an `INCOMPLETE` report and exits 2;
 malformed evidence fails without a report. The study CLI also retains its result
 and exits 2 when identity observations fail validation or the measurement is

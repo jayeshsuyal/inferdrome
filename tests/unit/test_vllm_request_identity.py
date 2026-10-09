@@ -417,6 +417,31 @@ def test_cli_writes_inspectable_incomplete_report_and_exits_two(
     )
 
 
+def test_cli_preserves_ledger_integers_beyond_rfc8785_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path, _, rows = _cli_inputs(tmp_path, monkeypatch)
+    rows[0].update(arrived_ns=2**63 - 1, first_byte_ms=0.000001)
+    raw = b"\n".join(json.dumps(row).encode() for row in rows) + b"\n"
+    (tmp_path / "router.jsonl").write_bytes(raw)
+    identity.main()
+    report = json.loads(output_path.read_bytes())
+    assert report["status"] == "VERIFIED"
+    assert report["ledger_rows_encoding"] == "PYTHON_JSON_SORTED_COMPACT_UTF8_V1"
+    encoded = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    assert str(2**63 - 1).encode() in encoded
+    assert (
+        report["ledger_rows_sha256"] == "sha256:" + hashlib.sha256(encoded).hexdigest()
+    )
+    assert report["ledger_file_sha256"] == "sha256:" + hashlib.sha256(raw).hexdigest()
+    reordered = [dict(reversed(list(row.items()))) for row in rows]
+    assert identity._ledger_digest(reordered) == report["ledger_rows_sha256"]
+    rows[0]["arrived_ns"] -= 1
+    assert identity._ledger_digest(rows) != report["ledger_rows_sha256"]
+
+
 @pytest.mark.parametrize("location", ["result_root", "result_nested", "ledger"])
 @pytest.mark.parametrize("matching_value", [True, False])
 def test_cli_rejects_duplicate_fields_even_with_matching_values(

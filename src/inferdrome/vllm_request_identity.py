@@ -69,6 +69,15 @@ def _digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def _ledger_digest(rows: list[dict[str, Any]]) -> str:
+    # The existing ledger has absolute monotonic nanoseconds. Long host uptimes
+    # can exceed RFC 8785's integer domain; preserve those integers exactly.
+    raw = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
 def _check_digest(value: dict[str, Any], label: str) -> None:
     if value.get("result_sha256") != _digest(
         {key: item for key, item in value.items() if key != "result_sha256"}
@@ -224,7 +233,8 @@ def verify_links(
         "measurement_comparison_valid": measurement["comparison_valid"],
         "correlated_result_sha256": result["result_sha256"],
         "measurement_sha256": measurement["result_sha256"],
-        "ledger_rows_sha256": _digest(ledger_rows),
+        "ledger_rows_sha256": _ledger_digest(ledger_rows),
+        "ledger_rows_encoding": "PYTHON_JSON_SORTED_COMPACT_UTF8_V1",
         "offered": len(rows),
         "matched": len(ledger_rows),
         "not_dispatched": sum(item["state"] == "NOT_DISPATCHED" for item in joined),
