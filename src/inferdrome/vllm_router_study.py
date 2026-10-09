@@ -36,6 +36,7 @@ from inferdrome.routing_execution.canonical import canonical_json_bytes
 from inferdrome.vllm_affinity import ESCAPE_BUSY_DELTA, HISTORY_KEYS, HISTORY_TTL_NS
 from inferdrome.vllm_request_identity import (
     REQUEST_ID_HEADER,
+    _read_json,
     correlated_result,
     valid_request_id,
     validate_correlated_result,
@@ -635,11 +636,22 @@ async def run_trial(
     expected_policy: str,
     token_certificate: dict[str, Any] | None = None,
     correlate_requests: bool = False,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one condition, optionally wrapping its legacy measurement with ID links."""
-    offers = validate_plan(plan)
+    if timing is not None:
+        # Imported here because the timing recipe reuses the frozen plan reader.
+        from inferdrome.vllm_arrival_timing import validate_timing
+
+        if correlate_requests is not True:
+            raise ValueError("timed studies require request correlation")
+        offers = validate_timing(plan, timing)
+    else:
+        offers = validate_plan(plan)
     capacity = plan["schema"] == CAPACITY_SCHEMA
-    if plan["phase"] != "fixture":
+    if plan["phase"] != "fixture" or (
+        timing is not None and token_certificate is not None
+    ):
         if token_certificate is None:
             raise ValueError("measured runs require verified prompt lengths")
         if capacity:
@@ -876,7 +888,7 @@ async def run_trial(
                     offer.document_id,
                 )
         rows = [row for row in results if row is not None]
-        summary = summarize(plan, rows)
+        summary = summarize(plan, rows, include_client_timing=timing is not None)
         status = (
             "INTERRUPTED"
             if interrupted
@@ -944,7 +956,7 @@ async def run_trial(
             "router_stats_after": after,
             "rows": [
                 asdict(row)
-                if capacity
+                if capacity or timing is not None
                 else {
                     key: value
                     for key, value in asdict(row).items()
@@ -954,6 +966,19 @@ async def run_trial(
             ],
             "summary": summary,
         }
+        if timing is not None:
+            from inferdrome.vllm_arrival_timing import TIMED_RESULT_SCHEMA
+
+            result.update(
+                schema=TIMED_RESULT_SCHEMA,
+                plan_sha256=timing["timing_sha256"],
+                trace_sha256=timing["transformed_trace_sha256"],
+                base_plan_schema=plan["schema"],
+                base_plan_sha256=plan["plan_sha256"],
+                base_trace_sha256=plan["trace_sha256"],
+                token_certificate_scope="BASE_WORKLOAD_UNCHANGED_TIMING_ONLY",
+                arrival_timing_scope="PLANNED_OFFERS_NOT_OBSERVED_ARRIVALS",
+            )
         result["result_sha256"] = _digest(result)
         return (
             correlated_result(result, request_links) if correlate_requests else result
@@ -967,7 +992,12 @@ def _quantile(values: list[int], fraction: float) -> int | None:
     return ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction + 0.5))]
 
 
-def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]:
+def summarize(
+    plan: dict[str, Any],
+    rows: list[RequestResult],
+    *,
+    include_client_timing: bool = False,
+) -> dict[str, Any]:
     if len(rows) != plan["offered_count"] or {r.index for r in rows} != set(
         range(len(rows))
     ):
@@ -1059,7 +1089,7 @@ def summarize(plan: dict[str, Any], rows: list[RequestResult]) -> dict[str, Any]
         "latency_origin": "SCHEDULED_ARRIVAL_INCLUDES_CLIENT_AND_ROUTER_WAIT",
         "content_timing": "COMPLETE_SSE_CONTENT_FRAMES_NOT_WIRE_OR_TOKEN_TIMING",
     }
-    if capacity:
+    if capacity or include_client_timing:
         lag = [
             max(0, row.ready_ns - row.scheduled_ns)
             for row in rows
@@ -1102,11 +1132,22 @@ def main() -> None:
     run.add_argument("--token-certificate", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument(
+        "--timing",
+        type=Path,
+        help="verified arrival-timing artifact; requires correlation",
+    )
+    run.add_argument(
         "--correlate-requests",
         action="store_true",
         help="write a versioned wrapper with request IDs for offline ledger joins",
     )
     args = parser.parse_args()
+    if (
+        args.command == "run"
+        and args.timing is not None
+        and not args.correlate_requests
+    ):
+        parser.error("--timing requires --correlate-requests")
     # Reserve the no-replace destination before any request can be dispatched.
     with args.output.open("x", encoding="utf-8") as stream:
         if args.command == "prepare":
@@ -1120,8 +1161,23 @@ def main() -> None:
             plan = json.loads(args.plan.read_text())
             content = verify_token_lengths(plan, args.tokenizer_root)
         else:
-            plan = json.loads(args.plan.read_text())
-            certificate = json.loads(args.token_certificate.read_text())
+            plan = (
+                json.loads(args.plan.read_text())
+                if args.timing is None
+                else _read_json(args.plan.read_bytes())
+            )
+            certificate = (
+                json.loads(args.token_certificate.read_text())
+                if args.timing is None
+                else _read_json(args.token_certificate.read_bytes())
+            )
+            arrival_timing = (
+                _read_json(args.timing.read_bytes())
+                if args.timing is not None
+                else None
+            )
+            if args.timing is not None and not isinstance(arrival_timing, dict):
+                raise ValueError("timing descriptor must be an object")
             content = asyncio.run(
                 run_trial(
                     plan,
@@ -1130,6 +1186,7 @@ def main() -> None:
                     expected_policy=args.policy,
                     token_certificate=certificate,
                     correlate_requests=args.correlate_requests,
+                    timing=arrival_timing,
                 )
             )
         json.dump(content, stream, sort_keys=True, separators=(",", ":"))
@@ -1143,6 +1200,16 @@ def main() -> None:
             except ValueError as error:
                 # Retain the failed identity observation for inspection.
                 parser.exit(2, f"request identity incomplete: {error}\n")
+        if args.timing is not None:
+            from inferdrome.vllm_timed_result import verify_timed_result
+
+            assert isinstance(arrival_timing, dict)
+            try:
+                verify_timed_result(
+                    plan, arrival_timing, content, token_certificate=certificate
+                )
+            except ValueError as error:
+                parser.exit(2, f"timed result invalid: {error}\n")
         if not measurement["comparison_valid"]:
             raise SystemExit(2)
 

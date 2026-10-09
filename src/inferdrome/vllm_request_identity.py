@@ -17,6 +17,7 @@ VERIFICATION_SCHEMA = "inferdrome.vllm-router-request-links.v1"
 MEASUREMENT_SCHEMAS = {
     "inferdrome.vllm-router-study-result.v1",
     "inferdrome.vllm-router-capacity-result.v2",
+    "inferdrome.vllm-router-timed-result.v1",
 }
 SUPPORTED_POLICIES = {
     "round_robin",
