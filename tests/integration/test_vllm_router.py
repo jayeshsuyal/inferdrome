@@ -14,6 +14,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from inferdrome.vllm_request_identity import REQUEST_ID_HEADER, valid_request_id
 from inferdrome.vllm_router import Router, make_app
 
 _SSE = (
@@ -42,6 +43,7 @@ def _replica(
 ) -> web.Application:
     async def chat(request: web.Request) -> web.StreamResponse:
         assert (await request.json())["stream"] is True
+        assert REQUEST_ID_HEADER not in request.headers
         seen.append(name)
 
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
@@ -68,6 +70,7 @@ async def _exercise_round_robin(ledger: Path) -> None:
     b, b_url = await _serve(_replica("b", seen))
     router = Router((a_url, b_url), ledger, max_active=2)
     proxy, proxy_url = await _serve(make_app(router))
+    response_ids: list[str] = []
     try:
         async with aiohttp.ClientSession() as client:
             for _ in range(4):
@@ -75,6 +78,7 @@ async def _exercise_round_robin(ledger: Path) -> None:
                     proxy_url + "/v1/chat/completions", json={"stream": True}
                 ) as response:
                     assert response.status == 200
+                    response_ids.append(response.headers[REQUEST_ID_HEADER])
                     assert await response.read() == _SSE
             async with client.get(proxy_url + "/router/stats") as response:
                 stats = await response.json()
@@ -83,6 +87,9 @@ async def _exercise_round_robin(ledger: Path) -> None:
         assert stats["outcomes"] == {"completed": 4}
         rows = [json.loads(line) for line in ledger.read_text().splitlines()]
         assert len(rows) == 4
+        assert [row["request_id"] for row in rows] == response_ids
+        assert len(set(response_ids)) == 4
+        assert all(valid_request_id(value) for value in response_ids)
         assert [row["replica"] for row in rows] == [0, 1, 0, 1]
         assert all(row["first_byte_ms"] is not None for row in rows)
     finally:
@@ -108,21 +115,30 @@ async def _exercise_queue_and_load(ledger: Path) -> None:
     try:
         async with aiohttp.ClientSession() as client:
             first = await client.post(
-                proxy_url + "/v1/chat/completions", json={"stream": True}
+                proxy_url + "/v1/chat/completions",
+                json={"stream": True},
+                headers={REQUEST_ID_HEADER: "1" * 32},
             )
             assert first.status == 200
+            assert first.headers[REQUEST_ID_HEADER] == "1" * 32
             # The first event arrives before the replica is allowed to finish.
             assert await asyncio.wait_for(first.content.readexactly(80), 1) == _SSE[:80]
             second = await client.post(
-                proxy_url + "/v1/chat/completions", json={"stream": True}
+                proxy_url + "/v1/chat/completions",
+                json={"stream": True},
+                headers={REQUEST_ID_HEADER: "2" * 32},
             )
             assert second.status == 200
+            assert second.headers[REQUEST_ID_HEADER] == "2" * 32
             assert await second.read() == _SSE
             # Replica A is still busy. Least-busy chooses B for the next call.
             third = await client.post(
-                proxy_url + "/v1/chat/completions", json={"stream": True}
+                proxy_url + "/v1/chat/completions",
+                json={"stream": True},
+                headers={REQUEST_ID_HEADER: "3" * 32},
             )
             assert third.status == 200
+            assert third.headers[REQUEST_ID_HEADER] == "3" * 32
             assert await third.read() == _SSE
             assert seen == ["a", "b", "b"]
             gate.set()
@@ -130,6 +146,12 @@ async def _exercise_queue_and_load(ledger: Path) -> None:
             await first.release()
         rows = [json.loads(line) for line in ledger.read_text().splitlines()]
         assert [row["outcome"] for row in rows] == ["completed"] * 3
+        # Rows are completion ordered; supplied identity survives reordering.
+        assert [row["request_id"] for row in rows] == [
+            "2" * 32,
+            "3" * 32,
+            "1" * 32,
+        ]
     finally:
         gate.set()
         await proxy.cleanup()
@@ -148,13 +170,19 @@ async def _exercise_capacity_and_disconnect(ledger: Path) -> None:
     try:
         async with aiohttp.ClientSession() as client:
             first = await client.post(
-                proxy_url + "/v1/chat/completions", json={"stream": True}
+                proxy_url + "/v1/chat/completions",
+                json={"stream": True},
+                headers={REQUEST_ID_HEADER: "a" * 32},
             )
             assert first.status == 200
+            assert first.headers[REQUEST_ID_HEADER] == "a" * 32
             second = await client.post(
-                proxy_url + "/v1/chat/completions", json={"stream": True}
+                proxy_url + "/v1/chat/completions",
+                json={"stream": True},
+                headers={REQUEST_ID_HEADER: "b" * 32},
             )
             assert second.status == 503
+            assert second.headers[REQUEST_ID_HEADER] == "b" * 32
             await second.release()
             first.close()
             for _ in range(40):
@@ -170,6 +198,10 @@ async def _exercise_capacity_and_disconnect(ledger: Path) -> None:
             gate.set()
         rows = [json.loads(line) for line in ledger.read_text().splitlines()]
         assert len(rows) == router.offered == router.terminal == 2
+        assert [(row["request_id"], row["outcome"]) for row in rows] == [
+            ("b" * 32, "rejected_capacity"),
+            ("a" * 32, "disconnected"),
+        ]
     finally:
         gate.set()
         await proxy.cleanup()
@@ -193,14 +225,18 @@ async def _exercise_bounded_queue(ledger: Path) -> None:
             )
             assert first.status == 200
             async with client.post(
-                proxy_url + "/v1/chat/completions", json={"stream": True}
+                proxy_url + "/v1/chat/completions",
+                json={"stream": True},
+                headers={REQUEST_ID_HEADER: "c" * 32},
             ) as second:
                 assert second.status == 503
+                assert second.headers[REQUEST_ID_HEADER] == "c" * 32
             gate.set()
             assert await first.read() == _SSE
         assert router.outcomes == {"rejected_queue_timeout": 1, "completed": 1}
         assert router.offered == router.terminal == 2
         assert len(ledger.read_text().splitlines()) == 2
+        assert json.loads(ledger.read_text().splitlines()[0])["request_id"] == "c" * 32
     finally:
         gate.set()
         await proxy.cleanup()
@@ -222,6 +258,87 @@ def test_capacity_and_disconnect_close_upstream(tmp_path: Path) -> None:
 
 def test_queue_timeout_is_accounted(tmp_path: Path) -> None:
     asyncio.run(_exercise_bounded_queue(tmp_path / "queue.jsonl"))
+
+
+async def _exercise_invalid_request_identity(
+    ledger: Path, headers: list[tuple[str, str]]
+) -> None:
+    seen: list[str] = []
+    a, a_url = await _serve(_replica("a", seen))
+    b, b_url = await _serve(_replica("b", seen))
+    router = Router((a_url, b_url), ledger, max_active=1, max_queue=0)
+    proxy, proxy_url = await _serve(make_app(router))
+    try:
+        # Raw HTTP preserves duplicate header names with differing case; aiohttp's
+        # client normalizes those and may discard one before it reaches the wire.
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", int(proxy_url.rsplit(":", 1)[1])
+        )
+        try:
+            identity_headers = "".join(f"{key}: {value}\r\n" for key, value in headers)
+            writer.write(
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
+                b"Content-Length: 15\r\nContent-Type: application/json\r\n"
+                b"Connection: close\r\n"
+                + identity_headers.encode("ascii")
+                + b'\r\n{"stream":true}'
+            )
+            await writer.drain()
+            response_bytes = await asyncio.wait_for(reader.read(), 2)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+        response_head, response_body = response_bytes.split(b"\r\n\r\n", 1)
+        response_lines = response_head.decode("ascii").split("\r\n")
+        assert response_lines[0].split()[1] == "400"
+        response_headers = {
+            key.lower(): value.strip()
+            for key, value in (line.split(":", 1) for line in response_lines[1:])
+        }
+        response_id = response_headers[REQUEST_ID_HEADER.lower()]
+        assert valid_request_id(response_id)
+        assert response_id not in [value for _, value in headers]
+        assert json.loads(response_body) == {
+            "error": "request identity must be one lowercase 32-hex value"
+        }
+        await _wait_terminal(router, 1)
+        row = json.loads(ledger.read_text())
+        assert row["request_id"] == response_id
+        assert row["outcome"] == "rejected_request_id"
+        assert row["http_status"] == 400
+        assert row["replica"] is None
+        assert row["queued_ms"] is None
+        assert row["turn_at_decision"] is None
+        assert router.offered == router.terminal == 1
+        assert router.active == router.pending == router.turn == 0
+        assert router.busy == [0, 0]
+        assert router.sem.locked() is False
+        assert seen == []
+        assert "private-invalid-value" not in ledger.read_text()
+    finally:
+        await proxy.cleanup()
+        await a.cleanup()
+        await b.cleanup()
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(REQUEST_ID_HEADER, "")],
+        [(REQUEST_ID_HEADER, "a" * 31)],
+        [(REQUEST_ID_HEADER, "a" * 33)],
+        [(REQUEST_ID_HEADER, "A" * 32)],
+        [(REQUEST_ID_HEADER, "g" * 32)],
+        [(REQUEST_ID_HEADER, "private-invalid-value")],
+        [(REQUEST_ID_HEADER, "a" * 32 + "," + "b" * 32)],
+        [(REQUEST_ID_HEADER, "a" * 32), (REQUEST_ID_HEADER, "a" * 32)],
+        [(REQUEST_ID_HEADER, "a" * 32), (REQUEST_ID_HEADER.lower(), "b" * 32)],
+    ],
+)
+def test_invalid_request_identity_rejected_before_admission(
+    tmp_path: Path, headers: list[tuple[str, str]]
+) -> None:
+    asyncio.run(_exercise_invalid_request_identity(tmp_path / "invalid.jsonl", headers))
 
 
 async def _wait_terminal(router: Router, count: int) -> None:
@@ -302,6 +419,8 @@ async def _exercise_deadline(ledger: Path, stage: str) -> None:
                 proxy_url + "/v1/chat/completions", data=body
             ) as response:
                 assert response.status == (200 if stage == "stream" else 504)
+                response_id = response.headers[REQUEST_ID_HEADER]
+                assert valid_request_id(response_id)
                 if stage == "stream":
                     # Failure after headers preserves status and aborts the payload.
                     with pytest.raises(aiohttp.ClientPayloadError):
@@ -312,6 +431,7 @@ async def _exercise_deadline(ledger: Path, stage: str) -> None:
             assert router.busy == [0, 0]
             assert router.sem.locked() is False
             row = json.loads(ledger.read_text())
+            assert row["request_id"] == response_id
             assert row["http_status"] == (200 if stage == "stream" else 504)
             assert row["terminal_ms"] < 1500
             assert seen == ([] if stage == "upload" else ["a"])
@@ -368,6 +488,7 @@ async def _exercise_queued_disconnect(ledger: Path) -> None:
             )
             writer.write(
                 b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
+                b"X-Inferdrome-Request-ID: dddddddddddddddddddddddddddddddd\r\n"
                 b"Content-Length: 15\r\nContent-Type: application/json\r\n\r\n"
                 b'{"stream":true}'
             )
@@ -394,6 +515,7 @@ async def _exercise_queued_disconnect(ledger: Path) -> None:
         rows = [json.loads(line) for line in ledger.read_text().splitlines()]
         assert len(rows) == router.offered == router.terminal == 3
         assert rows[0]["replica"] is None
+        assert rows[0]["request_id"] == "d" * 32
     finally:
         gate.set()
         await proxy.cleanup()
