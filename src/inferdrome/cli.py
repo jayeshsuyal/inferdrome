@@ -793,6 +793,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser(
+        "breakpoint",
+        help="search, reduce, confirm and summarize timing evidence offline",
+        description="Use inferdrome breakpoint --help for the offline workflow.",
+    )
+
     capabilities = commands.add_parser(
         "capabilities",
         help="print the active v0.3 capability and limitations contract",
@@ -1238,8 +1244,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "breakpoint":
+        from inferdrome.breakpoint import main as breakpoint_main
+
+        return breakpoint_main(arguments[1:])
     parser = build_parser()
-    namespace = parser.parse_args(argv)
+    namespace = parser.parse_args(arguments)
     handler = cast(_Command, namespace.handler)
     try:
         return handler(namespace)

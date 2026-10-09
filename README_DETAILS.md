@@ -10,7 +10,9 @@ Current development: [request identity](docs/VLLM_REQUEST_IDENTITY.md),
 [bounded search](docs/VLLM_BOUNDED_SEARCH.md),
 [timing witness reduction](docs/VLLM_WITNESS_REDUCER.md), and
 [held-out confirmation](docs/VLLM_HELDOUT_CONFIRMATION.md) build the first six
-steps toward Breakpoint on the existing routing study client.
+steps toward Breakpoint on the existing routing study client. The
+[unified Breakpoint CLI](docs/BREAKPOINT.md) adds verified readable summaries
+and a complete synthetic walkthrough as step 7.
 
 Inferdrome is a reproducible evidence pipeline for LLM-serving experiments.
 

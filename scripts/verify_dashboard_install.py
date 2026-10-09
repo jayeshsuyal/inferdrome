@@ -121,6 +121,34 @@ def _verify_installed_cli(package_root: Path, expected_version: str) -> None:
             capture_output=True,
             text=True,
         )
+        breakpoint_demo = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inferdrome",
+                "breakpoint",
+                "demo",
+                "--output-dir",
+                str(Path(root) / "breakpoint-demo"),
+            ],
+            cwd=root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if breakpoint_demo.returncode != 0:
+            raise AssertionError(
+                "installed Breakpoint walkthrough failed: "
+                f"returncode={breakpoint_demo.returncode}, "
+                f"stderr={breakpoint_demo.stderr!r}"
+            )
+        walkthrough = Path(root) / "breakpoint-demo" / "README.md"
+        if not walkthrough.is_file() or "SYNTHETIC_ONLY" not in walkthrough.read_text(
+            encoding="utf-8"
+        ):
+            raise AssertionError("installed Breakpoint synthetic guide is missing")
     if capabilities.returncode != 0:
         raise AssertionError(
             "installed Inferdrome capabilities smoke failed: "

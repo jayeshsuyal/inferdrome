@@ -2,7 +2,9 @@
 
 **Step 6:** freeze the incumbent from [timing witness reduction](VLLM_WITNESS_REDUCER.md)
 and check it on fresh workload seeds. This offline workflow prepares a protocol
-and verifies supplied raw evidence. It adds no GPU result.
+and verifies supplied raw evidence. It adds no GPU result. The
+[unified CLI walkthrough](BREAKPOINT.md) connects this step to search and
+reduction and provides a complete synthetic example.
 
 ## Freeze the question before collection
 

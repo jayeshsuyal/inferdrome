@@ -33,6 +33,12 @@ existing endpoint and writes synthetic, evidence-ineligible metadata to an
 explicit output directory; it does not launch a serving engine or replace the
 `inferdrome run` benchmark workflow. See [RUNNER_IMAGE_V1.md](RUNNER_IMAGE_V1.md).
 
+## Breakpoint workflow
+
+For the later offline routing workflow, see [Breakpoint](BREAKPOINT.md):
+`inferdrome breakpoint search|reduce|confirm`, verified Markdown summaries,
+and a packaged synthetic demo. It preserves the historical contracts below.
+
 ## Validate and resolve
 
 Validation reads and validates the source YAML plus exact workload bytes. It
