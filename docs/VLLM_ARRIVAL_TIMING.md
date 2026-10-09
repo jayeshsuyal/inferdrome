@@ -3,7 +3,8 @@
 **Breakpoint, step 2:** change the planned arrival schedule while holding the
 request population and measurement contract fixed. This extends the existing
 scheduled-arrival client and [request identity](VLLM_REQUEST_IDENTITY.md).
-Search, policy comparison, reduction, and held-out confirmation are future work.
+[Paired comparison](VLLM_PAIRED_COMPARISON.md) adds the exploratory noise screen.
+Search, reduction, and held-out confirmation are future work.
 
 ## One bounded intervention
 
