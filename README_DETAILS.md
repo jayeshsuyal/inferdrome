@@ -7,8 +7,9 @@ operator context. Start with the [short project overview](README.md) or the
 Current development: [request identity](docs/VLLM_REQUEST_IDENTITY.md),
 [controlled arrival timing](docs/VLLM_ARRIVAL_TIMING.md),
 [paired comparisons](docs/VLLM_PAIRED_COMPARISON.md),
-[bounded search](docs/VLLM_BOUNDED_SEARCH.md), and
-[timing witness reduction](docs/VLLM_WITNESS_REDUCER.md) build the first five
+[bounded search](docs/VLLM_BOUNDED_SEARCH.md),
+[timing witness reduction](docs/VLLM_WITNESS_REDUCER.md), and
+[held-out confirmation](docs/VLLM_HELDOUT_CONFIRMATION.md) build the first six
 steps toward Breakpoint on the existing routing study client.
 
 Inferdrome is a reproducible evidence pipeline for LLM-serving experiments.

@@ -152,7 +152,7 @@ confirmed reversal.
 Scope remains `EXPLORATORY_SEARCH_ONLY`. Source/environment/reset declarations
 and hashes do not authenticate execution or independent replicates. Adaptive
 search and reduction do not obtain a search-wide error guarantee from the paired
-screen. Held-out confirmation remains a later step.
+screen. The next step is [held-out confirmation](VLLM_HELDOUT_CONFIRMATION.md).
 
 Keep raw artifacts private and review reports before publication; protocols can
 include a private model identifier. This change is checked with synthetic
