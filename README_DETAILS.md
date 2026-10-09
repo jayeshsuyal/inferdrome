@@ -4,8 +4,9 @@ This is the former long-form README, retained for implementation, release, and
 operator context. Start with the [short project overview](README.md) or the
 [two-replica results](docs/VLLM_ROUTER_RESULTS.md) for the current public entry points.
 
-Current development: [request identity](docs/VLLM_REQUEST_IDENTITY.md) and
-[controlled arrival timing](docs/VLLM_ARRIVAL_TIMING.md) build the first two
+Current development: [request identity](docs/VLLM_REQUEST_IDENTITY.md),
+[controlled arrival timing](docs/VLLM_ARRIVAL_TIMING.md), and
+[paired comparisons](docs/VLLM_PAIRED_COMPARISON.md) build the first three
 steps toward Breakpoint on the existing routing study client.
 
 Inferdrome is a reproducible evidence pipeline for LLM-serving experiments.
