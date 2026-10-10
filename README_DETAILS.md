@@ -15,6 +15,8 @@ steps toward Breakpoint on the existing routing study client. The
 and a complete synthetic walkthrough as step 7.
 The [prospective study design](docs/BREAKPOINT_STUDY.md) adds offline preparation
 as step 8; it contains no new GPU results or execution authorization.
+The separate [single-recipe pilot](docs/BREAKPOINT_PILOT.md) prepares a smaller
+32-trial measurement, a CPU rehearsal, private export and external cleanup.
 
 Inferdrome is a reproducible evidence pipeline for LLM-serving experiments.
 
