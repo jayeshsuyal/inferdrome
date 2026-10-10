@@ -200,6 +200,12 @@ def _config(config: dict[str, Any]) -> None:
     advances = _axis(
         search["max_advances_ns"], 0, workload["duration_s"] * 1_000_000_000, "advance"
     )
+    if (
+        not any(group > 1 for group in groups)
+        or not any(spacing < 10_000 for spacing in spacings)
+        or not any(advance > 0 for advance in advances)
+    ):
+        raise ValueError("search must include a nonidentity timing recipe")
     recipes = len(groups) * len(spacings) * len(advances)
     if recipes > 128 or recipes * 8 * workload["offers_per_trial"] > 2_000_000:
         raise ValueError("search exceeds the bounded planning work limit")

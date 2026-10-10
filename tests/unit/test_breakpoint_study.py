@@ -541,3 +541,60 @@ def test_verify_rejects_a_fifo_plan_before_reading_it(
     monkeypatch.setattr(Path, "read_bytes", guarded_read)
     with pytest.raises(ValueError):
         preparation.verify(root, tmp_path / "unread-tokenizer")
+
+
+@pytest.mark.parametrize(
+    ("axis", "identity_values"),
+    [
+        ("group_sizes", [1]),
+        ("retained_spacing_bps", [10_000]),
+        ("max_advances_ns", [0]),
+    ],
+)
+def test_identity_only_grid_is_rejected_before_the_cli_publishes_a_plan(
+    tmp_path: Path, axis: str, identity_values: list[int]
+) -> None:
+    config = _small_config()
+    config["search"][axis] = identity_values
+    # Keep the declared slot budget feasible even when the axis has one value;
+    # the rejection must concern the absence of a timing intervention.
+    config["search"].update(max_candidates=1, max_trial_slots=32)
+    with pytest.raises(ValueError):
+        preparation.make_plan(config)
+    source = tmp_path / "identity-config.json"
+    source.write_text(json.dumps(config))
+    output = tmp_path / "must-not-exist.json"
+    assert (
+        main(
+            [
+                "breakpoint",
+                "study",
+                "plan",
+                "--config",
+                str(source),
+                "--output",
+                str(output),
+            ]
+        )
+        == 1
+    )
+    assert not output.exists()
+
+
+def test_mixed_identity_and_nonidentity_grid_still_prepares_a_usable_search(
+    tmp_path: Path, test_tokenizer: Path
+) -> None:
+    config = _small_config()
+    config["search"].update(
+        group_sizes=[1, 2],
+        retained_spacing_bps=[2500, 10_000],
+        max_advances_ns=[0, 1_000_000],
+    )
+    plan = preparation.make_plan(config)
+    root = tmp_path / "mixed-grid"
+    inventory = preparation.prepare(plan, test_tokenizer, root)
+    assert inventory["status"] == "PREPARED_NOT_EXECUTED"
+    initial = json.loads((root / "search-report.initial.json").read_text())
+    assert initial["status"] == "AWAITING_EVIDENCE"
+    assert initial["next_action"] is not None
+    assert preparation.verify(root, test_tokenizer) == inventory
