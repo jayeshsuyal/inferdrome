@@ -100,6 +100,26 @@ def test_top_level_help_lists_breakpoint(capsys: pytest.CaptureFixture[str]) -> 
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "plan",
+        "prepare",
+        "verify",
+        "rehearse",
+        "run",
+        "guard",
+        "export",
+        "verify-export",
+    ],
+)
+def test_pilot_help_never_runs_paid_actions(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _invoke(["breakpoint", "pilot", command, "--help"]) == 0
+    assert "usage:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
     "arguments", [["breakpoint", "unknown"], ["breakpoint", "confirm", "unknown"]]
 )
 def test_unknown_commands_fail_with_parser_status(arguments: list[str]) -> None:
