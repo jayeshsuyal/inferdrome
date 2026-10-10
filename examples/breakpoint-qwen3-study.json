@@ -1,0 +1,52 @@
+{
+  "schema": "inferdrome.breakpoint-study-config.v1",
+  "execution_authorized": false,
+  "spending": {"decision": "UNDECIDED", "cap_usd": null},
+  "pins": {
+    "source_revision": "14df96b93ff1c476483de51d4c4e1fa9d6f10d34",
+    "model": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "vllm_version": "0.26.0",
+    "image_reference": "vastai/vllm@sha256:39f2f782305dd7bf8478b748140a2ed719de2824bed51d1862f355dde9891f77",
+    "tokenizers_version": "0.22.1"
+  },
+  "workload": {
+    "duration_s": 120,
+    "offers_per_trial": 720,
+    "rate_rps": 6,
+    "document_count": 48,
+    "target_prefix_tokens": 4096,
+    "output_tokens": 128,
+    "context_length": 8192,
+    "max_client_concurrency": 256,
+    "first_content_slo_ns": 500000000,
+    "completion_slo_ns": 5000000000
+  },
+  "discovery_seeds": [1009, 1013, 1019, 1021, 1031, 1033, 1039, 1049],
+  "heldout_seeds": [2003, 2011, 2017, 2027, 2029, 2039, 2053, 2063],
+  "comparison": {
+    "policy_a": "cache_only",
+    "policy_b": "least_busy",
+    "order_seed": 104729,
+    "confirmation_order_seed": 130363,
+    "minimum_effect_microrps": 100000,
+    "max_scheduling_lag_p95_ns": 10000000,
+    "max_client_queue_p95_ns": 10000000
+  },
+  "search": {
+    "group_sizes": [8],
+    "retained_spacing_bps": [2500],
+    "max_advances_ns": [250000000, 1000000000],
+    "max_candidates": 2,
+    "max_trial_slots": 64
+  },
+  "reduction": {"max_proposals": 2, "max_trial_slots": 64},
+  "confirmation": {"max_attempts": 1, "max_trial_slots": 32},
+  "runtime": {
+    "drain_allowance_s_per_trial": 60,
+    "warm_reset_setup_allowance_s_per_trial": 60,
+    "session_overhead_s": 3600,
+    "teardown_reserve_s": 600,
+    "max_session_s": 43200
+  }
+}

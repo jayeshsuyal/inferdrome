@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for name, description in (
+        ("study", "plan and prepare a bounded study without executing trials"),
         ("search", "prepare and replay a bounded timing search"),
         ("reduce", "reduce a verified search candidate"),
         ("confirm", "freeze and evaluate one held-out confirmation batch"),
@@ -29,6 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _dispatch(command: str, arguments: Sequence[str]) -> int:
+    if command == "study":
+        from inferdrome.breakpoint_study import main as study_main
+
+        return study_main(arguments)
     if command == "search":
         from inferdrome.vllm_bounded_search import main as search_main
 
@@ -57,6 +62,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         if arguments and arguments[0] in {
+            "study",
             "search",
             "reduce",
             "confirm",

@@ -13,6 +13,8 @@ Current development: [request identity](docs/VLLM_REQUEST_IDENTITY.md),
 steps toward Breakpoint on the existing routing study client. The
 [unified Breakpoint CLI](docs/BREAKPOINT.md) adds verified readable summaries
 and a complete synthetic walkthrough as step 7.
+The [prospective study design](docs/BREAKPOINT_STUDY.md) adds offline preparation
+as step 8; it contains no new GPU results or execution authorization.
 
 Inferdrome is a reproducible evidence pipeline for LLM-serving experiments.
 
