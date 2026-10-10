@@ -9,7 +9,7 @@ import socket
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import pytest
@@ -25,6 +25,7 @@ from inferdrome.evaluation.observations import (
     ProbeError,
     ProbeLimitError,
     ProbeResponse,
+    parse_load,
 )
 from inferdrome.evaluation.policies import POLICY_IDS, PolicyId
 from inferdrome.evaluation.transport import AiohttpTransport
@@ -47,6 +48,7 @@ class _Replica:
     background_requests: int = 0
     foreground_requests: int = 0
     metrics_mode: str = "normal"
+    initial_probe_delay: float = 0
     redirect_to: str = ""
     connections: set[asyncio.Transport] = field(default_factory=set)
     handlers: set[asyncio.Task[object]] = field(default_factory=set)
@@ -60,9 +62,16 @@ class _Replica:
         assert task is not None
         assert request.transport is not None
         self.handlers.add(task)
+        new_connection = request.transport not in self.connections
         self.connections.add(request.transport)
         self.requests.append((request.path, dict(request.headers)))
         try:
+            if (
+                new_connection
+                and self.initial_probe_delay
+                and request.path in ("/health", "/metrics")
+            ):
+                await asyncio.sleep(self.initial_probe_delay)
             if request.path == "/health":
                 return web.Response()
             if request.path == "/metrics":
@@ -321,6 +330,53 @@ def _sanitized(result: RoutingFaultResult, origins: tuple[str, str]) -> None:
         )
 
 
+async def _prime_probes(
+    config: RoutingFaultConfig,
+    clients: tuple[
+        AiohttpTransport,
+        AiohttpTransport,
+        AiohttpProbeTransport,
+        AiohttpProbeTransport,
+    ],
+) -> None:
+    """Establish real fixture connections before the scenario's timed epoch.
+
+    No observation is injected into the routing session. It must still acquire
+    fresh samples within its unchanged 100 ms warmup and freshness limits.
+    """
+
+    async def check(probe: AiohttpProbeTransport, origin: str, path: str) -> None:
+        response = await probe.get(origin, path)
+        assert response.status == 200
+        if path == "/metrics":
+            assert parse_load(response.body, model=_MODEL, engine="0") == (0, 0)
+
+    try:
+        async with asyncio.timeout(_GUARD_SECONDS):
+            async with asyncio.TaskGroup() as tasks:
+                for endpoint in config.foreground.endpoints:
+                    for probe, path in (
+                        (clients[2], "/health"),
+                        (clients[2], "/metrics"),
+                        (clients[3], "/metrics"),
+                    ):
+                        tasks.create_task(check(probe, endpoint.origin, path))
+    except BaseException:
+        await asyncio.wait_for(
+            asyncio.gather(*(client.close() for client in clients)), _GUARD_SECONDS
+        )
+        raise
+
+
+def _warmup_diagnostics(result: RoutingFaultResult) -> dict[str, object]:
+    return {
+        "status": result.status,
+        "telemetry_bounds": result.telemetry_bounds,
+        "events": [asdict(event) for event in result.events],
+        "last_observations": [asdict(row) for row in result.observations[-24:]],
+    }
+
+
 @pytest.mark.parametrize("policy", POLICY_IDS)
 def test_real_two_replica_faults_retain_router_load_while_independent_load_changes(
     policy: PolicyId,
@@ -329,10 +385,11 @@ def test_real_two_replica_faults_retain_router_load_while_independent_load_chang
         async with _replicas() as (origins, replicas):
             config = _config(origins, policy)
             clients = _clients(config)
+            await _prime_probes(config, clients)
             result = await asyncio.wait_for(
                 run_routing_fault(config, *clients), _GUARD_SECONDS
             )
-            assert result.status == "COMPLETED"
+            assert result.status == "COMPLETED", _warmup_diagnostics(result)
             assert all(client.closed for client in clients)
             await asyncio.gather(
                 *(replica.assert_disconnected() for replica in replicas)
@@ -445,6 +502,48 @@ def test_real_two_replica_faults_retain_router_load_while_independent_load_chang
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("prime", [False, True])
+def test_probe_readiness_precedes_the_unchanged_warmup_deadline(prime: bool) -> None:
+    async def exercise() -> None:
+        async with _replicas() as (origins, replicas):
+            for replica in replicas:
+                replica.initial_probe_delay = 0.2
+            config = _config(origins, "evaluation_freshness_fallback_v1")
+            assert config.telemetry.warmup_ns == 100_000_000
+            assert config.telemetry.load_freshness_ns == 100_000_000
+            clients = _clients(config)
+            if prime:
+                await _prime_probes(config, clients)
+            result = await asyncio.wait_for(
+                run_routing_fault(config, *clients), _GUARD_SECONDS
+            )
+            expected = "COMPLETED" if prime else "WARMUP_FAILED"
+            assert result.status == expected, _warmup_diagnostics(result)
+            assert all(client.closed for client in clients)
+            await asyncio.gather(
+                *(replica.assert_disconnected() for replica in replicas)
+            )
+            _sanitized(result, origins)
+
+    asyncio.run(exercise())
+
+
+def test_probe_readiness_failure_closes_all_owned_clients() -> None:
+    async def exercise() -> None:
+        async with _replicas() as (origins, replicas):
+            replicas[0].metrics_mode = "oversize"
+            config = _config(origins, "evaluation_freshness_fallback_v1")
+            clients = _clients(config)
+            with pytest.raises(ExceptionGroup):
+                await _prime_probes(config, clients)
+            assert all(client.closed for client in clients)
+            await asyncio.gather(
+                *(replica.assert_disconnected() for replica in replicas)
+            )
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("interrupt", ["stop-event", "task-cancel"])
 def test_cancellation_during_frozen_background_closes_all_four_clients(
     interrupt: str,
@@ -453,6 +552,7 @@ def test_cancellation_during_frozen_background_closes_all_four_clients(
         async with _replicas() as (origins, replicas):
             config = _config(origins, "evaluation_freshness_fallback_v1")
             clients = _clients(config)
+            await _prime_probes(config, clients)
             stop = asyncio.Event()
             running = asyncio.create_task(
                 run_routing_fault(config, *clients, stop=stop)
