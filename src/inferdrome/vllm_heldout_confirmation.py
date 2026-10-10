@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -319,9 +320,10 @@ def _load_source(path: Path) -> dict[str, Any]:
     }
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Freeze and verify one held-out timing confirmation offline"
+        prog="inferdrome breakpoint confirm" if argv is not None else None,
+        description="Freeze and verify one held-out timing confirmation offline",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser("prepare")
@@ -342,7 +344,7 @@ def main() -> None:
         command.add_argument(
             "--report" if name == "verify" else "--output", type=Path, required=True
         )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     source = _load_source(args.source)
     if args.command == "prepare":
         plans = [_read_json(path.read_bytes()) for path in args.plans]

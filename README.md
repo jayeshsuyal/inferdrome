@@ -62,6 +62,7 @@ screens and controls.
 | --- | --- |
 | Understand the pipeline | [Architecture](docs/ARCHITECTURE.md) and [product charter](docs/PRODUCT.md) |
 | Use the CLI and evidence bundles | [CLI guide](docs/CLI.md) and [bundle verification](docs/EVIDENCE_BUNDLE_V1.md) |
+| Explore routing reversals | [Breakpoint: search, reduce, confirm](docs/BREAKPOINT.md), with a GPU-free walkthrough |
 | Examine the GPU studies | [Two-replica results](docs/VLLM_ROUTER_RESULTS.md) and [real-GPU proof](docs/REAL_GPU_PROOF.md) |
 | Review release scope | [v0.2 contract](docs/V0_2_CAPABILITIES.md), [v0.3 contract](docs/V0_3_CAPABILITIES.md), and [detailed project notes](README_DETAILS.md) |
 

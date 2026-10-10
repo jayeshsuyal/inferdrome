@@ -5,7 +5,8 @@ changes, requests comparison evidence in a fixed order, and selects the first
 candidate passing the [paired comparison screen](VLLM_PAIRED_COMPARISON.md).
 It reads supplied artifacts and emits the next protocol. It launches no serving
 process, cloud job or GPU experiment. [Timing witness reduction](VLLM_WITNESS_REDUCER.md)
-can follow a finding; independent confirmation remains a later step.
+can follow a finding, then [held-out confirmation](VLLM_HELDOUT_CONFIRMATION.md)
+checks the frozen incumbent. Start with the [unified CLI walkthrough](BREAKPOINT.md).
 
 ## Search the smallest planned changes first
 

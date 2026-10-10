@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -297,9 +298,10 @@ def _load_search_inputs(
     return plans, observations
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Prepare and resume a bounded offline timing search"
+        prog="inferdrome breakpoint search" if argv is not None else None,
+        description="Prepare and resume a bounded offline timing search",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
@@ -318,7 +320,7 @@ def main() -> None:
         command.add_argument(
             "--report" if name == "verify" else "--output", type=Path, required=True
         )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.command == "prepare":
         config = _fields(
             _read_json(args.config.read_bytes()),
