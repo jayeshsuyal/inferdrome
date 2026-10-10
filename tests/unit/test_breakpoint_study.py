@@ -598,3 +598,45 @@ def test_mixed_identity_and_nonidentity_grid_still_prepares_a_usable_search(
     assert initial["status"] == "AWAITING_EVIDENCE"
     assert initial["next_action"] is not None
     assert preparation.verify(root, test_tokenizer) == inventory
+
+
+def test_one_offer_per_epoch_is_rejected_before_plan_publication(
+    tmp_path: Path,
+) -> None:
+    config = _small_config()
+    config["workload"].update(duration_s=3, rate_rps=1, offers_per_trial=3)
+    with pytest.raises(ValueError):
+        preparation.make_plan(config)
+    source = tmp_path / "singleton-epochs.json"
+    source.write_text(json.dumps(config))
+    output = tmp_path / "must-not-exist.json"
+    assert (
+        main(
+            [
+                "breakpoint",
+                "study",
+                "plan",
+                "--config",
+                str(source),
+                "--output",
+                str(output),
+            ]
+        )
+        == 1
+    )
+    assert not output.exists()
+
+
+def test_four_offers_can_prepare_a_nonidentity_epoch_local_intervention(
+    tmp_path: Path, test_tokenizer: Path
+) -> None:
+    config = _small_config()
+    config["workload"].update(duration_s=4, rate_rps=1, offers_per_trial=4)
+    root = tmp_path / "four-offer-study"
+    inventory = preparation.prepare(preparation.make_plan(config), test_tokenizer, root)
+    initial = json.loads((root / "search-report.initial.json").read_text())
+    assert initial["status"] == "AWAITING_EVIDENCE"
+    assert initial["next_action"] is not None
+    for timing_path in (root / "initial/timings").glob("*-candidate.json"):
+        assert json.loads(timing_path.read_text())["moved_count"] > 0
+    assert preparation.verify(root, test_tokenizer) == inventory

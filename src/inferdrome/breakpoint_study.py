@@ -59,7 +59,9 @@ _CONFIG_FIELDS = {
 }
 _WORKLOAD_BOUNDS = {
     "duration_s": (3, 300),
-    "offers_per_trial": (1, 20_000),
+    # Timing groups stay inside three epochs; fewer than four offers can leave
+    # every epoch with a single anchor and no possible arrival movement.
+    "offers_per_trial": (4, 20_000),
     "rate_rps": (1, 64),
     "document_count": (8, 96),
     "target_prefix_tokens": (256, 6144),
