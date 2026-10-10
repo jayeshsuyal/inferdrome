@@ -100,7 +100,7 @@ private source manifests needed to regenerate it.
 | Search `CANDIDATE_FOUND` | An exploratory candidate passed the paired screen. |
 | Reduction `REDUCTION_COMPLETE` | The configured reduction procedure finished; minimality is not established. |
 | Confirmation `HELD_OUT_CRITERIA_MET` | Both frozen directional criteria passed on eligible held-out evidence. |
-| Confirmation `HELD_OUT_CRITERIA_NOT_MET` | Both criteria did not pass; this does not establish equivalence. |
+| Confirmation `HELD_OUT_CRITERIA_NOT_MET` | At least one frozen directional criterion did not pass; this does not establish equivalence. |
 | `AWAITING_EVIDENCE` / `INELIGIBLE` | More evidence is needed, or supplied evidence cannot support the comparison. |
 
 Search and reduction awaiting evidence exit 2. Confirmation ineligibility exits
