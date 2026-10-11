@@ -3,8 +3,9 @@
 Breakpoint asks whether changing **when the same requests are offered** can
 reverse the ordering of two routing policies. It searches a bounded timing
 grid, reduces a candidate's timing changes, then checks the frozen intervention
-on held-out workload seeds. The commands prepare protocols and verify supplied
-artifacts offline; collecting real measurements is a separate step.
+on held-out workload seeds. Its artifact commands prepare protocols and verify
+supplied observations offline. The separate [pilot](BREAKPOINT_PILOT.md) adds
+local rehearsal and explicitly authorized collection with external cleanup.
 
 ## Try it without a GPU
 
@@ -32,9 +33,12 @@ fixture placeholder. It does not replay the historical Qwen3-8B studies.
 To prepare the first prospective Qwen3 study, see the
 [study design and runbook](BREAKPOINT_STUDY.md). It freezes the workload,
 comparison budgets and runtime allowances; spending remains undecided.
+The smaller [single-recipe pilot](BREAKPOINT_PILOT.md) has 32 trial slots and a
+3½-hour session ceiling. It does not complete search, reduction or confirmation.
 
 | Command | Purpose | Detailed method |
 | --- | --- | --- |
+| `breakpoint pilot` | Prepare/rehearse one pilot; future `run`/`guard` require separate paid approval. | [Pilot runbook](BREAKPOINT_PILOT.md) |
 | `breakpoint study` | Freeze a study design and prepare verified local workload artifacts. | [Study design](BREAKPOINT_STUDY.md) |
 | `breakpoint search` | Freeze a finite timing grid; evaluate supplied comparisons within its budget. | [Bounded search](VLLM_BOUNDED_SEARCH.md) |
 | `breakpoint reduce` | Propose fewer timing changes; retain them only after fresh comparisons. | [Witness reduction](VLLM_WITNESS_REDUCER.md) |

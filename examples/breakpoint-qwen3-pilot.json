@@ -1,0 +1,45 @@
+{
+  "schema": "inferdrome.breakpoint-pilot-config.v1",
+  "execution_authorized": false,
+  "spending": {"decision": "UNDECIDED", "cap_usd": null},
+  "pins": {
+    "model": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "vllm_version": "0.26.0",
+    "image_reference": "vastai/vllm@sha256:39f2f782305dd7bf8478b748140a2ed719de2824bed51d1862f355dde9891f77",
+    "tokenizers_version": "0.22.1"
+  },
+  "workload": {
+    "duration_s": 120,
+    "offers_per_trial": 720,
+    "rate_rps": 6,
+    "document_count": 48,
+    "target_prefix_tokens": 4096,
+    "output_tokens": 128,
+    "context_length": 8192,
+    "max_client_concurrency": 256,
+    "first_content_slo_ns": 500000000,
+    "completion_slo_ns": 5000000000
+  },
+  "seeds": [1009, 1013, 1019, 1021, 1031, 1033, 1039, 1049],
+  "comparison": {
+    "policy_a": "cache_only",
+    "policy_b": "least_busy",
+    "order_seed": 104729,
+    "minimum_effect_microrps": 100000,
+    "max_scheduling_lag_p95_ns": 10000000,
+    "max_client_queue_p95_ns": 10000000
+  },
+  "candidate_parameters": {
+    "group_size": 8,
+    "retained_spacing_bps": 2500,
+    "max_advance_ns": 1000000000
+  },
+  "runtime": {
+    "drain_allowance_s_per_trial": 60,
+    "warm_reset_setup_allowance_s_per_trial": 60,
+    "session_overhead_s": 3600,
+    "teardown_reserve_s": 600,
+    "max_session_s": 12600
+  }
+}

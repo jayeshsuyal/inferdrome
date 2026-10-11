@@ -795,8 +795,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser(
         "breakpoint",
-        help="search, reduce, confirm and summarize timing evidence offline",
-        description="Use inferdrome breakpoint --help for the offline workflow.",
+        help="prepare pilots and verify search, reduction and confirmation artifacts",
+        description="Use inferdrome breakpoint --help for the artifact workflow.",
     )
 
     capabilities = commands.add_parser(
