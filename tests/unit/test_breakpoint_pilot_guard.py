@@ -186,6 +186,50 @@ def test_failed_destroy_is_not_claimed_as_closed(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("all_command_receipts_fail", [False, True])
+def test_lost_initial_receipt_prevents_arming_but_cleanup_still_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    all_command_receipts_fail: bool,
+) -> None:
+    clock, provider = Clock(), FakeProvider(fails=True)
+    original_write = guard._write
+    ready_writes: list[str] = []
+
+    def receipt_failure(path: Path, value: object, *, replace: bool = False) -> None:
+        if path.name == "ready.json":
+            ready_writes.append(path.name)
+        if path.name == "command-0001.json" or (
+            all_command_receipts_fail and path.name.startswith("command-")
+        ):
+            raise OSError("simulated receipt storage failure")
+        original_write(path, value, replace=replace)
+
+    def transient_provider(argv: list[str], timeout_s: float) -> guard.CommandResult:
+        result = provider(argv, timeout_s)
+        if argv[1] == "destroy":
+            provider.fails = False  # The first exact-ID destruction fails.
+        return result
+
+    monkeypatch.setattr(guard, "_write", receipt_failure)
+    guardian = make_guard(tmp_path, clock, provider)
+    guardian.runner = transient_provider
+    result = guardian.watch()
+    assert ready_writes == []
+    assert result["trigger"] == "ARM_RECEIPT_FAILED"
+    assert result["status"] == "ABSENCE_CONFIRMED"
+    assert result["command_receipts_complete"] is False
+    assert clock.elapsed == 5  # Cleanup retries immediately, not at the deadline.
+    assert [argv[1:] for argv in provider.calls if argv[1] == "destroy"] == [
+        ["destroy", "instance", "12345", "-y", "--raw"],
+        ["destroy", "instance", "12345", "-y", "--raw"],
+    ]
+    assert provider.calls[-1][1:] == ["show", "instances", "--raw"]
+    assert not (guardian.output_dir / "ready.json").exists()
+    assert not (guardian.output_dir / "command-0001.json").exists()
+    assert json.loads((guardian.output_dir / "result.json").read_text()) == result
+
+
 def test_destroy_failure_followed_by_independent_absence_is_confirmed(
     tmp_path: Path,
 ) -> None:

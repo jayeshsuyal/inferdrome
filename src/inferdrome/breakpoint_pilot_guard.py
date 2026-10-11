@@ -464,6 +464,10 @@ class Guardian:
                 trigger = "EXPIRED_AT_ARM"
             elif self._call("inventory", _COMMAND_TIMEOUT_S) is not True:
                 trigger = "TARGET_NOT_CONFIRMED_AT_ARM"
+            elif self.record_errors:
+                # A live observation without its durable receipt cannot arm
+                # collection. Cleanup must still use live readback and retry.
+                trigger = "ARM_RECEIPT_FAILED"
             else:
                 armed_at = _stamp(self.now())
                 while not self.interrupted:

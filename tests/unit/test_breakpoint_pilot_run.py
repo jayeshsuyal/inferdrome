@@ -372,3 +372,81 @@ def test_log_digest_failure_still_writes_terminal_marker(
     terminal = json.loads((args.output_dir / "session-status.json").read_text())
     assert terminal["status"] == "FAILED"
     assert terminal["engine_log_errors"] == {"engine-0.log": "log cannot be read"}
+
+
+@pytest.mark.parametrize("entrypoint", ["api", "cli"])
+@pytest.mark.parametrize("hash_error_type", [None, OSError, pilot.gpu.StudyError])
+def test_completed_collection_propagates_log_integrity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+    hash_error_type: type[Exception] | None,
+) -> None:
+    from inferdrome import vllm_router_capacity
+
+    args = _mock_run_inputs(tmp_path, monkeypatch)
+    hash_failure = hash_error_type is not None
+    bundle = preparation.load_prepared(args.prepared_dir)
+    bundle.update(protocol={"model": "fixture"}, plans=[{"workload": {}}])
+    lifecycle: list[str] = []
+    original_digest = pilot.gpu._file_digest
+
+    def start(*unused: Any, **kwargs: Any) -> tuple[list[Any], list[Any]]:
+        for index in range(2):
+            (args.output_dir / f"engine-{index}.log").write_text("fixture log")
+        return kwargs["processes"], kwargs["logs"]
+
+    async def ready(*unused: Any) -> None:
+        return None
+
+    async def collect(*unused: Any, **kwargs: Any) -> dict[str, Any]:
+        lifecycle.append("collected")
+        return {"supplied_trials": 32}
+
+    def digest(path: Path) -> str:
+        assert lifecycle == ["collected", "cleaned"]
+        if hash_error_type is not None and path.name == "engine-0.log":
+            raise hash_error_type("log cannot be read")
+        return original_digest(path)
+
+    monkeypatch.setattr(pilot, "_start_engines", start)
+    monkeypatch.setattr(pilot, "_ready", ready)
+    monkeypatch.setattr(pilot, "collect", collect)
+    monkeypatch.setattr(
+        pilot, "_stop_owned", lambda *unused: lifecycle.append("cleaned")
+    )
+    monkeypatch.setattr(pilot.gpu, "_file_digest", digest)
+    monkeypatch.setattr(
+        vllm_router_capacity,
+        "_cache_capacity",
+        lambda *unused: {"candidate_valid": True},
+    )
+
+    if entrypoint == "api":
+        if hash_failure:
+            with pytest.raises(pilot.gpu.StudyError, match="engine log hashing failed"):
+                asyncio.run(pilot.run(args))
+        else:
+            assert asyncio.run(pilot.run(args)) == {"supplied_trials": 32}
+    else:
+        argv = ["run"]
+        for name, value in vars(args).items():
+            argv.extend(["--" + name.replace("_", "-"), str(value)])
+        assert pilot.main(argv) == (2 if hash_failure else 0)
+        if hash_failure:
+            assert "engine log hashing failed" in capsys.readouterr().err
+
+    terminal = json.loads((args.output_dir / "session-status.json").read_text())
+    assert terminal["status"] == ("FAILED" if hash_failure else "COMPLETED")
+    assert terminal["local_cleanup"] == "COMPLETED"
+    assert terminal["supplied_trials"] == 32
+    assert lifecycle == ["collected", "cleaned"]
+    if hash_failure:
+        assert "engine log hashing failed" in terminal["error"]
+        assert terminal["engine_log_errors"] == {"engine-0.log": "log cannot be read"}
+        assert set(terminal["engine_logs"]) == {"engine-1.log"}
+    else:
+        assert terminal["error"] is None
+        assert terminal["engine_log_errors"] == {}
+        assert set(terminal["engine_logs"]) == {"engine-0.log", "engine-1.log"}
