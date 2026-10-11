@@ -66,6 +66,7 @@ def test_failed_or_nonboolean_reset_retains_receipt_and_stops(
         "success": success
     }
     assert not list(output.glob("*-result.json"))
+    assert json.loads((output / "inputs.json").read_text())["trials"] == []
     status = json.loads((output / "session-status.json").read_text())
     assert status["status"] == "FAILED" and status["local_cleanup"] == "COMPLETED"
 
@@ -188,3 +189,47 @@ def test_interrupted_client_retains_result_and_closes_router(
     assert status["status"] == "INTERRUPTED"
     assert status["local_cleanup"] == "COMPLETED"
     assert len(list(output.glob("*-reset.json"))) == 1
+    protocol = json.loads((output / "protocol.json").read_text())
+    plans, inputs = _load_inputs(output / "inputs.json", protocol)
+    assert len(inputs) == 1
+    assert inputs[0]["trial_id"] == protocol["trials"][0]["trial_id"]
+    assert inputs[0]["result"] == result
+    report = compare(protocol, plans, inputs)
+    assert report["status"] == "INELIGIBLE"
+    reasons = report["ineligibility_reasons"]
+    assert {
+        "trial_id": inputs[0]["trial_id"],
+        "reason": "MEASUREMENT_NOT_COMPARISON_VALID",
+    } in reasons
+    assert sum(item["reason"] == "MISSING_TRIAL" for item in reasons) == 31
+
+
+def test_deadline_after_saved_measurement_retains_replay_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "deadline-after-result"
+    original = pilot.Deadline.require
+
+    def expire_after_save(self: pilot.Deadline, seconds: float = 0) -> None:
+        if list(output.glob("*-result.json")):
+            raise pilot.gpu.StudyError("injected deadline after measurement save")
+        original(self, seconds)
+
+    monkeypatch.setattr(pilot.Deadline, "require", expire_after_save)
+    with pytest.raises(pilot.gpu.StudyError, match="deadline after measurement"):
+        asyncio.run(pilot.rehearse(output))
+    protocol = json.loads((output / "protocol.json").read_text())
+    plans, inputs = _load_inputs(output / "inputs.json", protocol)
+    assert len(inputs) == 1
+    assert inputs[0]["trial_id"] == protocol["trials"][0]["trial_id"]
+    assert inputs[0]["result"]["measurement"]["status"] == "COMPLETED"
+    report = compare(protocol, plans, inputs)
+    assert report["status"] == "INELIGIBLE"
+    assert sum(
+        item["reason"] == "MISSING_TRIAL" for item in report["ineligibility_reasons"]
+    ) == 31
+    assert len(list(output.glob("*-reset.json"))) == 1
+    status = json.loads((output / "session-status.json").read_text())
+    assert status["status"] == "FAILED"
+    assert status["local_cleanup"] == "COMPLETED"

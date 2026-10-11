@@ -254,6 +254,21 @@ async def warm_reset(
         _save(output / f"{label}-reset.json", record)
 
 
+def _execution(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Bindings for a trial entered only after its reset succeeds."""
+    return {
+        **{
+            key: bundle["protocol"][key]
+            for key in (
+                "source_revision",
+                "environment_sha256",
+                "reset_procedure_sha256",
+            )
+        },
+        "reset_completed": True,
+    }
+
+
 async def _trial(
     bundle: dict[str, Any],
     trial: dict[str, Any],
@@ -327,17 +342,7 @@ async def _trial(
         "result": result,
         "ledger_rows": [_read_json(line) for line in ledger.read_bytes().splitlines()],
         "token_certificate": certificate,
-        "execution": {
-            **{
-                key: bundle["protocol"][key]
-                for key in (
-                    "source_revision",
-                    "environment_sha256",
-                    "reset_procedure_sha256",
-                )
-            },
-            "reset_completed": True,
-        },
+        "execution": _execution(bundle),
     }
 
 
@@ -391,23 +396,32 @@ async def collect(
                     await warm_reset(
                         session, ports, output, label, bundle["protocol"]["model"]
                     )
-                item = await _trial(bundle, trial, output, ports, router_port, deadline)
+                try:
+                    item = await _trial(
+                        bundle, trial, output, ports, router_port, deadline
+                    )
+                finally:
+                    # A saved measurement must remain replayable even if the
+                    # trial raises during interruption, waiting or cleanup.
+                    if (output / f"{label}-result.json").exists():
+                        block = trial["block"]
+                        manifest["trials"].append(
+                            {
+                                "trial_id": label,
+                                "timing": (
+                                    f"b{block:02d}-{trial['condition']}-timing.json"
+                                ),
+                                "result": f"{label}-result.json",
+                                "ledger": f"{label}-ledger.jsonl",
+                                "token_certificate": (
+                                    f"b{block:02d}-certificate.json"
+                                    if bundle["certificates"][block - 1] is not None
+                                    else None
+                                ),
+                                "execution": _execution(bundle),
+                            }
+                        )
                 inputs.append(item)
-                block = trial["block"]
-                manifest["trials"].append(
-                    {
-                        "trial_id": label,
-                        "timing": f"b{block:02d}-{trial['condition']}-timing.json",
-                        "result": f"{label}-result.json",
-                        "ledger": f"{label}-ledger.jsonl",
-                        "token_certificate": (
-                            f"b{block:02d}-certificate.json"
-                            if item["token_certificate"] is not None
-                            else None
-                        ),
-                        "execution": item["execution"],
-                    }
-                )
                 progress = compare(bundle["protocol"], bundle["plans"], inputs)
                 _save(
                     output / f"progress-{trial['sequence']:02d}.json",
