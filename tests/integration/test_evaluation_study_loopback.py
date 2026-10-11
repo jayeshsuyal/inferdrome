@@ -6,19 +6,25 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import ModuleType
+from unittest.mock import call, patch
 
 import pytest
 
 from inferdrome.evaluation import cli, study
 from inferdrome.evaluation.faults import RoutingFaultResult
+from inferdrome.evaluation.observations import AiohttpProbeTransport
 from inferdrome.evaluation.policies import POLICY_IDS
-from inferdrome.evaluation.study_config import compile_study
+from inferdrome.evaluation.study_config import CompiledTrial, compile_study
 from inferdrome.evaluation.study_files import trial_filename
 from tests.integration.test_evaluation_routing_loopback import (
     _BACKGROUND,
     _FOREGROUND,
+    _GUARD_SECONDS,
     _MODEL,
     _OUTPUT,
     _config,
@@ -53,19 +59,79 @@ def _payload(origins: tuple[str, str]) -> dict:
     return value
 
 
+@asynccontextmanager
+async def _primed_study_probes(
+    owner: ModuleType, trial: CompiledTrial
+) -> AsyncIterator[None]:
+    """Ready real fixture connections before the native trial starts its clock.
+
+    Discard these responses. The production session must still acquire fresh
+    health and both load channels within its unchanged 100 ms warmup gate.
+    """
+    probes: list[AiohttpProbeTransport] = []
+    try:
+        for _ in range(2):
+            probes.append(
+                AiohttpProbeTransport(
+                    trial.config.foreground,
+                    max_response_bytes=trial.config.telemetry.max_response_bytes,
+                )
+            )
+        router, observer = probes
+
+        async def check(probe: AiohttpProbeTransport, origin: str, path: str) -> None:
+            response = await probe.get(origin, path)
+            assert response.status == 200
+            if path == "/metrics":
+                assert response.body
+
+        async with asyncio.timeout(_GUARD_SECONDS):
+            async with asyncio.TaskGroup() as tasks:
+                for endpoint in trial.config.foreground.endpoints:
+                    for probe, path in (
+                        (router, "/health"),
+                        (router, "/metrics"),
+                        (observer, "/metrics"),
+                    ):
+                        tasks.create_task(check(probe, endpoint.origin, path))
+        with patch.object(
+            owner, "AiohttpProbeTransport", side_effect=probes
+        ) as factory:
+            yield
+        expected = call(
+            trial.config.foreground,
+            max_response_bytes=trial.config.telemetry.max_response_bytes,
+        )
+        assert factory.call_args_list == [expected, expected]
+        # Check production ownership before any defensive fixture cleanup. A
+        # native entrypoint that leaks these clients must fail this assertion.
+        assert all(probe.closed for probe in probes)
+    finally:
+        pending = [probe for probe in probes if not probe.closed]
+        if pending:
+            await asyncio.wait_for(
+                asyncio.gather(*(probe.close() for probe in pending)), _GUARD_SECONDS
+            )
+
+
+@pytest.mark.parametrize("cold_probe_delay_s", [0.0, 0.12])
 def test_matched_healthy_and_fault_study_closes_clients_and_reports_offline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cold_probe_delay_s: float,
 ) -> None:
     async def exercise() -> None:
         async with _replicas() as (origins, replicas):
+            for replica in replicas:
+                replica.initial_probe_delay = cold_probe_delay_s
             config = load(_payload(origins))
             calls: list[str] = []
 
             async def execute(trial, *, stop):
                 assert not any(replica.active for replica in replicas)
                 calls.append(trial.trial_id)
-                result = await study.execute_trial(trial, stop=stop)
+                async with _primed_study_probes(study, trial):
+                    result = await study.execute_trial(trial, stop=stop)
                 await asyncio.gather(
                     *(replica.assert_disconnected() for replica in replicas)
                 )
@@ -85,7 +151,14 @@ def test_matched_healthy_and_fault_study_closes_clients_and_reports_offline(
             manifest = await asyncio.wait_for(
                 study.run_study(config, output, executor=execute), 15
             )
-            assert manifest.status == "COMPLETED", manifest.model_dump()
+            assert manifest.status == "COMPLETED", {
+                "reason": manifest.reason,
+                "started_trials": [
+                    (row.trial_id, row.state, row.result_status, row.failure_reason)
+                    for row in manifest.trials
+                    if row.state != "NOT_RUN"
+                ],
+            }
             assert calls == [f"trial-{index:04d}" for index in range(8)]
             assert all(row.state == "RETURNED" for row in manifest.trials)
 

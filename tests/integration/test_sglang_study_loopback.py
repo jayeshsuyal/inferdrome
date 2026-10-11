@@ -48,7 +48,10 @@ from tests.integration.test_evaluation_routing_loopback import (
     _OUTPUT,
     _Replica,
 )
-from tests.integration.test_evaluation_study_loopback import _payload
+from tests.integration.test_evaluation_study_loopback import (
+    _payload,
+    _primed_study_probes,
+)
 from tests.unit.test_evaluation_study_config import load
 from tests.unit.test_sglang_serving_profile import config as serving_config
 
@@ -106,11 +109,16 @@ async def _replicas() -> AsyncIterator[
         assert all(not replica.handlers and replica.active == 0 for replica in replicas)
 
 
+@pytest.mark.parametrize("cold_probe_delay_s", [0.0, 0.12])
 def test_sglang_native_study_keeps_populations_bound_through_offline_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cold_probe_delay_s: float,
 ) -> None:
     async def exercise() -> None:
         async with _replicas() as (origins, replicas):
+            for replica in replicas:
+                replica.initial_probe_delay = cold_probe_delay_s
             value = _payload(origins)
             # This test checks population binding, not healthy-path timer jitter.
             # Give the healthy block a full-window load freshness margin. The
@@ -138,6 +146,16 @@ def test_sglang_native_study_keeps_populations_bound_through_offline_report(
             }
             binding = build_sglang_engine_binding(plan, profiles)
             executor = sglang_execution.SGLangStudyExecutor(plan, binding, profiles)
+
+            async def execute(trial: CompiledTrial, *, stop: asyncio.Event):
+                assert not any(replica.active for replica in replicas)
+                async with _primed_study_probes(sglang_execution, trial):
+                    result = await executor(trial, stop=stop)
+                await asyncio.gather(
+                    *(replica.assert_disconnected() for replica in replicas)
+                )
+                return result
+
             native_results: dict[str, HealthyRoutingResult | RoutingFaultResult] = {}
             original_wrap = sglang_execution.wrap_sglang_result
 
@@ -177,11 +195,18 @@ def test_sglang_native_study_keeps_populations_bound_through_offline_report(
             output = tmp_path / "study"
             manifest = await asyncio.wait_for(
                 study.run_study(
-                    config, output, executor=executor, engine_binding=binding
+                    config, output, executor=execute, engine_binding=binding
                 ),
                 20,
             )
-            assert manifest.status == "COMPLETED", manifest.model_dump()
+            assert manifest.status == "COMPLETED", {
+                "reason": manifest.reason,
+                "started_trials": [
+                    (row.trial_id, row.state, row.result_status, row.failure_reason)
+                    for row in manifest.trials
+                    if row.state != "NOT_RUN"
+                ],
+            }
             assert len(manifest.trials) == 8
             assert all(row.state == "RETURNED" for row in manifest.trials)
             await asyncio.gather(
