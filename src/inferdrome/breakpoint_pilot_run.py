@@ -36,7 +36,7 @@ from inferdrome.vllm_arrival_timing import make_timing
 from inferdrome.vllm_paired_comparison import INPUT_SCHEMA, compare
 from inferdrome.vllm_paired_protocol import make_protocol, validate_protocol
 from inferdrome.vllm_request_identity import _read_json
-from inferdrome.vllm_router import Router, make_app
+from inferdrome.vllm_router import TRANSPORT_SCHEMA, Router, make_app
 from inferdrome.vllm_router_study import make_plan, run_trial
 
 SCHEMA = "inferdrome.breakpoint-pilot-session.v1"
@@ -283,6 +283,7 @@ async def _trial(
     timing = bundle["timings"][block][trial["condition"]]
     label = trial["trial_id"]
     ledger = output / f"{label}-ledger.jsonl"
+    diagnostics = output / f"{label}-transport.jsonl"
     # Router opens with append semantics: independently reserve a new empty file.
     with ledger.open("xb"):
         pass
@@ -292,6 +293,7 @@ async def _trial(
         policy=trial["policy"],
         max_active=128,
         max_queue=256,
+        diagnostics=diagnostics,
     )
     runner = web.AppRunner(make_app(router), shutdown_timeout=5)
     result: dict[str, Any] | None = None
@@ -333,9 +335,25 @@ async def _trial(
         await runner.cleanup()
         if ledger.exists():
             _sync(ledger)
+        if diagnostics.exists():
+            _sync(diagnostics)
+            # Capture post-cleanup failures that occurred after client stats.
+            _save(
+                output / f"{label}-transport-status.json",
+                {
+                    "schema": "inferdrome.vllm-router-transport-status.v1",
+                    "diagnostics_schema": TRANSPORT_SCHEMA,
+                    "path": diagnostics.name,
+                    "file_sha256": gpu._file_digest(diagnostics),
+                    "diagnostics_failed": router.diagnostics_failed,
+                    "diagnostic_rows": router.diagnostic_rows,
+                },
+            )
         # run_trial deliberately retains a cancelled population before returning.
         if result is not None and not (output / f"{label}-result.json").exists():
             _save(output / f"{label}-result.json", result)
+    if router.diagnostics_failed:
+        raise gpu.StudyError("router transport diagnostics unavailable")
     return {
         "trial_id": label,
         "timing": timing,
@@ -437,6 +455,13 @@ async def collect(
                         "ledger_file_sha256": gpu._file_digest(
                             output / f"{label}-ledger.jsonl"
                         ),
+                        "transport_diagnostics": {
+                            "schema": TRANSPORT_SCHEMA,
+                            "path": f"{label}-transport.jsonl",
+                            "file_sha256": gpu._file_digest(
+                                output / f"{label}-transport.jsonl"
+                            ),
+                        },
                         "comparison": progress,
                     },
                 )

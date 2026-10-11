@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -232,3 +233,54 @@ def test_changed_payload_during_pack_never_returns_success_receipt(
     monkeypatch.setattr(export, "_read", change_after_read)
     with pytest.raises(ValueError, match="changed during packaging"):
         export.pack(*inputs, tmp_path / "archive.zip")
+
+
+def test_transport_sidecar_is_inventoried_and_tamper_evident(
+    inputs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    sidecar = inputs[1] / "b01-baseline-cache_only-transport.jsonl"
+    data = (
+        json.dumps(
+            {
+                "schema": "inferdrome.vllm-router-transport.v1",
+                "request_id": "1" * 32,
+                "replica": 0,
+                "stage": "awaiting_upstream_headers",
+                "exception_type": "ServerDisconnectedError",
+                "errno": None,
+                "upstream_status": None,
+                "downstream_prepared": False,
+                "elapsed_ms": 11.0,
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    sidecar.write_bytes(data)
+    sidecar.chmod(0o600)
+    original = tmp_path / "original.zip"
+    receipt = export.pack(*inputs, original)
+    assert receipt["schema"] == export.SCHEMA
+    assert receipt["payload_files"] == 4
+    assert receipt["evidence_eligible"] is False
+    member = "collection/" + sidecar.name
+    with zipfile.ZipFile(original) as archive:
+        assert archive.read(member) == data
+        assert (archive.getinfo(member).external_attr >> 16) & 0o777 == 0o600
+        inventory = json.loads(archive.read("export-inventory.json"))
+        assert inventory["schema"] == export.SCHEMA
+        assert next(item for item in inventory["files"] if item["path"] == member) == {
+            "path": member,
+            "bytes": len(data),
+            "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+        }
+    changed = tmp_path / "changed.zip"
+    with zipfile.ZipFile(original) as source, zipfile.ZipFile(changed, "w") as sink:
+        for item in source.infolist():
+            payload = source.read(item)
+            if item.filename == member:
+                payload = payload.replace(b'"replica":0', b'"replica":1')
+                assert payload != data and len(payload) == len(data)
+            sink.writestr(item, payload)
+    with pytest.raises(ValueError, match="payload hash"):
+        export.verify_archive(changed, export.archive_digest(changed))

@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 import uuid
 from pathlib import Path
+from typing import TextIO
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -30,6 +32,41 @@ from inferdrome.vllm_affinity import (
 from inferdrome.vllm_request_identity import REQUEST_ID_HEADER, valid_request_id
 
 _REQUEST_ID_KEY = "inferdrome_request_id"
+TRANSPORT_SCHEMA = "inferdrome.vllm-router-transport.v1"
+
+# Use fixed labels, never an exception's message, repr, args or user-defined name.
+_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    aiohttp.ClientConnectorError,
+    aiohttp.ServerDisconnectedError,
+    aiohttp.ClientPayloadError,
+    aiohttp.ClientConnectionResetError,
+    aiohttp.ServerTimeoutError,
+    aiohttp.ClientOSError,
+    aiohttp.ClientConnectionError,
+    aiohttp.ClientResponseError,
+    aiohttp.ClientError,
+    ConnectionResetError,
+    BrokenPipeError,
+    ConnectionRefusedError,
+    TimeoutError,
+    OSError,
+)
+
+
+def _transport_error(error: BaseException) -> tuple[str, int | None]:
+    exception_type = next(
+        (kind.__name__ for kind in _TRANSPORT_EXCEPTIONS if isinstance(error, kind)),
+        "OtherTransportError",
+    )
+    # aiohttp may wrap an OS error; inspect only one known wrapper/cause.
+    underlying = (
+        error.os_error if isinstance(error, aiohttp.ClientConnectorError) else error
+    )
+    if not isinstance(underlying, OSError) and isinstance(error.__cause__, OSError):
+        underlying = error.__cause__
+    number = underlying.errno if isinstance(underlying, OSError) else None
+    errno = number if type(number) is int and -2**31 <= number < 2**31 else None
+    return exception_type, errno
 
 
 def _origin(value: str) -> str:
@@ -62,6 +99,7 @@ class Router:
         max_body_bytes: int = 262_144,
         max_stream_bytes: int = 16_777_216,
         saturation_active: int | None = None,
+        diagnostics: Path | None = None,
     ) -> None:
         if policy not in {
             "round_robin",
@@ -85,6 +123,12 @@ class Router:
         if self.origins[0] == self.origins[1]:
             raise ValueError("replicas must have distinct origins")
         self.ledger = ledger
+        if diagnostics is not None and diagnostics.resolve() == ledger.resolve():
+            raise ValueError("transport diagnostics must be separate from the ledger")
+        self.diagnostics = diagnostics
+        self.diagnostics_failed = False
+        self.diagnostic_rows = 0
+        self._diagnostics_file: TextIO | None = None
         self.policy = policy
         self.max_active = max_active
         self.max_queue = max_queue
@@ -112,19 +156,77 @@ class Router:
             self.ledger.stat().st_size if self.ledger.exists() else 0
         )
         self._ledger_file = self.ledger.open("a", encoding="utf-8")
-        self.session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(limit=self.max_active, use_dns_cache=False),
-            timeout=aiohttp.ClientTimeout(total=None),
-            trust_env=False,
-            cookie_jar=aiohttp.DummyCookieJar(),
-            auto_decompress=False,
-            headers={"Accept-Encoding": "identity"},
-        )
+        try:
+            if self.diagnostics is not None:
+                self.diagnostics.parent.mkdir(parents=True, exist_ok=True)
+                # Exclusive creation rejects stale files, hard links and symlinks.
+                fd = os.open(
+                    self.diagnostics, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                self._diagnostics_file = os.fdopen(fd, "w", encoding="utf-8")
+            self.session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(
+                    limit=self.max_active, use_dns_cache=False
+                ),
+                timeout=aiohttp.ClientTimeout(total=None),
+                trust_env=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                auto_decompress=False,
+                headers={"Accept-Encoding": "identity"},
+            )
+        except BaseException:
+            self._close_diagnostics()
+            self._ledger_file.close()
+            raise
 
     async def stop(self, _app: web.Application) -> None:
-        if self.session is not None:
-            await self.session.close()
-        self._ledger_file.close()
+        try:
+            if self.session is not None:
+                await self.session.close()
+        finally:
+            try:
+                self._ledger_file.close()
+            finally:
+                self._close_diagnostics()
+
+    def _close_diagnostics(self) -> None:
+        if self._diagnostics_file is not None:
+            try:
+                self._diagnostics_file.close()
+            except (OSError, ValueError):
+                self.diagnostics_failed = True
+
+    def _record_transport(
+        self,
+        error: BaseException,
+        stage: str,
+        row: dict[str, object],
+        response: web.StreamResponse,
+        arrived_ns: int,
+    ) -> None:
+        if self._diagnostics_file is None or self.diagnostics_failed:
+            return
+        exception_type, errno = _transport_error(error)
+        diagnostic = {
+            "schema": TRANSPORT_SCHEMA,
+            "request_id": row["request_id"],
+            "replica": row["replica"],
+            "stage": stage,
+            "exception_type": exception_type,
+            "errno": errno,
+            "upstream_status": row["upstream_status"],
+            "downstream_prepared": response.prepared,
+            "elapsed_ms": (time.monotonic_ns() - arrived_ns) / 1e6,
+        }
+        try:
+            self._diagnostics_file.write(
+                json.dumps(diagnostic, separators=(",", ":")) + "\n"
+            )
+            self._diagnostics_file.flush()
+        except (OSError, ValueError):
+            self.diagnostics_failed = True
+        else:
+            self.diagnostic_rows += 1
 
     def _record(self, row: dict[str, object]) -> None:
         outcome = str(row["outcome"])
@@ -182,6 +284,9 @@ class Router:
                 "accounting_failed": self.accounting_failed,
                 "ledger_rows": self.ledger_rows,
                 "initial_ledger_bytes": self.initial_ledger_bytes,
+                "diagnostics_enabled": self.diagnostics is not None,
+                "diagnostics_failed": self.diagnostics_failed,
+                "diagnostic_rows": self.diagnostic_rows,
             }
         )
 
@@ -370,6 +475,7 @@ class Router:
             status=200,
             headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
         )
+        stage = "awaiting_upstream_headers"
         try:
             # The same absolute deadline covers admission, upload, connect, reads
             # and writes. A terminal timeout cannot be mistaken for an idle poll.
@@ -393,6 +499,7 @@ class Router:
                         return web.json_response(
                             {"error": "replica did not stream"}, status=502
                         )
+                    stage = "prepare_downstream"
                     await response.prepare(request)
                     row["http_status"] = 200
                     total = 0
@@ -401,7 +508,11 @@ class Router:
                         max_event_bytes=262_144,
                         max_content_events=65_536,
                     )
-                    while chunk := await upstream.content.read(16_384):
+                    while True:
+                        stage = "read_upstream_stream"
+                        chunk = await upstream.content.read(16_384)
+                        if not chunk:
+                            break
                         total += len(chunk)
                         if total > self.max_stream_bytes:
                             row["outcome"] = "stream_limit"
@@ -411,22 +522,28 @@ class Router:
                             row["first_byte_ms"] = (
                                 time.monotonic_ns() - arrived_ns
                             ) / 1e6
+                        stage = "write_downstream"
                         await response.write(chunk)  # aiohttp awaits downstream drain.
                         row["stream_bytes"] = total
                     parser.finish()
+                    stage = "write_downstream_eof"
                     await response.write_eof()
                     row["outcome"] = "completed"
-        except (ConnectionResetError, BrokenPipeError):
+                    stage = "release_upstream"
+        except (ConnectionResetError, BrokenPipeError) as error:
+            self._record_transport(error, stage, row, response, arrived_ns)
             if not response.prepared:
                 raise
             row["outcome"] = "disconnected"
-        except TimeoutError:
+        except TimeoutError as error:
+            self._record_transport(error, stage, row, response, arrived_ns)
             if not response.prepared:
                 raise
             row["outcome"] = "timeout"
         except StreamError:
             row["outcome"] = "upstream_protocol_error"
-        except (aiohttp.ClientError, OSError):
+        except (aiohttp.ClientError, OSError) as error:
+            self._record_transport(error, stage, row, response, arrived_ns)
             if not response.prepared:
                 raise
             row["outcome"] = "upstream_error"
@@ -464,6 +581,9 @@ def main() -> None:
     parser.add_argument("--replica-b", required=True)
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument(
+        "--diagnostics", type=Path, help="fresh private transport diagnostic JSONL"
+    )
+    parser.add_argument(
         "--policy",
         choices=(
             "round_robin",
@@ -487,6 +607,7 @@ def main() -> None:
         max_active=args.max_active,
         max_queue=args.max_queue,
         saturation_active=args.saturation_active,
+        diagnostics=args.diagnostics,
     )
     web.run_app(make_app(router), host=args.host, port=args.port)
 
