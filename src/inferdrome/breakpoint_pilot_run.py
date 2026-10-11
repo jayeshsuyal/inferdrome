@@ -970,6 +970,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             asyncio.run(run(args))
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print("breakpoint pilot: interrupted", file=sys.stderr)
+        return 2
     except (
         OSError,
         ValueError,

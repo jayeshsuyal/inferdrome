@@ -358,11 +358,14 @@ def test_run_does_not_claim_cleanup_after_partial_startup_cleanup_failure(
     "received_signal", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP]
 )
 @pytest.mark.parametrize("stage", ["preflight", "startup", "collection"])
+@pytest.mark.parametrize("entrypoint", ["api", "cli"])
 def test_shutdown_signal_cleans_owned_engines_and_restores_handlers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     received_signal: signal.Signals,
     stage: str,
+    entrypoint: str,
 ) -> None:
     from inferdrome import vllm_router_capacity
 
@@ -426,8 +429,15 @@ def test_shutdown_signal_cleans_owned_engines_and_restores_handlers(
         lambda *unused: {"candidate_valid": True},
     )
     try:
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(pilot.run(args))
+        if entrypoint == "api":
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(pilot.run(args))
+        else:
+            argv = ["run"]
+            for name, value in vars(args).items():
+                argv.extend(["--" + name.replace("_", "-"), str(value)])
+            assert pilot.main(argv) == 2
+            assert capsys.readouterr().err == "breakpoint pilot: interrupted\n"
         assert stopped == ([] if stage == "preflight" else owned)
         terminal = json.loads((args.output_dir / "session-status.json").read_text())
         assert terminal["status"] == "INTERRUPTED"
