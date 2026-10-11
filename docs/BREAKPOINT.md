@@ -29,8 +29,13 @@ fixture placeholder. It does not replay the historical Qwen3-8B studies.
 
 ## One command family
 
+To prepare the first prospective Qwen3 study, see the
+[study design and runbook](BREAKPOINT_STUDY.md). It freezes the workload,
+comparison budgets and runtime allowances; spending remains undecided.
+
 | Command | Purpose | Detailed method |
 | --- | --- | --- |
+| `breakpoint study` | Freeze a study design and prepare verified local workload artifacts. | [Study design](BREAKPOINT_STUDY.md) |
 | `breakpoint search` | Freeze a finite timing grid; evaluate supplied comparisons within its budget. | [Bounded search](VLLM_BOUNDED_SEARCH.md) |
 | `breakpoint reduce` | Propose fewer timing changes; retain them only after fresh comparisons. | [Witness reduction](VLLM_WITNESS_REDUCER.md) |
 | `breakpoint confirm` | Freeze the incumbent and test it on disjoint workload seeds. | [Held-out confirmation](VLLM_HELDOUT_CONFIRMATION.md) |
