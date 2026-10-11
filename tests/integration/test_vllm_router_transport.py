@@ -19,7 +19,7 @@ from aiohttp import web
 from inferdrome.vllm_request_identity import REQUEST_ID_HEADER
 from inferdrome.vllm_router import Router, make_app
 
-_SCHEMA = "inferdrome.vllm-router-transport.v1"
+_SCHEMA = "inferdrome.vllm-router-transport.v2"
 _PROMPT = "private-prompt-must-not-enter-transport-diagnostics"
 _GENERATION = "private-generation-must-not-enter-transport-diagnostics"
 _FIRST_EVENT = (
@@ -43,6 +43,16 @@ _DIAGNOSTIC_FIELDS = {
     "upstream_status",
     "downstream_prepared",
     "elapsed_ms",
+    "connection",
+}
+_CONNECTION_FIELDS = {
+    "new_connection_attempts",
+    "reused_connections",
+    "queued_for_connection",
+    "connection_ready",
+    "request_headers_observed",
+    "request_body_bytes_observed",
+    "phase",
 }
 
 
@@ -199,6 +209,7 @@ async def _exercise_fault(
             assert not router.sem.locked()
             assert router.session is not None
             assert not router.session.connector._acquired
+            assert bool(router.session.trace_configs) is diagnostics_enabled
             # A real subsequent request proves the capacity was released and
             # failure did not silently reroute or retry to the healthy replica.
             assert healthy_seen == []
@@ -269,6 +280,32 @@ async def _exercise_fault(
             assert isinstance(detail["elapsed_ms"], (float, int))
             assert math.isfinite(detail["elapsed_ms"])
             assert 0 <= detail["elapsed_ms"] <= rows[0]["terminal_ms"]
+            connection = detail["connection"]
+            assert isinstance(connection, dict)
+            assert set(connection) == _CONNECTION_FIELDS
+            for name in (
+                "new_connection_attempts",
+                "reused_connections",
+                "request_body_bytes_observed",
+            ):
+                assert type(connection[name]) is int
+                assert connection[name] >= 0
+            for name in (
+                "queued_for_connection",
+                "connection_ready",
+                "request_headers_observed",
+            ):
+                assert type(connection[name]) is bool
+            assert connection["new_connection_attempts"] == 1
+            assert connection["reused_connections"] == 0
+            assert connection["queued_for_connection"] is False
+            refused = mode == "refused_connection"
+            assert connection["connection_ready"] is (not refused)
+            assert connection["request_headers_observed"] is (not refused)
+            assert connection["request_body_bytes_observed"] == (
+                0 if refused else len(bad_seen[0])
+            )
+            assert connection["phase"] == ("creating" if refused else "body_observed")
             text = diagnostics.read_text()
             assert all(value not in text for value in (_PROMPT, _GENERATION, bad_url))
             # This sidecar must not alter the historical measurement ledger.

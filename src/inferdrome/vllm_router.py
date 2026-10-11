@@ -13,8 +13,10 @@ import json
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from types import SimpleNamespace
+from typing import Literal, TextIO
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -32,7 +34,7 @@ from inferdrome.vllm_affinity import (
 from inferdrome.vllm_request_identity import REQUEST_ID_HEADER, valid_request_id
 
 _REQUEST_ID_KEY = "inferdrome_request_id"
-TRANSPORT_SCHEMA = "inferdrome.vllm-router-transport.v1"
+TRANSPORT_SCHEMA = "inferdrome.vllm-router-transport.v2"
 
 # Use fixed labels, never an exception's message, repr, args or user-defined name.
 _TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
@@ -83,6 +85,31 @@ def _origin(value: str) -> str:
     ):
         raise ValueError("replica origins must be literal loopback HTTP host:port")
     return value.rstrip("/")
+
+
+@dataclass(slots=True)
+class _ConnectionTrace:
+    new_connection_attempts: int = 0
+    reused_connections: int = 0
+    queued_for_connection: bool = False
+    connection_ready: bool = False
+    request_headers_observed: bool = False
+    request_body_bytes_observed: int = 0
+    phase: Literal[
+        "unobserved", "queued", "creating", "ready", "headers_observed", "body_observed"
+    ] = "unobserved"
+
+    def snapshot(self) -> dict[str, object]:
+        # Fixed allowlist: never retain trace params, URLs, headers or payloads.
+        return {
+            "new_connection_attempts": self.new_connection_attempts,
+            "reused_connections": self.reused_connections,
+            "queued_for_connection": self.queued_for_connection,
+            "connection_ready": self.connection_ready,
+            "request_headers_observed": self.request_headers_observed,
+            "request_body_bytes_observed": self.request_body_bytes_observed,
+            "phase": self.phase,
+        }
 
 
 class Router:
@@ -173,6 +200,9 @@ class Router:
                 cookie_jar=aiohttp.DummyCookieJar(),
                 auto_decompress=False,
                 headers={"Accept-Encoding": "identity"},
+                trace_configs=[self._connection_trace_config()]
+                if self.diagnostics is not None
+                else [],
             )
         except BaseException:
             self._close_diagnostics()
@@ -196,6 +226,94 @@ class Router:
             except (OSError, ValueError):
                 self.diagnostics_failed = True
 
+    def _trace_connection(
+        self, context: SimpleNamespace, event: str, body_bytes: int = 0
+    ) -> None:
+        try:
+            request_context = context.trace_request_ctx
+            if not isinstance(request_context, dict):
+                raise ValueError("missing per-request connection trace context")
+            state = request_context.get("connection")
+            if not isinstance(state, _ConnectionTrace):
+                raise ValueError("missing per-request connection trace")
+            if event == "queued":
+                state.queued_for_connection = True
+                state.phase = "queued"
+            elif event == "creating":
+                state.new_connection_attempts = min(
+                    state.new_connection_attempts + 1, 2**31 - 1
+                )
+                state.phase = "creating"
+            elif event == "reused":
+                state.reused_connections = min(state.reused_connections + 1, 2**31 - 1)
+                state.connection_ready = True
+                state.phase = "ready"
+            elif event == "ready":
+                state.connection_ready = True
+                state.phase = "ready"
+            elif event == "headers_observed":
+                state.request_headers_observed = True
+                state.phase = "headers_observed"
+            elif event == "body_observed":
+                state.request_body_bytes_observed = min(
+                    state.request_body_bytes_observed + body_bytes, 2**63 - 1
+                )
+                state.phase = "body_observed"
+            else:
+                raise ValueError("unknown connection trace event")
+        except Exception:
+            # Instrumentation errors fail required diagnostics without fabricating
+            # an upstream failure or interrupting a request that may be accepted.
+            self.diagnostics_failed = True
+
+    def _connection_trace_config(self) -> aiohttp.TraceConfig:
+        trace = aiohttp.TraceConfig()
+
+        async def queued(
+            _session: aiohttp.ClientSession, context: SimpleNamespace, _params: object
+        ) -> None:
+            self._trace_connection(context, "queued")
+
+        async def creating(
+            _session: aiohttp.ClientSession, context: SimpleNamespace, _params: object
+        ) -> None:
+            self._trace_connection(context, "creating")
+
+        async def ready(
+            _session: aiohttp.ClientSession, context: SimpleNamespace, _params: object
+        ) -> None:
+            self._trace_connection(context, "ready")
+
+        async def reused(
+            _session: aiohttp.ClientSession, context: SimpleNamespace, _params: object
+        ) -> None:
+            self._trace_connection(context, "reused")
+
+        async def headers(
+            _session: aiohttp.ClientSession, context: SimpleNamespace, _params: object
+        ) -> None:
+            self._trace_connection(context, "headers_observed")
+
+        async def body(
+            _session: aiohttp.ClientSession,
+            context: SimpleNamespace,
+            params: aiohttp.TraceRequestChunkSentParams,
+        ) -> None:
+            try:
+                size = len(params.chunk)
+            except Exception:
+                self.diagnostics_failed = True
+                return
+            self._trace_connection(context, "body_observed", size)
+
+        trace.on_connection_queued_start.append(queued)
+        trace.on_connection_create_start.append(creating)
+        trace.on_connection_create_end.append(ready)
+        trace.on_connection_reuseconn.append(reused)
+        trace.on_request_headers_sent.append(headers)
+        trace.on_request_chunk_sent.append(body)
+        return trace
+
     def _record_transport(
         self,
         error: BaseException,
@@ -203,27 +321,32 @@ class Router:
         row: dict[str, object],
         response: web.StreamResponse,
         arrived_ns: int,
+        connection: _ConnectionTrace | None,
     ) -> None:
         if self._diagnostics_file is None or self.diagnostics_failed:
             return
-        exception_type, errno = _transport_error(error)
-        diagnostic = {
-            "schema": TRANSPORT_SCHEMA,
-            "request_id": row["request_id"],
-            "replica": row["replica"],
-            "stage": stage,
-            "exception_type": exception_type,
-            "errno": errno,
-            "upstream_status": row["upstream_status"],
-            "downstream_prepared": response.prepared,
-            "elapsed_ms": (time.monotonic_ns() - arrived_ns) / 1e6,
-        }
+        if connection is None:
+            self.diagnostics_failed = True
+            return
         try:
+            exception_type, errno = _transport_error(error)
+            diagnostic = {
+                "schema": TRANSPORT_SCHEMA,
+                "request_id": row["request_id"],
+                "replica": row["replica"],
+                "stage": stage,
+                "exception_type": exception_type,
+                "errno": errno,
+                "upstream_status": row["upstream_status"],
+                "downstream_prepared": response.prepared,
+                "elapsed_ms": (time.monotonic_ns() - arrived_ns) / 1e6,
+                "connection": connection.snapshot(),
+            }
             self._diagnostics_file.write(
                 json.dumps(diagnostic, separators=(",", ":")) + "\n"
             )
             self._diagnostics_file.flush()
-        except (OSError, ValueError):
+        except Exception:
             self.diagnostics_failed = True
         else:
             self.diagnostic_rows += 1
@@ -476,6 +599,7 @@ class Router:
             headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
         )
         stage = "awaiting_upstream_headers"
+        connection = _ConnectionTrace() if self.diagnostics is not None else None
         try:
             # The same absolute deadline covers admission, upload, connect, reads
             # and writes. A terminal timeout cannot be mistaken for an idle poll.
@@ -485,6 +609,9 @@ class Router:
                     data=body,
                     headers={"Content-Type": "application/json"},
                     allow_redirects=False,
+                    trace_request_ctx={"connection": connection}
+                    if connection is not None
+                    else None,
                 ) as upstream:
                     row["upstream_status"] = upstream.status
                     if upstream.status != 200:
@@ -531,19 +658,19 @@ class Router:
                     row["outcome"] = "completed"
                     stage = "release_upstream"
         except (ConnectionResetError, BrokenPipeError) as error:
-            self._record_transport(error, stage, row, response, arrived_ns)
+            self._record_transport(error, stage, row, response, arrived_ns, connection)
             if not response.prepared:
                 raise
             row["outcome"] = "disconnected"
         except TimeoutError as error:
-            self._record_transport(error, stage, row, response, arrived_ns)
+            self._record_transport(error, stage, row, response, arrived_ns, connection)
             if not response.prepared:
                 raise
             row["outcome"] = "timeout"
         except StreamError:
             row["outcome"] = "upstream_protocol_error"
         except (aiohttp.ClientError, OSError) as error:
-            self._record_transport(error, stage, row, response, arrived_ns)
+            self._record_transport(error, stage, row, response, arrived_ns, connection)
             if not response.prepared:
                 raise
             row["outcome"] = "upstream_error"

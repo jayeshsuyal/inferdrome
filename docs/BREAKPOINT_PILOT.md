@@ -193,10 +193,20 @@ the guardian independently of this transfer terminal and the GPU host.
 
 Each new collector trial creates a private `*-transport.jsonl` sidecar, including
 an empty file when no caught transport exception occurs. Its rows use
-`inferdrome.vllm-router-transport.v1` and contain only the validated request ID,
+`inferdrome.vllm-router-transport.v2` and contain the validated request ID,
 replica index, operation stage, fixed exception type, numeric OS errno when
 available, upstream status, downstream-header state and elapsed milliseconds.
-They exclude exception messages, tracebacks, URLs, prompts and generated text.
+A per-request `connection` object adds connection-creation attempts, pool reuse,
+queue participation, connection readiness, header/body callback observations and
+the latest observed phase. Header values, URLs, body contents, exception messages,
+tracebacks, prompts and generated text are excluded.
+
+`request_headers_observed` and `request_body_bytes_observed` describe aiohttp
+callbacks that occur before the actual write. They do not prove bytes were sent,
+received or accepted by the engine. A reuse event identifies a pooled connection;
+it does not establish that the connection was stale or why the server closed it.
+Historical `inferdrome.vllm-router-transport.v1` sidecars lack these observations
+and remain unchanged.
 
 `awaiting_upstream_headers` covers connection establishment, POST upload and
 response-header receipt together; it does not establish which of those failed.
@@ -209,25 +219,30 @@ unavailable.
 
 Progress receipts bind the sidecar filename and SHA-256. A separate
 `*-transport-status.json` receipt records the post-cleanup hash, flushed row
-count and write/close failure flag. Failed and interrupted attempts retain their
-partial files through the existing private export inventory. `/router/stats` exposes whether diagnostics are enabled, write/close
-failure and the number of successfully flushed rows. The collector stops if
-required diagnostic writes fail. These fields explain failures; they do not
-change the ledger, comparison inputs or eligibility rules. A transport error
+count and diagnostic failure flag. Failed and interrupted attempts retain their
+partial files through the existing private export inventory. `/router/stats`
+exposes whether diagnostics are enabled, their failure state and the number of
+successfully flushed rows. Trace callback failures also mark diagnostics failed
+without replacing the upstream outcome; the collector stops if required
+diagnostics fail. These fields explain failures; they do not change the ledger,
+comparison inputs or eligibility rules. A transport error
 still makes the comparison ineligible. No POST retries or pool tuning are added.
 
 Reproduce closure before headers, refused connections and truncated streams with
 CPU-only fake replicas before considering a new GPU attempt:
 
 ```bash
-PYTHONPATH=src python -m pytest tests/integration/test_vllm_router_transport.py
+PYTHONPATH=src python -m pytest \
+  tests/integration/test_vllm_router_transport.py \
+  tests/integration/test_vllm_router_connections.py
 ```
 
 The standalone router enables the same optional sidecar with
 `--diagnostics /private/run/transport.jsonl`; the destination must be fresh and
 separate from `--ledger`. Any future GPU attempt needs a newly reviewed source
-revision and preparation bundle. Preserve earlier source revisions, sealed kits
-and historical archives.
+revision, preparation bundle and approval bound to those new pins; an earlier
+approval cannot be reused. Preserve earlier source revisions, sealed kits and
+historical archives. Historical root causes remain unverified by this change.
 
 ## Keep and retrieve every attempt
 
