@@ -461,6 +461,56 @@ def test_log_digest_failure_still_writes_terminal_marker(
     assert terminal["engine_log_errors"] == {"engine-0.log": "log cannot be read"}
 
 
+@pytest.mark.parametrize("save_fails", [False, True])
+def test_shutdown_handlers_cover_terminal_write_and_restore_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    save_fails: bool,
+) -> None:
+    args = _mock_run_inputs(tmp_path, monkeypatch)
+    original_save = pilot._save
+    writes: list[str] = []
+
+    def previous_handler(signum: int, frame: object) -> None:
+        raise AssertionError("shutdown signal escaped finalization")
+
+    old_handlers = {
+        signum: signal.signal(signum, previous_handler)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+
+    def start(*unused: Any, **kwargs: Any) -> None:
+        raise OSError("deliberate startup failure")
+
+    def save(path: Path, value: object) -> str:
+        if path.name == "session-status.json":
+            writes.append(path.name)
+            for signum in old_handlers:
+                # Guard the real signal so a regression cannot kill pytest.
+                assert signal.getsignal(signum) is not previous_handler
+                os.kill(os.getpid(), signum)
+            if save_fails:
+                raise OSError("terminal write failed")
+        return original_save(path, value)
+
+    monkeypatch.setattr(pilot, "_start_engines", start)
+    monkeypatch.setattr(pilot, "_save", save)
+    try:
+        expected = "terminal write failed" if save_fails else "startup failure"
+        with pytest.raises(OSError, match=expected):
+            asyncio.run(pilot.run(args))
+        assert writes == ["session-status.json"]
+        for signum in old_handlers:
+            assert signal.getsignal(signum) is previous_handler
+        if not save_fails:
+            terminal = json.loads((args.output_dir / writes[0]).read_text())
+            assert terminal["status"] == "FAILED"
+            assert terminal["local_cleanup"] == "COMPLETED"
+    finally:
+        for signum, old_handler in old_handlers.items():
+            signal.signal(signum, old_handler)
+
+
 @pytest.mark.parametrize("entrypoint", ["api", "cli"])
 @pytest.mark.parametrize("hash_error_type", [None, OSError, pilot.gpu.StudyError])
 def test_completed_collection_propagates_log_integrity_failure(

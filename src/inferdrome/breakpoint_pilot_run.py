@@ -896,48 +896,52 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             session["status"] = "INTERRUPTED"
         raise
     finally:
-        cleanup_error: str | None = None
         try:
-            _stop_owned(processes, logs)
-            if processes and not gpu._ports_closed():
-                raise gpu.StudyError("owned engine or router port remains open")
-            session["local_cleanup"] = "COMPLETED"
-        except Exception as error:
-            cleanup_error = f"{type(error).__name__}: {str(error)[:300]}"
-            session.update(status="CLEANUP_UNCONFIRMED", local_cleanup=cleanup_error)
-        session["ended_utc"] = datetime.now(UTC).isoformat()
-        session["engine_logs"] = {}
-        session["engine_log_errors"] = {}
-        log_error: OSError | gpu.StudyError | None = None
-        for path in output.glob("engine-*.log"):
-            if cleanup_error is not None:
-                session["engine_log_errors"][path.name] = (
-                    "NOT_HASHED_CLEANUP_UNCONFIRMED"
-                )
-                continue
+            cleanup_error: str | None = None
             try:
-                session["engine_logs"][path.name] = gpu._file_digest(path)
-            except (OSError, gpu.StudyError) as error:
-                session["engine_log_errors"][path.name] = str(error)[:300]
-                session["status"] = "FAILED"
-                if log_error is None:
-                    log_error = error
-        # Preserve an existing collection/startup exception. If collection had
-        # succeeded, log integrity failure must also fail its deferred return.
-        finalization_error = None
-        if log_error is not None and session["error"] is None:
-            finalization_error = gpu.StudyError(
-                f"engine log hashing failed: {str(log_error)[:300]}"
-            )
-            session["error"] = str(finalization_error)
-        for signum, old_handler in old_handlers.items():
-            loop.remove_signal_handler(signum)
-            signal.signal(signum, old_handler)
-        _save(output / "session-status.json", session)
-        if cleanup_error:
-            raise gpu.StudyError(f"local process cleanup failed: {cleanup_error}")
-        if finalization_error is not None:
-            raise finalization_error from log_error
+                _stop_owned(processes, logs)
+                if processes and not gpu._ports_closed():
+                    raise gpu.StudyError("owned engine or router port remains open")
+                session["local_cleanup"] = "COMPLETED"
+            except Exception as error:
+                cleanup_error = f"{type(error).__name__}: {str(error)[:300]}"
+                session.update(
+                    status="CLEANUP_UNCONFIRMED", local_cleanup=cleanup_error
+                )
+            session["ended_utc"] = datetime.now(UTC).isoformat()
+            session["engine_logs"] = {}
+            session["engine_log_errors"] = {}
+            log_error: OSError | gpu.StudyError | None = None
+            for path in output.glob("engine-*.log"):
+                if cleanup_error is not None:
+                    session["engine_log_errors"][path.name] = (
+                        "NOT_HASHED_CLEANUP_UNCONFIRMED"
+                    )
+                    continue
+                try:
+                    session["engine_logs"][path.name] = gpu._file_digest(path)
+                except (OSError, gpu.StudyError) as error:
+                    session["engine_log_errors"][path.name] = str(error)[:300]
+                    session["status"] = "FAILED"
+                    if log_error is None:
+                        log_error = error
+            # Preserve an existing collection/startup exception. If collection had
+            # succeeded, log integrity failure must also fail its deferred return.
+            finalization_error = None
+            if log_error is not None and session["error"] is None:
+                finalization_error = gpu.StudyError(
+                    f"engine log hashing failed: {str(log_error)[:300]}"
+                )
+                session["error"] = str(finalization_error)
+            _save(output / "session-status.json", session)
+            if cleanup_error:
+                raise gpu.StudyError(f"local process cleanup failed: {cleanup_error}")
+            if finalization_error is not None:
+                raise finalization_error from log_error
+        finally:
+            for signum, old_handler in old_handlers.items():
+                loop.remove_signal_handler(signum)
+                signal.signal(signum, old_handler)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
