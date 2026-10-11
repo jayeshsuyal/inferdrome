@@ -189,6 +189,46 @@ Copy failure leaves the collector unable to accept a fresh receipt. The receipt
 binds the intended deadline but cannot prove future guardian uptime; supervise
 the guardian independently of this transfer terminal and the GPU host.
 
+## Diagnose transport failures locally
+
+Each new collector trial creates a private `*-transport.jsonl` sidecar, including
+an empty file when no caught transport exception occurs. Its rows use
+`inferdrome.vllm-router-transport.v1` and contain only the validated request ID,
+replica index, operation stage, fixed exception type, numeric OS errno when
+available, upstream status, downstream-header state and elapsed milliseconds.
+They exclude exception messages, tracebacks, URLs, prompts and generated text.
+
+`awaiting_upstream_headers` covers connection establishment, POST upload and
+response-header receipt together; it does not establish which of those failed.
+Later stages distinguish upstream stream reads from downstream preparation,
+writes and EOF, plus upstream release. Caught transport errors and proxy
+timeouts produce diagnostics. HTTP rejections, parser errors and cancellation
+remain in the ledger; an empty sidecar does not prove the absence of every kind
+of failure. A missing sidecar in an older archive means diagnostics were
+unavailable.
+
+Progress receipts bind the sidecar filename and SHA-256. A separate
+`*-transport-status.json` receipt records the post-cleanup hash, flushed row
+count and write/close failure flag. Failed and interrupted attempts retain their
+partial files through the existing private export inventory. `/router/stats` exposes whether diagnostics are enabled, write/close
+failure and the number of successfully flushed rows. The collector stops if
+required diagnostic writes fail. These fields explain failures; they do not
+change the ledger, comparison inputs or eligibility rules. A transport error
+still makes the comparison ineligible. No POST retries or pool tuning are added.
+
+Reproduce closure before headers, refused connections and truncated streams with
+CPU-only fake replicas before considering a new GPU attempt:
+
+```bash
+PYTHONPATH=src python -m pytest tests/integration/test_vllm_router_transport.py
+```
+
+The standalone router enables the same optional sidecar with
+`--diagnostics /private/run/transport.jsonl`; the destination must be fresh and
+separate from `--ledger`. Any future GPU attempt needs a newly reviewed source
+revision and preparation bundle. Preserve earlier source revisions, sealed kits
+and historical archives.
+
 ## Keep and retrieve every attempt
 
 The immutable preparation and separate collection directory remain private.
