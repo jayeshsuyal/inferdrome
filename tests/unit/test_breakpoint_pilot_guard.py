@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import sys
 from datetime import UTC, datetime, timedelta
@@ -228,6 +229,77 @@ def test_lost_initial_receipt_prevents_arming_but_cleanup_still_retries(
     assert not (guardian.output_dir / "ready.json").exists()
     assert not (guardian.output_dir / "command-0001.json").exists()
     assert json.loads((guardian.output_dir / "result.json").read_text()) == result
+
+
+@pytest.mark.parametrize("all_receipts_fail", [False, True])
+def test_approval_receipt_failure_still_destroys_and_reads_back_without_arming(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    all_receipts_fail: bool,
+) -> None:
+    clock, provider = Clock(), FakeProvider()
+    original_write = guard._write
+    attempted_receipts: list[str] = []
+
+    def storage_full(path: Path, value: object, *, replace: bool = False) -> None:
+        attempted_receipts.append(path.name)
+        if path.name == "approval.json" or all_receipts_fail:
+            raise OSError(errno.ENOSPC, "simulated full receipt filesystem")
+        original_write(path, value, replace=replace)
+
+    monkeypatch.setattr(guard, "_write", storage_full)
+    guardian = make_guard(tmp_path, clock, provider)
+    if all_receipts_fail:
+        # Even losing the final durable receipt must happen after cleanup.
+        with pytest.raises(OSError) as error:
+            guardian.watch()
+        assert error.value.errno == errno.ENOSPC
+    else:
+        result = guardian.watch()
+        assert result["status"] == "ABSENCE_CONFIRMED"
+        assert result["trigger"] == "ARM_RECEIPT_FAILED"
+        assert result["command_receipts_complete"] is False
+        assert json.loads((guardian.output_dir / "result.json").read_text()) == result
+    assert clock.elapsed == 0
+    assert [argv[1:] for argv in provider.calls] == [
+        ["destroy", "instance", "12345", "-y", "--raw"],
+        ["show", "instances", "--raw"],
+    ]
+    assert provider.present is False
+    assert attempted_receipts == [
+        "approval.json",
+        "command-0001.json",
+        "command-0002.json",
+        "result.json",
+    ]
+    assert not (guardian.output_dir / "ready.json").exists()
+
+
+def test_new_receipt_directory_storage_failure_does_not_abandon_instance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock, provider = Clock(), FakeProvider()
+    guardian = make_guard(tmp_path, clock, provider)
+    original_mkdir = Path.mkdir
+
+    def storage_full(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == guardian.output_dir:
+            raise OSError(errno.ENOSPC, "simulated full receipt filesystem")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", storage_full)
+    # The final receipt cannot be written to the missing directory, but only
+    # after both cleanup commands have been attempted and absence observed.
+    with pytest.raises(OSError):
+        guardian.watch()
+    assert [argv[1:] for argv in provider.calls] == [
+        ["destroy", "instance", "12345", "-y", "--raw"],
+        ["show", "instances", "--raw"],
+    ]
+    assert provider.present is False
+    assert guardian.record_errors is True
+    assert not guardian.output_dir.exists()
 
 
 def test_destroy_failure_followed_by_independent_absence_is_confirmed(

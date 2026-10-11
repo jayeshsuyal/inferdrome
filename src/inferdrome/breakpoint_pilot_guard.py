@@ -452,14 +452,23 @@ class Guardian:
         initial_now = self.now()
         if _utc(self.approval["billing_start_utc"]) > initial_now:
             raise GuardError("observed billing start cannot be in the future")
-        self.output_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
-        _write(self.output_dir / "approval.json", self.approval)
         monotonic_hard = self.monotonic() + max(
             0, (self.hard_deadline - initial_now).total_seconds()
         )
         monotonic_cleanup = monotonic_hard - self.approval["cleanup_reserve_s"]
+        try:
+            self.output_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
+        except FileExistsError:
+            # Refuse a duplicate guardian before touching its existing state.
+            raise
+        except OSError:
+            # Approval is valid and the instance is already rented. Failure to
+            # create receipt storage must not abandon exact-instance cleanup.
+            self.record_errors = True
+            return self._cleanup(monotonic_hard, trigger="ARM_DIRECTORY_FAILED")
         trigger = "ARM_FAILED"
         try:
+            _write(self.output_dir / "approval.json", self.approval)
             if self._remaining(self.cleanup_start, monotonic_cleanup) <= 0:
                 trigger = "EXPIRED_AT_ARM"
             elif self._call("inventory", _COMMAND_TIMEOUT_S) is not True:
@@ -495,16 +504,19 @@ class Guardian:
                     trigger = "SIGNAL"
         except (KeyboardInterrupt, SystemExit):
             trigger = "INTERRUPTED"
+        except OSError:
+            self.record_errors = True
+            trigger = "ARM_RECEIPT_FAILED"
         except Exception:
             trigger = "GUARD_FAILED"
         finally:
             # A ready heartbeat stops being offered before cleanup begins.
             ready = self.output_dir / "ready.json"
-            if ready.exists():
-                try:
+            try:
+                if ready.exists():
                     ready.unlink()
-                except OSError:
-                    self.record_errors = True
+            except OSError:
+                self.record_errors = True
         return self._cleanup(monotonic_hard, trigger=trigger)
 
 

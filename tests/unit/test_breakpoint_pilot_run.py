@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
@@ -350,6 +352,91 @@ def test_run_does_not_claim_cleanup_after_partial_startup_cleanup_failure(
     terminal = json.loads((args.output_dir / "session-status.json").read_text())
     assert terminal["status"] == "CLEANUP_UNCONFIRMED"
     assert "could not be stopped" in terminal["local_cleanup"]
+
+
+@pytest.mark.parametrize(
+    "received_signal", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP]
+)
+@pytest.mark.parametrize("stage", ["preflight", "startup", "collection"])
+def test_shutdown_signal_cleans_owned_engines_and_restores_handlers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    received_signal: signal.Signals,
+    stage: str,
+) -> None:
+    from inferdrome import vllm_router_capacity
+
+    args = _mock_run_inputs(tmp_path, monkeypatch)
+    bundle = preparation.load_prepared(args.prepared_dir)
+    bundle.update(protocol={"model": "fixture"}, plans=[{"workload": {}}])
+    owned = [object(), object()]
+    stopped: list[object] = []
+
+    def previous_handler(signum: int, frame: object) -> None:
+        raise AssertionError("collector did not handle the shutdown signal")
+
+    old_handlers = {
+        signum: signal.signal(signum, previous_handler)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+
+    def start(*unused: Any, **kwargs: Any) -> tuple[list[Any], list[Any]]:
+        assert stage != "preflight", "cancelled preflight must not launch engines"
+        kwargs["processes"].extend(owned)
+        return kwargs["processes"], kwargs["logs"]
+
+    def send_signal() -> None:
+        # Check before sending so a regression cannot terminate the test runner.
+        assert signal.getsignal(received_signal) is not previous_handler
+        os.kill(os.getpid(), received_signal)
+
+    async def interrupt() -> None:
+        send_signal()
+        await asyncio.sleep(1)
+        raise AssertionError("shutdown signal did not cancel the collector")
+
+    def snapshot(*unused: Any) -> dict[str, Any]:
+        if stage == "preflight":
+            send_signal()
+        return {"sha256": "fixture"}
+
+    def stop(processes: list[Any], logs: list[Any]) -> None:
+        stopped.extend(processes)
+        # Repeated Ctrl-C during synchronous cleanup must not abandon replica 2.
+        if received_signal == signal.SIGINT:
+            send_signal()
+            send_signal()
+
+    async def ready(*unused: Any) -> None:
+        if stage == "startup":
+            await interrupt()
+
+    async def collect(*unused: Any, **kwargs: Any) -> dict[str, Any]:
+        await interrupt()
+        return {}  # unreachable
+
+    monkeypatch.setattr(pilot, "_start_engines", start)
+    monkeypatch.setattr(pilot.gpu, "_snapshot", snapshot)
+    monkeypatch.setattr(pilot, "_ready", ready)
+    monkeypatch.setattr(pilot, "collect", collect)
+    monkeypatch.setattr(pilot.gpu, "_stop_engines", stop)
+    monkeypatch.setattr(
+        vllm_router_capacity,
+        "_cache_capacity",
+        lambda *unused: {"candidate_valid": True},
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(pilot.run(args))
+        assert stopped == ([] if stage == "preflight" else owned)
+        terminal = json.loads((args.output_dir / "session-status.json").read_text())
+        assert terminal["status"] == "INTERRUPTED"
+        assert terminal["local_cleanup"] == "COMPLETED"
+        for signum in old_handlers:
+            assert signal.getsignal(signum) is previous_handler
+    finally:
+        for signum, old_handler in old_handlers.items():
+            signal.signal(signum, old_handler)
 
 
 def test_log_digest_failure_still_writes_terminal_marker(

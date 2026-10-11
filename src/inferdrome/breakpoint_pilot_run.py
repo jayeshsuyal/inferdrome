@@ -312,6 +312,8 @@ async def _trial(
             # Save first: interruption while waiting must not discard measurement.
             _save(output / f"{label}-result.json", result)
             measurement = result["measurement"]
+            if measurement["status"] != "COMPLETED":
+                raise gpu.TrialInterrupted("client trial did not complete")
             # The client begins after a stats request. Honor its reported start
             # as well as a monotonic minimum, without trusting wall-clock jumps.
             remaining = max(
@@ -327,8 +329,6 @@ async def _trial(
             if remaining:
                 await asyncio.sleep(remaining)
             deadline.require()
-            if measurement["status"] != "COMPLETED":
-                raise gpu.TrialInterrupted("client trial did not complete")
     finally:
         await runner.cleanup()
         if ledger.exists():
@@ -820,10 +820,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     logs: list[Any] = []
     loop = asyncio.get_running_loop()
     current = asyncio.current_task()
-    old_handler = signal.getsignal(signal.SIGTERM)
-    if current is not None:
-        loop.add_signal_handler(signal.SIGTERM, current.cancel)
+    old_handlers = {}
     try:
+        if current is not None:
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                old_handlers[signum] = signal.getsignal(signum)
+                loop.add_signal_handler(signum, current.cancel)
         _save(output / "approval.json", approval)
         session["snapshot"] = gpu._snapshot(args.model_dir)
         version = _command([str(args.vllm_executable), "--version"])
@@ -854,6 +856,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         _save(output / "guardian-ready.json", receipt)
         deadline.require(reservation)
         _save(output / "preflight.json", session)
+        # Let queued signal callbacks cancel us before launching engines after
+        # synchronous preflight. A positive timer also services signal I/O.
+        await asyncio.sleep(0.001)
         processes, logs = _start_engines(
             args.vllm_executable,
             args.model_dir,
@@ -925,8 +930,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 f"engine log hashing failed: {str(log_error)[:300]}"
             )
             session["error"] = str(finalization_error)
-        loop.remove_signal_handler(signal.SIGTERM)
-        signal.signal(signal.SIGTERM, old_handler)
+        for signum, old_handler in old_handlers.items():
+            loop.remove_signal_handler(signum)
+            signal.signal(signum, old_handler)
         _save(output / "session-status.json", session)
         if cleanup_error:
             raise gpu.StudyError(f"local process cleanup failed: {cleanup_error}")

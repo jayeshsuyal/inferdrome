@@ -7,6 +7,7 @@ import json
 import stat
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
@@ -167,9 +168,11 @@ def test_control_replies_read_all_chunks_before_parsing() -> None:
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("reject_window_wait", [False, True])
 def test_interrupted_client_retains_result_and_closes_router(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    reject_window_wait: bool,
 ) -> None:
     original = pilot.run_trial
 
@@ -177,7 +180,33 @@ def test_interrupted_client_retains_result_and_closes_router(
         current = asyncio.current_task()
         assert current is not None
         asyncio.get_running_loop().call_later(0.02, current.cancel)
-        return await original(*args, **kwargs)
+        result = await original(*args, **kwargs)
+        if reject_window_wait:
+
+            async def unexpected_sleep(delay: float) -> None:
+                pytest.fail("interrupted trial waited out its offered window")
+
+            # Scope these overrides to the collector after the real client has
+            # retained its interruption. A fixed wall clock ensures a pre-fix
+            # implementation requests a wait even on a slow test machine.
+            monkeypatch.setattr(
+                pilot,
+                "asyncio",
+                SimpleNamespace(**{**vars(asyncio), "sleep": unexpected_sleep}),
+            )
+            monkeypatch.setattr(
+                pilot,
+                "time",
+                SimpleNamespace(
+                    **{
+                        **vars(time),
+                        "time_ns": lambda: int(
+                            result["measurement"]["started_unix_ns"]
+                        ),
+                    }
+                ),
+            )
+        return result
 
     monkeypatch.setattr(pilot, "run_trial", interrupted)
     output = tmp_path / "interrupted"
@@ -226,9 +255,13 @@ def test_deadline_after_saved_measurement_retains_replay_input(
     assert inputs[0]["result"]["measurement"]["status"] == "COMPLETED"
     report = compare(protocol, plans, inputs)
     assert report["status"] == "INELIGIBLE"
-    assert sum(
-        item["reason"] == "MISSING_TRIAL" for item in report["ineligibility_reasons"]
-    ) == 31
+    assert (
+        sum(
+            item["reason"] == "MISSING_TRIAL"
+            for item in report["ineligibility_reasons"]
+        )
+        == 31
+    )
     assert len(list(output.glob("*-reset.json"))) == 1
     status = json.loads((output / "session-status.json").read_text())
     assert status["status"] == "FAILED"
