@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from inferdrome import breakpoint_pilot_run as pilot_run
 from inferdrome import vllm_router_capacity as capacity
 from inferdrome import vllm_router_followup as followup
 from inferdrome import vllm_router_gpu as gpu
@@ -282,6 +283,11 @@ def test_runner_freezes_threshold_and_rates_before_evaluation(
     }
     frozen = json.loads((args.output_root / "evaluation-freeze.json").read_text())
     assert frozen["http_transport"] == session["http_transport"]
+    # Preserve the followup's native JSON writer and its float declaration.
+    assert type(gpu._http_transport_settings()["upstream_keepalive_s"]) is float
+    assert type(session["http_transport"]["upstream_keepalive_s"]) is float
+    assert followup._http_transport_valid(session["http_transport"])
+    assert followup._http_transport_valid(frozen["http_transport"])
 
 
 def test_forged_decision_is_rejected(tmp_path: Path) -> None:
@@ -558,6 +564,7 @@ def test_incomplete_report_rejects_forged_row_and_invalid_counters(
     "case",
     [
         "valid",
+        "canonical_saved",
         "missing",
         "null",
         "missing_field",
@@ -569,6 +576,14 @@ def test_incomplete_report_rejects_forged_row_and_invalid_counters(
         "extra_field",
         "bool_idle",
         "int_idle",
+        "zero_idle",
+        "negative_idle",
+        "fractional_idle",
+        "near_one_idle",
+        "string_idle",
+        "false_idle",
+        "nan_idle",
+        "infinite_idle",
         "float_server",
         "int_reuse",
         "int_retry",
@@ -601,6 +616,14 @@ def test_report_requires_exact_retained_http_configuration_without_changing_raws
         "extra_field": ("unreviewed_setting", 30),
         "bool_idle": ("upstream_keepalive_s", True),
         "int_idle": ("upstream_keepalive_s", 1),
+        "zero_idle": ("upstream_keepalive_s", 0),
+        "negative_idle": ("upstream_keepalive_s", -1),
+        "fractional_idle": ("upstream_keepalive_s", 0.5),
+        "near_one_idle": ("upstream_keepalive_s", 1.0000000000000002),
+        "string_idle": ("upstream_keepalive_s", "1"),
+        "false_idle": ("upstream_keepalive_s", False),
+        "nan_idle": ("upstream_keepalive_s", float("nan")),
+        "infinite_idle": ("upstream_keepalive_s", float("inf")),
         "float_server": ("engine_http_keepalive_s", 30.0),
         "int_reuse": ("upstream_connection_reuse", 1),
         "int_retry": ("post_retries", 0),
@@ -627,11 +650,19 @@ def test_report_requires_exact_retained_http_configuration_without_changing_raws
     if case != "missing":
         record["http_transport"] = declaration
     session_path = raw / "session.json"
-    session_path.write_text(json.dumps(record))
+    if case == "canonical_saved":
+        # Exercise the native canonical writer and report reader, not json.dumps.
+        assert type(declaration["upstream_keepalive_s"]) is float
+        pilot_run._save(session_path, record)
+        saved = json.loads(session_path.read_bytes())
+        assert type(saved["http_transport"]["upstream_keepalive_s"]) is int
+        assert saved["http_transport"]["upstream_keepalive_s"] == 1
+    else:
+        session_path.write_text(json.dumps(record))
     before = {p.relative_to(raw): p.read_bytes() for p in raw.rglob("*") if p.is_file()}
     output = tmp_path / "report"
     result = followup.report(raw, output)
-    valid = case == "valid"
+    valid = case in {"valid", "int_idle", "canonical_saved"}
     assert result["http_transport_valid"] is valid
     assert result["provenance_valid"] is valid
     assert result["http_transport_provenance"] == (
