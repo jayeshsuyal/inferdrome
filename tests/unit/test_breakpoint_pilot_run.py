@@ -88,6 +88,7 @@ def test_engine_environment_is_separate_and_partial_startup_cleans_owned_only(
     monkeypatch.setenv("PYTHONPATH", "/collector/overlay")
     monkeypatch.setenv("VIRTUAL_ENV", "/collector/env")
     monkeypatch.setenv("PYTHONHOME", "/collector/python")
+    monkeypatch.setenv("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "1")
     starts: list[dict[str, Any]] = []
     owned = object()
     cleaned: list[list[object]] = []
@@ -114,6 +115,7 @@ def test_engine_environment_is_separate_and_partial_startup_cleans_owned_only(
         assert not {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"} & env.keys()
         assert env["CUDA_VISIBLE_DEVICES"] == str(index)
         assert env["HF_HUB_OFFLINE"] == env["VLLM_SERVER_DEV_MODE"] == "1"
+        assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "30"
         assert env["PATH"].startswith("/engine/bin:")
 
 
