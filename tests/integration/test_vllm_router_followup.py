@@ -209,6 +209,13 @@ def test_runner_freezes_threshold_and_rates_before_evaluation(
         **_kwargs: object,
     ) -> dict:
         nonlocal evaluation_seen
+        assert record["http_transport"] == {
+            "upstream_connection_reuse": True,
+            "upstream_keepalive_s": 1.0,
+            "engine_http_keepalive_s": 30,
+            "post_retries": False,
+            "provenance": "CONFIGURED_NOT_RUNTIME_ATTESTED",
+        }
         if phase == "evaluation":
             evaluation_seen += 1
             assert (out / "threshold-freeze.json").is_file()
@@ -266,6 +273,15 @@ def test_runner_freezes_threshold_and_rates_before_evaluation(
     assert session["frozen_rates_rps"] == [4, 5]
     assert evaluation_seen == 64
     assert len(session["conditions"]) == 74
+    assert session["http_transport"] == {
+        "upstream_connection_reuse": True,
+        "upstream_keepalive_s": 1.0,
+        "engine_http_keepalive_s": 30,
+        "post_retries": False,
+        "provenance": "CONFIGURED_NOT_RUNTIME_ATTESTED",
+    }
+    frozen = json.loads((args.output_root / "evaluation-freeze.json").read_text())
+    assert frozen["http_transport"] == session["http_transport"]
 
 
 def test_forged_decision_is_rejected(tmp_path: Path) -> None:
@@ -536,3 +552,94 @@ def test_incomplete_report_rejects_forged_row_and_invalid_counters(
     result = followup.report(raw, tmp_path / "invalid-counters")
     assert result["status"] == "INCOMPLETE"
     assert result["conditions"][0]["cache_counter_status"] == "INVALID_OR_MISSING"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "missing",
+        "null",
+        "missing_field",
+        "server_timeout",
+        "pool_idle",
+        "reuse_disabled",
+        "post_retry",
+        "runtime_claim",
+        "extra_field",
+        "bool_idle",
+        "int_idle",
+        "float_server",
+        "int_reuse",
+        "int_retry",
+    ],
+)
+def test_report_requires_exact_retained_http_configuration_without_changing_raws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    raw = tmp_path / "raw"
+    prepared = raw / "prepared"
+    prepared.mkdir(parents=True)
+    manifest = prepared / "manifest.json"
+    manifest.write_text("{}")
+    # Isolate the report's provenance gate from independent population gates.
+    # This incomplete fixture has no requests and can never become a study result.
+    monkeypatch.setattr(followup, "_prepared", lambda _root: ({}, {}))
+    declaration: dict[str, object] | None = {
+        "upstream_connection_reuse": True,
+        "upstream_keepalive_s": 1.0,
+        "engine_http_keepalive_s": 30,
+        "post_retries": False,
+        "provenance": "CONFIGURED_NOT_RUNTIME_ATTESTED",
+    }
+    changes: dict[str, tuple[str, object]] = {
+        "server_timeout": ("engine_http_keepalive_s", 5),
+        "pool_idle": ("upstream_keepalive_s", 15.0),
+        "reuse_disabled": ("upstream_connection_reuse", False),
+        "post_retry": ("post_retries", True),
+        "runtime_claim": ("provenance", "RUNTIME_ATTESTED"),
+        "extra_field": ("unreviewed_setting", 30),
+        "bool_idle": ("upstream_keepalive_s", True),
+        "int_idle": ("upstream_keepalive_s", 1),
+        "float_server": ("engine_http_keepalive_s", 30.0),
+        "int_reuse": ("upstream_connection_reuse", 1),
+        "int_retry": ("post_retries", 0),
+    }
+    if case == "null":
+        declaration = None
+    elif case == "missing_field":
+        declaration.pop("engine_http_keepalive_s")
+    elif case in changes:
+        key, value = changes[case]
+        declaration[key] = value
+    record = {
+        "schema": followup.SESSION_SCHEMA,
+        "status": "FAILED",
+        "conditions": [],
+        "prepared_manifest_sha256": gpu._file_digest(manifest),
+        "image_reference_declared": gpu.IMAGE,
+        "model_snapshot": {"sha256": followup.qwen3_expected_snapshot_sha256()},
+        "vllm_version": "0.26.0",
+        "source_commit": "a" * 40,
+        "gpus": [{"model": sorted(gpu.GPU_NAMES)[0]}] * 2,
+        "cache_capacity": {"candidate_valid": True},
+    }
+    if case != "missing":
+        record["http_transport"] = declaration
+    session_path = raw / "session.json"
+    session_path.write_text(json.dumps(record))
+    before = {p.relative_to(raw): p.read_bytes() for p in raw.rglob("*") if p.is_file()}
+    output = tmp_path / "report"
+    result = followup.report(raw, output)
+    valid = case == "valid"
+    assert result["http_transport_valid"] is valid
+    assert result["provenance_valid"] is valid
+    assert result["http_transport_provenance"] == (
+        "CONFIGURED_NOT_RUNTIME_ATTESTED" if valid else "UNVERIFIED_CONFIGURATION"
+    )
+    assert result["status"] == "INCOMPLETE"
+    assert result["raw_session_sha256"] == gpu._file_digest(session_path)
+    assert before == {
+        p.relative_to(raw): p.read_bytes() for p in raw.rglob("*") if p.is_file()
+    }
+    assert result["http_transport_provenance"] in (output / "report.md").read_text()

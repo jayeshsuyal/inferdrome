@@ -226,7 +226,9 @@ successfully flushed rows. Trace callback failures also mark diagnostics failed
 without replacing the upstream outcome; the collector stops if required
 diagnostics fail. These fields explain failures; they do not change the ledger,
 comparison inputs or eligibility rules. A transport error
-still makes the comparison ineligible. No POST retries or pool tuning are added.
+still makes the comparison ineligible. That diagnostics change added no POST retries or pool tuning. The subsequent
+[HTTP transport contract](vllm-http-transport.md) explicitly bounds idle
+connection retention; it requires fresh source and full-study preparation.
 
 Reproduce closure before headers, refused connections and truncated streams with
 CPU-only fake replicas before considering a new GPU attempt:

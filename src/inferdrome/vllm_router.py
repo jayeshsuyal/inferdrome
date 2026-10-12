@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import time
 import uuid
@@ -35,6 +36,7 @@ from inferdrome.vllm_request_identity import REQUEST_ID_HEADER, valid_request_id
 
 _REQUEST_ID_KEY = "inferdrome_request_id"
 TRANSPORT_SCHEMA = "inferdrome.vllm-router-transport.v2"
+UPSTREAM_KEEPALIVE_S = 1.0
 
 # Use fixed labels, never an exception's message, repr, args or user-defined name.
 _TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
@@ -67,7 +69,7 @@ def _transport_error(error: BaseException) -> tuple[str, int | None]:
     if not isinstance(underlying, OSError) and isinstance(error.__cause__, OSError):
         underlying = error.__cause__
     number = underlying.errno if isinstance(underlying, OSError) else None
-    errno = number if type(number) is int and -2**31 <= number < 2**31 else None
+    errno = number if type(number) is int and -(2**31) <= number < 2**31 else None
     return exception_type, errno
 
 
@@ -127,6 +129,8 @@ class Router:
         max_stream_bytes: int = 16_777_216,
         saturation_active: int | None = None,
         diagnostics: Path | None = None,
+        upstream_keepalive_s: float = UPSTREAM_KEEPALIVE_S,
+        reuse_upstream_connections: bool = True,
     ) -> None:
         if policy not in {
             "round_robin",
@@ -146,6 +150,19 @@ class Router:
             raise ValueError("candidate threshold must be within router active bound")
         if policy != "cache_saturation" and saturation_active is not None:
             raise ValueError("candidate threshold applies only to cache_saturation")
+        if (
+            type(upstream_keepalive_s) not in (int, float)
+            or type(reuse_upstream_connections) is not bool
+        ):
+            raise ValueError("upstream connection settings are invalid")
+        try:
+            upstream_keepalive_s = float(upstream_keepalive_s)
+        except OverflowError as error:
+            raise ValueError("upstream connection settings are invalid") from error
+        if not math.isfinite(upstream_keepalive_s) or upstream_keepalive_s <= 0:
+            raise ValueError("upstream connection settings are invalid")
+        self.upstream_keepalive_s = upstream_keepalive_s
+        self.reuse_upstream_connections = reuse_upstream_connections
         self.origins = tuple(_origin(value) for value in origins)
         if self.origins[0] == self.origins[1]:
             raise ValueError("replicas must have distinct origins")
@@ -191,10 +208,21 @@ class Router:
                     self.diagnostics, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
                 )
                 self._diagnostics_file = os.fdopen(fd, "w", encoding="utf-8")
+            # Retire idle sockets before the owned server's longer idle limit.
+            # This never closes an active response or retries an inference POST.
+            connector = (
+                aiohttp.TCPConnector(
+                    limit=self.max_active,
+                    use_dns_cache=False,
+                    keepalive_timeout=self.upstream_keepalive_s,
+                )
+                if self.reuse_upstream_connections
+                else aiohttp.TCPConnector(
+                    limit=self.max_active, use_dns_cache=False, force_close=True
+                )
+            )
             self.session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(
-                    limit=self.max_active, use_dns_cache=False
-                ),
+                connector=connector,
                 timeout=aiohttp.ClientTimeout(total=None),
                 trust_env=False,
                 cookie_jar=aiohttp.DummyCookieJar(),
@@ -398,6 +426,12 @@ class Router:
                 "affinity_history_keys": self.history.size,
                 "outcomes": self.outcomes,
                 "policy": self.policy,
+                "upstream_connection_reuse": self.reuse_upstream_connections,
+                "upstream_keepalive_s": (
+                    self.upstream_keepalive_s
+                    if self.reuse_upstream_connections
+                    else None
+                ),
                 "saturation_active": self.saturation_active,
                 "saturation_rule_version": (
                     SATURATION_RULE_VERSION
@@ -726,6 +760,17 @@ def main() -> None:
     parser.add_argument("--max-active", type=int, default=32)
     parser.add_argument("--max-queue", type=int, default=32)
     parser.add_argument("--saturation-active", type=int)
+    parser.add_argument(
+        "--upstream-keepalive-s",
+        type=float,
+        default=UPSTREAM_KEEPALIVE_S,
+        help="Maximum upstream pooled idle time; keep below the server idle timeout",
+    )
+    parser.add_argument(
+        "--no-upstream-reuse",
+        action="store_true",
+        help="Use a fresh upstream connection per POST (diagnostic control)",
+    )
     args = parser.parse_args()
     router = Router(
         (args.replica_a, args.replica_b),
@@ -735,6 +780,8 @@ def main() -> None:
         max_queue=args.max_queue,
         saturation_active=args.saturation_active,
         diagnostics=args.diagnostics,
+        upstream_keepalive_s=args.upstream_keepalive_s,
+        reuse_upstream_connections=not args.no_upstream_reuse,
     )
     web.run_app(make_app(router), host=args.host, port=args.port)
 

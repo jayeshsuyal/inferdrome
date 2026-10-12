@@ -753,6 +753,7 @@ def _start_engines(
                     "CUDA_VISIBLE_DEVICES": str(index),
                     "HF_HUB_OFFLINE": "1",
                     "VLLM_SERVER_DEV_MODE": "1",
+                    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": str(gpu.ENGINE_HTTP_KEEPALIVE_S),
                     "PATH": str(executable.parent) + os.pathsep + env.get("PATH", ""),
                 }
             )
@@ -832,6 +833,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "hard_deadline_utc": hard_deadline.isoformat(),
         "local_cleanup_export_reserve_s": EXPORT_RESERVE_S,
         "image_runtime_provenance": "OPERATOR_DECLARED_NOT_ATTESTED",
+        "http_transport": gpu._http_transport_settings(),
         "provider_teardown": "UNVERIFIED_EXTERNAL_GUARDIAN_REQUIRED",
         "guardian_liveness": "RECENT_RECEIPT_NOT_FUTURE_UPTIME_ATTESTATION",
         "deadline_limitations": (

@@ -1314,6 +1314,7 @@ async def run(args: argparse.Namespace) -> None:
         "provider_instance_id": args.instance_id,
         "image_reference_declared": gpu.IMAGE,
         "image_runtime_provenance": "OPERATOR_DECLARED_NOT_ATTESTED",
+        "http_transport": gpu._http_transport_settings(),
         "model_snapshot": snapshot,
         "vllm_version": version,
         "cli_flags": flags,

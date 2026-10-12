@@ -36,7 +36,7 @@ from inferdrome.qwen3_campaign import (
     QWEN3_8B_REVISION,
     qwen3_expected_snapshot_sha256,
 )
-from inferdrome.vllm_router import Router, make_app
+from inferdrome.vllm_router import UPSTREAM_KEEPALIVE_S, Router, make_app
 from inferdrome.vllm_router_study import (
     POLICIES,
     make_plan,
@@ -64,6 +64,7 @@ PHASE_SEEDS: tuple[
 GPU_NAMES = {"NVIDIA A100-PCIE-40GB", "NVIDIA A100-SXM4-40GB"}
 ENGINE_PORTS = (8001, 8002)
 ROUTER_PORT = 8090
+ENGINE_HTTP_KEEPALIVE_S = 30
 _METRIC_NAMES = (
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
@@ -272,6 +273,17 @@ def _ports_closed() -> bool:
     return True
 
 
+def _http_transport_settings() -> dict[str, Any]:
+    """Retained configured settings; effective runtime needs separate observation."""
+    return {
+        "upstream_connection_reuse": True,
+        "upstream_keepalive_s": UPSTREAM_KEEPALIVE_S,
+        "engine_http_keepalive_s": ENGINE_HTTP_KEEPALIVE_S,
+        "post_retries": False,
+        "provenance": "CONFIGURED_NOT_RUNTIME_ATTESTED",
+    }
+
+
 def _start_engines(
     executable: Path,
     model_dir: Path,
@@ -292,6 +304,7 @@ def _start_engines(
                     "CUDA_VISIBLE_DEVICES": str(index),
                     "HF_HUB_OFFLINE": "1",
                     "VLLM_SERVER_DEV_MODE": "1",
+                    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": str(ENGINE_HTTP_KEEPALIVE_S),
                 }
             )
             process = subprocess.Popen(
@@ -847,6 +860,7 @@ async def run(args: argparse.Namespace) -> None:
         "provider_instance_id": args.instance_id,
         "image_reference_declared": IMAGE,
         "image_runtime_provenance": "OPERATOR_DECLARED_NOT_ATTESTED",
+        "http_transport": _http_transport_settings(),
         "model": QWEN3_8B_MODEL_ID,
         "revision": QWEN3_8B_REVISION,
         "snapshot": snapshot,
