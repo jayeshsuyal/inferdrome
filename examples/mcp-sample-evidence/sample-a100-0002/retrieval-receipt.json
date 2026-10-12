@@ -1,0 +1,8 @@
+{
+  "managed_capability_profile": "managed-vllm-0.26-qwen3-8b-bf16-v1",
+  "repository_commit": "0000000000000000000000000000000000000000",
+  "archive_sha256": "sha256:a3a9a1c98170c74cb7b35ccd3c49da050b1ce2e11b233a0ce6d79207b6e8a683",
+  "verified_at": "2026-08-23T19:37:11Z",
+  "semantic_verification": "SAMPLE_SYNTHETIC_NOT_EVIDENCE",
+  "schema_version": "inferdrome.sample-evidence.v1"
+}

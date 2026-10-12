@@ -1,0 +1,6 @@
+{
+  "archive_name": "capture.tar.gz",
+  "archive_sha256": "sha256:a3a9a1c98170c74cb7b35ccd3c49da050b1ce2e11b233a0ce6d79207b6e8a683",
+  "size_bytes": 61,
+  "schema_version": "inferdrome.sample-evidence.v1"
+}
