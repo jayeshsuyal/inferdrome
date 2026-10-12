@@ -84,3 +84,12 @@ production-wide gain claim. Routing affinity and cache counters do not prove
 KV-cache residency or isolate a causal cache benefit. The passing 4 req/s and
 failing 6 req/s capacity pilot bracket the tested SLO boundary; they do not
 measure the exact maximum rate between them.
+
+## Later arrival-pattern pilot — 12 October 2026
+
+A separate [arrival-pattern pilot](QWEN3_8B_ARRIVAL_PILOT_RESULTS.md) completed
+32 windows and 23,040 evaluation requests, plus 64 separate warmups, on two
+A100 PCIe 40 GB replicas. Its exploratory reversal screen was INCONCLUSIVE:
+cache-only stayed ahead under both schedules. Its workload, hardware,
+source and replication scheme are documented separately; the earlier tables
+and capacity-study 7.2% figure above describe their original studies.

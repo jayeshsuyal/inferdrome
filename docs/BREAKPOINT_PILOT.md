@@ -1,7 +1,12 @@
 # Breakpoint: prepare the first affordable GPU pilot
 
-**Spending is undecided.** These preparations do not rent GPUs. The pilot is
-an exploratory measurement of one timing recipe, with a **3½-hour ceiling for
+**Execution update, 12 October 2026:** the separately approved 32-window pilot
+completed. See the [audited result](QWEN3_8B_ARRIVAL_PILOT_RESULTS.md). The
+preparation and pre-approval budget contract below is retained as its design
+record; execution used a stricter 3h19m30s guarded ceiling.
+
+**At preparation time, spending was undecided.** These preparation commands do
+not rent GPUs. The pilot is an exploratory measurement of one timing recipe, with a **3½-hour ceiling for
 one two-GPU session**. It is a separate, smaller experiment from the
 [full study design](BREAKPOINT_STUDY.md); that design and earlier release
 contracts remain unchanged.
