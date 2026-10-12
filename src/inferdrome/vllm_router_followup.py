@@ -409,6 +409,7 @@ async def run(args: argparse.Namespace) -> None:
         "provider_instance_id": args.instance_id,
         "image_reference_declared": gpu.IMAGE,
         "image_runtime_provenance": "OPERATOR_DECLARED_NOT_ATTESTED",
+        "http_transport": gpu._http_transport_settings(),
         "model_snapshot": snapshot,
         "vllm_version": version,
         "cli_flags": flags,
@@ -666,6 +667,19 @@ def _verify_route_decisions(
     return {"decisions": len(turns), "reasons": dict(reasons)}
 
 
+def _http_transport_valid(value: object) -> bool:
+    """Require the exact configured declaration, without attesting runtime."""
+    expected = gpu._http_transport_settings()
+    return (
+        isinstance(value, dict)
+        and set(value) == set(expected)
+        and all(
+            type(value[key]) is type(configured) and value[key] == configured
+            for key, configured in expected.items()
+        )
+    )
+
+
 def report(raw_root: Path, output_root: Path) -> dict[str, Any]:
     record = json.loads((raw_root / "session.json").read_text())
     if record.get("schema") != SESSION_SCHEMA:
@@ -852,6 +866,7 @@ def report(raw_root: Path, output_root: Path) -> dict[str, Any]:
     pilot = [item for item in record["conditions"] if item["phase"] == "pilot"]
     evaluation = [value for value in values if value["phase"] == "evaluation"]
     gpus = record.get("gpus")
+    http_transport_valid = _http_transport_valid(record.get("http_transport"))
     provenance_valid = bool(
         record.get("image_reference_declared") == gpu.IMAGE
         and record.get("model_snapshot", {}).get("sha256")
@@ -863,6 +878,7 @@ def report(raw_root: Path, output_root: Path) -> dict[str, Any]:
         and gpus[0].get("model") == gpus[1].get("model")
         and gpus[0].get("model") in gpu.GPU_NAMES
         and record.get("cache_capacity", {}).get("candidate_valid") is True
+        and http_transport_valid
     )
     calibration_labels = [
         f"calibration-{pattern}-t{threshold}-5rps"
@@ -1034,6 +1050,10 @@ def report(raw_root: Path, output_root: Path) -> dict[str, Any]:
         "raw_session_sha256": inventory["session.json"],
         "raw_inventory": inventory,
         "provenance_valid": provenance_valid,
+        "http_transport_valid": http_transport_valid,
+        "http_transport_provenance": "CONFIGURED_NOT_RUNTIME_ATTESTED"
+        if http_transport_valid
+        else "UNVERIFIED_CONFIGURATION",
         "frozen_saturation_active": frozen_threshold,
         "threshold_calibration_valid": threshold_valid,
         "frozen_rates_rps": frozen_rates,
@@ -1056,6 +1076,7 @@ def report(raw_root: Path, output_root: Path) -> dict[str, Any]:
         "# vLLM affinity saturation follow-up",
         "",
         f"Status: **{result['status']}**; session: `{record['status']}`.",
+        f"HTTP transport: `{result['http_transport_provenance']}`.",
         f"Frozen threshold: {frozen_threshold} active requests on preferred "
         f"replica; rates: {frozen_rates} rps.",
         "",
