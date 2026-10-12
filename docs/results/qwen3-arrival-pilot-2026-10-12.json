@@ -1,0 +1,373 @@
+{
+  "schema": "inferdrome.public-breakpoint-pilot-summary.v1",
+  "date": "2026-10-12",
+  "scope": "EXPLORATORY_FULL_PILOT_ONLY",
+  "evidence_eligible": false,
+  "native_comparison_status": "INCONCLUSIVE",
+  "held_out_confirmation": "NOT_IMPLEMENTED",
+  "policy_a": "cache_only",
+  "policy_b": "least_busy",
+  "source_revision": "c4a2ad0725a2a971e59006fb3354cefda2217ead",
+  "public_source_merge_revision": "ea0d4d15b941c8caa40d0c1913d2b51318c26000",
+  "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "settings": {
+    "model": "Qwen3-8B",
+    "vllm_version": "0.26.0+cu129",
+    "replicas": 2,
+    "gpu_per_replica": "A100 PCIe 40 GB",
+    "tensor_parallel_size_per_replica": 1,
+    "dtype": "BF16",
+    "routing_policies": [
+      "cache_only",
+      "least_busy"
+    ],
+    "arrival_schedules": [
+      "baseline",
+      "candidate"
+    ],
+    "matched_blocks": 8,
+    "window_s": 120,
+    "offered_rps": 6,
+    "first_content_slo_ms": 500,
+    "completion_slo_ms": 5000,
+    "client_lag_p95_limit_ms": 10,
+    "client_queue_p95_limit_ms": 10,
+    "candidate_group_size": 8,
+    "minimum_retained_spacing_fraction": {
+      "numerator": 1,
+      "denominator": 4
+    },
+    "maximum_advance_ms": 1000,
+    "workload_profile": "control.v1",
+    "document_prefixes": 48,
+    "target_prefix_tokens": 4096,
+    "context_length": 8192,
+    "output_tokens_per_evaluation_request": 128,
+    "image_reference": "vastai/vllm@sha256:39f2f782305dd7bf8478b748140a2ed719de2824bed51d1862f355dde9891f77",
+    "image_identity_provenance": "OPERATOR_DECLARED_NOT_ATTESTED"
+  },
+  "population": {
+    "windows": 32,
+    "evaluation_offered": 23040,
+    "evaluation_completed_http200": 23040,
+    "separate_warmup_requests": 64,
+    "warmup_output_tokens": 512,
+    "additional_calibration_requests": 0
+  },
+  "checks": {
+    "native_replay_matches_saved_report": true,
+    "native_gate_ineligibility_reasons": 0,
+    "recorded_transport_faults": 0,
+    "diagnostic_sink_failures": 0,
+    "valid_sidecars": 32,
+    "valid_status_receipts": 32,
+    "valid_progress_receipts": 32,
+    "valid_reset_receipts": 32,
+    "valid_safety_receipts": 97
+  },
+  "cells": [
+    {
+      "condition": "baseline",
+      "policy": "cache_only",
+      "windows": 8,
+      "offered": 5760,
+      "slo_good": 5179,
+      "denominator_s": 960,
+      "slo_goodput_rps": 5.394791666666666
+    },
+    {
+      "condition": "baseline",
+      "policy": "least_busy",
+      "windows": 8,
+      "offered": 5760,
+      "slo_good": 3008,
+      "denominator_s": 960,
+      "slo_goodput_rps": 3.1333333333333333
+    },
+    {
+      "condition": "candidate",
+      "policy": "cache_only",
+      "windows": 8,
+      "offered": 5760,
+      "slo_good": 5139,
+      "denominator_s": 960,
+      "slo_goodput_rps": 5.353125
+    },
+    {
+      "condition": "candidate",
+      "policy": "least_busy",
+      "windows": 8,
+      "offered": 5760,
+      "slo_good": 2545,
+      "denominator_s": 960,
+      "slo_goodput_rps": 2.6510416666666665
+    }
+  ],
+  "blocks": [
+    {
+      "block": 1,
+      "seed": 1009,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 653,
+        "policy_b_slo_good": 471,
+        "a_minus_b_slo_good": 182,
+        "a_minus_b_goodput_rps": 1.5166666666666666
+      },
+      "candidate": {
+        "policy_a_slo_good": 644,
+        "policy_b_slo_good": 310,
+        "a_minus_b_slo_good": 334,
+        "a_minus_b_goodput_rps": 2.783333333333333
+      }
+    },
+    {
+      "block": 2,
+      "seed": 1013,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 641,
+        "policy_b_slo_good": 377,
+        "a_minus_b_slo_good": 264,
+        "a_minus_b_goodput_rps": 2.2
+      },
+      "candidate": {
+        "policy_a_slo_good": 637,
+        "policy_b_slo_good": 342,
+        "a_minus_b_slo_good": 295,
+        "a_minus_b_goodput_rps": 2.4583333333333335
+      }
+    },
+    {
+      "block": 3,
+      "seed": 1019,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 648,
+        "policy_b_slo_good": 343,
+        "a_minus_b_slo_good": 305,
+        "a_minus_b_goodput_rps": 2.5416666666666665
+      },
+      "candidate": {
+        "policy_a_slo_good": 648,
+        "policy_b_slo_good": 293,
+        "a_minus_b_slo_good": 355,
+        "a_minus_b_goodput_rps": 2.9583333333333335
+      }
+    },
+    {
+      "block": 4,
+      "seed": 1021,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 646,
+        "policy_b_slo_good": 306,
+        "a_minus_b_slo_good": 340,
+        "a_minus_b_goodput_rps": 2.8333333333333335
+      },
+      "candidate": {
+        "policy_a_slo_good": 637,
+        "policy_b_slo_good": 306,
+        "a_minus_b_slo_good": 331,
+        "a_minus_b_goodput_rps": 2.7583333333333333
+      }
+    },
+    {
+      "block": 5,
+      "seed": 1031,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 641,
+        "policy_b_slo_good": 408,
+        "a_minus_b_slo_good": 233,
+        "a_minus_b_goodput_rps": 1.9416666666666667
+      },
+      "candidate": {
+        "policy_a_slo_good": 637,
+        "policy_b_slo_good": 316,
+        "a_minus_b_slo_good": 321,
+        "a_minus_b_goodput_rps": 2.675
+      }
+    },
+    {
+      "block": 6,
+      "seed": 1033,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 653,
+        "policy_b_slo_good": 367,
+        "a_minus_b_slo_good": 286,
+        "a_minus_b_goodput_rps": 2.3833333333333333
+      },
+      "candidate": {
+        "policy_a_slo_good": 651,
+        "policy_b_slo_good": 359,
+        "a_minus_b_slo_good": 292,
+        "a_minus_b_goodput_rps": 2.433333333333333
+      }
+    },
+    {
+      "block": 7,
+      "seed": 1039,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 644,
+        "policy_b_slo_good": 339,
+        "a_minus_b_slo_good": 305,
+        "a_minus_b_goodput_rps": 2.5416666666666665
+      },
+      "candidate": {
+        "policy_a_slo_good": 640,
+        "policy_b_slo_good": 351,
+        "a_minus_b_slo_good": 289,
+        "a_minus_b_goodput_rps": 2.408333333333333
+      }
+    },
+    {
+      "block": 8,
+      "seed": 1049,
+      "goodput_denominator_ns": 120000000000,
+      "baseline": {
+        "policy_a_slo_good": 653,
+        "policy_b_slo_good": 397,
+        "a_minus_b_slo_good": 256,
+        "a_minus_b_goodput_rps": 2.1333333333333333
+      },
+      "candidate": {
+        "policy_a_slo_good": 645,
+        "policy_b_slo_good": 268,
+        "a_minus_b_slo_good": 377,
+        "a_minus_b_goodput_rps": 3.1416666666666666
+      }
+    }
+  ],
+  "statistics": {
+    "replication_unit": "MATCHED_FOUR_TRIAL_BLOCK",
+    "contrast": "POLICY_A_MINUS_POLICY_B_SLO_GOODPUT",
+    "minimum_effect_microrps": 100000,
+    "minimum_effect_rps": 0.1,
+    "baseline": {
+      "block_count": 8,
+      "direction": "POLICY_A_ADVANTAGE",
+      "mean_rps": 2.261458333333333,
+      "median_rps": 2.2916666666666665,
+      "min_rps": 1.5166666666666666,
+      "max_rps": 2.8333333333333335,
+      "exact_rps": {
+        "mean": {
+          "numerator": "2171",
+          "denominator": "960"
+        },
+        "median": {
+          "numerator": "55",
+          "denominator": "24"
+        },
+        "min": {
+          "numerator": "91",
+          "denominator": "60"
+        },
+        "max": {
+          "numerator": "17",
+          "denominator": "6"
+        }
+      },
+      "exceedances": 8,
+      "at_margin": 0,
+      "opposite_or_below": 0,
+      "pvalue": {
+        "numerator": "1",
+        "denominator": "256"
+      },
+      "alpha": {
+        "numerator": "1",
+        "denominator": "40"
+      },
+      "direction_supported": true
+    },
+    "candidate": {
+      "block_count": 8,
+      "direction": "POLICY_B_ADVANTAGE",
+      "mean_rps": 2.7020833333333334,
+      "median_rps": 2.716666666666667,
+      "min_rps": 2.408333333333333,
+      "max_rps": 3.1416666666666666,
+      "exact_rps": {
+        "mean": {
+          "numerator": "1297",
+          "denominator": "480"
+        },
+        "median": {
+          "numerator": "163",
+          "denominator": "60"
+        },
+        "min": {
+          "numerator": "289",
+          "denominator": "120"
+        },
+        "max": {
+          "numerator": "377",
+          "denominator": "120"
+        }
+      },
+      "exceedances": 0,
+      "at_margin": 0,
+      "opposite_or_below": 8,
+      "pvalue": {
+        "numerator": "1",
+        "denominator": "1"
+      },
+      "alpha": {
+        "numerator": "1",
+        "denominator": "40"
+      },
+      "direction_supported": false
+    },
+    "reversal_signal": false,
+    "test": "EXACT_ONE_SIDED_BINOMIAL_MARGIN_EXCEEDANCE",
+    "null_exceedance_probability": {
+      "numerator": "1",
+      "denominator": "2"
+    },
+    "planned_familywise_alpha": {
+      "numerator": "1",
+      "denominator": "20"
+    },
+    "multiplicity_scope": "TWO_PREDECLARED_DIRECTIONS_FOR_ONE_CANDIDATE_ONLY",
+    "ties": "AT_MARGIN_COUNTS_AS_FAILURE_WITH_ALL_PLANNED_BLOCKS_RETAINED",
+    "assumptions": [
+      "INDEPENDENT_BLOCKS",
+      "NULL_DIRECTIONAL_MARGIN_EXCEEDANCE_PROBABILITY_AT_MOST_ONE_HALF",
+      "DIRECTIONS_AND_MARGIN_PREDECLARED"
+    ],
+    "inference_scope": "EXCEEDANCE_PROBABILITY_NOT_POPULATION_MEAN",
+    "independent_execution": "UNVERIFIED",
+    "search_multiplicity": "UNCONTROLLED",
+    "confidence_interval": null
+  },
+  "fingerprints": {
+    "full_pilot_plan_sha256": "sha256:83c5acaf74bbc5bd8224344df2961a3cf0c3a6ee13c813fd3de32d232442976c",
+    "semantic_protocol_sha256": "sha256:0e7540ec4b85c0975763d07b0ee888fa2e7030d48765920fa185535c1fee9a5f",
+    "private_operator_runner_sha256": "sha256:63fb98317c550f8cf267cfb7c97daad07fcb31809584e0df668071d46621d510",
+    "private_archive_sha256": "sha256:589e00ba212c621e7c3ccf8450504573bd5598e8f2a67f51c3c88bb5615209fa",
+    "private_audit_sha256": "sha256:332b5f8535759117a12216d7a93d8496d56f8a910700e018a4851f2e733758dc",
+    "independent_replay_sha256": "sha256:d103836305c2864e36b21ba041f8e57940807e1db4acf3eb6cfa69c3a594667d"
+  },
+  "transport": {
+    "client_pooled_idle_retention_s": 1,
+    "owned_engine_keepalive_config_s": 30,
+    "post_retries": false,
+    "configured_provenance": "CONFIGURED_NOT_RUNTIME_ATTESTED",
+    "selected_process_environment_observed_before_collection": true,
+    "effective_server_timeout_attested": false
+  },
+  "interpretation": "NO_POLICY_RANKING_REVERSAL_FLAGGED_FOR_THIS_FROZEN_RECIPE",
+  "limits": [
+    "Eight matched blocks are replicates; requests are correlated observations.",
+    "This is an exploratory directional screen, not held-out confirmation or customer acceptance.",
+    "Block independence and search multiplicity remain unverified; no confidence interval is reported.",
+    "The observed ordering is specific to this workload and host. INCONCLUSIVE does not establish equivalence or rule out other reversals.",
+    "Process environment does not attest effective timeout or prove a historical disconnection cause.",
+    "Private raw archives and operator wrapper are not publicly downloadable; fingerprints identify retained records.",
+    "This pilot is separate from the historical 21300-request baseline and its separate capacity-study 7.2% comparison."
+  ]
+}

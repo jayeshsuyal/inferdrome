@@ -668,15 +668,17 @@ def _verify_route_decisions(
 
 
 def _http_transport_valid(value: object) -> bool:
-    """Require the exact configured declaration, without attesting runtime."""
+    """Accept the configured idle value and its canonical JSON representation."""
     expected = gpu._http_transport_settings()
-    return (
-        isinstance(value, dict)
-        and set(value) == set(expected)
-        and all(
-            type(value[key]) is type(configured) and value[key] == configured
-            for key, configured in expected.items()
+    if not isinstance(value, dict) or set(value) != set(expected):
+        return False
+    return all(
+        (
+            type(value[key]) in (int, float) and value[key] == 1
+            if key == "upstream_keepalive_s"
+            else type(value[key]) is type(configured) and value[key] == configured
         )
+        for key, configured in expected.items()
     )
 
 

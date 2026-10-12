@@ -29,15 +29,16 @@ flowchart LR
 
 ## Measured on two A100s
 
-A later, manually hosted Qwen3-8B study used **two independent vLLM 0.26
-replicas**, one per A100-SXM4 40 GB GPU. Four routing policies saw matched
-synthetic traffic. The studies are descriptive; they do not establish a
-production routing winner.
+The earlier routing and capacity studies used **two independent Qwen3-8B
+vLLM 0.26 replicas**, one per A100-SXM4 40 GB GPU. Four routing policies saw
+matched synthetic traffic. A later arrival-pattern pilot used A100 PCIe 40 GB
+GPUs. These synthetic studies do not establish a production routing winner.
 
 | Study | What happened |
 | --- | --- |
 | Routing baseline | **21,300/21,300 requests completed:** 2,100 calibration and 19,200 evaluation. All four policies tied at **4.000 SLO-good requests/s** at the selected 4 requests/s rate. |
 | Separate capacity sweep | Across four matched blocks at 6 offered requests/s, cache-only averaged **5.633** versus least-busy **5.254 SLO-good requests/s** (**+7.2%**). Every policy missed the sweep's 95% pass rule at that rate. |
+| Arrival-pattern pilot | **23,040/23,040 evaluation requests completed**, plus 64 separate warmups, across 32 windows. Cache-only led both schedules; the reversal screen was **INCONCLUSIVE**. [Method and results](docs/QWEN3_8B_ARRIVAL_PILOT_RESULTS.md). |
 
 Read the [method, source revisions, calculations, and limitations](docs/VLLM_ROUTER_RESULTS.md).
 The private raw archives are not published.
@@ -63,7 +64,7 @@ screens and controls.
 | Understand the pipeline | [Architecture](docs/ARCHITECTURE.md) and [product charter](docs/PRODUCT.md) |
 | Use the CLI and evidence bundles | [CLI guide](docs/CLI.md) and [bundle verification](docs/EVIDENCE_BUNDLE_V1.md) |
 | Explore routing reversals | [Breakpoint: search, reduce, confirm](docs/BREAKPOINT.md), with a GPU-free walkthrough |
-| Examine the GPU studies | [Two-replica results](docs/VLLM_ROUTER_RESULTS.md) and [real-GPU proof](docs/REAL_GPU_PROOF.md) |
+| Examine the GPU studies | [Routing/capacity results](docs/VLLM_ROUTER_RESULTS.md), [arrival-pattern pilot](docs/QWEN3_8B_ARRIVAL_PILOT_RESULTS.md), and [real-GPU proof](docs/REAL_GPU_PROOF.md) |
 | Review release scope | [v0.2 contract](docs/V0_2_CAPABILITIES.md), [v0.3 contract](docs/V0_3_CAPABILITIES.md), and [detailed project notes](README_DETAILS.md) |
 
 The v0.2/v0.3 contracts describe their historical release boundaries. The
