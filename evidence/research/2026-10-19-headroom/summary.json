@@ -1,0 +1,255 @@
+{
+  "report_kind": "aggregate_research_summary",
+  "experiment": "400 ms versus 500 ms forwarding cutoff during peer restart",
+  "runtime": {
+    "vllm": "0.26.0+cu129",
+    "model": "Qwen/Qwen3-8B",
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "gpus": "2 x A100 PCIe 40 GB",
+    "physical_hosts": 1
+  },
+  "design": {
+    "pairs": 12,
+    "trials": 24,
+    "orders": {
+      "500_then400": 6,
+      "400_then500": 6
+    },
+    "total_offers": 25920,
+    "history_offers": 8640,
+    "primary_recovery_offers": 17280,
+    "primary_recovery_offers_per_arm": 8640,
+    "offered_requests_per_second": 6,
+    "document_prefix_tokens": 4096,
+    "output_tokens": 128,
+    "history_seconds_per_trial": 60,
+    "recovery_seconds_per_trial": 120,
+    "return_policy": "immediate on first health; no priming",
+    "per_replica_admission_cap_after_loss": 16,
+    "first_token_deadline_ms": 500,
+    "completion_deadline_ms": 5000,
+    "rejects_timeouts_missing_and_errors_count_as_misses": true
+  },
+  "primary": {
+    "500ms": {
+      "offers": 8640,
+      "slo_good": 5220,
+      "misses": 3420
+    },
+    "400ms": {
+      "offers": 8640,
+      "slo_good": 5642,
+      "misses": 2998
+    },
+    "fewer_misses": 422,
+    "relative_miss_reduction_percent": 12.339181286549708,
+    "slo_good_increase_percentage_points": 4.8842592592592595,
+    "mean_fewer_misses_per_pair": 35.166666666666664,
+    "descriptive_95pct_paired_t_interval": [
+      27.74797164246468,
+      42.58536169086865
+    ],
+    "interval_independence_not_established": true
+  },
+  "pairs": [
+    {
+      "pair": 1,
+      "order_ms": [
+        500,
+        400
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 291,
+      "misses_400ms": 260,
+      "fewer_misses": 31,
+      "valid": true
+    },
+    {
+      "pair": 2,
+      "order_ms": [
+        500,
+        400
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 266,
+      "misses_400ms": 251,
+      "fewer_misses": 15,
+      "valid": true
+    },
+    {
+      "pair": 3,
+      "order_ms": [
+        500,
+        400
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 278,
+      "misses_400ms": 251,
+      "fewer_misses": 27,
+      "valid": true
+    },
+    {
+      "pair": 4,
+      "order_ms": [
+        400,
+        500
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 287,
+      "misses_400ms": 268,
+      "fewer_misses": 19,
+      "valid": true
+    },
+    {
+      "pair": 5,
+      "order_ms": [
+        400,
+        500
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 289,
+      "misses_400ms": 239,
+      "fewer_misses": 50,
+      "valid": true
+    },
+    {
+      "pair": 6,
+      "order_ms": [
+        500,
+        400
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 291,
+      "misses_400ms": 251,
+      "fewer_misses": 40,
+      "valid": true
+    },
+    {
+      "pair": 7,
+      "order_ms": [
+        500,
+        400
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 294,
+      "misses_400ms": 240,
+      "fewer_misses": 54,
+      "valid": true
+    },
+    {
+      "pair": 8,
+      "order_ms": [
+        400,
+        500
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 285,
+      "misses_400ms": 242,
+      "fewer_misses": 43,
+      "valid": true
+    },
+    {
+      "pair": 9,
+      "order_ms": [
+        400,
+        500
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 295,
+      "misses_400ms": 254,
+      "fewer_misses": 41,
+      "valid": true
+    },
+    {
+      "pair": 10,
+      "order_ms": [
+        400,
+        500
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 271,
+      "misses_400ms": 242,
+      "fewer_misses": 29,
+      "valid": true
+    },
+    {
+      "pair": 11,
+      "order_ms": [
+        500,
+        400
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 285,
+      "misses_400ms": 251,
+      "fewer_misses": 34,
+      "valid": true
+    },
+    {
+      "pair": 12,
+      "order_ms": [
+        400,
+        500
+      ],
+      "offers_per_arm": 720,
+      "misses_500ms": 288,
+      "misses_400ms": 249,
+      "fewer_misses": 39,
+      "valid": true
+    }
+  ],
+  "quality": {
+    "valid_pairs": 12,
+    "invalid_or_replaced_pairs": 0,
+    "independent_audit_checks_passed": 552,
+    "independent_audit_checks_total": 552,
+    "all_p95_scheduling_and_client_queue_gates_below10ms": true,
+    "worst_trial_p95_scheduling_lag_ms": 0.177088,
+    "worst_trial_p95_client_queue_ms": 0.068059,
+    "all_history_rejections": 0,
+    "healthy_reference_slo_good": 2880,
+    "healthy_reference_offered": 2880
+  },
+  "secondary_first30": {
+    "offers_per_arm": 2160,
+    "slo_good_500ms": 617,
+    "slo_good_400ms": 771,
+    "pairs_favoring400ms": 10,
+    "all12_survivor_only_windows_eligible": true
+  },
+  "provenance_digests": {
+    "base_source_commit": "8bea7c7842c44df33d29a22faf21c78be870b30e",
+    "effective_source_identity_sha256": "sha256:0998b0d9bac5ec35aeb3b4db866d9fcf4de545d2c64817562baa2f789c5c4475",
+    "campaign_plan_sha256": "sha256:c7f6e567a8f9a9b3a9ced0fac5bd8a9300c5acb932843271b17b8534f76edad8",
+    "campaign_binding_sha256": "sha256:2ddb105bbd63c80d43c0674251cefe4a25f36622a29a0ccfa0678c9baa99c788",
+    "local_final_receipt_sha256": "sha256:80c6d9efc930b32d150ea446dfe45727973efcda7e20c8572c7942f17d89f7a6"
+  },
+  "earlier_baseline": {
+    "date": "2026-09-28",
+    "gpus": "2 x A100-SXM4 40 GB",
+    "total_offers": 21300,
+    "calibration_offers": 2100,
+    "evaluation_offers": 19200,
+    "evaluation_blocks": 4,
+    "policies": [
+      "round_robin",
+      "least_busy",
+      "cache_only",
+      "cache_plus_load"
+    ],
+    "evaluation_offers_per_policy": 4800,
+    "slo_good_requests_per_second_each_policy": 4.0,
+    "input_tokens": 286,
+    "output_tokens": 128,
+    "workers_remain_loaded": true,
+    "aggregate_report_sha256": "sha256:22668f38d0a73470303045c7559961c0a6e4b67d9c02151ca94c6e1ef5204d77",
+    "interpretation": "Four-way tie at tested load; no routing-policy advantage demonstrated."
+  },
+  "limits": [
+    "Single physical host and one synthetic workload; broader host/workload performance untested.",
+    "Candidate SLO attainment 65.30% remains below 95% target.",
+    "The t interval is descriptive; repeated pairs need not be independent.",
+    "Counts and digests permit aggregate inspection; full raw-data replay requires the privately retained capture and sealed research runner.",
+    "Research summaries do not change frozen release capability or customer acceptance contracts.",
+    "This file excludes prompts, responses, request IDs, provider credentials, endpoints, billing and private filesystem paths."
+  ]
+}

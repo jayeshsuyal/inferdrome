@@ -1,78 +1,49 @@
 # Inferdrome
 
-**Turn an LLM-serving run into evidence someone else can check.**
+**LLM-serving experiments with results you can audit.**
 
-Inferdrome pins an experiment, captures the benchmark's native output, reduces
-request-level observations into reproducible measurements, and seals the result
-for offline verification. The local dashboard lets you trace a measurement
-back to its run and evidence. ExitSpec remains the separate customer acceptance
-authority.
+A Python toolkit for controlled traffic, routing and admission experiments,
+request traces, queue/KV metrics, and offline evidence verification.
 
-```mermaid
-flowchart LR
-    A[Experiment + pinned inputs] --> B[Serving run]
-    B --> C[Native output + request records]
-    C --> D[Deterministic measurements]
-    D --> E[Sealed evidence bundle]
-    E --> F[Offline verifier]
-    E --> G[Read-only dashboard]
-```
+## Measured recovery result
 
-## What you can inspect
+A **100 ms admission-headroom guard reduced recovery SLO misses by 12.34%**
+on Qwen3-8B with vLLM 0.26 and two A100 PCIe GPUs.
 
-- **A reproducible run:** resolved inputs, pinned runtime and model identities,
-  complete request accounting, and the benchmark's untouched output.
-- **A checked result:** deterministic reduction, exact-byte manifests, and an
-  independent offline verifier. Missing observations stay missing.
-- **A readable trail:** the local dashboard connects measurements, routing
-  decisions, outcomes, and evidence without changing the underlying bundle.
+| Recovery outcome | 500 ms cutoff | 400 ms cutoff |
+| --- | ---: | ---: |
+| Offers per arm | 8,640 | 8,640 |
+| SLO misses | 3,420 | 2,998 |
+| SLO attainment | 60.42% | 65.30% |
 
-## Measured on two A100s
+**24 trials · 25,920 total offers · improvement in all 12 matched pairs.**
+Both arms used a 500 ms first-token and 5 s completion deadline; rejects counted
+as misses. One host and synthetic workload; attainment remains below the 95% target.
 
-The earlier routing and capacity studies used **two independent Qwen3-8B
-vLLM 0.26 replicas**, one per A100-SXM4 40 GB GPU. Four routing policies saw
-matched synthetic traffic. A later arrival-pattern pilot used A100 PCIe 40 GB
-GPUs. These synthetic studies do not establish a production routing winner.
+[Method and all pairs](docs/research/RECOVERY_HEADROOM.md) ·
+[Aggregate data](evidence/research/2026-10-19-headroom/summary.json)
 
-| Study | What happened |
-| --- | --- |
-| Routing baseline | **21,300/21,300 requests completed:** 2,100 calibration and 19,200 evaluation. All four policies tied at **4.000 SLO-good requests/s** at the selected 4 requests/s rate. |
-| Separate capacity sweep | Across four matched blocks at 6 offered requests/s, cache-only averaged **5.633** versus least-busy **5.254 SLO-good requests/s** (**+7.2%**). Every policy missed the sweep's 95% pass rule at that rate. |
-| Arrival-pattern pilot | **23,040/23,040 evaluation requests completed**, plus 64 separate warmups, across 32 windows. Cache-only led both schedules; the reversal screen was **INCONCLUSIVE**. [Method and results](docs/QWEN3_8B_ARRIVAL_PILOT_RESULTS.md). |
+## Earlier studies
 
-Read the [method, source revisions, calculations, and limitations](docs/VLLM_ROUTER_RESULTS.md).
-The private raw archives are not published.
+**Routing baseline:** 21,300 requests across four policies, all tied at
+4 SLO-good requests/s with short prompts and both workers healthy.
+[Results](docs/VLLM_ROUTER_RESULTS.md).
 
-## Try the local walkthrough
+Also see the separate [capacity sweep](docs/VLLM_ROUTER_RESULTS.md#separate-capacity-sweep)
+and [arrival-pattern pilot](docs/QWEN3_8B_ARRIVAL_PILOT_RESULTS.md).
 
-Requires Python 3.12 and [`uv`](https://docs.astral.sh/uv/). From the repository root:
+## Try it locally
+
+Requires Python 3.12 and `uv`.
 
 ```bash
 uv sync --frozen --extra dev --extra dashboard
-./scripts/run_local_demo.py
+uv run python scripts/run_local_demo.py
 ```
 
-This creates and verifies a **synthetic** two-endpoint campaign, then opens the
-read-only dashboard on loopback. It demonstrates the evidence workflow and does
-not replay the GPU studies. See the [demo guide](docs/LOCAL_DEMO.md) for the
-screens and controls.
+The demo uses synthetic CPU data. GPU results come from separate private captures.
+The research studies are separate from the frozen release capability contracts.
 
-## Find your way around
-
-| If you want to… | Start here |
-| --- | --- |
-| Understand the pipeline | [Architecture](docs/ARCHITECTURE.md) and [product charter](docs/PRODUCT.md) |
-| Use the CLI and evidence bundles | [CLI guide](docs/CLI.md) and [bundle verification](docs/EVIDENCE_BUNDLE_V1.md) |
-| Explore routing reversals | [Breakpoint: search, reduce, confirm](docs/BREAKPOINT.md), with a GPU-free walkthrough |
-| Examine the GPU studies | [Routing/capacity results](docs/VLLM_ROUTER_RESULTS.md), [arrival-pattern pilot](docs/QWEN3_8B_ARRIVAL_PILOT_RESULTS.md), and [real-GPU proof](docs/REAL_GPU_PROOF.md) |
-| Review release scope | [v0.2 contract](docs/V0_2_CAPABILITIES.md), [v0.3 contract](docs/V0_3_CAPABILITIES.md), and [detailed project notes](README_DETAILS.md) |
-
-The v0.2/v0.3 contracts describe their historical release boundaries. The
-later two-A100 manual-host study does not turn the separate GCP guarded
-campaign or Kubernetes production operation into an executed claim. The
-dashboard is local and read-only; it was outside the v0.1 release gate.
-Cloud examples remain dry-run/reference.
-Inferdrome produces measurements. ExitSpec owns customer acceptance.
-
-Repository-authored code is [Apache-2.0 licensed](LICENSE). Model weights,
-workloads, generated output, and private evidence have separate terms.
+[Demo](docs/LOCAL_DEMO.md) · [Architecture](docs/ARCHITECTURE.md) ·
+[CLI](docs/CLI.md) · [Breakpoint](docs/BREAKPOINT.md) ·
+[Engineering notes](README_DETAILS.md) · [Apache-2.0](LICENSE)
