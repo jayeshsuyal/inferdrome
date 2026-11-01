@@ -118,7 +118,7 @@ pairs without rerunning traffic. Subsequent complete content-hash checks passed.
 The original error was rethrown at CLI exit after verified delivery and cleanup;
 the exact offending raw filename was not recorded.
 
-The [curated aggregate JSON](../../evidence/research/2026-10-19-headroom/summary.json)
+The [curated aggregate JSON](../results/recovery-headroom-2026-10-19.json)
 contains the full pair table, populations, controls, and source/plan/receipt
 digests. It excludes request text, identifiers, credentials, provider endpoints,
 billing, and private paths. Digests identify retained artifacts; they do not

@@ -21,7 +21,7 @@ Both arms used a 500 ms first-token and 5 s completion deadline; rejects counted
 as misses. One host and synthetic workload; attainment remains below the 95% target.
 
 [Method and all pairs](docs/research/RECOVERY_HEADROOM.md) ·
-[Aggregate data](evidence/research/2026-10-19-headroom/summary.json)
+[Aggregate data](docs/results/recovery-headroom-2026-10-19.json)
 
 ## Earlier studies
 
@@ -43,6 +43,9 @@ uv run python scripts/run_local_demo.py
 
 The demo uses synthetic CPU data. GPU results come from separate private captures.
 The research studies are separate from the frozen release capability contracts.
+Inferdrome produces measurements. ExitSpec owns customer acceptance.
+Cloud examples remain dry-run/reference; the local dashboard was
+outside the v0.1 release gate.
 
 [Demo](docs/LOCAL_DEMO.md) · [Architecture](docs/ARCHITECTURE.md) ·
 [CLI](docs/CLI.md) · [Breakpoint](docs/BREAKPOINT.md) ·
