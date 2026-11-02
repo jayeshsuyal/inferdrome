@@ -6,6 +6,7 @@ import {
   Layers3,
   Moon,
   Route,
+  BarChart3,
   Sun,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -26,6 +27,7 @@ function initialTheme(): Theme {
 }
 
 function pathLabel(pathname: string): string {
+  if (pathname.startsWith("/recovery-results")) return "Research / Recovery results";
   if (/^\/evaluations\/.+/.test(pathname)) return "Evidence / Evaluation report";
   if (pathname.startsWith("/evaluations")) return "Evidence / Evaluations";
   if (/^\/routing-executions\/.+/.test(pathname)) return "Evidence / Routing execution detail";
@@ -54,6 +56,7 @@ interface NavigationItem {
 
 export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
+  const isRecoveryResults = location.pathname.startsWith("/recovery-results");
   const { runs, rejected, generatedAt, status, refresh } = useRuns();
   const { runId } = useParams();
   const { authRequired, token, clear } = useDashboardAuth();
@@ -79,6 +82,7 @@ export function AppShell({ children }: PropsWithChildren) {
   const navigation = useMemo<readonly NavigationItem[]>(
     () => [
       { label: "Runs", to: "/runs", icon: LayoutDashboard, end: true },
+      { label: "Recovery results", to: "/recovery-results", icon: BarChart3 },
       { label: "Trial sets", to: "/trial-sets", icon: Layers3 },
       { label: "Evaluations", to: "/evaluations", icon: Activity },
       { label: "Routing campaigns", to: "/routing-campaigns", icon: Route },
@@ -122,9 +126,9 @@ export function AppShell({ children }: PropsWithChildren) {
           <span>Inferdrome</span>
         </NavLink>
 
-        <div className="workspace-label">
+        <div className={`workspace-label${isRecoveryResults ? " workspace-label-research" : ""}`}>
           Evidence source
-          <strong>Local bundles</strong>
+          <strong>{isRecoveryResults ? "Published research aggregate" : "Local bundles"}</strong>
         </div>
 
         <nav className="primary-nav" aria-label="Dashboard views">
@@ -169,10 +173,12 @@ export function AppShell({ children }: PropsWithChildren) {
         <div className="topline">
           <span className="topline-path">{pathLabel(location.pathname)}</span>
           <div className="topline-actions">
-            {generatedAt ? <span className="index-time">Runs last verified {formatDateTime(generatedAt)}</span> : null}
-            <button className="button button-secondary" type="button" onClick={refresh} disabled={status === "loading"}>
-              Refresh runs
-            </button>
+            {!isRecoveryResults && generatedAt ? <span className="index-time">Runs last verified {formatDateTime(generatedAt)}</span> : null}
+            {!isRecoveryResults ? (
+              <button className="button button-secondary" type="button" onClick={refresh} disabled={status === "loading"}>
+                Refresh runs
+              </button>
+            ) : null}
             {authRequired && token !== null ? (
               <button className="button button-secondary lock-button" type="button" onClick={clear}>
                 Lock dashboard

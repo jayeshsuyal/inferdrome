@@ -384,6 +384,45 @@ function dashboardFetch(input: RequestInfo | URL): Promise<Response> {
   return Promise.resolve(response({ detail: "Not found" }, 404));
 }
 
+describe("Recovery results", () => {
+  it("opens the published research from navigation independently of the local run index", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("Local runs unavailable"))));
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={["/runs"]}><App /></MemoryRouter>);
+    await user.click(screen.getByRole("link", { name: "Recovery results" }));
+
+    expect(screen.getByRole("heading", { name: "Recovery results" })).toBeInTheDocument();
+    expect(screen.getByText("Published research aggregate")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "12.3% fewer SLO misses" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh runs" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(13);
+  });
+
+  it("filters by execution order without changing the complete-study headline", async () => {
+    vi.stubGlobal("fetch", vi.fn(dashboardFetch));
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={["/recovery-results/"]}><App /></MemoryRouter>);
+
+    const filter = screen.getByRole("group", { name: "Filter pairs by execution order" });
+    await user.click(within(filter).getByRole("button", { name: "400 ms first" }));
+    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(7);
+    expect(screen.getAllByText("400 → 500 ms")).toHaveLength(6);
+    expect(screen.queryByText("500 → 400 ms")).not.toBeInTheDocument();
+    expect(screen.getByText(/Showing 6 of 12 pairs/)).toBeInTheDocument();
+    expect(screen.getByText("3,420")).toBeInTheDocument();
+    expect(screen.getByText("2,998")).toBeInTheDocument();
+
+    await user.click(within(filter).getByRole("button", { name: "500 ms first" }));
+    expect(screen.getAllByText("500 → 400 ms")).toHaveLength(6);
+    await user.click(within(filter).getByRole("button", { name: "All 12" }));
+    expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(13);
+    expect(screen.getByRole("link", { name: "Download results" })).toHaveAttribute("download", "recovery-headroom-2026-10-19.json");
+    expect(screen.getByRole("link", { name: "Read the experiment method" })).toHaveAttribute("href", "https://github.com/jayeshsuyal/inferdrome/blob/main/docs/research/RECOVERY_HEADROOM.md");
+    expect(screen.getByText(/Rejections, timeouts, missing outcomes, and errors all count as misses/)).toBeInTheDocument();
+    expect(screen.getByText(/still below the 95% target/)).toBeInTheDocument();
+  });
+});
+
 describe("Runs view", () => {
   it("explains missing table and mobile metrics while preserving measured zero", async () => {
     const run = {

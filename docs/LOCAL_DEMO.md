@@ -83,6 +83,14 @@ workspace for a fresh take rather than mutating or repairing recorded evidence.
 
 ## Recording path
 
+For the completed GPU study, select **Recovery results** in the dashboard
+(`/recovery-results`). This separate, read-only view bundles the
+[published recovery aggregate](results/recovery-headroom-2026-10-19.json):
+3,420 → 2,998 misses, all 12 matched pairs, execution-order filters, and the
+unchanged scoring rules. Download results exports that exact JSON. It does
+not run GPU traffic or replay raw captures; the synthetic walkthrough below
+keeps its existing scope.
+
 Use a five-minute walkthrough:
 
 1. Start on **Runs** and call out the visible **Synthetic only** badge.
