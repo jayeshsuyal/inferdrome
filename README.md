@@ -23,6 +23,10 @@ as misses. One host and synthetic workload; attainment remains below the 95% tar
 [Method and all pairs](docs/research/RECOVERY_HEADROOM.md) ·
 [Aggregate data](docs/results/recovery-headroom-2026-10-19.json)
 
+![Recovery results: 12.3% fewer misses across all 12 matched pairs](docs/images/recovery-results.png)
+
+Open **Recovery results** in the local dashboard to inspect all pairs and download the JSON.
+
 ## Earlier studies
 
 **Routing baseline:** 21,300 requests across four policies, all tied at
